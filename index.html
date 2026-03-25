@@ -160,7 +160,7 @@
                             </div>
                             
                             <button type="button" id="btn-salvar-escala" class="btn-success hidden" onclick="salvarEscalaNoBanco()">
-                                <i class="fa-solid fa-floppy-disk"></i> Salvar / Fechar Escala
+                                <i class="fa-solid fa-floppy-disk"></i> Fechar Escala
                             </button>
                         </div>
                     </div>
@@ -317,14 +317,14 @@
         const SUPABASE_ANON_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         let usuarioAtual = null;
-        
-        // Variavel global para segurar a escala gerada em memoria antes de salvar
         let escalaMesAtualGerada = [];
 
         const loginContainer = document.getElementById('login-container');
         const appContainer = document.getElementById('app-container');
 
-        // --- GRID SEMANAL (ADMISSÃO) ---
+        // ==========================================
+        // GRID SEMANAL INTELIGENTE
+        // ==========================================
         function renderizarGridSemanal() {
             const dataInicioStr = document.getElementById('adm-data-inicio').value;
             const gridSemana = document.getElementById('lista-semana-grid');
@@ -350,7 +350,9 @@
                         <div class="grid-col-dia">${diaNome}</div>
                         <div class="grid-col-status">
                             <select class="j-status" onchange="toggleHorariosSemana(this)" style="padding: 8px;">
-                                <option value="Trabalho">Trabalho (Fixo)</option><option value="Folga">Folga (Fixo)</option><option value="Alternado">Alternado</option>
+                                <option value="Trabalho">Trabalho (Fixo)</option>
+                                <option value="Folga">Folga (Fixo)</option>
+                                <option value="Alternado">Alternado</option>
                             </select>
                             <div class="j-alt-config hidden">
                                 <select class="j-alt-pattern"><option value="1x1">1 Sem Sim / 1 Sem Não</option><option value="2x1">2 Sem Sim / 1 Sem Não</option><option value="2x2">2 Sem Sim / 2 Sem Não</option></select>
@@ -383,12 +385,9 @@
                 const sucesso = await carregarPerfil(session.user.id);
                 if (sucesso) {
                     loginContainer.classList.add('hidden'); appContainer.classList.remove('hidden');
-                    
-                    // Coloca o mês atual no seletor de escala
                     const dataAtual = new Date();
                     const mesAtualStr = `${dataAtual.getFullYear()}-${String(dataAtual.getMonth() + 1).padStart(2, '0')}`;
                     document.getElementById('filtro-mes-escala').value = mesAtualStr;
-
                     if(usuarioAtual.perfil !== 'Colaborador') setupFiltroEscala();
                 }
             }
@@ -431,7 +430,7 @@
         }
 
         // ==========================================
-        // MÓDULO DE ESCALAS MENSAIS (COM BANCO)
+        // MÓDULO DE ESCALAS MENSAIS (AUTO-SAVE + TRAVA)
         // ==========================================
         async function setupFiltroEscala() {
             const selectFiltroU = document.getElementById('filtro-unidade-escala');
@@ -465,25 +464,43 @@
             loading.classList.remove('hidden');
 
             try {
-                // 1. TENTA BUSCAR A ESCALA FECHADA NO BANCO
-                const { data: escalaSalva, error: errEscala } = await supabaseClient
-                    .from('escalas_mensais')
-                    .select('*')
-                    .eq('mes_ano', mesAno)
-                    .eq('unidade', unidade)
-                    .single();
+                // --- TRAVA DE SEGURANÇA: CHECA O MÊS ANTERIOR ---
+                const [anoSelecionado, mesSelecionado] = mesAno.split('-');
+                let anoAnterior = parseInt(anoSelecionado);
+                let mesAnterior = parseInt(mesSelecionado) - 1;
+                
+                if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
+                const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
+
+                const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
+                
+                if (count > 0) {
+                    const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).single();
+                    if (escAnt && !escAnt.fechada) { // Só bloqueia se a escala antiga existe e ta aberta
+                        alert(`⛔ Acesso Bloqueado!\n\nA escala do mês anterior (${mesAnteriorStr}) não foi fechada definitivamente.\n\nO sistema vai retornar para o mês pendente.`);
+                        document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
+                        loading.classList.add('hidden');
+                        processarEscala(); 
+                        return;
+                    }
+                }
+                // ------------------------------------------------
+
+                // 1. TENTA BUSCAR A ESCALA NO BANCO (DO MÊS SELECIONADO)
+                const { data: escalaSalva } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).single();
 
                 if (escalaSalva) {
-                    // Já existe! Renderiza o que tá no banco.
+                    // Já existe! (Pode ser o Auto-Save aberto ou uma já fechada)
+                    escalaMesAtualGerada = escalaSalva.dados_escala;
                     renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, escalaSalva.fechada);
-                    if(!escalaSalva.fechada) btnSalvar.classList.remove('hidden');
+                    
+                    if(!escalaSalva.fechada) {
+                        btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
+                        btnSalvar.classList.remove('hidden');
+                    }
                 } else {
-                    // 2. NÃO EXISTE. PRECISA GERAR AUTOMATICAMENTE
-                    const { data: colaboradores } = await supabaseClient
-                        .from('perfis')
-                        .select('*')
-                        .eq('perfil', 'Colaborador')
-                        .eq('unidade', unidade);
+                    // 2. NÃO EXISTE NO BANCO. GERA MATEMATICAMENTE.
+                    const { data: colaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').eq('unidade', unidade);
 
                     if(!colaboradores || colaboradores.length === 0){
                         containerTabela.innerHTML = '<p style="text-align:center;">Nenhum colaborador encontrado nesta unidade.</p>';
@@ -491,8 +508,16 @@
                     }
 
                     escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno);
+                    
+                    // --- AUTO-SAVE INVISÍVEL ---
+                    await supabaseClient.from('escalas_mensais').insert([{ 
+                        mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false 
+                    }]);
+                    // ----------------------------
+
                     renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
-                    btnSalvar.classList.remove('hidden'); // Exibe o botão pra salvar
+                    btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
+                    btnSalvar.classList.remove('hidden');
                 }
             } catch (error) {
                 console.error("Erro na escala:", error);
@@ -501,11 +526,11 @@
             }
         }
 
-        // O Algoritmo matemático puro
+        // Algoritmo Matemático de Escala
         function algoritmoGeradorDeEscala(colaboradores, mesAno) {
             const partes = mesAno.split('-');
             const ano = parseInt(partes[0]);
-            const mes = parseInt(partes[1]) - 1; // JS começa em 0
+            const mes = parseInt(partes[1]) - 1; 
             const diasNoMes = new Date(ano, mes + 1, 0).getDate();
             const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
 
@@ -567,7 +592,7 @@
                                 }
 
                                 if (trabalhaHoje) { sigla = 'T'; tipo = 'trabalho'; hora = diaEscala.horario; } 
-                                else { sigla = 'F'; tipo = 'folga'; hora = 'Folga'; }
+                                else { sigla = 'F'; tipo = 'folga'; hora = 'Folga Alternada'; }
                             }
                         }
                     }
@@ -579,7 +604,7 @@
             return novaEscala;
         }
 
-        // Desenha o Array de Escala na Tela
+        // Desenha o Array na Tela
         function renderizarTabelaHTML(dadosArray, mesAnoStr, isFechada) {
             const containerTabela = document.getElementById('container-tabela-escala');
             const partes = mesAnoStr.split('-');
@@ -600,7 +625,6 @@
                     if(diaData.tipo === 'trabalho') cssClass = 'celula-trabalho';
                     if(diaData.tipo === 'folga') cssClass = 'celula-folga';
 
-                    // O onclick continua pra ver a hora
                     html += `<td class="${cssClass}" onclick="alert('${colab.nome} (Dia ${d}):\\n${diaData.horario}')">${diaData.sigla}</td>`;
                 }
                 html += '</tr>';
@@ -610,66 +634,41 @@
             
             if(isFechada) {
                 html = `<div style="background: rgba(220,53,69,0.1); border: 1px solid var(--cor-perigo); padding: 10px; border-radius: 8px; color: var(--cor-perigo); font-weight: bold; margin-bottom: 15px; text-align: center;">
-                    <i class="fa-solid fa-lock"></i> Esta escala já foi fechada e salva no histórico.
+                    <i class="fa-solid fa-lock"></i> Esta escala já foi fechada definitivamente.
                 </div>` + html;
             }
 
             containerTabela.innerHTML = html;
         }
 
-        // Envia para o Supabase (Corrigido para não precisar de Unique Constraint)
+        // Fecha a escala definitivamente
         async function salvarEscalaNoBanco() {
             const mesAno = document.getElementById('filtro-mes-escala').value;
             const unidade = document.getElementById('filtro-unidade-escala').value;
 
-            if(!confirm(`Deseja realmente salvar a escala de ${mesAno} da unidade ${unidade}?`)) return;
+            if(!confirm(`Deseja realmente TRANCAR a escala de ${mesAno} da unidade ${unidade}? Após trancada, o mês não poderá mais ser editado.`)) return;
 
             const btnSalvar = document.getElementById('btn-salvar-escala');
-            btnSalvar.innerText = "Salvando...";
-            btnSalvar.disabled = true;
+            btnSalvar.innerText = "Trancando..."; btnSalvar.disabled = true;
 
             try {
-                // 1. Verifica se já existe uma escala para esse mês e unidade
-                const { data: existente, error: errBusca } = await supabaseClient
-                    .from('escalas_mensais')
-                    .select('id')
-                    .eq('mes_ano', mesAno)
-                    .eq('unidade', unidade)
-                    .single();
+                // A escala JÁ ESTÁ no banco por causa do Auto-Save. Então é só um UPDATE na coluna fechada
+                const { error: errUpdate } = await supabaseClient.from('escalas_mensais')
+                    .update({ fechada: true })
+                    .eq('mes_ano', mesAno).eq('unidade', unidade);
+                    
+                if (errUpdate) throw errUpdate;
 
-                if (existente) {
-                    // 2. Se existe, atualiza (UPDATE)
-                    const { error: errUpdate } = await supabaseClient
-                        .from('escalas_mensais')
-                        .update({ dados_escala: escalaMesAtualGerada, fechada: true })
-                        .eq('id', existente.id);
-                    if (errUpdate) throw errUpdate;
-                } else {
-                    // 3. Se não existe, cria uma nova (INSERT)
-                    const { error: errInsert } = await supabaseClient
-                        .from('escalas_mensais')
-                        .insert([{ 
-                            mes_ano: mesAno, 
-                            unidade: unidade, 
-                            dados_escala: escalaMesAtualGerada, 
-                            fechada: true 
-                        }]);
-                    if (errInsert) throw errInsert;
-                }
-
-                alert("Escala salva com sucesso no histórico!");
-                processarEscala(); // Recarrega a tela para mostrar a tarja vermelha de Fechada
-
+                alert("Escala trancada com sucesso!");
+                processarEscala(); 
             } catch (error) {
-                alert("Erro ao salvar: " + error.message);
-                btnSalvar.innerText = "Salvar / Fechar Escala";
-                btnSalvar.disabled = false;
+                alert("Erro ao trancar escala: " + error.message);
+                btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente'; btnSalvar.disabled = false;
             }
         }
 
-
         // ==========================================
-        // LÓGICA DE VISUALIZAÇÃO DOS FORMULÁRIOS
+        // LÓGICA DO FORMULÁRIO DE CADASTRO GERAL
         // ==========================================
         document.getElementById('novo-perfil').addEventListener('change', async function() {
             const p = this.value;
@@ -729,9 +728,6 @@
             }
         }
 
-        // ==========================================
-        // SALVAR NO BANCO DE DADOS (CADASTRO)
-        // ==========================================
         document.getElementById('form-novo-usuario').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('btn-salvar-usuario'); const msg = document.getElementById('user-create-msg');
