@@ -2534,84 +2534,95 @@ if (ausenciasPendentesData) {
             }
         }
 
-        async function processarEscala() {
-            const mesAno = document.getElementById('filtro-mes-escala').value;
-            const unidade = document.getElementById('filtro-unidade-escala').value;
-            const containerTabela = document.getElementById('container-tabela-escala');
-            const loading = document.getElementById('loading-escala');
-            const btnSalvar = document.getElementById('btn-salvar-escala');
+       async function processarEscala() {
+    const mesAno = document.getElementById('filtro-mes-escala').value;
+    const unidade = document.getElementById('filtro-unidade-escala').value;
+    const containerTabela = document.getElementById('container-tabela-escala');
+    const loading = document.getElementById('loading-escala');
+    const btnSalvar = document.getElementById('btn-salvar-escala');
 
-            containerTabela.innerHTML = '';
-            btnSalvar.classList.add('hidden');
+    containerTabela.innerHTML = '';
+    btnSalvar.classList.add('hidden');
 
-            if(!mesAno || !unidade) {
-                containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario);">Selecione o Mês e a Unidade para visualizar a escala.</p>';
+    if(!mesAno || !unidade) {
+        containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario);">Selecione o Mês e a Unidade para visualizar a escala.</p>';
+        return;
+    }
+
+    loading.classList.remove('hidden');
+
+    try {
+        const [anoSelecionado, mesSelecionado] = mesAno.split('-');
+        let anoAnterior = parseInt(anoSelecionado);
+        let mesAnterior = parseInt(mesSelecionado) - 1;
+        if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
+        const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
+
+        // TRAVA: A escala anterior foi fechada?
+        const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
+        
+        if (count > 0) {
+            const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).single();
+            if (escAnt && !escAnt.fechada) { 
+                alert(`⛔ Acesso Bloqueado!\n\nA escala do mês anterior (${mesAnteriorStr}) não foi fechada definitivamente.\n\nO sistema vai retornar para o mês pendente.`);
+                document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
+                loading.classList.add('hidden');
+                processarEscala(); 
+                return;
+            }
+        }
+
+        // Busca a escala do mês atual
+        const { data: escalaSalva } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).single();
+
+        // 👇 A MÁGICA ESTÁ AQUI 👇
+        // Se a escala existir E estiver FECHADA, renderiza do banco direto.
+        if (escalaSalva && escalaSalva.fechada) {
+            escalaMesAtualGerada = escalaSalva.dados_escala;
+            renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, true);
+        } 
+        // Se não existir, OU se existir mas NÃO ESTIVER FECHADA, recalcula tudo do zero!
+        else {
+            const { data: colaboradores } = await supabaseClient
+                .from('perfis')
+                .select('*')
+                .eq('perfil', 'Colaborador')
+                .eq('unidade', unidade)
+                .eq('status_aprovacao', 'Aprovado');
+
+            // Puxa as ausências aprovadas
+            const { data: ausenciasAprovadas } = await supabaseClient
+                .from('ausencias')
+                .select('*')
+                .eq('unidade', unidade)
+                .eq('status', 'Aprovado')
+                .or(`data_inicio.gte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-01,data_fim.lte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-${new Date(anoSelecionado, mesSelecionado + 1, 0).getDate()}`);
+
+            if(!colaboradores || colaboradores.length === 0){
+                containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador <b>APROVADO</b> encontrado nesta unidade.</p>';
                 return;
             }
 
-            loading.classList.remove('hidden');
+            // GERA A ESCALA NOVA DO ZERO CRUZANDO AS AUSÊNCIAS
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ausenciasAprovadas);
+            
+            // Salva esse recálculo no banco como um novo rascunho
+            if (escalaSalva) {
+                await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
+            } else {
+                await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
+            }
 
-            try {
-                const [anoSelecionado, mesSelecionado] = mesAno.split('-');
-                let anoAnterior = parseInt(anoSelecionado);
-                let mesAnterior = parseInt(mesSelecionado) - 1;
-                if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
-                const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
-
-                const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
-                
-                if (count > 0) {
-                    const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).single();
-                    if (escAnt && !escAnt.fechada) { 
-                        alert(`⛔ Acesso Bloqueado!\n\nA escala do mês anterior (${mesAnteriorStr}) não foi fechada definitivamente.\n\nO sistema vai retornar para o mês pendente.`);
-                        document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
-                        loading.classList.add('hidden');
-                        processarEscala(); 
-                        return;
-                    }
-                }
-
-                const { data: escalaSalva } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).single();
-
-                if (escalaSalva && escalaSalva.fechada) {
-                    escalaMesAtualGerada = escalaSalva.dados_escala;
-                    renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, true);
-                } else {
-                    const { data: colaboradores } = await supabaseClient
-                        .from('perfis')
-                        .select('*')
-                        .eq('perfil', 'Colaborador')
-                        .eq('unidade', unidade)
-                        .eq('status_aprovacao', 'Aprovado');
-
-                    // 👇 AQUI NÓS PUXAMOS AS AUSÊNCIAS APROVADAS DO BANCO 👇
-                    const { data: ausenciasAprovadas } = await supabaseClient
-                        .from('ausencias')
-                        .select('*')
-                        .eq('unidade', unidade)
-                        .eq('status', 'Aprovado')
-                        .or(`data_inicio.gte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-01,data_fim.lte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-${new Date(anoSelecionado, mesSelecionado + 1, 0).getDate()}`);
-
-                    if(!colaboradores || colaboradores.length === 0){
-                        containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador <b>APROVADO</b> encontrado nesta unidade.</p>';
-                        return;
-                    }
-
-                    // 👇 AQUI NÓS PASSAMOS AS AUSÊNCIAS PARA A FUNÇÃO DO ALGORITMO 👇
-                    escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ausenciasAprovadas);
-                    
-                    if (escalaSalva) {
-                        await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
-                    } else {
-                        await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
-                    }
-
-                    renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
-                    btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
-                    btnSalvar.classList.remove('hidden');
-                }
-            } catch (error) { console.error("Erro na escala:", error); } finally { loading.classList.add('hidden'); }
+            renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
+            btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
+            btnSalvar.classList.remove('hidden');
         }
+    } catch (error) { 
+        console.error("Erro na escala:", error); 
+    } finally { 
+        loading.classList.add('hidden'); 
+    }
+}
 
         // 👇 AQUI COMEÇA O ALGORITMO COM A LÓGICA DAS AUSÊNCIAS 👇
         function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias) {
