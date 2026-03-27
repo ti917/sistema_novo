@@ -1011,9 +1011,17 @@ input[type="month"]::-webkit-calendar-picker-indicator {
         let todasAdmissoesAprovadas = [];
         let admissoesFiltradas = [];
         let tabelaSalariosGlobais = [];
+        let notificacoesGlobais = [];
+        let todosUsuariosCadastrados = [];
+
+        // TRAVAS PARA NÃO REPETIR SELECTS:
+        let usuariosCarregados = false;
+        let solicitacoesCarregadas = false;
+        let contadoresCarregados = false;
+        let admissoesCarregadasBanco = false;
+
         let paginaAtualAdmissoes = 1;
         const itensPorPaginaAdmissoes = 20;
-        let notificacoesGlobais = [];
 
         const loginContainer = document.getElementById('login-container');
         const appContainer = document.getElementById('app-container');
@@ -1204,26 +1212,99 @@ function fecharTimePicker() {
                 checarAvisosDeLogin();
             }
 
-            // --- ESCUTADORES EM TEMPO REAL ---
-            if(usuarioAtual.perfil === 'Admin') {
+            // --- ESCUTADORES EM TEMPO REAL OTIMIZADOS ---
+            if (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor') {
                 supabaseClient
-                    .channel('escuta-admissoes')
+                    .channel('escuta-banco-geral')
                     .on(
                         'postgres_changes', 
                         { event: '*', schema: 'public', table: 'perfis' }, 
                         (payload) => {
-                            atualizarContador(); 
-                            if(!document.getElementById('tela-usuarios').classList.contains('hidden')) listarUsuarios();
-                            if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
-                            if(!document.getElementById('tela-admissoes').classList.contains('hidden')) carregarAdmissoesParaAdmin();
-                            
-                            if (payload.eventType === 'INSERT' && payload.new.status_aprovacao === 'Pendente') {
-                                mostrarAlerta(`Nova ficha enviada por um Gestor:<br><b>${payload.new.nome}</b> (${payload.new.unidade || '-'})`, 'aviso', '🔔 Nova Admissão Recebida!');
+                            if (usuarioAtual.perfil !== 'Admin') return; // Gestor não precisa processar a tabela de perfis toda
+
+                            const novo = payload.new;
+                            const antigo = payload.old;
+                            const tipo = payload.eventType;
+
+                            // 1. Atualiza lista de Usuários Gerais
+                            if (tipo === 'INSERT') todosUsuariosCadastrados.push(novo);
+                            if (tipo === 'UPDATE') {
+                                const idx = todosUsuariosCadastrados.findIndex(u => u.id === novo.id);
+                                if (idx !== -1) todosUsuariosCadastrados[idx] = novo;
+                            }
+                            if (tipo === 'DELETE') todosUsuariosCadastrados = todosUsuariosCadastrados.filter(u => u.id !== antigo.id);
+
+                            // 2. Atualiza lista de Pendentes
+                            if (tipo === 'INSERT' && novo.status_aprovacao === 'Pendente') {
+                                listaAdmissoesPendentes.push(novo);
+                                mostrarAlerta(`Nova ficha enviada por um Gestor:<br><b>${novo.nome}</b> (${novo.unidade || '-'})`, 'aviso', '🔔 Nova Admissão!');
+                            }
+                            if (tipo === 'UPDATE') {
+                                const idx = listaAdmissoesPendentes.findIndex(u => u.id === novo.id);
+                                if (novo.status_aprovacao === 'Pendente') {
+                                    if (idx === -1) listaAdmissoesPendentes.push(novo);
+                                    else listaAdmissoesPendentes[idx] = novo;
+                                } else {
+                                    if (idx !== -1) listaAdmissoesPendentes.splice(idx, 1);
+                                }
+                            }
+                            if (tipo === 'DELETE') listaAdmissoesPendentes = listaAdmissoesPendentes.filter(u => u.id !== antigo.id);
+
+                            // 3. Atualiza lista de Aprovados
+                            if (tipo === 'INSERT' && novo.status_aprovacao === 'Aprovado' && novo.perfil === 'Colaborador') {
+                                todasAdmissoesAprovadas.push(novo);
+                            }
+                            if (tipo === 'UPDATE') {
+                                const idx = todasAdmissoesAprovadas.findIndex(u => u.id === novo.id);
+                                if (novo.status_aprovacao === 'Aprovado' && novo.perfil === 'Colaborador') {
+                                    if (idx === -1) todasAdmissoesAprovadas.push(novo);
+                                    else todasAdmissoesAprovadas[idx] = novo;
+                                } else {
+                                    if (idx !== -1) todasAdmissoesAprovadas.splice(idx, 1);
+                                }
+                            }
+                            if (tipo === 'DELETE') todasAdmissoesAprovadas = todasAdmissoesAprovadas.filter(u => u.id !== antigo.id);
+
+                            // REDESENHA AS TELAS USANDO APENAS A MEMÓRIA DO NAVEGADOR
+                            renderizarSinos(); 
+                            if(!document.getElementById('tela-usuarios').classList.contains('hidden')) renderizarUsuariosVisuais();
+                            if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) renderizarSolicitacoesVisuais();
+                            if(!document.getElementById('tela-admissoes').classList.contains('hidden')) {
+                                todasAdmissoesAprovadas.sort((a, b) => new Date(b.dados_admissao?.data_envio || 0) - new Date(a.dados_admissao?.data_envio || 0));
+                                filtrarAdmissoes();
                             }
                         }
                     )
+                    .on(
+                        'postgres_changes', 
+                        { event: '*', schema: 'public', table: 'notificacoes' }, 
+                        (payload) => {
+                            const novo = payload.new;
+                            const tipo = payload.eventType;
+
+                            if (tipo === 'INSERT') {
+                                notificacoesGlobais.unshift(novo); // Bota no topo
+                                
+                                // O Gestor é avisado sem fazer SELECT
+                                if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
+                                    const unidadesGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
+                                    if(unidadesGestor.includes(novo.unidade)) {
+                                        mostrarAlerta(`A ficha de <b>${novo.nome}</b> acabou de ser aprovada pelo Admin!`, 'sucesso', '🎉 Admissão Aprovada!');
+                                    }
+                                }
+                            }
+                            
+                            if (tipo === 'UPDATE') {
+                                const idx = notificacoesGlobais.findIndex(n => n.id === novo.id);
+                                if (idx !== -1) notificacoesGlobais[idx] = novo;
+                            }
+
+                            renderizarSinos();
+                            if(!document.getElementById('tela-admissoes').classList.contains('hidden')) renderizarPaginacaoAdmissoes();
+                        }
+                    )
                     .subscribe();
-            } 
+            }
             // 👇 ADICIONANDO O TEMPO REAL PARA O GESTOR TAMBÉM 👇
             else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
                 supabaseClient
@@ -1329,92 +1410,94 @@ function fecharTimePicker() {
         document.getElementById('novo-unidade-select').addEventListener('change', puxarSalarioAutomatico);
 
         async function atualizarContador() {
-    // 1. Busca pendentes reais no banco (Tabela: perfis)
-    const { data: pendentesData, count: countPendentes, error: errorPendentes } = await supabaseClient
-        .from('perfis')
-        .select('nome, unidade', { count: 'exact' })
-        .eq('status_aprovacao', 'Pendente');
+            // Só bate no banco 1 única vez quando o sistema é carregado
+            if (!contadoresCarregados) {
+                const { data: pendentesData } = await supabaseClient
+                    .from('perfis')
+                    .select('id, nome, unidade, status_aprovacao')
+                    .eq('status_aprovacao', 'Pendente');
+                
+                listaAdmissoesPendentes = pendentesData || [];
 
-    // 2. Busca notificações recentes (últimos 30 dias) salvas direto no Supabase (Tabela: notificacoes)
-    const dataLimite = new Date();
-    dataLimite.setDate(dataLimite.getDate() - 30);
+                const dataLimite = new Date();
+                dataLimite.setDate(dataLimite.getDate() - 30);
+                const { data: notifsAprovadasDb } = await supabaseClient
+                    .from('notificacoes')
+                    .select('*')
+                    .gte('created_at', dataLimite.toISOString())
+                    .order('created_at', { ascending: false });
 
-    const { data: notifsAprovadasDb, error: errorNotifs } = await supabaseClient
-        .from('notificacoes')
-        .select('*')
-        .gte('created_at', dataLimite.toISOString())
-        .order('created_at', { ascending: false });
-
-    // Garante que seja um array mesmo se voltar vazio
-    const notifsAprovadas = notifsAprovadasDb || [];
-    const count = countPendentes || 0;
-            notificacoesGlobais = notifsAprovadas;
-
-    // 3. Calcula quantas estão NÃO LIDAS para colocar no sininho
-    const naoLidas = notifsAprovadas.filter(n => !n.lida).length;
-    const totalNotifsPendentesNoSino = count + naoLidas;
-
-    const badgeMenu = document.getElementById('badge-count');
-    const badgeHeader = document.getElementById('badge-header-count');
-    const listaDropdown = document.getElementById('lista-notificacoes-dropdown');
-
-    if (totalNotifsPendentesNoSino > 0 || notifsAprovadas.length > 0 || count > 0) {
-        // O menu lateral de Solicitações mostra APENAS os itens pendentes no banco
-        if (badgeMenu) { 
-            badgeMenu.innerText = count; 
-            badgeMenu.style.display = count > 0 ? 'block' : 'none'; 
-        }
-        
-        // O sino do cabeçalho mostra o total (pendentes + aprovadas não lidas)
-        if (badgeHeader) { 
-            badgeHeader.innerText = totalNotifsPendentesNoSino; 
-            badgeHeader.style.display = totalNotifsPendentesNoSino > 0 ? 'block' : 'none'; 
-        }
-        
-        listaDropdown.innerHTML = '';
-        
-        // Exibe as Aprovadas (Histórico) - Buscadas do Supabase
-        notifsAprovadas.forEach((item) => {
-            const isLida = item.lida;
-            const cssClasse = isLida ? 'lida' : '';
+                notificacoesGlobais = notifsAprovadasDb || [];
+                contadoresCarregados = true;
+            }
             
-            // Define o ícone do botão. Atenção: passamos o item.id (UUID da notificação)
-            const btnAcao = isLida 
-                ? `<button class="btn-toggle-read" onclick="event.stopPropagation(); alternarLeituraNotificacao('${item.id}', false)" title="Marcar como Não Lido"><i class="fa-solid fa-envelope"></i></button>`
-                : `<button class="btn-toggle-read" onclick="event.stopPropagation(); alternarLeituraNotificacao('${item.id}', true)" title="Marcar como Lido"><i class="fa-solid fa-envelope-open-text"></i></button>`;
-
-            listaDropdown.innerHTML += `
-                <div class="notif-item ${cssClasse}" style="border-left: 4px solid var(--cor-sucesso); background: rgba(40,167,69,0.05);" onclick="abrirAdmissaoDestacada('${item.colaborador_id}')">
-                    <i class="fa-solid fa-user-check fa-2x"></i>
-                    <div style="flex: 1;">
-                        <strong style="display: block;">Admissão Aprovada!</strong>
-                        <span><b>${item.nome}</b> (${item.unidade || '-'}) foi alocado.</span>
-                    </div>
-                    <div style="padding-left: 10px;">${btnAcao}</div>
-                </div>
-            `;
-        });
-
-        // Exibe as Pendentes (Do Banco - Tabela: perfis)
-        if (pendentesData) {
-            pendentesData.forEach(item => {
-                listaDropdown.innerHTML += `
-                    <div class="notif-item" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()">
-                        <i class="fa-solid fa-file-signature fa-2x" style="color: #4fc3f7;"></i>
-                        <div>
-                            <strong style="color: white; display: block;">Nova Admissão Pendente</strong>
-                            <span>${item.nome} (${item.unidade || '-'}) aguarda aprovação.</span>
-                        </div>
-                    </div>
-                `;
-            });
+            // Depois de carregar do banco (ou se já estava carregado), manda montar a tela
+            renderizarSinos();
         }
-    } else {
-        if (badgeMenu) badgeMenu.style.display = 'none';
-        if (badgeHeader) badgeHeader.style.display = 'none';
-        listaDropdown.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--cor-texto-secundario); font-size: 0.9rem;"><i class="fa-solid fa-check-circle fa-2x" style="color: var(--cor-sucesso); margin-bottom: 10px; display: block;"></i>Tudo tranquilo por aqui!</div>`;
-    }
-}
+
+        function renderizarSinos() {
+            // Calcula usando as variáveis que já estão na memória do JS (Custo zero pro Supabase)
+            const naoLidas = notificacoesGlobais.filter(n => !n.lida).length;
+            const countPendentes = listaAdmissoesPendentes.length;
+            const totalNotifsPendentesNoSino = countPendentes + naoLidas;
+
+            const badgeMenu = document.getElementById('badge-count');
+            const badgeHeader = document.getElementById('badge-header-count');
+            const listaDropdown = document.getElementById('lista-notificacoes-dropdown');
+
+            if (totalNotifsPendentesNoSino > 0 || notificacoesGlobais.length > 0 || countPendentes > 0) {
+                // O menu lateral de Solicitações mostra APENAS os itens pendentes 
+                if (badgeMenu) { 
+                    badgeMenu.innerText = countPendentes; 
+                    badgeMenu.style.display = countPendentes > 0 ? 'block' : 'none'; 
+                }
+                
+                // O sino do cabeçalho mostra o total
+                if (badgeHeader) { 
+                    badgeHeader.innerText = totalNotifsPendentesNoSino; 
+                    badgeHeader.style.display = totalNotifsPendentesNoSino > 0 ? 'block' : 'none'; 
+                }
+                
+                listaDropdown.innerHTML = '';
+                
+                // Exibe as Aprovadas (Histórico)
+                notificacoesGlobais.forEach((item) => {
+                    const isLida = item.lida;
+                    const cssClasse = isLida ? 'lida' : '';
+                    const btnAcao = isLida 
+                        ? `<button class="btn-toggle-read" onclick="event.stopPropagation(); alternarLeituraNotificacao('${item.id}', false)" title="Marcar como Não Lido"><i class="fa-solid fa-envelope"></i></button>`
+                        : `<button class="btn-toggle-read" onclick="event.stopPropagation(); alternarLeituraNotificacao('${item.id}', true)" title="Marcar como Lido"><i class="fa-solid fa-envelope-open-text"></i></button>`;
+
+                    listaDropdown.innerHTML += `
+                        <div class="notif-item ${cssClasse}" style="border-left: 4px solid var(--cor-sucesso); background: rgba(40,167,69,0.05);" onclick="abrirAdmissaoDestacada('${item.colaborador_id}')">
+                            <i class="fa-solid fa-user-check fa-2x"></i>
+                            <div style="flex: 1;">
+                                <strong style="display: block;">Admissão Aprovada!</strong>
+                                <span><b>${item.nome}</b> (${item.unidade || '-'}) foi alocado.</span>
+                            </div>
+                            <div style="padding-left: 10px;">${btnAcao}</div>
+                        </div>
+                    `;
+                });
+
+                // Exibe as Pendentes
+                listaAdmissoesPendentes.forEach(item => {
+                    listaDropdown.innerHTML += `
+                        <div class="notif-item" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()">
+                            <i class="fa-solid fa-file-signature fa-2x" style="color: #4fc3f7;"></i>
+                            <div>
+                                <strong style="color: white; display: block;">Nova Admissão Pendente</strong>
+                                <span>${item.nome} (${item.unidade || '-'}) aguarda aprovação.</span>
+                            </div>
+                        </div>
+                    `;
+                });
+            } else {
+                if (badgeMenu) badgeMenu.style.display = 'none';
+                if (badgeHeader) badgeHeader.style.display = 'none';
+                listaDropdown.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--cor-texto-secundario); font-size: 0.9rem;"><i class="fa-solid fa-check-circle fa-2x" style="color: var(--cor-sucesso); margin-bottom: 10px; display: block;"></i>Tudo tranquilo por aqui!</div>`;
+            }
+        }
 
         document.getElementById('btn-add-vt-colab').addEventListener('click', function() {
     const select = document.getElementById('adm-empresa-vt-add');
@@ -1570,34 +1653,29 @@ function fecharTimePicker() {
             carregarTabelaSalarios();
         }
 
+       // ------------- TELA DE ADMISSÕES (ADMIN) -------------
         async function carregarAdmissoesParaAdmin() {
-    // 1. ESPERA as notificações atualizarem do Supabase primeiro!
-    await atualizarContador(); 
+            renderizarSinos(); // Atualiza os sinos visualmente
 
-    // 2. Busca somente colaboradores aprovados (sem forçar a ordem no banco para não dar erro)
-    const { data, error } = await supabaseClient.from('perfis')
-        .select('*')
-        .eq('perfil', 'Colaborador')
-        .eq('status_aprovacao', 'Aprovado');
-        
-    if (error) {
-        console.error("Erro ao buscar admissões:", error);
-        return;
-    }
+            if (!admissoesCarregadasBanco) {
+                const { data, error } = await supabaseClient.from('perfis')
+                    .select('*')
+                    .eq('perfil', 'Colaborador')
+                    .eq('status_aprovacao', 'Aprovado');
+                    
+                if (error) return;
 
-    // 3. A MÁGICA AQUI: O JavaScript ordena a lista usando a data de envio da ficha
-    data.sort((a, b) => {
-        // Pega a data de envio de cada um (se não tiver, assume 0 para não dar erro)
-        const dataA = new Date(a.dados_admissao?.data_envio || 0).getTime();
-        const dataB = new Date(b.dados_admissao?.data_envio || 0).getTime();
-        
-        // Retorna do maior (mais recente) para o menor (mais antigo)
-        return dataB - dataA;
-    });
+                data.sort((a, b) => {
+                    const dataA = new Date(a.dados_admissao?.data_envio || 0).getTime();
+                    const dataB = new Date(b.dados_admissao?.data_envio || 0).getTime();
+                    return dataB - dataA;
+                });
 
-    todasAdmissoesAprovadas = data;
-    filtrarAdmissoes();
-}
+                todasAdmissoesAprovadas = data;
+                admissoesCarregadasBanco = true;
+            }
+            filtrarAdmissoes();
+        }
 
         function filtrarAdmissoes() {
     const termoBusca = document.getElementById('busca-admissoes').value.toLowerCase();
@@ -1743,34 +1821,34 @@ function fecharTimePicker() {
     }
 }
 
-        // Função do botão da cartinha para forçar lido/não lido (Agora salva no Supabase)
-window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
-    const { error } = await supabaseClient
-        .from('notificacoes')
-        .update({ lida: statusLida })
-        .eq('id', idNotificacao);
-        
-    if (!error) {
-        await atualizarContador(); // Puxa do banco e atualiza variáveis globais
-        // Se a aba admissões estiver aberta, já atualiza o card na hora!
-        if(!document.getElementById('tela-admissoes').classList.contains('hidden')) {
-            renderizarPaginacaoAdmissoes();
-        }
-    } else {
-        console.error("Erro ao atualizar notificação:", error);
-    }
-};
+        window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
+            const { error } = await supabaseClient.from('notificacoes').update({ lida: statusLida }).eq('id', idNotificacao);
+            
+            if (!error) {
+                // Atualiza a variável local sem buscar do banco
+                const idx = notificacoesGlobais.findIndex(n => n.id === idNotificacao);
+                if (idx !== -1) notificacoesGlobais[idx].lida = statusLida;
 
-// Função para marcar lido/não lido usando o ID do colaborador (usado nos Cards da aba Admissão)
-window.alternarLeituraPorId = async function(idColab, statusLida) {
-    await supabaseClient.from('notificacoes').update({ lida: statusLida }).eq('colaborador_id', idColab);
-    
-    await atualizarContador(); // Puxa do banco de novo (Sincroniza o sininho e a variavel global)
-    renderizarPaginacaoAdmissoes(); // Atualiza o botão no card usando a variável nova
-    
-    const txt = statusLida ? "Notificação marcada como lida." : "Notificação marcada como pendente.";
-    mostrarAlerta(txt, "sucesso");
-};
+                renderizarSinos();
+                if(!document.getElementById('tela-admissoes').classList.contains('hidden')) {
+                    renderizarPaginacaoAdmissoes();
+                }
+            }
+        };
+
+        window.alternarLeituraPorId = async function(idColab, statusLida) {
+            await supabaseClient.from('notificacoes').update({ lida: statusLida }).eq('colaborador_id', idColab);
+            
+            // Atualiza na memória
+            const idx = notificacoesGlobais.findIndex(n => n.colaborador_id === idColab);
+            if (idx !== -1) notificacoesGlobais[idx].lida = statusLida;
+
+            renderizarSinos(); 
+            renderizarPaginacaoAdmissoes(); 
+            
+            const txt = statusLida ? "Notificação marcada como lida." : "Notificação marcada como pendente.";
+            mostrarAlerta(txt, "sucesso");
+        };
 
         async function cancelarContratacao(idColab) {
             const confirmado = await mostrarConfirmacao("Atenção! Tem certeza que deseja cancelar esta contratação? O status mudará para 'Cancelado(a)'.", "Cancelar Contratação");
@@ -1895,23 +1973,33 @@ window.alternarLeituraPorId = async function(idColab, statusLida) {
             });
         }
 
-        // ==========================================
-        // MÓDULO DE SOLICITAÇÕES E APROVAÇÕES (ADMIN)
-        // ==========================================
+        // ------------- TELA DE SOLICITAÇÕES (ADMIN) -------------
         async function listarSolicitacoes() {
+            if (!solicitacoesCarregadas) {
+                const tbody = document.getElementById('lista-solicitacoes-body');
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">Carregando...</td></tr>';
+                
+                const { data, error } = await supabaseClient.from('perfis').select('*').eq('status_aprovacao', 'Pendente').order('nome');
+                if (error) return;
+                
+                listaAdmissoesPendentes = data;
+                solicitacoesCarregadas = true;
+            }
+            renderizarSolicitacoesVisuais();
+        }
+
+        function renderizarSolicitacoesVisuais() {
             const tbody = document.getElementById('lista-solicitacoes-body');
-            const { data, error } = await supabaseClient.from('perfis').select('*').eq('status_aprovacao', 'Pendente').order('nome');
-            if (error) return;
-            
-            listaAdmissoesPendentes = data;
             tbody.innerHTML = "";
             
-            if(data.length === 0) {
+            if(listaAdmissoesPendentes.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario);">Nenhuma solicitação pendente no momento.</td></tr>`;
                 return;
             }
             
-            data.forEach(u => {
+            const listaOrdenada = [...listaAdmissoesPendentes].sort((a, b) => a.nome.localeCompare(b.nome));
+
+            listaOrdenada.forEach(u => {
                 tbody.innerHTML += `<tr>
                     <td><strong>${u.nome}</strong></td>
                     <td><span class="badge tipo-solicitacao">Nova Admissão</span></td>
@@ -2878,14 +2966,30 @@ if(document.getElementById('adm-precisa-vt').value === 'Sim') {
             }
         });
 
+        // ------------- TELA DE USUÁRIOS GERAIS (ADMIN) -------------
         async function listarUsuarios() {
             if(usuarioAtual.perfil !== 'Admin') return; 
 
+            if (!usuariosCarregados) {
+                const tbody = document.getElementById('lista-usuarios-body');
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Carregando...</td></tr>';
+                
+                const { data, error } = await supabaseClient.from('perfis').select('*').order('nome');
+                if (error) return;
+                
+                todosUsuariosCadastrados = data;
+                usuariosCarregados = true;
+            }
+            renderizarUsuariosVisuais();
+        }
+
+        function renderizarUsuariosVisuais() {
             const tbody = document.getElementById('lista-usuarios-body');
-            const { data, error } = await supabaseClient.from('perfis').select('*').order('nome');
-            if (error) return;
             tbody.innerHTML = "";
-            data.forEach(u => {
+            
+            const listaOrdenada = [...todosUsuariosCadastrados].sort((a, b) => a.nome.localeCompare(b.nome));
+
+            listaOrdenada.forEach(u => {
                 let badgeClass = u.perfil.toLowerCase();
                 if(u.perfil === 'Empresa') badgeClass = 'empresa'; 
                 
