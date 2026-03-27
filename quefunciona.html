@@ -2534,230 +2534,241 @@ if (ausenciasPendentesData) {
             }
         }
 
-        async function processarEscala() {
-            const mesAno = document.getElementById('filtro-mes-escala').value;
-            const unidade = document.getElementById('filtro-unidade-escala').value;
-            const containerTabela = document.getElementById('container-tabela-escala');
-            const loading = document.getElementById('loading-escala');
-            const btnSalvar = document.getElementById('btn-salvar-escala');
+      async function processarEscala() {
+    const mesAno = document.getElementById('filtro-mes-escala').value;
+    const unidade = document.getElementById('filtro-unidade-escala').value;
+    const containerTabela = document.getElementById('container-tabela-escala');
+    const loading = document.getElementById('loading-escala');
+    const btnSalvar = document.getElementById('btn-salvar-escala');
 
-            containerTabela.innerHTML = '';
-            btnSalvar.classList.add('hidden');
+    containerTabela.innerHTML = '';
+    btnSalvar.classList.add('hidden');
 
-            if(!mesAno || !unidade) {
-                containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario);">Selecione o Mês e a Unidade para visualizar a escala.</p>';
+    if(!mesAno || !unidade) {
+        containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario);">Selecione o Mês e a Unidade para visualizar a escala.</p>';
+        return;
+    }
+
+    loading.classList.remove('hidden');
+
+    try {
+        // CORREÇÃO CRÍTICA AQUI: Transformando em Número inteiro imediatamente!
+        const partesMesAno = mesAno.split('-');
+        const anoSelecionado = parseInt(partesMesAno[0]);
+        const mesSelecionado = parseInt(partesMesAno[1]); 
+
+        let anoAnterior = anoSelecionado;
+        let mesAnterior = mesSelecionado - 1;
+        if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
+        const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
+
+        // TRAVA: A escala anterior foi fechada?
+        const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
+        
+        if (count > 0) {
+            const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).single();
+            if (escAnt && !escAnt.fechada) { 
+                alert(`⛔ Acesso Bloqueado!\n\nA escala do mês anterior (${mesAnteriorStr}) não foi fechada definitivamente.\n\nO sistema vai retornar para o mês pendente.`);
+                document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
+                loading.classList.add('hidden');
+                processarEscala(); 
+                return;
+            }
+        }
+
+        // Busca a escala do mês atual
+        const { data: escalaSalva } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).single();
+
+        // Se a escala existir E estiver FECHADA, renderiza do banco direto.
+        if (escalaSalva && escalaSalva.fechada) {
+            escalaMesAtualGerada = escalaSalva.dados_escala;
+            renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, true);
+        } 
+        // Se não existir, OU se existir mas NÃO ESTIVER FECHADA, recalcula tudo do zero!
+        else {
+            const { data: colaboradores } = await supabaseClient
+                .from('perfis')
+                .select('*')
+                .eq('perfil', 'Colaborador')
+                .eq('unidade', unidade)
+                .eq('status_aprovacao', 'Aprovado');
+
+            // Datas formatadas corretamente para buscar no banco!
+            const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
+            const ultimoDia = new Date(anoSelecionado, mesSelecionado, 0).getDate();
+            const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(ultimoDia).padStart(2, '0')}`;
+
+            const { data: ausenciasAprovadas, error: erroAus } = await supabaseClient
+                .from('ausencias')
+                .select('*')
+                .eq('unidade', unidade)
+                .eq('status', 'Aprovado')
+                .lte('data_inicio', dataFimMes)  
+                .gte('data_fim', dataInicioMes); 
+
+            if (erroAus) console.error("Erro ao puxar ausências:", erroAus);
+
+            if(!colaboradores || colaboradores.length === 0){
+                containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador <b>APROVADO</b> encontrado nesta unidade.</p>';
                 return;
             }
 
-            loading.classList.remove('hidden');
+            // GERA A ESCALA NOVA DO ZERO CRUZANDO AS AUSÊNCIAS
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ausenciasAprovadas);
+            
+            // Salva esse recálculo no banco como um novo rascunho
+            if (escalaSalva) {
+                await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
+            } else {
+                await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
+            }
 
-            try {
-                const [anoSelecionado, mesSelecionado] = mesAno.split('-');
-                let anoAnterior = parseInt(anoSelecionado);
-                let mesAnterior = parseInt(mesSelecionado) - 1;
-                if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
-                const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
+            renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
+            btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
+            btnSalvar.classList.remove('hidden');
+        }
+    } catch (error) { 
+        console.error("Erro na escala:", error); 
+    } finally { 
+        loading.classList.add('hidden'); 
+    }
+}
 
-                const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
-                
-                if (count > 0) {
-                    const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).single();
-                    if (escAnt && !escAnt.fechada) { 
-                        alert(`⛔ Acesso Bloqueado!\n\nA escala do mês anterior (${mesAnteriorStr}) não foi fechada definitivamente.\n\nO sistema vai retornar para o mês pendente.`);
-                        document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
-                        loading.classList.add('hidden');
-                        processarEscala(); 
-                        return;
-                    }
-                }
+        function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias) {
+    const partes = mesAno.split('-');
+    const ano = parseInt(partes[0]);
+    const mes = parseInt(partes[1]) - 1; 
+    const diasNoMes = new Date(ano, mes + 1, 0).getDate();
+    const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
 
-                const { data: escalaSalva } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).single();
+    let novaEscala = [];
 
-                if (escalaSalva && escalaSalva.fechada) {
-                    escalaMesAtualGerada = escalaSalva.dados_escala;
-                    renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, true);
-                } else {
-                    const { data: colaboradores } = await supabaseClient
-                        .from('perfis')
-                        .select('*')
-                        .eq('perfil', 'Colaborador')
-                        .eq('unidade', unidade)
-                        .eq('status_aprovacao', 'Aprovado');
-
-                    // 👇 AQUI NÓS PUXAMOS AS AUSÊNCIAS APROVADAS DO BANCO 👇
-                    const { data: ausenciasAprovadas } = await supabaseClient
-                        .from('ausencias')
-                        .select('*')
-                        .eq('unidade', unidade)
-                        .eq('status', 'Aprovado')
-                        .or(`data_inicio.gte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-01,data_fim.lte.${anoSelecionado}-${String(mesSelecionado + 1).padStart(2, '0')}-${new Date(anoSelecionado, mesSelecionado + 1, 0).getDate()}`);
-
-                    if(!colaboradores || colaboradores.length === 0){
-                        containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador <b>APROVADO</b> encontrado nesta unidade.</p>';
-                        return;
-                    }
-
-                    // 👇 AQUI NÓS PASSAMOS AS AUSÊNCIAS PARA A FUNÇÃO DO ALGORITMO 👇
-                    escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ausenciasAprovadas);
-                    
-                    if (escalaSalva) {
-                        await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
-                    } else {
-                        await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
-                    }
-
-                    renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
-                    btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
-                    btnSalvar.classList.remove('hidden');
-                }
-            } catch (error) { console.error("Erro na escala:", error); } finally { loading.classList.add('hidden'); }
+    colaboradores.forEach(colab => {
+        const adm = colab.dados_admissao || {}; 
+        const jor = adm.jornada || {};
+        const dataInicioStr = jor.data_inicio || adm.data_inicio;
+        
+        let dataInicioObj = null;
+        if (dataInicioStr) {
+            const p = dataInicioStr.split('-');
+            dataInicioObj = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]), 0,0,0,0);
         }
 
-        // 👇 AQUI COMEÇA O ALGORITMO COM A LÓGICA DAS AUSÊNCIAS 👇
-        function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias) {
-            const partes = mesAno.split('-');
-            const ano = parseInt(partes[0]);
-            const mes = parseInt(partes[1]) - 1; 
-            const diasNoMes = new Date(ano, mes + 1, 0).getDate();
-            const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        let dataUltimoDiaObj = null;
+        let resc = colab.dados_rescisao;
+        if (typeof resc === 'string') {
+            try { resc = JSON.parse(resc); } catch(e){}
+        }
 
-            let novaEscala = [];
+        if (resc && resc.ultimo_dia && resc.ultimo_dia !== '-') {
+            const regexData = resc.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (regexData) {
+                dataUltimoDiaObj = new Date(parseInt(regexData[3]), parseInt(regexData[2]) - 1, parseInt(regexData[1]), 23, 59, 59);
+            }
+        }
 
-            colaboradores.forEach(colab => {
-                const adm = colab.dados_admissao || {}; 
-                const jor = adm.jornada || {};
-                const dataInicioStr = jor.data_inicio || adm.data_inicio;
+        const primeiroDiaDoMesEscala = new Date(ano, mes, 1, 0, 0, 0, 0);
+        if (dataUltimoDiaObj && primeiroDiaDoMesEscala > dataUltimoDiaObj) {
+            return; 
+        }
+
+        let linhaColab = { id_colaborador: colab.id, nome: colab.nome, cargo: adm.cargo || '-', dias: {} };
+
+        for (let d = 1; d <= diasNoMes; d++) {
+            const dataAtual = new Date(ano, mes, d, 0,0,0,0);
+            let sigla = '-'; let cssTipo = ''; let hora = '';
+
+            if (dataUltimoDiaObj && dataAtual > dataUltimoDiaObj) {
+                sigla = 'DES'; 
+                cssTipo = 'celula-desligado'; 
+                hora = 'Desligado / Rescisão';
+            } 
+            else if (dataInicioObj && dataAtual < dataInicioObj) {
+                sigla = '-'; 
+                cssTipo = 'celula-inativo';
+                hora = 'Pré-Admissão (Ainda não estava na empresa)';
+            } 
+            else if (dataInicioObj && jor.tipo === '12x36') {
+                const diffTempo = dataAtual.getTime() - dataInicioObj.getTime();
+                const diffDias = Math.floor(diffTempo / (1000 * 3600 * 24));
+                const isMesmoStatus = (diffDias % 2 === 0);
+                const statusPrimeiroDia = jor.status_inicio || 'Trabalho';
                 
-                let dataInicioObj = null;
-                if (dataInicioStr) {
-                    const p = dataInicioStr.split('-');
-                    dataInicioObj = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]), 0,0,0,0);
-                }
+                let hojeTrabalha = (statusPrimeiroDia === 'Trabalho') ? isMesmoStatus : !isMesmoStatus;
 
-                let dataUltimoDiaObj = null;
-                let resc = colab.dados_rescisao;
-                if (typeof resc === 'string') {
-                    try { resc = JSON.parse(resc); } catch(e){}
-                }
+                if (hojeTrabalha) { 
+                    hora = jor.horario || 'Plantão';
+                    const turno = descobreTurno(hora, jor.tipo);
+                    sigla = turno.sigla; cssTipo = turno.css;
+                } 
+                else { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga'; }
+            }
+            else if (dataInicioObj && jor.escala) {
+                const diaNome = nomesDiasFull[dataAtual.getDay()];
+                const diaEscala = jor.escala[diaNome]; 
 
-                if (resc && resc.ultimo_dia && resc.ultimo_dia !== '-') {
-                    const regexData = resc.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                    if (regexData) {
-                        dataUltimoDiaObj = new Date(parseInt(regexData[3]), parseInt(regexData[2]) - 1, parseInt(regexData[1]), 23, 59, 59);
-                    }
-                }
-
-                // TRAVA 1: Se o mês gerado for totalmente DEPOIS do último dia, o colaborador some da escala.
-                const primeiroDiaDoMesEscala = new Date(ano, mes, 1, 0, 0, 0, 0);
-                if (dataUltimoDiaObj && primeiroDiaDoMesEscala > dataUltimoDiaObj) {
-                    return; // Pula este colaborador e não desenha ele na tela
-                }
-
-                let linhaColab = { id_colaborador: colab.id, nome: colab.nome, cargo: adm.cargo || '-', dias: {} };
-
-                for (let d = 1; d <= diasNoMes; d++) {
-                    const dataAtual = new Date(ano, mes, d, 0,0,0,0);
-                    let sigla = '-'; let cssTipo = ''; let hora = '';
-
-                    // TRAVA 2: Já passou do último dia trabalhado? 
-                    if (dataUltimoDiaObj && dataAtual > dataUltimoDiaObj) {
-                        sigla = 'DES'; 
-                        cssTipo = 'celula-desligado'; 
-                        hora = 'Desligado / Rescisão';
+                if (diaEscala) {
+                    if (diaEscala.status === 'Trabalho') { 
+                        hora = diaEscala.horario;
+                        const turno = descobreTurno(hora, jor.tipo);
+                        sigla = turno.sigla; cssTipo = turno.css;
                     } 
-                    // TRAVA 3: O dia atual é ANTES da data de admissão? 
-                    else if (dataInicioObj && dataAtual < dataInicioObj) {
-                        sigla = '-'; 
-                        cssTipo = 'celula-inativo';
-                        hora = 'Pré-Admissão (Ainda não estava na empresa)';
-                    } 
-                    else if (dataInicioObj && jor.tipo === '12x36') {
+                    else if (diaEscala.status === 'Folga') { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga'; }
+                    else if (diaEscala.status === 'Alternado') {
                         const diffTempo = dataAtual.getTime() - dataInicioObj.getTime();
-                        const diffDias = Math.floor(diffTempo / (1000 * 3600 * 24));
-                        const isMesmoStatus = (diffDias % 2 === 0);
-                        const statusPrimeiroDia = jor.status_inicio || 'Trabalho';
-                        
-                        let hojeTrabalha = (statusPrimeiroDia === 'Trabalho') ? isMesmoStatus : !isMesmoStatus;
+                        const diffSemanas = Math.floor(diffTempo / (1000 * 3600 * 24 * 7));
+                        const padrao = diaEscala.padrao || '1x1';
+                        const inicio = diaEscala.inicio || 'Trabalha';
+                        let trabalhaHoje = false;
 
-                        if (hojeTrabalha) { 
-                            hora = jor.horario || 'Plantão';
+                        if (padrao === '1x1') trabalhaHoje = (diffSemanas % 2 === 0) ? (inicio === 'Trabalha') : (inicio === 'Folga');
+                        else if (padrao === '2x1') {
+                            let resto = diffSemanas % 3;
+                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 1 || resto === 2);
+                        }
+                        else if (padrao === '2x2') {
+                            let resto = diffSemanas % 4;
+                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 2 || resto === 3);
+                        }
+
+                        if (trabalhaHoje) { 
+                            hora = diaEscala.horario;
                             const turno = descobreTurno(hora, jor.tipo);
                             sigla = turno.sigla; cssTipo = turno.css;
                         } 
-                        else { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga'; }
+                        else { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga Alternada'; }
                     }
-                    else if (dataInicioObj && jor.escala) {
-                        const diaNome = nomesDiasFull[dataAtual.getDay()];
-                        const diaEscala = jor.escala[diaNome]; 
-
-                        if (diaEscala) {
-                            if (diaEscala.status === 'Trabalho') { 
-                                hora = diaEscala.horario;
-                                const turno = descobreTurno(hora, jor.tipo);
-                                sigla = turno.sigla; cssTipo = turno.css;
-                            } 
-                            else if (diaEscala.status === 'Folga') { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga'; }
-                            else if (diaEscala.status === 'Alternado') {
-                                const diffTempo = dataAtual.getTime() - dataInicioObj.getTime();
-                                const diffSemanas = Math.floor(diffTempo / (1000 * 3600 * 24 * 7));
-                                const padrao = diaEscala.padrao || '1x1';
-                                const inicio = diaEscala.inicio || 'Trabalha';
-                                let trabalhaHoje = false;
-
-                                if (padrao === '1x1') trabalhaHoje = (diffSemanas % 2 === 0) ? (inicio === 'Trabalha') : (inicio === 'Folga');
-                                else if (padrao === '2x1') {
-                                    let resto = diffSemanas % 3;
-                                    if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 1 || resto === 2);
-                                }
-                                else if (padrao === '2x2') {
-                                    let resto = diffSemanas % 4;
-                                    if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 2 || resto === 3);
-                                }
-
-                                if (trabalhaHoje) { 
-                                    hora = diaEscala.horario;
-                                    const turno = descobreTurno(hora, jor.tipo);
-                                    sigla = turno.sigla; cssTipo = turno.css;
-                                } 
-                                else { sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga Alternada'; }
-                            }
-                        }
-                    }
-
-                    // 👇 TRAVA 4: SOBREPOSIÇÃO DE AUSÊNCIAS APROVADAS (NO LUGAR CERTO!) 👇
-                    if (listaAusencias && listaAusencias.length > 0) {
-                        const atestadoHoje = listaAusencias.find(a => {
-                            // Só olha se a ausência for do colaborador atual do loop
-                            if (a.colaborador_id !== colab.id) return false;
-                            
-                            const dIni = new Date(a.data_inicio); 
-                            // Zera as horas para comparar só o dia
-                            dIni.setHours(0,0,0,0);
-                            
-                            const dFim = new Date(a.data_fim); 
-                            // Coloca no último milissegundo do dia para garantir que engloba tudo
-                            dFim.setHours(23,59,59,999);
-                            
-                            // Retorna true se a data que a escala está desenhando agora (dataAtual) 
-                            // estiver entre o Início e o Fim do atestado
-                            return (dataAtual >= dIni && dataAtual <= dFim);
-                        });
-
-                        // Se encontrou um atestado para hoje, substitui o "D", "N" ou "F" pela ausência!
-                        if (atestadoHoje) {
-                            sigla = atestadoHoje.sigla; 
-                            cssTipo = 'celula-ausencia'; // Traz a cor laranja!
-                            hora = atestadoHoje.motivo; // Muda a tooltip (Atestado Médico, Falta...)
-                        }
-                    }
-
-                    linhaColab.dias[d] = { sigla: sigla, cssClass: cssTipo, horario: hora };
                 }
-                novaEscala.push(linhaColab);
-            });
+            }
 
-            return novaEscala;
+            // 👇 TRAVA 4: SOBREPOSIÇÃO DE AUSÊNCIAS BLINDADA 👇
+            if (listaAusencias && listaAusencias.length > 0) {
+                const atestadoHoje = listaAusencias.find(a => {
+                    if (String(a.colaborador_id).trim() !== String(colab.id).trim()) return false;
+                    
+                    const [anoIni, mesIni, diaIni] = a.data_inicio.split('-');
+                    const dIni = new Date(anoIni, mesIni - 1, diaIni, 0, 0, 0, 0);
+                    
+                    const [anoFim, mesFim, diaFim] = a.data_fim.split('-');
+                    const dFim = new Date(anoFim, mesFim - 1, diaFim, 23, 59, 59, 999);
+                    
+                    return (dataAtual >= dIni && dataAtual <= dFim);
+                });
+
+                if (atestadoHoje) {
+                    sigla = atestadoHoje.sigla; 
+                    cssTipo = 'celula-ausencia'; 
+                    hora = atestadoHoje.motivo; 
+                }
+            }
+
+            linhaColab.dias[d] = { sigla: sigla, cssClass: cssTipo, horario: hora };
         }
+        novaEscala.push(linhaColab);
+    });
+
+    return novaEscala;
+}
 
         function renderizarTabelaHTML(dadosArray, mesAnoStr, isFechada) {
             const containerTabela = document.getElementById('container-tabela-escala');
