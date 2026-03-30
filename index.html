@@ -4431,22 +4431,57 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         // ==========================================
         let listaColaboradoresAtivosAusencia = [];
 
-        async function abrirAbaAusencias() {
-            const selectUnidade = document.getElementById('aus-unidade');
-            selectUnidade.innerHTML = '<option value="">Carregando unidades...</option>';
-            document.getElementById('form-ausencia').reset();
+        // 👇 NOVA FUNÇÃO INTELIGENTE QUE DESCOBRE SE É DIA DE FOLGA 👇
+        window.isDiaDeFolga = function(colab, dataIso) {
+            const adm = colab.dados_admissao || {};
+            const jor = adm.jornada || {};
+            const dataInicioStr = jor.data_inicio || adm.data_inicio;
+            
+            if (!dataInicioStr) return false;
 
-            if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
-                selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-                unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
-            } else {
-                const { data } = await supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
-                const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-                selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-                uSet.sort().forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+            const dInicio = new Date(dataInicioStr + 'T00:00:00');
+            const dAtual = new Date(dataIso + 'T00:00:00');
+
+            if (dAtual < dInicio) return true; // Antes de ser contratado, bloqueia como folga
+
+            const diffTempo = dAtual.getTime() - dInicio.getTime();
+            const diffDias = Math.round(diffTempo / (1000 * 3600 * 24));
+
+            if (jor.tipo === '12x36') {
+                const isMesmoStatus = (diffDias % 2 === 0);
+                const statusPrimeiroDia = jor.status_inicio || 'Trabalho';
+                let hojeTrabalha = (statusPrimeiroDia === 'Trabalho') ? isMesmoStatus : !isMesmoStatus;
+                return !hojeTrabalha; // Se não trabalha hoje, é folga
+            } else if (jor.escala) {
+                const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+                const diaNome = nomesDiasFull[dAtual.getDay()];
+                const diaEscala = jor.escala[diaNome];
+                
+                if (diaEscala) {
+                    if (diaEscala.status === 'Folga') return true;
+                    if (diaEscala.status === 'Trabalho') return false;
+                    
+                    if (diaEscala.status === 'Alternado') {
+                        const diffSemanas = Math.floor(diffDias / 7);
+                        const padrao = diaEscala.padrao || '1x1';
+                        const inicio = diaEscala.inicio || 'Trabalha';
+                        let trabalhaHoje = false;
+
+                        if (padrao === '1x1') trabalhaHoje = (diffSemanas % 2 === 0) ? (inicio === 'Trabalha') : (inicio === 'Folga');
+                        else if (padrao === '2x1') {
+                            let resto = diffSemanas % 3;
+                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 1 || resto === 2);
+                        }
+                        else if (padrao === '2x2') {
+                            let resto = diffSemanas % 4;
+                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 2 || resto === 3);
+                        }
+                        return !trabalhaHoje;
+                    }
+                }
             }
-        }
+            return false;
+        };
 
         async function buscarColaboradoresParaAusencia() {
             const unidade = document.getElementById('aus-unidade').value;
@@ -4462,7 +4497,7 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             selectColab.disabled = true;
 
             const { data, error } = await supabaseClient.from('perfis')
-                .select('id, nome, empresa') // 👇 ADICIONADO EMPRESA AQUI
+                .select('id, nome, empresa, dados_admissao') // 👇 AGORA PUXA OS DADOS PARA CALCULAR A FOLGA
                 .eq('perfil', 'Colaborador')
                 .eq('unidade', unidade)
                 .eq('status', 'Ativo');
@@ -4480,7 +4515,7 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             selectColab.disabled = false;
         }
 
-        // ==========================================
+       // ==========================================
         // LÓGICA EM TEMPO REAL - FORMULÁRIO DE AUSÊNCIAS
         // ==========================================
         const ausMotivo = document.getElementById('aus-motivo');
@@ -4534,6 +4569,11 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
                 ausInfoDias.style.display = 'block';
 
                 if (sigla === 'ATM' && totalDias > 15) {
+                    const fBR = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+                    const dIniObj = new Date(dataI + 'T00:00:00');
+                    const d15 = new Date(dIniObj); d15.setDate(d15.getDate() + 14);
+                    const d16 = new Date(d15); d16.setDate(d16.getDate() + 1);
+
                     ausInfoDias.innerHTML = `
                         <div style="padding: 15px; background: rgba(220,53,69,0.1); border-left: 4px solid var(--cor-perigo); border-radius: 8px; font-size: 0.9rem; color: var(--cor-texto-principal);">
                             <i class="fa-solid fa-triangle-exclamation" style="color: var(--cor-perigo);"></i> <b style="color: var(--cor-perigo);">Atenção: Você selecionou ${totalDias} dias no total.</b><br>
@@ -4561,7 +4601,6 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             }
         }
 
-        // Fica escutando os três campos
         ausMotivo.addEventListener('change', atualizarPainelAusenciaTempoReal);
         ausDataInicio.addEventListener('change', atualizarPainelAusenciaTempoReal);
         ausDataFim.addEventListener('change', atualizarPainelAusenciaTempoReal);
@@ -4591,6 +4630,14 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
                 return mostrarAlerta("Para atestados e licenças, anexar o documento é obrigatório!", "aviso");
             }
 
+            // 👇 NOVA TRAVA: BLOQUEIA FALTA NO DIA DE FOLGA 👇
+            const colabObj = listaColaboradoresAtivosAusencia.find(c => c.id === idColab);
+            if (sigla === 'FA' && colabObj) {
+                if (window.isDiaDeFolga(colabObj, dataInicio)) {
+                    return mostrarAlerta("Ação Bloqueada: Não é possível lançar Falta Injustificada (FA) em um dia de Folga do colaborador!", "erro", "Dia de Folga");
+                }
+            }
+
             const confirmado = await mostrarConfirmacao(`Deseja enviar o registro de <b>${sigla}</b> para <b>${colabNome}</b>?`, "Confirmar Ausência");
             if (!confirmado) return;
 
@@ -4599,8 +4646,6 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             try {
                 let urlAnexo = null;
                 if (fileInput.files.length > 0) {
-                    // 👇 PUXA A EMPRESA E CRIA O CAMINHO COM A SUBPASTA "Ausencias" 👇
-                    const colabObj = listaColaboradoresAtivosAusencia.find(c => c.id === idColab);
                     const empresaColab = colabObj && colabObj.empresa ? colabObj.empresa : 'Sem_Empresa';
                     const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidade)}/${formatarNomePasta(colabNome)}/Ausencias`;
                     
@@ -4632,7 +4677,7 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             } finally {
                 btn.disabled = false; msg.innerText = "";
             }
-        }); // <--- ESTE FECHAMENTO ESTAVA FALTANDO!
+        });
 
 
         // ==========================================
@@ -5513,16 +5558,27 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
     // Força o cálculo inicial ao abrir o modal
     window.calcularDiasEdicaoAusencia();
 
+    // (Dentro da função window.editarAusenciaAdmin, substitua APENAS o bloco do submit)
     document.getElementById('form-edicao-ausencia').addEventListener('submit', async (e) => {
         e.preventDefault();
         
-        // Pega o ID com segurança do campo oculto
         const idAusenciaBanco = document.getElementById('edit-aus-id-banco').value;
         const inputDataInicio = document.getElementById('edit-aus-data-inicio').value;
         const inputDataFim = document.getElementById('edit-aus-data-fim').value;
 
         if(new Date(inputDataInicio) > new Date(inputDataFim)) {
             return mostrarAlerta("A Data Final não pode ser menor que a Data Inicial!", "aviso");
+        }
+
+        const motivoCru = document.getElementById('edit-aus-motivo').value;
+        const [sigla, tipoExtenso] = motivoCru.split('|');
+
+        // 👇 NOVA TRAVA DE FOLGA PARA O ADMIN 👇
+        if (sigla === 'FA') {
+            const { data: colabCheck } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', aus.colaborador_id).single();
+            if (colabCheck && window.isDiaDeFolga(colabCheck, inputDataInicio)) {
+                return mostrarAlerta("Ação Bloqueada: Não é possível alterar para Falta (FA) porque este é um dia de Folga do colaborador!", "erro", "Dia de Folga");
+            }
         }
 
         const confirmado = await mostrarConfirmacao(`Confirmar atualização da ausência de ${aus.nome}? Isso pode afetar as escalas geradas.`, "Atualizar Ausência");
@@ -5532,10 +5588,6 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
         btn.disabled = true;
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Atualizando...';
 
-        const motivoCru = document.getElementById('edit-aus-motivo').value;
-        const [sigla, tipoExtenso] = motivoCru.split('|');
-
-        // Garantindo que envia o dado exato
         const { error: errUpdate } = await supabaseClient.from('ausencias').update({
             sigla: sigla,
             motivo: tipoExtenso,
@@ -5555,12 +5607,28 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
         mostrarAlerta("Ausência atualizada com sucesso!", "sucesso");
         carregarAusenciasParaAdmin();
         
-        // Se a escala estiver visível, manda recalcular com a nova data da ausência
         if(!document.getElementById('tela-escala').classList.contains('hidden')) {
             processarEscala(); 
         }
     });
 };
+
+        async function abrirAbaAusencias() {
+            const selectUnidade = document.getElementById('aus-unidade');
+            selectUnidade.innerHTML = '<option value="">Carregando unidades...</option>';
+            document.getElementById('form-ausencia').reset();
+
+            if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
+                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+                selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
+                unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+            } else {
+                const { data } = await supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
+                const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+                selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
+                uSet.sort().forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+            }
+        }
     </script>
 </body>
 </html>
