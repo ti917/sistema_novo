@@ -865,11 +865,16 @@ input[type="month"]::-webkit-calendar-picker-indicator {
                 <option value="">Carregando...</option>
             </select>
         </div>
-       <div class="form-group">
+      <div class="form-group">
             <label>Colaborador <span style="color: var(--cor-perigo);">*</span></label>
-            <select id="gestao-hor-colaborador" required disabled>
-                <option value="">Selecione a Unidade primeiro...</option>
-            </select>
+            <div style="display: flex; gap: 10px;">
+                <select id="gestao-hor-colaborador" required disabled onchange="carregarExcecoesDoColaborador()" style="flex: 1;">
+                    <option value="">Selecione a Unidade primeiro...</option>
+                </select>
+                <button type="button" id="btn-ver-historico-jor" class="btn-secondary hidden" onclick="abrirModalHistoricoJornada()" title="Ver Histórico Completo de Horários" style="padding: 10px 15px;">
+                    <i class="fa-solid fa-clock-rotate-left"></i> Histórico
+                </button>
+            </div>
         </div>
         <div class="form-group">
             <label>Tipo de Alteração <span style="color: var(--cor-perigo);">*</span></label>
@@ -903,7 +908,12 @@ input[type="month"]::-webkit-calendar-picker-indicator {
                 </div>
             </div>
         </div>
-    </div>
+
+        <div id="box-lista-excecoes" style="margin-top: 20px; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 15px; display: none;">
+            <h5 style="color: #4fc3f7; margin-bottom: 10px;"><i class="fa-solid fa-list-check"></i> Exceções já lançadas para este colaborador</h5>
+            <div id="lista-excecoes-render" style="display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; padding-right: 5px;"></div>
+        </div>
+        </div>
 
     <div id="box-gestao-hor-fixa" class="bloco-destaque hidden" style="border-color: var(--cor-sucesso);">
         <h4 style="color: var(--cor-sucesso); margin-bottom: 15px;"><i class="fa-solid fa-calendar-check"></i> Nova Jornada Fixa</h4>
@@ -1527,9 +1537,9 @@ input[type="month"]::-webkit-calendar-picker-indicator {
                             </div>
                         </div>
                         <div class="grid-col-times j-times-container">
-    <input type="text" class="j-ent" value="08:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
+    <input type="text" class="j-ent" value="09:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
     <span style="color:var(--cor-texto-secundario); align-self:center;">às</span>
-    <input type="text" class="j-sai" value="18:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
+    <input type="text" class="j-sai" value="19:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
 </div>
                     </div>`;
             }
@@ -5880,13 +5890,45 @@ function alternarCamposGestaoHorarios() {
     }
 }
 
-function renderizarGridSemanalGestao() {
+async function renderizarGridSemanalGestao() {
     const dataInicioStr = document.getElementById('gestao-hor-fixa-data').value;
     const gridSemana = document.getElementById('gestao-hor-lista-semana-grid');
-    
+    const idColab = document.getElementById('gestao-hor-colaborador').value;
+
     if (!dataInicioStr) {
         gridSemana.innerHTML = '<p style="color: var(--cor-perigo); font-weight: bold;">Selecione a Data de Início para gerar a semana!</p>';
         return;
+    }
+
+    if (!idColab) {
+        gridSemana.innerHTML = '<p style="color: var(--cor-perigo); font-weight: bold;">Selecione o colaborador primeiro!</p>';
+        return;
+    }
+
+    // Mostra um aviso de carregamento enquanto busca no banco
+    gridSemana.innerHTML = '<p style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-spinner fa-spin"></i> Buscando horários atuais do colaborador...</p>';
+
+    // BUSCA A ESCALA ATUAL NO BANCO DE DADOS (COM INTELIGÊNCIA DE HISTÓRICO)
+    let escalaAtual = {};
+    try {
+        const { data } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        if (data && data.dados_admissao && data.dados_admissao.jornada) {
+            let jor = data.dados_admissao.jornada;
+            let jornadaVigente = jor;
+
+            // Procura a jornada mais recente no histórico
+            if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
+                // Ordena puxando a alteração mais nova primeiro
+                const histOrdenado = [...jor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                jornadaVigente = histOrdenado[0]; 
+            }
+
+            if (jornadaVigente.escala) {
+                escalaAtual = jornadaVigente.escala;
+            }
+        }
+    } catch (e) {
+        console.error("Erro ao buscar escala atual", e);
     }
 
     gridSemana.innerHTML = '';
@@ -5899,24 +5941,56 @@ function renderizarGridSemanalGestao() {
         const diaAtualIndex = (startIndex + i) % 7;
         const diaNome = nomesDias[diaAtualIndex];
 
+        // VALORES PADRÕES (Se ele for novo ou não tiver escala configurada)
+        let ent = "09:00"; 
+        let sai = "19:00";
+        let status = "Trabalho";
+        let padrao = "1x1";
+        let inicioAlt = "Trabalha";
+
+        // SE ELE TIVER ESCALA SALVA, SOBRESCREVE OS VALORES PADRÕES
+        if (escalaAtual[diaNome]) {
+            status = escalaAtual[diaNome].status || "Trabalho";
+            padrao = escalaAtual[diaNome].padrao || "1x1";
+            inicioAlt = escalaAtual[diaNome].inicio || "Trabalha";
+
+            if (escalaAtual[diaNome].horario && escalaAtual[diaNome].horario !== "Folga") {
+                const match = escalaAtual[diaNome].horario.match(/(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
+                if (match) {
+                    ent = match[1];
+                    sai = match[2];
+                }
+            }
+        }
+
+        let visHora = status === 'Folga' ? 'hidden' : 'visible';
+        let visAlt = status === 'Alternado' ? '' : 'hidden';
+
         gridSemana.innerHTML += `
             <div class="grid-semana" data-dia="${diaNome}">
                 <div class="grid-col-dia">${diaNome}</div>
                 <div class="grid-col-status">
                     <select class="j-status" onchange="toggleHorariosSemana(this)" style="padding: 8px;">
-                        <option value="Trabalho">Trabalho (Fixo)</option>
-                        <option value="Folga">Folga (Fixo)</option>
-                        <option value="Alternado">Alternado</option>
+                        <option value="Trabalho" ${status === 'Trabalho' ? 'selected' : ''}>Trabalho (Fixo)</option>
+                        <option value="Folga" ${status === 'Folga' ? 'selected' : ''}>Folga (Fixo)</option>
+                        <option value="Alternado" ${status === 'Alternado' ? 'selected' : ''}>Alternado</option>
                     </select>
-                    <div class="j-alt-config hidden">
-                        <select class="j-alt-pattern"><option value="1x1">1 Sem Sim / 1 Sem Não</option><option value="2x1">2 Sem Sim / 1 Sem Não</option><option value="2x2">2 Sem Sim / 2 Sem Não</option></select>
-                        <select class="j-alt-inicio"><option value="Trabalha">Neste dia 1: Trabalha</option><option value="Folga">Neste dia 1: Folga</option></select>
+                    <div class="j-alt-config ${visAlt}">
+                        <select class="j-alt-pattern">
+                            <option value="1x1" ${padrao === '1x1' ? 'selected' : ''}>1 Sem Sim / 1 Sem Não</option>
+                            <option value="2x1" ${padrao === '2x1' ? 'selected' : ''}>2 Sem Sim / 1 Sem Não</option>
+                            <option value="2x2" ${padrao === '2x2' ? 'selected' : ''}>2 Sem Sim / 2 Sem Não</option>
+                        </select>
+                        <select class="j-alt-inicio">
+                            <option value="Trabalha" ${inicioAlt === 'Trabalha' ? 'selected' : ''}>Neste dia 1: Trabalha</option>
+                            <option value="Folga" ${inicioAlt === 'Folga' ? 'selected' : ''}>Neste dia 1: Folga</option>
+                        </select>
                     </div>
                 </div>
-                <div class="grid-col-times j-times-container">
-                    <input type="text" class="j-ent" value="08:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
+                <div class="grid-col-times j-times-container" style="visibility: ${visHora};">
+                    <input type="text" class="j-ent" value="${ent}" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
                     <span style="color:var(--cor-texto-secundario); align-self:center;">às</span>
-                    <input type="text" class="j-sai" value="18:00" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
+                    <input type="text" class="j-sai" value="${sai}" readonly onclick="abrirTimePicker(this)" style="padding: 8px; width: 75px; cursor: pointer; text-align: center;">
                 </div>
             </div>`;
     }
@@ -5989,14 +6063,13 @@ async function salvarGestaoHorarios() {
 
         if (!jor.historico_alteracoes) jor.historico_alteracoes = [];
 
-        // ========================================================
+       // ========================================================
         // A MÁGICA DA LIMPEZA E ORGANIZAÇÃO (TURBINADA)
         // ========================================================
         
         const dataNovaObj = new Date(dataIni + 'T00:00:00');
         
         // 1. Removemos todo o lixo: qualquer regra que seja IGUAL ou POSTERIOR à data escolhida!
-        // Assim, essa nova regra torna-se a definitiva dali pra frente, esmagando o lixo.
         jor.historico_alteracoes = jor.historico_alteracoes.filter(h => {
             const dataRegraHist = new Date(h.data_inicio + 'T00:00:00');
             return dataRegraHist < dataNovaObj; // Só sobrevive quem for estritamente do PASSADO.
@@ -6009,13 +6082,33 @@ async function salvarGestaoHorarios() {
         jor.historico_alteracoes.sort((a, b) => new Date(a.data_inicio + 'T00:00:00') - new Date(b.data_inicio + 'T00:00:00'));
         
         // ========================================================
+        // 👇 NOVA LÓGICA: Atualiza o horário atual direto na raiz da Admissão 👇
+        // ========================================================
+        jor.tipo = novaEscalaEmpacotada.tipo;
+        jor.data_inicio = novaEscalaEmpacotada.data_inicio;
+
+        if (novaEscalaEmpacotada.tipo === '12x36') {
+            jor.horario = novaEscalaEmpacotada.horario;
+            jor.status_inicio = novaEscalaEmpacotada.status_inicio;
+            delete jor.escala; // Limpa os dados de escala semanal, já que virou 12x36
+        } else {
+            jor.escala = novaEscalaEmpacotada.escala;
+            delete jor.horario; // Limpa os dados de 12x36
+            delete jor.status_inicio; 
+        }
+        // ========================================================
+        // 👆 FIM DA NOVA LÓGICA 👆
     }
 
     adm.jornada = jor;
 
+    // 👇 ADICIONE ESTA LINHA PARA VARRER O LIXO ANTIGO DA RAIZ 👇
+    delete adm.jornadas_historico;
+
     // Salva o JSON limpinho e atualizado no perfil do colaborador
     const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
     
+   // No final da função salvarGestaoHorarios() ...
     if (errUpdate) {
         mostrarAlerta("Erro ao salvar: " + errUpdate.message, "erro");
     } else {
@@ -6031,8 +6124,191 @@ async function salvarGestaoHorarios() {
         // Reseta os campos para não gerar confusão
         document.getElementById('gestao-hor-exc-data').value = '';
         document.getElementById('gestao-hor-fixa-data').value = '';
+        
+        // 👇 ADICIONE ESTA LINHA 👇
+        carregarExcecoesDoColaborador(); 
     }
 }
+
+        window.carregarExcecoesDoColaborador = async function() {
+    const idColab = document.getElementById('gestao-hor-colaborador').value;
+    const containerBox = document.getElementById('box-lista-excecoes');
+    const renderDiv = document.getElementById('lista-excecoes-render');
+    const btnHistorico = document.getElementById('btn-ver-historico-jor'); // <--- Pega o botão
+
+    // Se limpar o select, esconde a caixa e o botão
+    if (!idColab) {
+        containerBox.style.display = 'none';
+        btnHistorico.classList.add('hidden'); // <--- Esconde
+        return;
+    }
+
+    btnHistorico.classList.remove('hidden'); // <--- Mostra o botão!
+
+    renderDiv.innerHTML = '<span style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-spinner fa-spin"></i> Carregando exceções...</span>';
+    containerBox.style.display = 'block';
+
+    const { data: colab, error } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    
+    if (error || !colab) {
+        renderDiv.innerHTML = '<span style="color: var(--cor-perigo);">Erro ao carregar dados.</span>';
+        return;
+    }
+
+    // Acha o objeto "excecoes_pontuais" dentro da jornada
+    const excecoes = colab.dados_admissao?.jornada?.excecoes_pontuais || {};
+    const datas = Object.keys(excecoes).sort((a, b) => new Date(b) - new Date(a)); // Ordena da mais recente para a mais antiga
+
+    if (datas.length === 0) {
+        renderDiv.innerHTML = '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhuma exceção lançada no histórico.</span>';
+        return;
+    }
+
+    let html = '';
+    datas.forEach(dataIso => {
+        const valor = excecoes[dataIso];
+        const dataFormatada = formatarDataBR(dataIso);
+        
+        let badgeCor = valor === 'Folga' ? '#28a745' : '#4fc3f7';
+        let icon = valor === 'Folga' ? 'fa-mug-hot' : 'fa-clock';
+
+        html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px 15px; border-radius: 8px; border-left: 3px solid ${badgeCor};">
+                <div>
+                    <strong style="color: var(--cor-texto-principal);">${dataFormatada}</strong>
+                    <span style="color: ${badgeCor}; margin-left: 10px; font-size: 0.85rem; font-weight: bold;"><i class="fa-solid ${icon}"></i> ${valor}</span>
+                </div>
+                <button type="button" class="btn-danger-mini" onclick="removerExcecaoPontual('${idColab}', '${dataIso}')" title="Remover Exceção">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </div>
+        `;
+    });
+
+    renderDiv.innerHTML = html;
+};
+
+window.removerExcecaoPontual = async function(idColab, dataIso) {
+    const dataFormatada = formatarDataBR(dataIso);
+    const confirmado = await mostrarConfirmacao(`Deseja remover a exceção do dia ${dataFormatada}? O colaborador voltará ao horário padrão neste dia.`, "Remover Exceção");
+    if (!confirmado) return;
+
+    const { data: colab, error: errGet } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    if (errGet || !colab) return mostrarAlerta("Erro ao acessar dados do colaborador.", "erro");
+
+    let adm = colab.dados_admissao || {};
+    let jor = adm.jornada || {};
+
+    // Localiza a chave exata (ex: "2026-04-10") e deleta ela do objeto
+    if (jor.excecoes_pontuais && jor.excecoes_pontuais[dataIso]) {
+        delete jor.excecoes_pontuais[dataIso];
+    }
+
+    adm.jornada = jor;
+
+    const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+
+    if (errUpdate) {
+        mostrarAlerta("Erro ao remover: " + errUpdate.message, "erro");
+    } else {
+        mostrarAlerta("Exceção removida com sucesso!", "sucesso");
+        carregarExcecoesDoColaborador(); // Recarrega a lista do modal na hora
+        
+        // Se a tela de Escala estiver aberta, já atualiza ela em tempo real
+        const mesAnoAtual = dataIso.substring(0, 7);
+        if (!document.getElementById('tela-escala').classList.contains('hidden') && document.getElementById('filtro-mes-escala').value === mesAnoAtual) {
+            processarEscala(); 
+        }
+    }
+};
+
+        window.abrirModalHistoricoJornada = async function() {
+    const idColab = document.getElementById('gestao-hor-colaborador').value;
+    if(!idColab) return;
+
+    // Coloca o cursor de carregamento (opcional, só para UX)
+    const btnHist = document.getElementById('btn-ver-historico-jor');
+    const iconeOriginal = btnHist.innerHTML;
+    btnHist.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+
+    const { data: colab, error } = await supabaseClient.from('perfis').select('nome, dados_admissao').eq('id', idColab).single();
+    
+    btnHist.innerHTML = iconeOriginal; // Devolve o ícone
+
+    if (error || !colab) return mostrarAlerta("Erro ao carregar dados.", "erro");
+
+    const adm = colab.dados_admissao || {};
+    const jor = adm.jornada || {};
+    let historico = jor.historico_alteracoes || [];
+
+    // Se o funcionário é novo e não tem array de histórico, criamos um array fake só pra exibir a atual
+    if (historico.length === 0) {
+        historico = [jor];
+    } else {
+        // Garante que a jornada atual (da raiz) esteja no topo da visualização caso não esteja no array
+        // Ordena da mais NOVA (topo) para a mais VELHA (fundo)
+        historico.sort((a, b) => new Date(b.data_inicio + 'T00:00:00') - new Date(a.data_inicio + 'T00:00:00'));
+    }
+
+    let timelineHtml = '';
+
+    historico.forEach((h, index) => {
+        const dataFormatada = formatarDataBR(h.data_inicio);
+        const isAtual = index === 0; // A primeira da lista ordenada é a atual
+        const corBorda = isAtual ? '#28a745' : 'var(--cor-borda)';
+        const corTexto = isAtual ? '#28a745' : 'var(--cor-texto-secundario)';
+        const badgeAtual = isAtual ? `<span class="badge" style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid #28a745; font-size: 0.6rem; margin-left: 10px;">JORNADA ATUAL</span>` : '';
+
+        // Monta o resumo dos dias
+        let resumoDias = '';
+        if (h.tipo === '12x36') {
+            resumoDias = `<span style="display:block; margin-top: 5px; color: var(--cor-texto-principal);"><i class="fa-regular fa-clock"></i> ${h.horario || 'Plantão'} (Iniciou no status: ${h.status_inicio || 'Trabalho'})</span>`;
+        } else if (h.escala) {
+            const diasOrdem = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo'];
+            resumoDias = '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 10px;">';
+            diasOrdem.forEach(d => {
+                const configDia = h.escala[d];
+                if (configDia) {
+                    let detalhe = configDia.status === 'Folga' ? '<b style="color: #28a745;">Folga</b>' : configDia.horario;
+                    if (configDia.status === 'Alternado') detalhe = `<b style="color: #ffc107;">Alternado (${configDia.padrao})</b>`;
+                    resumoDias += `<div style="font-size: 0.8rem; background: rgba(0,0,0,0.2); padding: 5px; border-radius: 4px;"><span style="color: var(--cor-texto-secundario);">${d.substring(0,3)}:</span> ${detalhe}</div>`;
+                }
+            });
+            resumoDias += '</div>';
+        }
+
+        timelineHtml += `
+            <div style="border-left: 3px solid ${corBorda}; padding-left: 15px; margin-bottom: 20px; position: relative;">
+                <div style="position: absolute; left: -8px; top: 0; width: 13px; height: 13px; border-radius: 50%; background: ${isAtual ? '#28a745' : 'var(--cor-borda)'};"></div>
+                <div style="font-size: 0.8rem; color: ${corTexto}; font-weight: bold;">
+                    A partir de ${dataFormatada} ${badgeAtual}
+                </div>
+                <div style="margin-top: 5px; font-size: 1rem; font-weight: bold; color: var(--cor-acento);">
+                    ${h.tipo}
+                </div>
+                ${resumoDias}
+            </div>
+        `;
+    });
+
+    const modalHtml = `
+    <div id="modal-historico-jornada" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; max-height: 85vh; overflow-y: auto; border: 1px solid #4fc3f7;">
+            <button onclick="document.getElementById('modal-historico-jornada').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #4fc3f7; margin-bottom: 25px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
+                <i class="fa-solid fa-clock-rotate-left"></i> Histórico de Jornadas: ${colab.nome}
+            </h3>
+            
+            <div style="padding-left: 10px;">
+                ${timelineHtml}
+            </div>
+
+            <button class="btn-secondary" style="width: 100%; height: 50px; margin-top: 15px;" onclick="document.getElementById('modal-historico-jornada').remove()">Fechar Histórico</button>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
     </script>
 </body>
 </html>
