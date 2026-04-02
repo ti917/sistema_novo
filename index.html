@@ -865,9 +865,9 @@ input[type="month"]::-webkit-calendar-picker-indicator {
                 <option value="">Carregando...</option>
             </select>
         </div>
-       <div class="form-group">
+      <div class="form-group">
             <label>Colaborador <span style="color: var(--cor-perigo);">*</span></label>
-            <select id="gestao-hor-colaborador" required disabled>
+            <select id="gestao-hor-colaborador" required disabled onchange="carregarExcecoesDoColaborador()">
                 <option value="">Selecione a Unidade primeiro...</option>
             </select>
         </div>
@@ -903,7 +903,12 @@ input[type="month"]::-webkit-calendar-picker-indicator {
                 </div>
             </div>
         </div>
-    </div>
+
+        <div id="box-lista-excecoes" style="margin-top: 20px; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 15px; display: none;">
+            <h5 style="color: #4fc3f7; margin-bottom: 10px;"><i class="fa-solid fa-list-check"></i> Exceções já lançadas para este colaborador</h5>
+            <div id="lista-excecoes-render" style="display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; padding-right: 5px;"></div>
+        </div>
+        </div>
 
     <div id="box-gestao-hor-fixa" class="bloco-destaque hidden" style="border-color: var(--cor-sucesso);">
         <h4 style="color: var(--cor-sucesso); margin-bottom: 15px;"><i class="fa-solid fa-calendar-check"></i> Nova Jornada Fixa</h4>
@@ -6098,6 +6103,7 @@ async function salvarGestaoHorarios() {
     // Salva o JSON limpinho e atualizado no perfil do colaborador
     const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
     
+   // No final da função salvarGestaoHorarios() ...
     if (errUpdate) {
         mostrarAlerta("Erro ao salvar: " + errUpdate.message, "erro");
     } else {
@@ -6113,8 +6119,99 @@ async function salvarGestaoHorarios() {
         // Reseta os campos para não gerar confusão
         document.getElementById('gestao-hor-exc-data').value = '';
         document.getElementById('gestao-hor-fixa-data').value = '';
+        
+        // 👇 ADICIONE ESTA LINHA 👇
+        carregarExcecoesDoColaborador(); 
     }
 }
+
+        window.carregarExcecoesDoColaborador = async function() {
+    const idColab = document.getElementById('gestao-hor-colaborador').value;
+    const containerBox = document.getElementById('box-lista-excecoes');
+    const renderDiv = document.getElementById('lista-excecoes-render');
+
+    // Se limpar o select, esconde a caixa
+    if (!idColab) {
+        containerBox.style.display = 'none';
+        return;
+    }
+
+    renderDiv.innerHTML = '<span style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-spinner fa-spin"></i> Carregando exceções...</span>';
+    containerBox.style.display = 'block';
+
+    const { data: colab, error } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    
+    if (error || !colab) {
+        renderDiv.innerHTML = '<span style="color: var(--cor-perigo);">Erro ao carregar dados.</span>';
+        return;
+    }
+
+    // Acha o objeto "excecoes_pontuais" dentro da jornada
+    const excecoes = colab.dados_admissao?.jornada?.excecoes_pontuais || {};
+    const datas = Object.keys(excecoes).sort((a, b) => new Date(b) - new Date(a)); // Ordena da mais recente para a mais antiga
+
+    if (datas.length === 0) {
+        renderDiv.innerHTML = '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhuma exceção lançada no histórico.</span>';
+        return;
+    }
+
+    let html = '';
+    datas.forEach(dataIso => {
+        const valor = excecoes[dataIso];
+        const dataFormatada = formatarDataBR(dataIso);
+        
+        let badgeCor = valor === 'Folga' ? '#28a745' : '#4fc3f7';
+        let icon = valor === 'Folga' ? 'fa-mug-hot' : 'fa-clock';
+
+        html += `
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px 15px; border-radius: 8px; border-left: 3px solid ${badgeCor};">
+                <div>
+                    <strong style="color: var(--cor-texto-principal);">${dataFormatada}</strong>
+                    <span style="color: ${badgeCor}; margin-left: 10px; font-size: 0.85rem; font-weight: bold;"><i class="fa-solid ${icon}"></i> ${valor}</span>
+                </div>
+                <button type="button" class="btn-danger-mini" onclick="removerExcecaoPontual('${idColab}', '${dataIso}')" title="Remover Exceção">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </div>
+        `;
+    });
+
+    renderDiv.innerHTML = html;
+};
+
+window.removerExcecaoPontual = async function(idColab, dataIso) {
+    const dataFormatada = formatarDataBR(dataIso);
+    const confirmado = await mostrarConfirmacao(`Deseja remover a exceção do dia ${dataFormatada}? O colaborador voltará ao horário padrão neste dia.`, "Remover Exceção");
+    if (!confirmado) return;
+
+    const { data: colab, error: errGet } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    if (errGet || !colab) return mostrarAlerta("Erro ao acessar dados do colaborador.", "erro");
+
+    let adm = colab.dados_admissao || {};
+    let jor = adm.jornada || {};
+
+    // Localiza a chave exata (ex: "2026-04-10") e deleta ela do objeto
+    if (jor.excecoes_pontuais && jor.excecoes_pontuais[dataIso]) {
+        delete jor.excecoes_pontuais[dataIso];
+    }
+
+    adm.jornada = jor;
+
+    const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+
+    if (errUpdate) {
+        mostrarAlerta("Erro ao remover: " + errUpdate.message, "erro");
+    } else {
+        mostrarAlerta("Exceção removida com sucesso!", "sucesso");
+        carregarExcecoesDoColaborador(); // Recarrega a lista do modal na hora
+        
+        // Se a tela de Escala estiver aberta, já atualiza ela em tempo real
+        const mesAnoAtual = dataIso.substring(0, 7);
+        if (!document.getElementById('tela-escala').classList.contains('hidden') && document.getElementById('filtro-mes-escala').value === mesAnoAtual) {
+            processarEscala(); 
+        }
+    }
+};
     </script>
 </body>
 </html>
