@@ -3254,9 +3254,31 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
             return; 
         }
 
-        // O nome da linha da tabela carrega o cargo ATUAL pra visualização rápida
-        let linhaColab = { id_colaborador: colab.id, nome: colab.nome, cargo: adm.cargo || '-', dias: {} };
-        let teveUmDiaNestaEscala = false; // Trava para não renderizar o cara fantasma
+        // 👇 MÁGICA 1: QUAL CARGO MOSTRAR NA TABELA?
+        let cargoNestaUnidade = adm.cargo || '-';
+        let dataEntradaNestaUnidade = new Date('1970-01-01');
+        
+        if (adm.historico_transferencias && adm.historico_transferencias.length > 0) {
+            // Ordena do mais recente para o mais antigo para descobrir o cargo
+            const histDesc = [...adm.historico_transferencias].sort((a,b) => new Date(b.data_mudanca) - new Date(a.data_mudanca));
+            
+            if (colab.unidade !== unidadeEscalaGerada) {
+                const histItem = histDesc.find(h => h.unidade_antiga === unidadeEscalaGerada);
+                if (histItem) cargoNestaUnidade = histItem.cargo_antigo;
+            }
+
+            // Acha o momento de entrada nesta unidade
+            const histAsc = [...adm.historico_transferencias].sort((a,b) => new Date(a.data_mudanca) - new Date(b.data_mudanca));
+            for (let h of histAsc) {
+                if (h.unidade_nova === unidadeEscalaGerada) {
+                    dataEntradaNestaUnidade = new Date(h.data_mudanca + 'T00:00:00');
+                }
+            }
+        }
+
+        // Criamos a linha base do colaborador com o cargo travado corretamente
+        let linhaColab = { id_colaborador: colab.id, nome: colab.nome, cargo: cargoNestaUnidade, dias: {} };
+        let teveUmDiaNestaEscala = false; 
 
         for (let d = 1; d <= diasNoMes; d++) {
             const dataAtual = new Date(ano, mes, d, 0,0,0,0);
@@ -3264,8 +3286,8 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
             
             let sigla = '-'; let cssTipo = ''; let hora = '';
 
-            // LÓGICA TEMPORAL DA UNIDADE (SLOWLY CHANGING DIMENSIONS)
-            let unidadeNesteDia = colab.unidade; // Assume a atual
+            // 👇 MÁGICA 2: ELE ESTAVA AQUI NESTE DIA?
+            let unidadeNesteDia = colab.unidade; 
             
             if (adm.historico_transferencias && adm.historico_transferencias.length > 0) {
                 const histOrdenado = [...adm.historico_transferencias].sort((a,b) => new Date(a.data_mudanca) - new Date(b.data_mudanca));
@@ -3281,16 +3303,15 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
 
             // Se neste dia, ele NÃO estava na unidade que estamos gerando a tabela:
             if (unidadeNesteDia !== unidadeEscalaGerada) {
-                if (colab.unidade === unidadeEscalaGerada) {
-                    sigla = 'AL'; cssTipo = 'celula-inativo'; hora = 'Escala na Unidade Anterior';
+                if (dataAtual < dataEntradaNestaUnidade) {
+                    sigla = 'AL'; cssTipo = 'celula-inativo'; hora = `Pertencia à unidade: ${unidadeNesteDia}`;
                 } else {
-                    sigla = 'TR'; cssTipo = 'celula-inativo'; hora = 'Transferido para outra unidade';
+                    sigla = 'TR'; cssTipo = 'celula-inativo'; hora = `Transferido para a unidade: ${unidadeNesteDia}`;
                 }
                 linhaColab.dias[d] = { sigla: sigla, cssClass: cssTipo, horario: hora };
-                continue; // Pula as validações de INSS, Folga, etc para este dia.
+                continue; 
             }
             
-            // Se chegou aqui, ele ESTAVA na unidade neste dia!
             teveUmDiaNestaEscala = true;
 
             // 1. CHECA SE FOI DESLIGADO
@@ -4082,34 +4103,127 @@ if(document.getElementById('adm-precisa-vt').value === 'Sim') {
             }
         });
 
-        async function listarUsuarios() {
-            if(usuarioAtual.perfil !== 'Admin') return; 
+        let todosUsuariosCadastrados = [];
 
-            const tbody = document.getElementById('lista-usuarios-body');
-            const { data, error } = await supabaseClient.from('perfis').select('*').order('nome');
-            if (error) return;
-            tbody.innerHTML = "";
-            data.forEach(u => {
-                let badgeClass = u.perfil.toLowerCase();
-                if(u.perfil === 'Empresa') badgeClass = 'empresa'; 
-                
-                let statusBadge = (u.status || 'Ativo') === 'Ativo' ? 'badge ativo' : 'badge desligado';
-                let aprovacaoBadge = '';
-                if(u.status_aprovacao === 'Pendente') { aprovacaoBadge = '<span class="badge pendente">Pendente</span>'; } 
-                else if(u.status_aprovacao === 'Reprovado') { aprovacaoBadge = '<span class="badge reprovado">Reprovado</span>'; } 
-                else { aprovacaoBadge = '<span class="badge ativo">Aprovado</span>'; }
-                
-                tbody.innerHTML += `<tr>
-                    <td>${u.nome}</td>
-                    <td><span class="badge ${badgeClass}">${u.perfil}</span></td>
-                    <td><span class="${statusBadge}">${u.status || 'Ativo'}</span></td>
-                    <td>${aprovacaoBadge}</td>
-                    <td>${u.empresa || '-'}</td>
-                    <td>${u.unidade || 'Todas (Admin)'}</td>
-                    <td style="text-align: center;"><button class="btn-danger-mini"><i class="fa-solid fa-trash"></i></button></td>
-                </tr>`;
-            });
-        }
+async function listarUsuarios() {
+    if(usuarioAtual.perfil !== 'Admin') return; 
+
+    // Injeta a barra de busca dinamicamente se ela não existir
+    const abaUsuarios = document.getElementById('aba-usuarios-cadastrados');
+    if (!document.getElementById('busca-usuarios-cadastrados')) {
+        const searchHtml = `
+            <div class="controls-escala" style="justify-content: flex-start; gap: 15px; margin-bottom: 20px;">
+                <div class="input-wrapper" style="flex: 1; min-width: 250px;">
+                    <i class="fa-solid fa-search"></i>
+                    <input type="text" id="busca-usuarios-cadastrados" placeholder="Buscar usuário pelo nome..." oninput="filtrarUsuariosCadastrados()">
+                </div>
+            </div>
+        `;
+        // Insere a busca logo após o título da aba
+        abaUsuarios.querySelector('h3').insertAdjacentHTML('afterend', searchHtml);
+    }
+
+    const tbody = document.getElementById('lista-usuarios-body');
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando lista...</td></tr>';
+    
+    const { data, error } = await supabaseClient.from('perfis').select('*').order('nome');
+    if (error) return;
+    
+    todosUsuariosCadastrados = data;
+    filtrarUsuariosCadastrados();
+}
+
+        window.filtrarUsuariosCadastrados = function() {
+    const termo = document.getElementById('busca-usuarios-cadastrados').value.toLowerCase();
+    const tbody = document.getElementById('lista-usuarios-body');
+    tbody.innerHTML = "";
+    
+    const filtrados = todosUsuariosCadastrados.filter(u => u.nome.toLowerCase().includes(termo));
+
+    if (filtrados.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario);">Nenhum usuário encontrado na busca.</td></tr>';
+        return;
+    }
+
+    filtrados.forEach(u => {
+        let badgeClass = u.perfil.toLowerCase();
+        if(u.perfil === 'Empresa') badgeClass = 'empresa'; 
+        
+        let statusBadge = (u.status || 'Ativo') === 'Ativo' ? 'badge ativo' : 'badge desligado';
+        let aprovacaoBadge = '';
+        if(u.status_aprovacao === 'Pendente') { aprovacaoBadge = '<span class="badge pendente">Pendente</span>'; } 
+        else if(u.status_aprovacao === 'Reprovado') { aprovacaoBadge = '<span class="badge reprovado">Reprovado</span>'; } 
+        else { aprovacaoBadge = '<span class="badge ativo">Aprovado</span>'; }
+        
+        // Adicionamos o botão de "Histórico" na coluna de Ações
+        tbody.innerHTML += `<tr>
+            <td>${u.nome}</td>
+            <td><span class="badge ${badgeClass}">${u.perfil}</span></td>
+            <td><span class="${statusBadge}">${u.status || 'Ativo'}</span></td>
+            <td>${aprovacaoBadge}</td>
+            <td>${u.empresa || '-'}</td>
+            <td>${u.unidade || 'Todas (Admin)'}</td>
+            <td style="text-align: center; display: flex; justify-content: center; gap: 8px;">
+                <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.85rem;" onclick="verHistoricoTransferencias('${u.id}')" title="Ver Histórico de Cargos e Unidades"><i class="fa-solid fa-clock-rotate-left"></i></button>
+                <button class="btn-danger-mini" onclick="excluirAdmissaoAdmin('${u.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>`;
+    });
+};
+
+        window.verHistoricoTransferencias = async function(idColab) {
+    const user = todosUsuariosCadastrados.find(u => u.id === idColab);
+    if (!user) return mostrarAlerta("Usuário não encontrado.", "erro");
+
+    let historico = user.dados_admissao?.historico_transferencias || [];
+    let timelineHtml = '';
+
+    if (historico.length === 0) {
+        timelineHtml = '<p style="color: var(--cor-texto-secundario); font-size: 0.9rem; text-align: center; margin-top: 20px;">Nenhuma transferência registrada no histórico deste colaborador.</p>';
+    } else {
+        // Ordena da mais nova para a mais antiga
+        const histDesc = [...historico].sort((a,b) => new Date(b.data_mudanca) - new Date(a.data_mudanca));
+        
+        histDesc.forEach((h, index) => {
+            const dataFormatada = formatarDataBR(h.data_mudanca);
+            const isMaisRecente = index === 0;
+            const corBorda = isMaisRecente ? '#ff9800' : 'var(--cor-borda)';
+            const corTexto = isMaisRecente ? '#ff9800' : 'var(--cor-texto-secundario)';
+            const badgeUltima = isMaisRecente ? `<span class="badge" style="background: rgba(255,152,0,0.2); color: #ff9800; border: 1px solid #ff9800; font-size: 0.6rem; margin-left: 10px;">MUDANÇA MAIS RECENTE</span>` : '';
+
+            timelineHtml += `
+                <div style="border-left: 3px solid ${corBorda}; padding-left: 15px; margin-bottom: 20px; position: relative;">
+                    <div style="position: absolute; left: -8px; top: 0; width: 13px; height: 13px; border-radius: 50%; background: ${isMaisRecente ? '#ff9800' : 'var(--cor-borda)'};"></div>
+                    <div style="font-size: 0.85rem; color: ${corTexto}; font-weight: bold;">
+                        A partir de ${dataFormatada} ${badgeUltima}
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.9rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.2); padding: 15px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);">
+                        <div style="margin-bottom: 8px;"><i class="fa-solid fa-map-marker-alt" style="color: var(--cor-perigo); width: 20px;"></i> <b>De:</b> ${h.unidade_antiga} <i class="fa-solid fa-arrow-right" style="margin: 0 5px; color: var(--cor-texto-secundario);"></i> <b style="color: var(--cor-sucesso);">Para:</b> ${h.unidade_nova}</div>
+                        <div><i class="fa-solid fa-briefcase" style="color: var(--cor-perigo); width: 20px;"></i> <b>De:</b> ${h.cargo_antigo} <i class="fa-solid fa-arrow-right" style="margin: 0 5px; color: var(--cor-texto-secundario);"></i> <b style="color: var(--cor-sucesso);">Para:</b> ${h.cargo_novo}</div>
+                    </div>
+                </div>
+            `;
+        });
+    }
+
+    const modalHtml = `
+    <div id="modal-historico-transferencias" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; max-height: 85vh; overflow-y: auto; border: 1px solid #ff9800;">
+            <button onclick="document.getElementById('modal-historico-transferencias').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #ff9800; margin-bottom: 25px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
+                <i class="fa-solid fa-clock-rotate-left"></i> Histórico de Cargos e Unidades: ${user.nome}
+            </h3>
+            
+            <div style="padding-left: 10px;">
+                ${timelineHtml}
+            </div>
+
+            <button class="btn-secondary" style="width: 100%; height: 50px; margin-top: 15px;" onclick="document.getElementById('modal-historico-transferencias').remove()">Fechar Histórico</button>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
 
         window.editarSalarioBase = function(idStr) {
             // Acha o salário na lista global (garantindo que o ID é string)
