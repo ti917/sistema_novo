@@ -4727,14 +4727,13 @@ async function listarUsuarios() {
             abrirAdmissaoDestacada(idColab);
         } else if (tipoNotificacao.includes('Ausência')) {
             abrirAusenciaDestacada(referenciaId);
-        } else if (tipoNotificacao.includes('FT')) { 
-            // 👇 SE FOR FT, JOGA O ADMIN PRA TELA DE FT DELE 👇
-            if (usuarioAtual.perfil === 'Admin') {
-                document.querySelector('[data-target="tela-ft-admin"]')?.click();
-            } else {
-                // Se for o gestor, avisa ele que tá aprovado na escala
-                document.querySelector('[data-target="tela-escala"]')?.click();
-            }
+        } else if (tipoNotificacao === 'FT_Admin') { 
+            // 👇 SE O ADMIN CLICAR NA NOTIFICAÇÃO PENDENTE, VAI PRA CENTRAL 👇
+            document.querySelector('[data-target="tela-solicitacoes"]')?.click();
+            listarSolicitacoes();
+        } else if (tipoNotificacao === 'FT') {
+            // Se for o gestor (clicou no aviso de aprovado), vai ver a escala
+            document.querySelector('[data-target="tela-escala"]')?.click();
         } else {
             const { data } = await supabaseClient.from('perfis').select('status').eq('id', idColab).single();
             if(data && data.status === 'Desligado') {
@@ -6794,6 +6793,7 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
     const dataAlvo = document.getElementById('ft-data').value;
     const motivoText = document.getElementById('ft-motivo').value;
 
+    // 👇 MÁGICA: CRIA APENAS 1 OBJETO PRO BANCO DE DADOS
     let objBanco = {
         colaborador_id: idColab, nome: nomeColab, unidade: unidade,
         status: 'Pendente', criado_por: usuarioAtual.nome
@@ -6814,7 +6814,8 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
             if(new Date(dataFP) < new Date(dataAlvo)) return mostrarAlerta("A Folga Programada não pode ser antes da FT!", "erro");
             
             objBanco.motivo = 'Folga Trabalhada (Compensada)';
-            objBanco.data_fim = dataFP; // 🔴 MÁGICA: A FP SALVA NA DATA_FIM DA MESMA LINHA!
+            // 🔴 MÁGICA: A FP SALVA NA DATA_FIM DA MESMA LINHA DA FT!
+            objBanco.data_fim = dataFP; 
             objBanco.observacao = `Gerará Folga Programada (FP) no dia ${formatarDataBR(dataFP)}. Motivo: ${motivoText}`;
         }
     } else if (tipo === 'H+') {
@@ -6832,11 +6833,16 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
     btn.disabled = true; btn.innerHTML = "Enviando...";
 
     try {
-        // 🔴 NADA DE NOTIFICAÇÕES AQUI! SÓ SALVA A LINHA ÚNICA NO BANCO.
-        const { error } = await supabaseClient.from('horas_extras_ft').insert([objBanco]);
+        // SALVA A LINHA ÚNICA NO BANCO E JÁ PEGA O ID DELA
+        const { data, error } = await supabaseClient.from('horas_extras_ft').insert([objBanco]).select('id').single();
         if (error) throw error;
         
-        mostrarAlerta(`${tipo} lançada com sucesso! Ela irá para a Gestão de FT do Admin.`, "sucesso");
+        // 👇 CRIA A NOTIFICAÇÃO PENDENTE PRO ADMIN AQUI 👇
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidade, lida: false, tipo: 'FT_Admin', referencia_id: data.id }
+        ]);
+        
+        mostrarAlerta(`${tipo} lançada com sucesso! Ela irá para a Central de Aprovações.`, "sucesso");
         document.getElementById('form-ft').reset();
         document.getElementById('bloco-opcoes-ft').classList.add('hidden');
         document.getElementById('bloco-opcoes-hplus').classList.add('hidden');
@@ -6902,7 +6908,7 @@ function renderizarPaginacaoFTsAdmin() {
         let dataEnvio = new Date(ft.created_at).toLocaleDateString('pt-BR') + ' às ' + new Date(ft.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         let aprovadoInfo = ft.aprovado_por ? `<span style="font-size: 0.75rem; color: ${corStatus}; display: block; margin-top: 4px; font-weight: bold;"><i class="fa-solid fa-user-tag"></i> Analisado por: ${ft.aprovado_por}</span>` : '';
 
-        // 👇 MÁGICA: MONTA A DATA DEPENDENDO SE É DINHEIRO OU FOLGA 👇
+        // 👇 MÁGICA DA DATA: Mostra 1 Data se for Dinheiro/H+, ou 2 Datas se for FP 👇
         let dataTexto = `<i class="fa-regular fa-calendar-days"></i> <b>Data: ${formatarDataBR(ft.data_inicio)}</b>`;
         if (ft.sigla === 'FT' && ft.data_inicio !== ft.data_fim) {
             dataTexto = `<i class="fa-solid fa-briefcase"></i> Data FT: <b>${formatarDataBR(ft.data_inicio)}</b> &nbsp;|&nbsp; <i class="fa-solid fa-mug-hot"></i> Data FP: <b>${formatarDataBR(ft.data_fim)}</b>`;
@@ -6956,17 +6962,16 @@ window.aprovarFTAdmin = async function(idFT, idColab, nomeColab, unidadeColab) {
     const { error } = await supabaseClient.from('horas_extras_ft').update({ status: 'Aprovado', aprovado_por: usuarioAtual.nome }).eq('id', idFT);
     if (error) return mostrarAlerta("Erro ao aprovar.", "erro");
 
-    // 👇 AGORA SIM CRIA AS NOTIFICAÇÕES (Gestor e Admin) 👇
-    await supabaseClient.from('notificacoes').insert([
-        { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'FT', referencia_id: idFT },
-        { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'FT_Admin', referencia_id: idFT }
-    ]);
+    // 👇 AVISA O GESTOR APENAS QUE FOI APROVADO 👇
+    await supabaseClient.from('notificacoes').insert([{
+        colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'FT', referencia_id: idFT
+    }]);
 
     mostrarAlerta("Registro aprovado com sucesso!", "sucesso");
     carregarFTsParaAdmin();
     if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
 };
-
+        
 window.reprovarERemoverFT = async function(idFT) {
     const confirmado = await mostrarConfirmacao("Deseja RECUSAR E REMOVER este registro permanentemente?", "Recusar Registro");
     if (!confirmado) return;
