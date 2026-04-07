@@ -1757,6 +1757,7 @@ input[type="month"]::-webkit-calendar-picker-indicator {
         let notificacoesGlobais = [];
         let listaAusenciasPendentes = [];
         let listaFTPendentes = [];
+        let listaTrocasPendentes = [];
 
         const loginContainer = document.getElementById('login-container');
         const appContainer = document.getElementById('app-container');
@@ -2128,11 +2129,13 @@ function fecharTimePicker() {
 
                 const resPerfis = await supabaseClient.from('perfis').select('id, nome, unidade, status_aprovacao', { count: 'exact' }).in('status_aprovacao', ['Pendente', 'Rescisão Pendente']); 
                 const resAusencias = await supabaseClient.from('ausencias').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente');
-const resFT = await supabaseClient.from('horas_extras_ft').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente');
+                const resFT = await supabaseClient.from('horas_extras_ft').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente');
+                const resTrocas = await supabaseClient.from('trocas_turno').select('id', { count: 'exact' }).eq('status', 'Pendente'); 
 
                 countPendentes = resPerfis.count || 0;
                 countAusencias = resAusencias.count || 0;
                 countFTs = resFT.count || 0;
+                let countTrocas = resTrocas.count || 0;
                 
                 pendentesData = resPerfis.data;
                 ausenciasPendentesData = resAusencias.data;
@@ -2151,10 +2154,10 @@ const resFT = await supabaseClient.from('horas_extras_ft').select('id, nome, uni
                 .order('created_at', { ascending: false });
 
             if (isAdmin) {
-                queryNotifs = queryNotifs.in('tipo', ['Admissão_Admin', 'Rescisão_Admin', 'Ausência_Admin', 'FT_Admin']);
+                queryNotifs = queryNotifs.in('tipo', ['Admissão_Admin', 'Rescisão_Admin', 'Ausência_Admin', 'FT_Admin', 'Troca_Admin']); // 👈 Adicionado Troca_Admin
             } else if (usuarioAtual.unidade) {
                 const unidadesGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
-                queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT']);
+                queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca']); // 👈 Adicionado Troca
             }
 
             const { data: notifsAprovadasDb } = await queryNotifs;
@@ -2162,10 +2165,10 @@ const resFT = await supabaseClient.from('horas_extras_ft').select('id, nome, uni
             notificacoesGlobais = notifsAprovadas; 
             
             const naoLidas = notifsAprovadas.filter(n => !n.lida).length;
-            totalNotifsNoSino = countPendentes + countAusencias + countFTs + naoLidas;
+            totalNotifsNoSino = countPendentes + countAusencias + countFTs + countTrocas + naoLidas;
 
             if (badgeMenu && isAdmin) { 
-                const totalPendentesMenu = countPendentes + countAusencias + countFTs;
+                const totalPendentesMenu = countPendentes + countAusencias + countFTs + countTrocas;
                 badgeMenu.innerText = totalPendentesMenu; 
                 badgeMenu.style.display = totalPendentesMenu > 0 ? 'block' : 'none'; 
             }
@@ -2369,6 +2372,17 @@ async function limparNotificacoesAntigas() {
                         if(!document.getElementById('tela-ft-admin').classList.contains('hidden')) carregarFTsParaAdmin();
                         if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
                         mostrarAlerta(`Novo registro de ${payload.new.sigla} recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova FT / Hora Extra!');
+                    })
+                    .subscribe();
+
+                 // 👇 Escuta Trocas de Turno (NOVO!) 👇
+                supabaseClient
+                    .channel('escuta-trocas-admin')
+                    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trocas_turno' }, (payload) => {
+                        atualizarContador(); 
+                        if(!document.getElementById('tela-trocas-admin').classList.contains('hidden')) carregarTrocasAdmin();
+                        if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
+                        mostrarAlerta(`Novo pedido de troca recebido de:<br><b>${payload.new.criado_por}</b>`, 'aviso', '⚠️ Nova Troca Pendente!');
                     })
                     .subscribe();
             }
@@ -2876,83 +2890,106 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
             document.body.insertAdjacentHTML('beforeend', modalHtml);
         }
 
-        async function listarSolicitacoes() {
-            const tbody = document.getElementById('lista-solicitacoes-body');
-            tbody.innerHTML = "<tr><td colspan='6' style='text-align: center; padding: 20px;'><i class='fa-solid fa-spinner fa-spin'></i> Carregando solicitações...</td></tr>";
+       async function listarSolicitacoes() {
+    const tbody = document.getElementById('lista-solicitacoes-body');
+    tbody.innerHTML = "<tr><td colspan='6' style='text-align: center; padding: 20px;'><i class='fa-solid fa-spinner fa-spin'></i> Carregando solicitações...</td></tr>";
 
-            const { data: perfisData } = await supabaseClient.from('perfis').select('*').in('status_aprovacao', ['Pendente', 'Rescisão Pendente']).order('nome');
-            const { data: ausenciasData } = await supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('nome');
-            // 👇 BUSCA FTS PENDENTES 👇
-            const { data: ftData } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('nome');
+    const { data: perfisData } = await supabaseClient.from('perfis').select('*').in('status_aprovacao', ['Pendente', 'Rescisão Pendente']).order('nome');
+    const { data: ausenciasData } = await supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('nome');
+    const { data: ftData } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('nome');
+    // 👇 BUSCA AS TROCAS PENDENTES 👇
+    const { data: trocasData } = await supabaseClient.from('trocas_turno').select('*').eq('status', 'Pendente').order('created_at');
 
-            listaAdmissoesPendentes = perfisData || [];
-            listaAusenciasPendentes = ausenciasData || []; 
-            listaFTPendentes = ftData || []; // 🔴 GUARDA NA VARIÁVEL
-            tbody.innerHTML = "";
+    listaAdmissoesPendentes = perfisData || [];
+    listaAusenciasPendentes = ausenciasData || []; 
+    listaFTPendentes = ftData || []; 
+    listaTrocasPendentes = trocasData || []; // 🔴 GUARDA AS TROCAS AQUI
+    
+    tbody.innerHTML = "";
 
-            const totalItems = (perfisData?.length || 0) + (ausenciasData?.length || 0) + (ftData?.length || 0);
+    const totalItems = (perfisData?.length || 0) + (ausenciasData?.length || 0) + (ftData?.length || 0) + (trocasData?.length || 0);
 
-            if (totalItems === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma solicitação pendente no momento.</td></tr>`;
-                return;
-            }
+    if (totalItems === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma solicitação pendente no momento.</td></tr>`;
+        return;
+    }
 
-            if (perfisData) {
-                perfisData.forEach(u => {
-                    let isAdmissao = u.status_aprovacao === 'Pendente';
-                    let tipoBadge = isAdmissao ? '<span class="badge tipo-solicitacao">Nova Admissão</span>' : '<span class="badge" style="background: rgba(220,53,69,0.15); color: #dc3545; border: 1px solid #dc3545;">Desligamento</span>';
-                    let funcAcao = isAdmissao ? `verFichaAdmissao('${u.id}')` : `verFichaRescisaoPendente('${u.id}')`;
+    // ... (Aqui continua o if do perfisData, ausenciasData, ftData normalmente como você já tem) ...
 
-                    tbody.innerHTML += `<tr>
-                        <td><strong>${u.nome}</strong></td>
-                        <td>${tipoBadge}</td>
-                        <td><span class="badge pendente">Pendente</span></td>
-                        <td>${u.empresa || '-'}</td>
-                        <td>${u.unidade || '-'}</td>
-                        <td style="text-align: center;">
-                            <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
-                        </td>
-                    </tr>`;
-                });
-            }
+    if (perfisData) {
+        perfisData.forEach(u => {
+            let isAdmissao = u.status_aprovacao === 'Pendente';
+            let tipoBadge = isAdmissao ? '<span class="badge tipo-solicitacao">Nova Admissão</span>' : '<span class="badge" style="background: rgba(220,53,69,0.15); color: #dc3545; border: 1px solid #dc3545;">Desligamento</span>';
+            let funcAcao = isAdmissao ? `verFichaAdmissao('${u.id}')` : `verFichaRescisaoPendente('${u.id}')`;
 
-            if (ausenciasData) {
-                ausenciasData.forEach(aus => {
-                    let tipoBadge = `<span class="badge" style="background: rgba(255, 152, 0, 0.15); color: #ff9800; border: 1px solid #ff9800;">Ausência/Atestado</span>`;
-                    let funcAcao = `verFichaAusenciaPendente('${aus.id}')`;
+            tbody.innerHTML += `<tr>
+                <td><strong>${u.nome}</strong></td>
+                <td>${tipoBadge}</td>
+                <td><span class="badge pendente">Pendente</span></td>
+                <td>${u.empresa || '-'}</td>
+                <td>${u.unidade || '-'}</td>
+                <td style="text-align: center;">
+                    <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
+                </td>
+            </tr>`;
+        });
+    }
 
-                    tbody.innerHTML += `<tr>
-                        <td><strong>${aus.nome}</strong></td>
-                        <td>${tipoBadge} <br><small style="color: var(--cor-texto-secundario);">${aus.sigla}</small></td>
-                        <td><span class="badge pendente">Pendente</span></td>
-                        <td>-</td>
-                        <td>${aus.unidade || '-'}</td>
-                        <td style="text-align: center;">
-                            <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #ff9800; color: #ff9800;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
-                        </td>
-                    </tr>`;
-                });
-            }
+    if (ausenciasData) {
+        ausenciasData.forEach(aus => {
+            let tipoBadge = `<span class="badge" style="background: rgba(255, 152, 0, 0.15); color: #ff9800; border: 1px solid #ff9800;">Ausência/Atestado</span>`;
+            let funcAcao = `verFichaAusenciaPendente('${aus.id}')`;
 
-            // 👇 GERA A LINHA DA FT IGUALZINHA ÀS OUTRAS 👇
-            if (ftData) {
-                ftData.forEach(ft => {
-                    let tipoBadge = `<span class="badge" style="background: rgba(79, 195, 247, 0.15); color: #4fc3f7; border: 1px solid #4fc3f7;">FT / Hora Extra</span>`;
-                    let funcAcao = `verFichaFTPendente('${ft.id}')`; // CHAMA O MODAL
+            tbody.innerHTML += `<tr>
+                <td><strong>${aus.nome}</strong></td>
+                <td>${tipoBadge} <br><small style="color: var(--cor-texto-secundario);">${aus.sigla}</small></td>
+                <td><span class="badge pendente">Pendente</span></td>
+                <td>-</td>
+                <td>${aus.unidade || '-'}</td>
+                <td style="text-align: center;">
+                    <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #ff9800; color: #ff9800;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
+                </td>
+            </tr>`;
+        });
+    }
 
-                    tbody.innerHTML += `<tr>
-                        <td><strong>${ft.nome}</strong></td>
-                        <td>${tipoBadge} <br><small style="color: var(--cor-texto-secundario);">${ft.sigla}</small></td>
-                        <td><span class="badge pendente">Pendente</span></td>
-                        <td>-</td>
-                        <td>${ft.unidade || '-'}</td>
-                        <td style="text-align: center;">
-                            <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
-                        </td>
-                    </tr>`;
-                });
-            }
-        }
+    if (ftData) {
+        ftData.forEach(ft => {
+            let tipoBadge = `<span class="badge" style="background: rgba(79, 195, 247, 0.15); color: #4fc3f7; border: 1px solid #4fc3f7;">FT / Hora Extra</span>`;
+            let funcAcao = `verFichaFTPendente('${ft.id}')`;
+
+            tbody.innerHTML += `<tr>
+                <td><strong>${ft.nome}</strong></td>
+                <td>${tipoBadge} <br><small style="color: var(--cor-texto-secundario);">${ft.sigla}</small></td>
+                <td><span class="badge pendente">Pendente</span></td>
+                <td>-</td>
+                <td>${ft.unidade || '-'}</td>
+                <td style="text-align: center;">
+                    <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
+                </td>
+            </tr>`;
+        });
+    }
+
+    // 👇 RENDERIZA AS TROCAS DE TURNO NA TABELA DA CENTRAL 👇
+    if (trocasData) {
+        trocasData.forEach(t => {
+            let tipoBadge = `<span class="badge" style="background: rgba(77, 171, 247, 0.15); color: #4dabf7; border: 1px solid #4dabf7;">Troca de Turno</span>`;
+            let funcAcao = `verFichaTrocaPendente('${t.id}')`;
+
+            tbody.innerHTML += `<tr>
+                <td><strong>${t.nome_solicitante} / ${t.nome_substituto}</strong></td>
+                <td>${tipoBadge}</td>
+                <td><span class="badge pendente">Pendente</span></td>
+                <td>-</td>
+                <td>${t.unidade_solicitante}</td>
+                <td style="text-align: center;">
+                    <button class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #4dabf7; color: #4dabf7;" onclick="${funcAcao}"><i class="fa-solid fa-eye"></i> Analisar</button>
+                </td>
+            </tr>`;
+        });
+    }
+}
 
         function verFichaAdmissao(idStr) {
             const colab = listaAdmissoesPendentes.find(c => c.id === idStr);
@@ -4938,6 +4975,17 @@ async function listarUsuarios() {
     } else if (tipoNotificacao.includes('FT')) { 
         // Pega tanto 'FT' quanto 'FT_Admin'
         abrirFTDestacada(referenciaId);
+    } else if (tipoNotificacao.includes('Troca')) {
+        // Redireciona e destaca o card da Troca de Turno
+        document.querySelector('[data-target="tela-trocas-admin"]')?.click();
+        setTimeout(() => {
+            const card = document.getElementById(`card-troca-${referenciaId}`);
+            if(card) {
+                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                card.style.boxShadow = '0 0 20px rgba(77, 171, 247, 0.6)';
+                setTimeout(() => card.style.boxShadow = 'none', 5000);
+            }
+        }, 500);
     } else {
         const { data } = await supabaseClient.from('perfis').select('status').eq('id', idColab).single();
         if(data && data.status === 'Desligado') {
@@ -7731,11 +7779,12 @@ async function carregarTrocasAdmin() {
     const container = document.getElementById('lista-trocas-admin-container');
     container.innerHTML = '<p style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando trocas...</p>';
 
+    // Pega todas, ordenando da mais nova pra mais velha
     const { data, error } = await supabaseClient.from('trocas_turno').select('*').order('created_at', { ascending: false });
     if (error) return mostrarAlerta("Erro ao carregar trocas", "erro");
 
     if (!data || data.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario);">Nenhuma troca registrada.</p>';
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario);">Nenhuma troca registrada no sistema.</p>';
         return;
     }
 
@@ -7743,19 +7792,26 @@ async function carregarTrocasAdmin() {
     data.forEach(t => {
         let corStatus = t.status === 'Aprovado' ? 'var(--cor-sucesso)' : (t.status === 'Reprovado' ? 'var(--cor-perigo)' : '#ff9800');
         
-        let botoesAcao = '';
-        if (t.status === 'Pendente') {
-            botoesAcao = `
-                <button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="aprovarTrocaAdmin('${t.id}')"><i class="fa-solid fa-check"></i> Aprovar Troca</button>
-                <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="reprovarTrocaAdmin('${t.id}')"><i class="fa-solid fa-trash"></i> Recusar</button>
-            `;
-        }
+        let dataEnvio = new Date(t.created_at).toLocaleDateString('pt-BR') + ' às ' + new Date(t.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        let aprovadoInfo = t.aprovado_por ? `<span style="font-size: 0.75rem; color: ${corStatus}; display: block; margin-top: 4px; font-weight: bold;"><i class="fa-solid fa-user-tag"></i> Analisado por: ${t.aprovado_por}</span>` : '';
+
+        // Removemos os botões de aprovar daqui, deixamos só a opção de deletar o registro se o Admin quiser limpar
+        let btnExcluirHist = t.status === 'Aprovado' ? `<button class="btn-danger-mini" onclick="excluirTrocaHist('${t.id}')" title="Excluir Histórico"><i class="fa-solid fa-trash"></i></button>` : '';
 
         container.innerHTML += `
-            <div class="admissao-card" style="border-left: 4px solid ${corStatus}; display: flex; flex-direction: column; align-items: stretch;">
+            <div class="admissao-card" id="card-troca-${t.id}" style="border-left: 4px solid ${corStatus}; display: flex; flex-direction: column; align-items: stretch;">
                 <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                    <strong style="color: #4dabf7; font-size: 1.1rem;"><i class="fa-solid fa-people-arrows"></i> Troca Solicitada por ${t.criado_por}</strong>
-                    <span class="badge" style="background: ${corStatus}33; color: ${corStatus}; border: 1px solid ${corStatus};">${t.status}</span>
+                    <div>
+                        <strong style="color: #4dabf7; font-size: 1.1rem;"><i class="fa-solid fa-people-arrows"></i> Troca de Turno</strong>
+                        <span style="font-size: 0.75rem; color: var(--cor-texto-secundario); display: block; margin-top: 2px;">
+                            Solicitado por ${t.criado_por} em ${dataEnvio}
+                        </span>
+                        ${aprovadoInfo}
+                    </div>
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 5px;">
+                        <span class="badge" style="background: ${corStatus}33; color: ${corStatus}; border: 1px solid ${corStatus};">${t.status}</span>
+                        ${btnExcluirHist}
+                    </div>
                 </div>
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
@@ -7768,13 +7824,17 @@ async function carregarTrocasAdmin() {
                         <span style="font-size: 0.8rem; color: var(--cor-texto-secundario);">Vai trabalhar dia: <b style="color: #fff;">${formatarDataBR(t.dia_substituto_ira)}</b> (${t.horario_substituto})</span>
                     </div>
                 </div>
-                <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
-                    ${botoesAcao}
-                </div>
             </div>
         `;
     });
 }
+
+window.excluirTrocaHist = async function(id) {
+    const confirmado = await mostrarConfirmacao("Deseja limpar esse registro do histórico?", "Excluir");
+    if (!confirmado) return;
+    await supabaseClient.from('trocas_turno').delete().eq('id', id);
+    carregarTrocasAdmin();
+};
 
 window.aprovarTrocaAdmin = async function(idTroca) {
     const confirmado = await mostrarConfirmacao("Deseja APROVAR esta troca? A escala de ambos será atualizada automaticamente com TP e FP.", "Aprovar Troca");
@@ -7833,6 +7893,113 @@ window.reprovarTrocaAdmin = async function(idTroca) {
     await supabaseClient.from('trocas_turno').update({ status: 'Reprovado', aprovado_por: usuarioAtual.nome }).eq('id', idTroca);
     mostrarAlerta("Troca recusada.", "sucesso");
     carregarTrocasAdmin();
+};
+
+        window.verFichaTrocaPendente = function(idStr) {
+    const t = listaTrocasPendentes.find(tr => tr.id === idStr);
+    if(!t) return;
+
+    const modalHtml = `
+    <div id="modal-ficha-troca" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; border: 1px solid #4dabf7; position: relative;">
+            <button onclick="document.getElementById('modal-ficha-troca').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+
+            <h3 style="color: #4dabf7; margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
+                <i class="fa-solid fa-people-arrows"></i> Analisar Troca de Turno
+            </h3>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
+                <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-acento);">
+                    <strong style="color: var(--cor-acento); font-size: 0.9rem;">SOLICITANTE:</strong><br>
+                    <b style="font-size: 1.1rem;">${t.nome_solicitante}</b><br>
+                    <small style="color: var(--cor-texto-secundario);">Vai trabalhar dia: <b style="color: #fff;">${formatarDataBR(t.dia_solicitante_ira)}</b><br>(${t.horario_solicitante})</small>
+                </div>
+                <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border-left: 4px solid #ff9800;">
+                    <strong style="color: #ff9800; font-size: 0.9rem;">SUBSTITUTO:</strong><br>
+                    <b style="font-size: 1.1rem;">${t.nome_substituto}</b><br>
+                    <small style="color: var(--cor-texto-secundario);">Vai trabalhar dia: <b style="color: #fff;">${formatarDataBR(t.dia_substituto_ira)}</b><br>(${t.horario_substituto})</small>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <button class="btn-success" style="flex: 2; height: 50px; font-weight: bold; background-color: #4dabf7; color: #fff; border: none;" onclick="aprovarTrocaPeloModal('${t.id}')">
+                    <i class="fa-solid fa-check"></i> APROVAR
+                </button>
+                <button class="btn-danger-mini" style="flex: 1; height: 50px; color: white; border: 1px solid var(--cor-borda);" onclick="reprovarERemoverTrocaModal('${t.id}')">
+                    <i class="fa-solid fa-trash"></i> RECUSAR
+                </button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+window.aprovarTrocaPeloModal = async function(idTroca) {
+    const btn = document.querySelector('#modal-ficha-troca .btn-success');
+    btn.innerText = "Aprovando..."; btn.disabled = true;
+
+    try {
+        const t = listaTrocasPendentes.find(tr => tr.id === idTroca);
+        const { data: colabs, error: errC } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', [t.solicitante_id, t.substituto_id]);
+        
+        if (errC || colabs.length !== 2) throw errC;
+
+        const sol = colabs.find(c => c.id === t.solicitante_id);
+        const sub = colabs.find(c => c.id === t.substituto_id);
+
+        let admSol = sol.dados_admissao || {};
+        let jorSol = admSol.jornada || {};
+        if (!jorSol.excecoes_pontuais) jorSol.excecoes_pontuais = {};
+
+        let admSub = sub.dados_admissao || {};
+        let jorSub = admSub.jornada || {};
+        if (!jorSub.excecoes_pontuais) jorSub.excecoes_pontuais = {};
+
+        // Injeta a lógica TP e FP na escala
+        jorSol.excecoes_pontuais[t.dia_solicitante_ira] = `TP|${t.horario_solicitante}`;
+        jorSol.excecoes_pontuais[t.dia_substituto_ira] = `FP|Folga Programada (Troca c/ ${t.nome_substituto})`;
+
+        jorSub.excecoes_pontuais[t.dia_substituto_ira] = `TP|${t.horario_substituto}`;
+        jorSub.excecoes_pontuais[t.dia_solicitante_ira] = `FP|Folga Programada (Troca c/ ${t.nome_solicitante})`;
+
+        // Salva as escalas
+        await supabaseClient.from('perfis').update({ dados_admissao: admSol }).eq('id', sol.id);
+        await supabaseClient.from('perfis').update({ dados_admissao: admSub }).eq('id', sub.id);
+        
+        // Atualiza a troca para Aprovado
+        await supabaseClient.from('trocas_turno').update({ status: 'Aprovado', aprovado_por: usuarioAtual.nome }).eq('id', idTroca);
+
+        // 👇 GERA A NOTIFICAÇÃO PARA O GESTOR E PARA O ADMIN ACOMPANHAR 👇
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: sol.id, nome: `Troca: ${t.nome_solicitante} / ${t.nome_substituto}`, unidade: t.unidade_solicitante, lida: false, tipo: 'Troca', referencia_id: idTroca },
+            { colaborador_id: sol.id, nome: `Troca: ${t.nome_solicitante} / ${t.nome_substituto}`, unidade: t.unidade_solicitante, lida: false, tipo: 'Troca_Admin', referencia_id: idTroca }
+        ]);
+
+        document.getElementById('modal-ficha-troca').remove();
+        mostrarAlerta("Troca aprovada! A escala foi atualizada com TP e FP.", "sucesso");
+        listarSolicitacoes();
+        atualizarContador();
+        
+        if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+    } catch (err) {
+        mostrarAlerta("Erro ao processar a troca.", "erro");
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR`; btn.disabled = false;
+    }
+};
+
+window.reprovarERemoverTrocaModal = async function(idTroca) {
+    const confirmado = await mostrarConfirmacao("Deseja RECUSAR E REMOVER este pedido de troca?", "Recusar Troca");
+    if (!confirmado) return;
+
+    const btn = document.querySelector('#modal-ficha-troca .btn-danger-mini');
+    btn.innerText = "Removendo..."; btn.disabled = true;
+
+    await supabaseClient.from('trocas_turno').delete().eq('id', idTroca);
+    
+    document.getElementById('modal-ficha-troca').remove();
+    mostrarAlerta("Pedido de troca recusado e apagado.", "sucesso");
+    listarSolicitacoes();
+    atualizarContador();
 };
     </script>
 </body>
