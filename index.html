@@ -8080,32 +8080,48 @@ window.reprovarERemoverTrocaModal = async function(idTroca) {
     const confirmado = await mostrarConfirmacao("Deseja apagar este registro definitivamente? As escalas dos colaboradores voltarão ao normal.", "Excluir Troca");
     if (!confirmado) return;
 
-    const { data: t } = await supabaseClient.from('trocas_turno').select('*').eq('id', idTroca).single();
-    if (t && t.status === 'Aprovado') {
-        const { data: colabs } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', [t.solicitante_id, t.substituto_id]);
-        if (colabs && colabs.length === 2) {
-            const sol = colabs.find(c => c.id === t.solicitante_id);
-            const sub = colabs.find(c => c.id === t.substituto_id);
+    // Coloca o botão em loading
+    const cardBtn = document.querySelector(`#card-troca-${idTroca} .btn-danger-mini`);
+    if(cardBtn) { cardBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; cardBtn.disabled = true; }
+
+    try {
+        const { data: t } = await supabaseClient.from('trocas_turno').select('*').eq('id', idTroca).single();
+        
+        if (t && t.status === 'Aprovado') {
+            const { data: colabs } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', [t.solicitante_id, t.substituto_id]);
             
-            // Remove as exceções de quem pediu
-            if(sol.dados_admissao && sol.dados_admissao.jornada && sol.dados_admissao.jornada.excecoes_pontuais) {
-                delete sol.dados_admissao.jornada.excecoes_pontuais[t.dia_solicitante_ira];
-                delete sol.dados_admissao.jornada.excecoes_pontuais[t.dia_substituto_ira];
-                await supabaseClient.from('perfis').update({ dados_admissao: sol.dados_admissao }).eq('id', sol.id);
-            }
-            // Remove as exceções de quem substituiu
-            if(sub.dados_admissao && sub.dados_admissao.jornada && sub.dados_admissao.jornada.excecoes_pontuais) {
-                delete sub.dados_admissao.jornada.excecoes_pontuais[t.dia_substituto_ira];
-                delete sub.dados_admissao.jornada.excecoes_pontuais[t.dia_solicitante_ira];
-                await supabaseClient.from('perfis').update({ dados_admissao: sub.dados_admissao }).eq('id', sub.id);
+            if (colabs && colabs.length > 0) {
+                const sol = colabs.find(c => c.id === t.solicitante_id);
+                const sub = colabs.find(c => c.id === t.substituto_id);
+                
+                // MÁGICA: Clonamos o JSON inteiro, deletamos as chaves, e mandamos de volta. Isso força o Supabase a atualizar!
+                if (sol && sol.dados_admissao && sol.dados_admissao.jornada && sol.dados_admissao.jornada.excecoes_pontuais) {
+                    let admSol = JSON.parse(JSON.stringify(sol.dados_admissao));
+                    delete admSol.jornada.excecoes_pontuais[t.dia_solicitante_ira];
+                    delete admSol.jornada.excecoes_pontuais[t.dia_substituto_ira];
+                    await supabaseClient.from('perfis').update({ dados_admissao: admSol }).eq('id', sol.id);
+                }
+                
+                if (sub && sub.dados_admissao && sub.dados_admissao.jornada && sub.dados_admissao.jornada.excecoes_pontuais) {
+                    let admSub = JSON.parse(JSON.stringify(sub.dados_admissao));
+                    delete admSub.jornada.excecoes_pontuais[t.dia_substituto_ira];
+                    delete admSub.jornada.excecoes_pontuais[t.dia_solicitante_ira];
+                    await supabaseClient.from('perfis').update({ dados_admissao: admSub }).eq('id', sub.id);
+                }
             }
         }
+        
+        // Agora sim, apaga o registro da tabela de trocas
+        await supabaseClient.from('trocas_turno').delete().eq('id', idTroca);
+        mostrarAlerta("Troca excluída com sucesso! As escalas foram corrigidas.", "sucesso");
+        carregarTrocasAdmin();
+        
+        if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+        
+    } catch(e) {
+        mostrarAlerta("Erro ao excluir a troca.", "erro");
+        if(cardBtn) { cardBtn.innerHTML = '<i class="fa-solid fa-trash"></i> Excluir'; cardBtn.disabled = false; }
     }
-    
-    await supabaseClient.from('trocas_turno').delete().eq('id', idTroca);
-    mostrarAlerta("Troca excluída com sucesso!", "sucesso");
-    carregarTrocasAdmin();
-    if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
 };
 
 window.editarTrocaAdmin = async function(idTroca) {
@@ -8180,27 +8196,29 @@ window.editarTrocaAdmin = async function(idTroca) {
                 const sol = colabs.find(c => c.id === t.solicitante_id);
                 const sub = colabs.find(c => c.id === t.substituto_id);
 
-                let admSol = sol.dados_admissao || {};
-                let jorSol = admSol.jornada || {};
-                if (!jorSol.excecoes_pontuais) jorSol.excecoes_pontuais = {};
+                let admSol = JSON.parse(JSON.stringify(sol.dados_admissao || {}));
+                let admSub = JSON.parse(JSON.stringify(sub.dados_admissao || {}));
+                
+                if (!admSol.jornada) admSol.jornada = {};
+                if (!admSol.jornada.excecoes_pontuais) admSol.jornada.excecoes_pontuais = {};
+                
+                if (!admSub.jornada) admSub.jornada = {};
+                if (!admSub.jornada.excecoes_pontuais) admSub.jornada.excecoes_pontuais = {};
 
-                let admSub = sub.dados_admissao || {};
-                let jorSub = admSub.jornada || {};
-                if (!jorSub.excecoes_pontuais) jorSub.excecoes_pontuais = {};
+                // 1. Limpa os dias antigos usando o clone
+                delete admSol.jornada.excecoes_pontuais[t.dia_solicitante_ira];
+                delete admSol.jornada.excecoes_pontuais[t.dia_substituto_ira];
+                delete admSub.jornada.excecoes_pontuais[t.dia_substituto_ira];
+                delete admSub.jornada.excecoes_pontuais[t.dia_solicitante_ira];
 
-                // 1. Limpa os dias antigos da escala de ambos
-                delete jorSol.excecoes_pontuais[t.dia_solicitante_ira];
-                delete jorSol.excecoes_pontuais[t.dia_substituto_ira];
-                delete jorSub.excecoes_pontuais[t.dia_substituto_ira];
-                delete jorSub.excecoes_pontuais[t.dia_solicitante_ira];
+                // 2. Aplica as novas datas no clone
+                admSol.jornada.excecoes_pontuais[novaDataSol] = `TP|${novaHoraSol}|${t.nome_substituto}|${novaDataSub}`;
+                admSol.jornada.excecoes_pontuais[novaDataSub] = `FP|${t.nome_substituto}|${novaDataSol}`;
 
-                // 2. Aplica as novas datas
-                jorSol.excecoes_pontuais[novaDataSol] = `TP|${novaHoraSol}|${t.nome_substituto}|${novaDataSub}`;
-                jorSol.excecoes_pontuais[novaDataSub] = `FP|${t.nome_substituto}|${novaDataSol}`;
+                admSub.jornada.excecoes_pontuais[novaDataSub] = `TP|${novaHoraSub}|${t.nome_solicitante}|${novaDataSol}`;
+                admSub.jornada.excecoes_pontuais[novaDataSol] = `FP|${t.nome_solicitante}|${novaDataSub}`;
 
-                jorSub.excecoes_pontuais[novaDataSub] = `TP|${novaHoraSub}|${t.nome_solicitante}|${novaDataSol}`;
-                jorSub.excecoes_pontuais[novaDataSol] = `FP|${t.nome_solicitante}|${novaDataSub}`;
-
+                // Manda o clone atualizado de volta pro banco
                 await supabaseClient.from('perfis').update({ dados_admissao: admSol }).eq('id', sol.id);
                 await supabaseClient.from('perfis').update({ dados_admissao: admSub }).eq('id', sub.id);
             }
