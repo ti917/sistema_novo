@@ -1692,6 +1692,27 @@ input[type="month"]::-webkit-calendar-picker-indicator {
         function mascaraTelefone(v) { v = v.replace(/\D/g, ""); if (v.length === 0) return ""; if (v.length > 0 && !v.startsWith("55") && v.length <= 11) v = "55" + v; if (v.length > 13) v = v.substring(0, 13); let f = "+" + v.substring(0,2); if (v.length > 2) f += " (" + v.substring(2,4); if (v.length > 4) { if(v.length > 12) f += ") " + v.substring(4,9) + "-" + v.substring(9,13); else f += ") " + v.substring(4,8) + "-" + v.substring(8,12); } return f; }
         function mascaraMoeda(v) { v = v.replace(/\D/g, ""); if (v === "") return ""; v = (parseInt(v, 10) / 100).toFixed(2); v = v.replace(".", ","); v = v.replace(/(\d)(?=(\d{3})+(?!\d))/g, "$1."); return "R$ " + v; }
 
+        // 👇 ADICIONE ESTA FUNÇÃO AQUI 👇
+        window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
+            const hoje = new Date();
+            hoje.setHours(0,0,0,0);
+
+            return colaboradores.filter(c => {
+                if (c.status === 'Ativo') return true;
+                
+                // Se estiver Desligado, checa se o último dia ainda não passou
+                if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
+                    const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                    if (udRegex) {
+                        const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
+                        ud.setHours(0,0,0,0);
+                        if (hoje <= ud) return true; // Ainda tá cumprindo aviso! Mantém na lista.
+                    }
+                }
+                return false;
+            });
+        };
+
         async function buscarCEP(cep) {
             const cepLimpo = cep.replace(/\D/g, '');
             if (cepLimpo.length !== 8) return;
@@ -5890,19 +5911,18 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
     selectColab.innerHTML = '<option value="">Carregando...</option>';
     selectColab.disabled = true;
 
-    // Busca todos os colaboradores ativos
+    // Traz todos para analisar o histórico e o aviso prévio
     const { data, error } = await supabaseClient.from('perfis')
-        .select('id, nome, empresa, dados_admissao, unidade')
-        .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo');
+        .select('id, nome, empresa, dados_admissao, unidade, status, dados_rescisao')
+        .eq('perfil', 'Colaborador');
 
     if (error || !data) {
-        selectColab.innerHTML = '<option value="">Nenhum colaborador ativo encontrado.</option>';
+        selectColab.innerHTML = '<option value="">Nenhum colaborador encontrado.</option>';
         return;
     }
 
-    // Filtra no JavaScript respeitando o histórico
-    const filtrados = data.filter(c => {
+    // Filtra histórico primeiro
+    let filtrados = data.filter(c => {
         if (c.unidade === unidade) return true;
         if (c.dados_admissao && c.dados_admissao.historico_transferencias) {
             return c.dados_admissao.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade);
@@ -5910,8 +5930,11 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         return false;
     });
 
+    // Passa no filtro de aviso prévio
+    filtrados = window.filtrarAtivosE_AvisoPrevio(filtrados);
+
     if (filtrados.length === 0) {
-        selectColab.innerHTML = '<option value="">Nenhum colaborador encontrado para este histórico.</option>';
+        selectColab.innerHTML = '<option value="">Nenhum colaborador válido encontrado.</option>';
         return;
     }
 
@@ -7329,29 +7352,29 @@ async function carregarColaboradoresParaGestaoHorarios() {
 
     let query = supabaseClient
         .from('perfis')
-        .select('id, nome')
+        .select('id, nome, status, dados_rescisao')
         .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo')
         .eq('unidade', unidade) // Filtro pela unidade selecionada
         .order('nome');
 
-    // 👇 TRAVA DA EMPRESA NO SELECT DE COLABORADOR 👇
+    // TRAVA DA EMPRESA NO SELECT DE COLABORADOR
     if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
         query = query.eq('empresa', empresaSelecionadaFiltro);
     }
 
     const { data, error } = await query;
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
 
-    if (error || !data || data.length === 0) {
+    if (error || ativosReais.length === 0) {
         selectColab.innerHTML = '<option value="">Nenhum colaborador encontrado.</option>';
         return;
     }
 
     selectColab.innerHTML = '<option value="">Selecione um colaborador...</option>';
-    data.forEach(c => { selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`; });
+    ativosReais.forEach(c => { selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`; });
     selectColab.disabled = false;
 }
-
+        
 // Ao clicar na aba, carrega apenas as Unidades.
 document.querySelector('[data-aba="aba-gestao-horarios"]')?.addEventListener('click', prepararAbaGestaoHorarios);
   
@@ -7838,10 +7861,14 @@ window.buscarColaboradoresParaFT = async function() {
     if (!unidade) { selectColab.innerHTML = ''; selectColab.disabled = true; return; }
 
     selectColab.innerHTML = '<option value="">Carregando...</option>';
-    const { data } = await supabaseClient.from('perfis').select('id, nome').eq('perfil', 'Colaborador').eq('unidade', unidade).eq('status', 'Ativo').order('nome');
+    // Removemos a trava do banco para trazer os de aviso prévio também
+    const { data } = await supabaseClient.from('perfis').select('id, nome, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
     
+    // Passa pelo nosso filtro inteligente
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
     selectColab.innerHTML = '<option value="">Selecione o colaborador...</option>';
-    if(data) data.forEach(c => selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`);
+    if(ativosReais) ativosReais.forEach(c => selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`);
     selectColab.disabled = false;
 };
 
@@ -8599,10 +8626,12 @@ window.buscarColabsTroca = async function(tipo) {
     if (!unidade) { selectColab.innerHTML = ''; selectColab.disabled = true; return; }
     
     selectColab.innerHTML = '<option value="">Carregando...</option>';
-    const { data } = await supabaseClient.from('perfis').select('id, nome').eq('perfil', 'Colaborador').eq('unidade', unidade).eq('status', 'Ativo').order('nome');
+    const { data } = await supabaseClient.from('perfis').select('id, nome, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
     
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
     selectColab.innerHTML = '<option value="">Selecione o colaborador...</option>';
-    if(data) data.forEach(c => selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`);
+    if(ativosReais) ativosReais.forEach(c => selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`);
     selectColab.disabled = false;
 };
 
@@ -9405,10 +9434,12 @@ async function buscarColaboradoresParaAdv() {
     if (!unidade) { selectColab.innerHTML = ''; selectColab.disabled = true; return; }
 
     selectColab.innerHTML = '<option value="">Carregando...</option>';
-    const { data } = await supabaseClient.from('perfis').select('id, nome, empresa').eq('perfil', 'Colaborador').eq('unidade', unidade).eq('status', 'Ativo').order('nome');
+    const { data } = await supabaseClient.from('perfis').select('id, nome, empresa, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
     
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
     selectColab.innerHTML = '<option value="">Selecione o infrator...</option>';
-    if(data) data.forEach(c => selectColab.innerHTML += `<option value="${c.id}" data-empresa="${c.empresa}">${c.nome}</option>`);
+    if(ativosReais) ativosReais.forEach(c => selectColab.innerHTML += `<option value="${c.id}" data-empresa="${c.empresa}">${c.nome}</option>`);
     selectColab.disabled = false;
 }
 
