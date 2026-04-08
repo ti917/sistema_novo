@@ -2729,6 +2729,17 @@ async function limparNotificacoesAntigas() {
                     })
                     .subscribe();
 
+                 // 👇 Escuta Advertências (NOVO!) 👇
+                supabaseClient
+                    .channel('escuta-advs-admin')
+                    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'advertencias' }, (payload) => {
+                        atualizarContador(); 
+                        if(!document.getElementById('tela-advertencias-admin').classList.contains('hidden')) carregarAdvAdmin();
+                        if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
+                        mostrarAlerta(`Nova Medida Disciplinar enviada:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova Ocorrência!');
+                    })
+                    .subscribe();
+
                  // 👇 Escuta Notificações (Sincroniza "Lido/Não Lido" entre Admins em tempo real) 👇
                 supabaseClient
                     .channel('escuta-notificacoes-admin')
@@ -2783,6 +2794,9 @@ async function limparNotificacoesAntigas() {
                                 mostrarAlerta(`O desligamento de <b>${payload.new.nome}</b> foi homologado pelo Admin!`, 'aviso', '🚨 Rescisão Concluída!');
                             } else if (tipoN === 'Ausência') {
                                 mostrarAlerta(`A ausência de <b>${payload.new.nome}</b> foi Aprovada pelo Admin!`, 'aviso', '📋 Atestado Validado!');
+                        // Você tem um if/else gigante lá. Adicione este bloco `else if` no meio deles:
+                            } else if (tipoN === 'Advertência_Gestor') {
+                                mostrarAlerta(`O RH gerou a carta disciplinar de <b>${payload.new.nome}</b>! Baixe e colete a assinatura.`, 'aviso', '⚖️ Advertência Pronta!');
                             } else {
                                 mostrarAlerta(`A ficha de <b>${payload.new.nome}</b> acabou de ser aprovada pelo Admin!`, 'sucesso', '🎉 Admissão Aprovada!');
                             }
@@ -9124,18 +9138,20 @@ async function abrirAbaAdv() {
     }
 }
 
-function adicionarDataAdv() {
+window.adicionarDataAdv = function() {
     const container = document.getElementById('container-datas-adv');
     const div = document.createElement('div');
-    div.className = 'input-wrapper';
-    div.style = 'display: flex; gap: 10px; align-items: center; margin-top: 10px;';
+    // Adicionamos a estrutura flex para ficar perfeito lado a lado
+    div.style = 'display: flex; gap: 10px; align-items: center; margin-top: 10px; width: 100%;';
     div.innerHTML = `
-        <i class="fa-regular fa-calendar"></i>
-        <input type="date" class="adv-data-input" required onclick="this.showPicker()" style="flex: 1;">
-        <button type="button" class="btn-danger-mini" onclick="this.parentElement.remove()" style="padding: 12px;"><i class="fa-solid fa-trash"></i></button>
+        <div class="input-wrapper" style="flex: 1;">
+            <i class="fa-regular fa-calendar"></i>
+            <input type="date" class="adv-data-input" required onclick="this.showPicker()">
+        </div>
+        <button type="button" class="btn-danger-mini" onclick="this.parentElement.remove()" style="padding: 12px; height: 43px;" title="Remover esta data"><i class="fa-solid fa-trash"></i></button>
     `;
     container.appendChild(div);
-}
+};
 
 async function buscarColaboradoresParaAdv() {
     const unidade = document.getElementById('adv-unidade').value;
@@ -9179,13 +9195,21 @@ document.getElementById('form-advertencia').addEventListener('submit', async (e)
             urlsEvidencias = await subirDocumentos(caminhoBase, files);
         }
 
-        const { error } = await supabaseClient.from('advertencias').insert([{
+        // Puxamos o ID gerado para amarrar na notificação
+        const { data: advSalva, error } = await supabaseClient.from('advertencias').insert([{
             colaborador_id: idColab, nome: nomeColab, unidade: unidade, empresa: empresaColab,
             datas_ocorrencia: arrDatas, motivo: motivo, evidencias: urlsEvidencias,
             status: 'Pendente', criado_por: usuarioAtual.nome
-        }]);
+        }]).select('id').single();
 
         if (error) throw error;
+        
+        // 👇 CRIA A NOTIFICAÇÃO PARA O RH (ADMIN) VER O SININHO APITAR 👇
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: nomeColab, unidade: unidade, 
+            lida: false, tipo: 'Advertência_Admin', referencia_id: advSalva.id
+        }]);
+
         mostrarAlerta("Ocorrência enviada ao RH com sucesso!", "sucesso");
         abrirAbaAdv();
     } catch (err) {
@@ -9233,8 +9257,9 @@ function filtrarAdvAdmin() {
         let acaoBtn = '';
         if (adv.status === 'Pendente') {
             acaoBtn = `<button class="btn-advertencia" style="padding: 6px 12px; font-size: 0.8rem;" onclick="abrirModalAprovarAdv('${adv.id}')"><i class="fa-solid fa-check"></i> RH: Definir e Gerar Carta</button>`;
-        } else if (adv.status === 'Aguardando Assinatura') {
-            acaoBtn = `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-color: #4fc3f7; color: #4fc3f7;"><i class="fa-solid fa-hourglass-half"></i> Aguardando Gestor Assinar</button>`;
+        } else {
+            // 👇 SE NÃO FOR PENDENTE, MOSTRA O BOTÃO DE VER OS DETALHES 👇
+            acaoBtn = `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="verDetalhesAdvAdmin('${adv.id}')"><i class="fa-solid fa-eye"></i> Ver Anexos e Detalhes</button>`;
         }
 
         container.innerHTML += `
@@ -9257,6 +9282,49 @@ function filtrarAdvAdmin() {
         `;
     });
 }
+
+        window.verDetalhesAdvAdmin = async function(idAdv) {
+    const adv = todasAdvAdmin.find(a => a.id === idAdv);
+    if(!adv) return;
+
+    let linksEvidencias = adv.evidencias && adv.evidencias.length > 0 
+        ? adv.evidencias.map((lnk, i) => `<a href="${lnk}" target="_blank" class="badge admin" style="margin-right: 5px; margin-bottom: 5px;"><i class="fa-solid fa-paperclip"></i> Evidência ${i+1}</a>`).join('')
+        : '<small style="color: var(--cor-texto-secundario);">O gestor não anexou provas visuais.</small>';
+
+    let cartaRh = adv.carta_rh ? `<a href="${adv.carta_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.2); color: #4fc3f7; border: 1px solid #4fc3f7; margin-bottom: 5px; text-decoration: none;"><i class="fa-solid fa-file-export"></i> Carta Gerada pelo RH</a>` : '';
+    let docAssinado = adv.documento_assinado ? `<a href="${adv.documento_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid #28a745; text-decoration: none;"><i class="fa-solid fa-check-double"></i> Documento Assinado</a>` : '<br><small style="color: var(--cor-perigo);"><i class="fa-solid fa-hourglass-half"></i> Aguardando Gestor anexar o arquivo final...</small>';
+
+    const modalHtml = `
+    <div id="modal-detalhes-adv" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 650px; border: 1px solid var(--cor-advertencia); max-height: 90vh; overflow-y: auto; position: relative;">
+            <button onclick="document.getElementById('modal-detalhes-adv').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: var(--cor-advertencia); margin-bottom: 20px;"><i class="fa-solid fa-scale-balanced"></i> Detalhes da Medida Disciplinar</h3>
+            
+            <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-acento); margin-bottom: 15px;">
+                <strong style="font-size: 1.1rem; color: #fff;">${adv.nome} (${adv.unidade})</strong><br>
+                <span style="color: var(--cor-perigo); font-weight: bold; font-size: 0.85rem;">Gravidade: ${adv.gravidade || 'Não definida'}</span><br>
+                <small style="color: var(--cor-texto-secundario); display: block; margin-top: 5px;">Datas das Ocorrências: ${adv.datas_ocorrencia.map(d => formatarDataBR(d)).join(', ')}</small>
+                <p style="margin-top: 10px; font-size: 0.9rem; color: var(--cor-texto-principal);">${adv.motivo}</p>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <h4 style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 10px;">PROVAS DO GESTOR:</h4>
+                ${linksEvidencias}
+            </div>
+
+            <div style="margin-bottom: 20px; padding-top: 15px; border-top: 1px dashed var(--cor-borda);">
+                <h4 style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 10px;">DOCUMENTOS OFICIAIS:</h4>
+                <div style="display: flex; flex-direction: column; gap: 5px; align-items: flex-start;">
+                    ${cartaRh}
+                    ${docAssinado}
+                </div>
+            </div>
+
+            <button class="btn-primary" style="width: 100%; height: 50px; justify-content: center; background: var(--cor-advertencia); color: #fff;" onclick="document.getElementById('modal-detalhes-adv').remove()">Fechar Visualização</button>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
 
 // Modal do Admin para aprovar e gerar a carta
 window.abrirModalAprovarAdv = async function(idAdv) {
