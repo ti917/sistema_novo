@@ -5691,51 +5691,6 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
 
                 if (errAusencia) throw errAusencia;
 
-                // =========================================================
-                // 👇 NOVA LÓGICA DE E-MAIL COM O RESEND (SÓ PARA NÃO FA) 👇
-                // =========================================================
-                if (sigla !== 'FA') {
-                    const d1 = new Date(dataInicio + 'T00:00:00');
-                    const d2 = new Date(dataFim + 'T00:00:00');
-                    const totalDias = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
-
-                    let mensagemDiasExtra = `Total: ${totalDias} dia(s) de afastamento (15 dias pela empresa e o restante pelo INSS - AF).`;
-                    
-                    // Ajusta a mensagem se for menor que 15 dias
-                    if (totalDias <= 15) {
-                        mensagemDiasExtra = `Total: ${totalDias} dia(s) de afastamento (Dentro da responsabilidade da empresa).`;
-                    }
-
-                    // Se for Licença Maternidade/Paternidade, muda o texto pra ficar elegante
-                    if (sigla === 'LDM' || sigla === 'LDP') {
-                        mensagemDiasExtra = `Total: ${totalDias} dia(s) de licença concedida.`;
-                    }
-
-                    const payloadEmail = {
-                        nome_colaborador: colabNome,
-                        unidade: unidade,
-                        tipo_atestado: tipoExtenso,
-                        sigla: sigla,
-                        data_ocorrencia: formatarDataBR(dataInicio),
-                        data_fim: formatarDataBR(dataFim),
-                        mensagem_dias: mensagemDiasExtra,
-                        link_anexo: urlAnexo || 'Sem anexo'
-                    };
-
-                    // CHAMA A EDGE FUNCTION DO SUPABASE LÁ NA NUVEM!
-                    try {
-                        const { data, error } = await supabaseClient.functions.invoke('enviar-email-ausencia', {
-                            body: payloadEmail
-                        });
-                        if (error) console.error("Erro na Edge Function:", error);
-                    } catch (emailErr) {
-                        console.error("Falha ao comunicar com a Edge Function:", emailErr);
-                    }
-                }
-                // =========================================================
-                // 👆 FIM DA LÓGICA DE E-MAIL 👆
-                // =========================================================
-
                 await mostrarAlerta("Ausência lançada com sucesso! Aguardando o RH validar.", "sucesso");
                 abrirAbaAusencias(); 
 
@@ -5889,14 +5844,13 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
     }
 }
         
-        window.aprovarAusenciaAdmin = async function(idAusencia, idColab, nomeColab, unidadeColab) {
+       window.aprovarAusenciaAdmin = async function(idAusencia, idColab, nomeColab, unidadeColab) {
     const confirmado = await mostrarConfirmacao("Deseja APROVAR esta ausência? Ela vai popular a escala automaticamente.", "Aprovar Ausência");
     if (!confirmado) return;
 
     const { error } = await supabaseClient.from('ausencias').update({ status: 'Aprovado' }).eq('id', idAusencia);
     if (error) { await mostrarAlerta("Erro ao aprovar: " + error.message, "erro"); return; }
 
-    // ID CORRIGIDO: Passando idColab e idAusencia separados
     await supabaseClient.from('notificacoes').insert([{
         colaborador_id: idColab, 
         nome: nomeColab,
@@ -5906,10 +5860,12 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         referencia_id: idAusencia
     }]);
 
+    // 👇 CHAMA O E-MAIL AQUI 👇
+    await dispararEmailAusenciaAprovada(idAusencia);
+
     await mostrarAlerta("Ausência aprovada com sucesso!", "sucesso");
     carregarAusenciasParaAdmin();
     
-    // Atualiza a escala se ela estiver aberta
     if(!document.getElementById('tela-escala').classList.contains('hidden')) {
         processarEscala(); 
     }
@@ -6426,34 +6382,37 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
 };
 
 window.aprovarAusenciaModal = async function(idAusencia, idColab, nomeColab, unidadeColab) {
-            const btn = document.querySelector('#modal-ficha-ausencia .btn-success');
-            btn.innerText = "Aprovando..."; btn.disabled = true;
+    const btn = document.querySelector('#modal-ficha-ausencia .btn-success');
+    btn.innerText = "Aprovando..."; btn.disabled = true;
 
-            const { error } = await supabaseClient.from('ausencias').update({ 
-                status: 'Aprovado',
-                aprovado_por: usuarioAtual.nome // <--- GRAVA NO BANCO
-            }).eq('id', idAusencia);
+    const { error } = await supabaseClient.from('ausencias').update({ 
+        status: 'Aprovado',
+        aprovado_por: usuarioAtual.nome
+    }).eq('id', idAusencia);
 
-            if (error) {
-                await mostrarAlerta("Erro ao aprovar: " + error.message, "erro");
-                btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR AUSÊNCIA`; btn.disabled = false;
-            } else {
-                await supabaseClient.from('notificacoes').insert([
-                    { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência', referencia_id: idAusencia },
-                    { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência_Admin', referencia_id: idAusencia }
-                ]);
+    if (error) {
+        await mostrarAlerta("Erro ao aprovar: " + error.message, "erro");
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR AUSÊNCIA`; btn.disabled = false;
+    } else {
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência', referencia_id: idAusencia },
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência_Admin', referencia_id: idAusencia }
+        ]);
 
-                document.getElementById('modal-ficha-ausencia').remove();
-                listarSolicitacoes();
-                await atualizarContador();
-                
-                if(!document.getElementById('tela-escala').classList.contains('hidden')) {
-                    processarEscala(); 
-                }
+        // 👇 CHAMA O E-MAIL AQUI 👇
+        await dispararEmailAusenciaAprovada(idAusencia);
 
-                await mostrarAlerta("Ausência Aprovada! Ela já está constando no Histórico de Ausências e na Escala.", "sucesso");
-            }
-        };
+        document.getElementById('modal-ficha-ausencia').remove();
+        listarSolicitacoes();
+        await atualizarContador();
+        
+        if(!document.getElementById('tela-escala').classList.contains('hidden')) {
+            processarEscala(); 
+        }
+
+        await mostrarAlerta("Ausência Aprovada! E-mail enviado com sucesso.", "sucesso");
+    }
+};
 
 window.reprovarERemoverAusencia = async function(id) {
     const confirmado = await mostrarConfirmacao("Atenção: Ao recusar, esta ausência será EXCLUÍDA do sistema. Deseja continuar?", "Recusar e Remover Ausência");
@@ -8872,6 +8831,52 @@ window.filtrarTabelaVT = function() {
         </tr>`;
     });
 };
+
+        // =========================================================
+// FUNÇÃO PARA DISPARAR E-MAIL AO APROVAR ATESTADO
+// =========================================================
+async function dispararEmailAusenciaAprovada(idAusencia) {
+    try {
+        // Puxa todos os detalhes da ausência para montar o e-mail
+        const { data: aus, error } = await supabaseClient.from('ausencias').select('*').eq('id', idAusencia).single();
+        if (error || !aus) return;
+
+        if (aus.sigla === 'FA') return; // Não manda email pra falta injustificada
+
+        const d1 = new Date(aus.data_inicio + 'T00:00:00');
+        const d2 = new Date(aus.data_fim + 'T00:00:00');
+        const totalDias = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+
+        let mensagemDiasExtra = `Total: ${totalDias} dia(s) de afastamento (15 dias pela empresa e o restante pelo INSS - AF).`;
+        
+        if (totalDias <= 15) {
+            mensagemDiasExtra = `Total: ${totalDias} dia(s) de afastamento (Dentro da responsabilidade da empresa).`;
+        }
+
+        if (aus.sigla === 'LDM' || aus.sigla === 'LDP') {
+            mensagemDiasExtra = `Total: ${totalDias} dia(s) de licença concedida.`;
+        }
+
+        const payloadEmail = {
+            nome_colaborador: aus.nome,
+            unidade: aus.unidade,
+            tipo_atestado: aus.motivo,
+            sigla: aus.sigla,
+            data_ocorrencia: formatarDataBR(aus.data_inicio),
+            data_fim: formatarDataBR(aus.data_fim),
+            mensagem_dias: mensagemDiasExtra,
+            link_anexo: aus.documento || 'Sem anexo'
+        };
+
+        // Dispara pra nuvem!
+        await supabaseClient.functions.invoke('enviar-email-ausencia', {
+            body: payloadEmail
+        });
+        console.log("E-mail de aprovação enviado com sucesso!");
+    } catch (e) {
+        console.error("Erro ao enviar email de aprovação:", e);
+    }
+}
     </script>
 </body>
 </html>
