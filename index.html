@@ -3113,9 +3113,9 @@ async function limparNotificacoesAntigas() {
     }
 }
 
-       async function escutarTempoReal() {
+     async function escutarTempoReal() {
             if(usuarioAtual.perfil === 'Admin') {
-                // Escuta Perfis (Admissão e Rescisão)
+                // Escuta Perfis (Admissão, Rescisão e Mudanças de Horário)
                 supabaseClient
                     .channel('escuta-admissoes')
                     .on('postgres_changes', { event: '*', schema: 'public', table: 'perfis' }, (payload) => {
@@ -3124,6 +3124,9 @@ async function limparNotificacoesAntigas() {
                         if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
                         if(!document.getElementById('tela-admissoes').classList.contains('hidden')) carregarAdmissoesParaAdmin();
                         
+                        // 👇 MÁGICA DA ESCALA: Se mudarem horário/rescisão de alguém, a escala atualiza na hora na tela de todos
+                        if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+
                         if (payload.eventType === 'INSERT' && payload.new.status_aprovacao === 'Pendente') {
                             mostrarAlerta(`Nova ficha enviada por um Gestor:<br><b>${payload.new.nome}</b> (${payload.new.unidade || '-'})`, 'sucesso', '🔔 Nova Admissão Recebida!');
                         }
@@ -3140,6 +3143,10 @@ async function limparNotificacoesAntigas() {
                         atualizarContador(); 
                         if(!document.getElementById('tela-ausencias-admin').classList.contains('hidden')) carregarAusenciasParaAdmin();
                         if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
+                        
+                        // 👇 MÁGICA DA ESCALA: Se aprovarem/editarem ausência, a escala atualiza na hora na tela de todos
+                        if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+
                         if (payload.eventType === 'INSERT') {
                             mostrarAlerta(`Novo atestado/falta recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova Ausência Pendente!');
                         }
@@ -3153,6 +3160,10 @@ async function limparNotificacoesAntigas() {
                         atualizarContador(); 
                         if(!document.getElementById('tela-ft-admin').classList.contains('hidden')) carregarFTsParaAdmin();
                         if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
+                        
+                        // 👇 MÁGICA DA ESCALA: Se aprovarem/editarem FT, a escala atualiza na hora na tela de todos
+                        if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+
                         if (payload.eventType === 'INSERT') {
                             mostrarAlerta(`Novo registro de ${payload.new.sigla} recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova FT / Hora Extra!');
                         }
@@ -3217,7 +3228,7 @@ async function limparNotificacoesAntigas() {
                     })
                     .subscribe();
 
-                // 👇 ESCUTA ATUALIZAÇÕES DA ESCALA PARA O ADMIN 👇
+                // ESCUTA ATUALIZAÇÕES DIRETAS NO DOCUMENTO DA ESCALA (Quando trancam)
                 supabaseClient
                     .channel('escuta-escalas-admin')
                     .on('postgres_changes', { event: '*', schema: 'public', table: 'escalas_mensais' }, (payload) => {
@@ -3227,7 +3238,7 @@ async function limparNotificacoesAntigas() {
                             
                             // Se a mudança no banco for na unidade e mês que o Admin tá olhando
                             if(payload.new && payload.new.mes_ano === mesEscalaInput && payload.new.unidade === unidadeEscalaInput) {
-                                // ATUALIZA SÓ A TELA (Não roda o processarEscala para não dar Loop no banco)
+                                // Se a tabela recém mudada for a escala salva e fechada
                                 escalaMesAtualGerada = payload.new.dados_escala;
                                 renderizarTabelaHTML(payload.new.dados_escala, payload.new.mes_ano, payload.new.fechada);
                                 
@@ -3268,22 +3279,12 @@ async function limparNotificacoesAntigas() {
                             }
                         }
                     })
-                    // 👇 ESCUTA ATUALIZAÇÕES DA ESCALA PARA O GESTOR 👇
-                    .on('postgres_changes', { event: '*', schema: 'public', table: 'escalas_mensais' }, (payload) => {
-                        if(!document.getElementById('tela-escala').classList.contains('hidden')) {
-                            const mesEscalaInput = document.getElementById('filtro-mes-escala').value;
-                            const unidadeEscalaInput = document.getElementById('filtro-unidade-escala').value;
-                            
-                            if(payload.new && payload.new.mes_ano === mesEscalaInput && payload.new.unidade === unidadeEscalaInput) {
-                                // ATUALIZA SÓ A TELA
-                                escalaMesAtualGerada = payload.new.dados_escala;
-                                renderizarTabelaHTML(payload.new.dados_escala, payload.new.mes_ano, payload.new.fechada);
-                            }
-                        }
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'notificacoes' }, async (payload) => {
+                        await atualizarContador();
                     })
                     .subscribe();
                     
-                // 2. Escuta ATUALIZAÇÕES nas tabelas para atualizar o HTML sem dar F5
+                // 2. Escuta ATUALIZAÇÕES nas tabelas vitais para atualizar a ESCALA (ou formulários) do Gestor
                 supabaseClient
                     .channel('escuta-atualizacoes-tabelas-gestor')
                     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'advertencias' }, (payload) => {
@@ -3294,22 +3295,41 @@ async function limparNotificacoesAntigas() {
                             }
                         }
                     })
+                    // 👇 ESCUTA PERFIS: Se mudou rescisão, admissão ou HORÁRIOS de quem é da unidade do Gestor 👇
                     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'perfis' }, (payload) => {
                         const unidPerfil = payload.new.unidade ? payload.new.unidade.trim() : '';
                         if(unidadesGestor.includes(unidPerfil)) {
                             if(!document.getElementById('tela-rescisao').classList.contains('hidden')) {
                                 if (typeof carregarAndamentoRescisoes === 'function') carregarAndamentoRescisoes();
                             }
+                            // Recarrega a escala se mudar horário
+                            if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
                         }
                     })
-                    // 👇 ESCUTA ATUALIZAÇÕES DA ESCALA PARA O GESTOR 👇
+                    // 👇 ESCUTA AUSÊNCIAS: Se aprovou Ausência 👇
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'ausencias' }, (payload) => {
+                        const unid = payload.new ? payload.new.unidade : payload.old.unidade;
+                        if(unid && unidadesGestor.includes(unid.trim())) {
+                            if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+                        }
+                    })
+                    // 👇 ESCUTA FTS: Se aprovou FT/H+ 👇
+                    .on('postgres_changes', { event: '*', schema: 'public', table: 'horas_extras_ft' }, (payload) => {
+                        const unid = payload.new ? payload.new.unidade : payload.old.unidade;
+                        if(unid && unidadesGestor.includes(unid.trim())) {
+                            if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+                        }
+                    })
+                    // ESCUTA ATUALIZAÇÕES DIRETAS NA ESCALA MENSAL (Trancamento)
                     .on('postgres_changes', { event: '*', schema: 'public', table: 'escalas_mensais' }, (payload) => {
                         if(!document.getElementById('tela-escala').classList.contains('hidden')) {
                             const mesEscalaInput = document.getElementById('filtro-mes-escala').value;
                             const unidadeEscalaInput = document.getElementById('filtro-unidade-escala').value;
                             
                             if(payload.new && payload.new.mes_ano === mesEscalaInput && payload.new.unidade === unidadeEscalaInput) {
-                                processarEscala();
+                                // Se o Admin trancou a escala, o gestor só renderiza a versão trancada
+                                escalaMesAtualGerada = payload.new.dados_escala;
+                                renderizarTabelaHTML(payload.new.dados_escala, payload.new.mes_ano, payload.new.fechada);
                             }
                         }
                     })
