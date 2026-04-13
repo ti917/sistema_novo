@@ -11944,9 +11944,20 @@ window.filtrarJustificativasZap = function() {
         let linkRH = j.doc_rh ? `<a href="${j.doc_rh}" target="_blank" class="badge" style="background: rgba(255,255,255,0.1); color: #fff; text-decoration: none;"><i class="fa-solid fa-file-pdf"></i> Enviado pelo RH</a>` : '';
         let linkColab = j.doc_colaborador ? `<a href="${j.doc_colaborador}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; text-decoration: none; border: 1px solid #4fc3f7;"><i class="fa-solid fa-file-signature"></i> Assinado pelo Colaborador</a>` : '';
 
-        let botoesAcao = '';
+       let botoesAcao = '';
         if (j.status === 'Pendente') {
-            botoesAcao = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="arquivarJustificativa('${j.id}')"><i class="fa-solid fa-folder-open"></i> Arquivar (Concluído)</button>`;
+            // 👇 AQUI ENTRA A MÁGICA DOS NOVOS BOTÕES 👇
+            botoesAcao = `
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #a6b0cf; color: #a6b0cf;" onclick="marcarNotificacaoJustificativaLida('${j.id}')">
+                    <i class="fa-solid fa-envelope-open-text"></i> Lido
+                </button>
+                <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="devolverJustificativa('${j.id}', '${j.nome}', '${j.colaborador_id}', '${j.data_falha}')">
+                    <i class="fa-solid fa-rotate-left"></i> Devolver
+                </button>
+                <button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="arquivarJustificativa('${j.id}')">
+                    <i class="fa-solid fa-folder-open"></i> Arquivar
+                </button>
+            `;
         } else if (j.status === 'Aguardando Colaborador') {
             botoesAcao = `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirJustificativa('${j.id}')"><i class="fa-solid fa-trash"></i> Cancelar</button>`;
         }
@@ -11986,6 +11997,89 @@ window.excluirJustificativa = async function(id) {
     await supabaseClient.from('ocorrencias_ponto').delete().eq('id', id);
     mostrarAlerta("Cobrança cancelada.", "sucesso");
     carregarJustificativasZap();
+};
+
+        // =====================================
+// BOTÃO: MARCAR COMO LIDO (JUSTIFICATIVA)
+// =====================================
+window.marcarNotificacaoJustificativaLida = async function(idOcorrencia) {
+    // Procura a notificação correspondente a essa ocorrência e marca como lida para sumir o número vermelho do sino
+    const { error } = await supabaseClient.from('notificacoes')
+        .update({ lida: true, lida_por: usuarioAtual.nome })
+        .eq('referencia_id', idOcorrencia)
+        .eq('tipo', 'Ocorrencia_Ponto');
+
+    if (!error) {
+        mostrarAlerta("Notificação marcada como lida!", "sucesso");
+        atualizarContador(); // Atualiza o sino
+    } else {
+        mostrarAlerta("Erro ao marcar como lido.", "erro");
+    }
+};
+
+// =====================================
+// BOTÃO: DEVOLVER JUSTIFICATIVA VIA ZAP
+// =====================================
+window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, dataFalha) {
+    // 1. Pede o motivo da devolução para o RH
+    const motivoRecusa = prompt(`Qual o motivo da devolução para ${nomeColab}?`);
+    if (!motivoRecusa) return; // Se cancelar ou deixar vazio, cancela a ação
+
+    const confirmado = await mostrarConfirmacao(`Deseja devolver a justificativa para ${nomeColab} via WhatsApp e limpar os dados preenchidos?`, "Devolver Justificativa");
+    if (!confirmado) return;
+
+    try {
+        // 2. Precisamos buscar o telefone do colaborador no banco
+        const { data: perfil, error: errPerfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        if (errPerfil || !perfil) throw new Error("Não foi possível encontrar os dados do colaborador.");
+
+        const fone = perfil.dados_admissao?.telefone;
+        if (!fone) return mostrarAlerta("Este colaborador não possui telefone cadastrado!", "erro");
+
+        const primeiroNome = nomeColab.split(' ')[0];
+        const dataFormatada = formatarDataBR(dataFalha);
+
+        // 3. Dispara a mensagem via Meta API com o template 'justificativa_recusada'
+        // Template vars: {{1}} = Nome, {{2}} = Data, {{3}} = Motivo
+        // E injetamos o '?oc=ID' no botão do template
+        const sucessoZap = await enviarMensagemGraphAPI(
+            fone, 
+            'justificativa_recusada', 
+            [primeiroNome, dataFormatada, motivoRecusa], 
+            null, // Sem PDF novo no cabeçalho
+            "?oc=" + idOcorrencia // Parâmetro injetado no botão do ZAP
+        );
+
+        if (sucessoZap) {
+            // 4. Limpa os dados da ocorrência no banco para o colaborador fazer de novo
+            // E volta o status para 'Aguardando Colaborador'
+            const { error: errUpdate } = await supabaseClient.from('ocorrencias_ponto')
+                .update({
+                    status: 'Aguardando Colaborador',
+                    justificativa: null,
+                    doc_colaborador: null,
+                    entrada: null,
+                    ida_refeicao: null,
+                    volta_refeicao: null,
+                    saida: null
+                })
+                .eq('id', idOcorrencia);
+
+            if (errUpdate) throw errUpdate;
+
+            // 5. Apaga a notificação de recebimento que estava pendente, já que foi devolvida
+            await supabaseClient.from('notificacoes').delete().eq('referencia_id', idOcorrencia).eq('tipo', 'Ocorrencia_Ponto');
+
+            mostrarAlerta("Justificativa devolvida com sucesso! O colaborador foi notificado.", "sucesso");
+            carregarJustificativasZap();
+            atualizarContador();
+        } else {
+            mostrarAlerta("Falha ao disparar o WhatsApp. Verifique se o template está aprovado na Meta.", "erro");
+        }
+
+    } catch (err) {
+        mostrarAlerta("Erro ao devolver justificativa: " + err.message, "erro");
+    }
 };
 
      // =====================================
