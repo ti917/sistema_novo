@@ -18,7 +18,7 @@
             --cor-fundo-input: rgba(0, 0, 0, 0.2); --cor-sucesso: #28a745; --cor-perigo: #dc3545;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Roboto', sans-serif; }
-        body { background-color: var(--cor-principal); color: var(--cor-texto); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; overflow-x: hidden; }
+        body { background-color: var(--cor-principal); color: var(--cor-texto); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; overflow-x: hidden; position: relative; }
         
         .mobile-card {
             background: rgba(0, 25, 51, 0.8); backdrop-filter: blur(15px);
@@ -71,7 +71,7 @@
         }
 
         .hidden { display: none !important; }
-        #sucesso-msg { text-align: center; display: none; }
+        #sucesso-msg { text-align: center; display: none; z-index: 10; position: relative; }
         #sucesso-msg i { font-size: 4rem; color: var(--cor-sucesso); margin-bottom: 15px; }
     </style>
 </head>
@@ -282,18 +282,21 @@
             const saida = document.getElementById('hora-saida').value;
             const justificativa = document.getElementById('texto-motivo').value;
             const dataHoraAtual = new Date().toLocaleString('pt-BR');
-            const assinaturaBase64 = canvas.toDataURL('image/png');
 
-            // 👇 MÁGICA: CRIA A FOLHA DO PDF FORA DA TELA MAS DENTRO DO DOM 👇
-            const pdfContainer = document.createElement('div');
+            // 1. Extrai a imagem da assinatura
+            const assinaturaBase64 = canvas.toDataURL('image/png', 1.0);
             
-            // Coloca a div na página, mas escondida lá longe para o WhatsApp não bugar
+            // 2. MÁGICA: A Folha de impressão fica fixada no topo, mas QUASE invisível e atrás do card principal
+            // O navegador renderiza, mas os olhos não veem!
+            const pdfContainer = document.createElement('div');
             pdfContainer.style.position = 'absolute';
-            pdfContainer.style.left = '-9999px';
             pdfContainer.style.top = '0';
+            pdfContainer.style.left = '0';
             pdfContainer.style.width = '800px'; 
             pdfContainer.style.backgroundColor = '#ffffff';
-            pdfContainer.style.zIndex = '-1000';
+            pdfContainer.style.opacity = '0.01'; // <-- O WhatsApp precisa disso pra não descartar o elemento!
+            pdfContainer.style.pointerEvents = 'none';
+            pdfContainer.style.zIndex = '-1';
 
             pdfContainer.innerHTML = `
                 <div style="padding: 40px; font-family: Arial, sans-serif; color: #333; background: white;">
@@ -322,8 +325,8 @@
                     </p>
 
                     <div style="margin-top: 60px; text-align: center;">
-                        <img src="${assinaturaBase64}" style="height: 120px; width: 350px; object-fit: contain; margin-bottom: 5px; background: white;">
-                        <div style="border-top: 1px solid #333; width: 350px; margin: 0 auto; padding-top: 5px;">
+                        <img src="${assinaturaBase64}" width="300" height="120" style="display: inline-block; margin-bottom: 5px;">
+                        <div style="border-top: 1px solid #333; width: 300px; margin: 0 auto; padding-top: 5px;">
                             <b>${nome}</b><br>
                             <span style="font-size: 12px; color: #666;">Assinado digitalmente</span>
                         </div>
@@ -331,11 +334,14 @@
                 </div>
             `;
 
-            // Coloca o container na página (Obrigatório para o WhatsApp não congelar)
+            // Força a rolagem para o topo antes de tirar a "foto" (Evita corte no WebView)
+            window.scrollTo(0, 0);
+
+            // Joga o elemento na tela
             document.body.appendChild(pdfContainer);
 
             try {
-                // 2. GERA O PDF
+                // 3. GERA O PDF
                 const opt = {
                     margin: 10,
                     filename: `Justificativa_${nome.replace(/\s+/g, '_')}_${dataFalha}.pdf`,
@@ -346,10 +352,12 @@
 
                 const pdfBlob = await html2pdf().set(opt).from(pdfContainer).output('blob');
 
-                // Apaga a folha fantasma da tela
-                document.body.removeChild(pdfContainer);
+                // Apaga a folha fantasma da tela assim que terminar
+                if(document.body.contains(pdfContainer)) {
+                    document.body.removeChild(pdfContainer);
+                }
 
-                // 3. FAZ UPLOAD PARA O SUPABASE
+                // 4. FAZ UPLOAD PARA O SUPABASE
                 const caminhoPdf = `Justificativas_Ponto/${Date.now()}_${nome.replace(/\s+/g, '_')}.pdf`;
                 const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(caminhoPdf, pdfBlob, { contentType: 'application/pdf' });
                 if (uploadError) throw uploadError;
@@ -357,7 +365,7 @@
                 const { data: publicData } = supabaseClient.storage.from('documentos').getPublicUrl(caminhoPdf);
                 const pdfUrlFinal = publicData.publicUrl;
 
-                // 4. SALVA NO BANCO
+                // 5. SALVA NO BANCO
                 const objBanco = {
                     colaborador_id: colabId,
                     nome: nome,
@@ -376,7 +384,7 @@
                 const { error: dbError } = await supabaseClient.from('ocorrencias_ponto').insert([objBanco]);
                 if (dbError) throw dbError;
 
-                // 5. AVISA O ADMIN
+                // 6. AVISA O ADMIN
                 await supabaseClient.from('notificacoes').insert([{
                     colaborador_id: colabId, 
                     nome: `Ocorrência Respondida: ${nome}`, 
@@ -389,7 +397,7 @@
                 document.getElementById('sucesso-msg').style.display = 'block';
 
             } catch (err) {
-                // Se der erro, tenta limpar a tela invisível para não dar bug duplo
+                // Limpeza de segurança em caso de erro
                 if(document.body.contains(pdfContainer)) document.body.removeChild(pdfContainer);
                 alert("Erro ao processar e enviar: " + err.message);
                 btn.disabled = false;
