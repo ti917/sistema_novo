@@ -224,14 +224,7 @@
         const nome = urlParams.get('nome');
         const unidade = urlParams.get('unidade');
         const dataFalha = urlParams.get('data');
-        const docLinkCriptografado = urlParams.get('doc');
-        
-        let docLink = null;
-        try {
-            if (docLinkCriptografado && docLinkCriptografado !== 'null') {
-                docLink = atob(docLinkCriptografado); 
-            }
-        } catch(e) { console.error("Erro ao decodificar link:", e); }
+        const docLink = urlParams.get('doc'); // Pegamos o link direto agora, sem criptografia!
         
         let dataFormatadaBr = '-';
 
@@ -244,10 +237,11 @@
             document.getElementById('lbl-data').innerText = dataFormatadaBr;
         }
 
-        if(docLink) {
+        if(docLink && docLink !== 'null') {
             const btnDoc = document.getElementById('btn-ver-doc');
-            btnDoc.href = `https://docs.google.com/viewer?url=${encodeURIComponent(docLink)}&embedded=true`;
-            btnDoc.removeAttribute('target');
+            // Colocamos o link direto e mandamos abrir em nova aba
+            btnDoc.href = docLink;
+            btnDoc.target = '_blank';
             btnDoc.classList.remove('hidden');
         }
 
@@ -272,7 +266,7 @@
 
             const btn = document.getElementById('btn-enviar');
             btn.disabled = true;
-            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF e Enviando...';
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando...';
 
             const entrada = document.getElementById('hora-entrada').value;
             const idaRef = document.getElementById('hora-ida-ref').value;
@@ -287,6 +281,19 @@
             const assinaturaBase64 = canvas.toDataURL('image/jpeg', 1.0);
 
             try {
+                // 👇 NOVO PASSO: BUSCA O ID DA OCORRÊNCIA PRIMEIRO PARA EVITAR ERRO DE JSON 👇
+                const { data: ocorrenciaExistente, error: buscaErro } = await supabaseClient.from('ocorrencias_ponto')
+                    .select('id')
+                    .eq('colaborador_id', colabId)
+                    .eq('data_falha', dataFalha)
+                    .maybeSingle();
+
+                if (buscaErro || !ocorrenciaExistente) {
+                    throw new Error("Ocorrência não encontrada no sistema. O RH pode ter cancelado este chamado.");
+                }
+
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF...';
+
                 // 2. MÁGICA FINAL: Montando o PDF escrevendo na unha (Zero Bugs)
                 const { jsPDF } = window.jspdf;
                 const doc = new jsPDF({
@@ -408,6 +415,8 @@
                 // Transforma o PDF gerado em Arquivo Binário (Blob)
                 const pdfBlob = doc.output('blob');
 
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando ao RH...';
+
                 // 3. FAZ UPLOAD PARA O SUPABASE
                 const caminhoPdf = `Justificativas_Ponto/${Date.now()}_${nome.replace(/\s+/g, '_')}.pdf`;
                 const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(caminhoPdf, pdfBlob, { contentType: 'application/pdf' });
@@ -416,8 +425,8 @@
                 const { data: publicData } = supabaseClient.storage.from('documentos').getPublicUrl(caminhoPdf);
                 const pdfUrlFinal = publicData.publicUrl;
 
-                // 4. ATUALIZA A LINHA NO BANCO E PEGA O ID
-                const { data: ocorrenciaSalva, error: dbError } = await supabaseClient.from('ocorrencias_ponto')
+                // 4. ATUALIZA A LINHA NO BANCO (AGORA SEM O SELECT.SINGLE PRA NÃO DAR ERRO)
+                const { error: dbError } = await supabaseClient.from('ocorrencias_ponto')
                     .update({
                         entrada: entrada || null,
                         ida_refeicao: idaRef || null,
@@ -427,10 +436,7 @@
                         doc_colaborador: pdfUrlFinal,
                         status: 'Pendente' // Devolve pro RH avaliar
                     })
-                    .eq('colaborador_id', colabId)
-                    .eq('data_falha', dataFalha)
-                    .eq('status', 'Aguardando Colaborador')
-                    .select('id').single(); // 👇 RETORNA O ID PARA A NOTIFICAÇÃO! 👇
+                    .eq('id', ocorrenciaExistente.id); // Usa a ID que buscamos lá em cima!
 
                 if (dbError) throw dbError;
 
@@ -441,7 +447,7 @@
                     unidade: unidade, 
                     lida: false, 
                     tipo: 'Ocorrencia_Ponto',
-                    referencia_id: ocorrenciaSalva.id // 👇 LIGA A NOTIFICAÇÃO AO CARD 👇
+                    referencia_id: ocorrenciaExistente.id // 👇 LIGA A NOTIFICAÇÃO AO CARD 👇
                 }]);
 
                 document.getElementById('card-formulario').style.display = 'none';
