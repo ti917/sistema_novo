@@ -11993,7 +11993,17 @@ window.filtrarJustificativasZap = function() {
                     <i class="fa-solid fa-folder-open"></i> Arquivar
                 </button>
             `;
-        } else if (j.status === 'Aguardando Colaborador') {
+        } 
+        
+        // Se NÃO estiver Aguardando Colaborador, o botão excluir aparece normal
+        if (j.status !== 'Aguardando Colaborador') {
+            botoesAcao += `
+                <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; margin-left: 5px;" onclick="excluirJustificativa('${j.id}')">
+                    <i class="fa-solid fa-trash"></i> Excluir
+                </button>
+            `;
+        } else {
+            // Se estiver Aguardando Colaborador, exibe só o "Cancelar" (que chama a mesma função de excluir)
             botoesAcao = `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirJustificativa('${j.id}')"><i class="fa-solid fa-trash"></i> Cancelar</button>`;
         }
 
@@ -12011,7 +12021,7 @@ window.filtrarJustificativasZap = function() {
 
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px;">
                     <div style="display: flex; gap: 5px;">${linkRH} ${linkColab}</div>
-                    <div style="display: flex; gap: 6px;">
+                    <div style="display: flex; gap: 6px; align-items: flex-start;">
                         ${btnNotifHtml}
                         ${botoesAcao}
                     </div>
@@ -12030,11 +12040,50 @@ window.arquivarJustificativa = async function(id) {
 };
 
 window.excluirJustificativa = async function(id) {
-    const confirmado = await mostrarConfirmacao("Deseja cancelar esta cobrança de justificativa?", "Excluir");
+    const confirmado = await mostrarConfirmacao("⚠️ ATENÇÃO: Deseja apagar esta justificativa DEFINITIVAMENTE? Isso excluirá o registro, a notificação e todos os PDFs anexados (tanto do RH quanto do colaborador) do sistema.", "Excluir Definitivamente");
     if (!confirmado) return;
-    await supabaseClient.from('ocorrencias_ponto').delete().eq('id', id);
-    mostrarAlerta("Cobrança cancelada.", "sucesso");
-    carregarJustificativasZap();
+
+    try {
+        // 1. Pega os dados para saber quais arquivos deletar do Storage
+        const { data: ocorrencia } = await supabaseClient.from('ocorrencias_ponto').select('doc_rh, doc_colaborador').eq('id', id).single();
+        
+        if (ocorrencia) {
+            const arquivosParaDeletar = [];
+            
+            // Função auxiliar para extrair o caminho do arquivo a partir da URL pública
+            const extrairCaminho = (url) => {
+                if (!url) return null;
+                // Pega tudo que vem depois de '/documentos/' na URL do Supabase
+                const partes = url.split('/storage/v1/object/public/documentos/');
+                return partes.length > 1 ? partes[1] : null;
+            };
+
+            const pathRH = extrairCaminho(ocorrencia.doc_rh);
+            const pathColab = extrairCaminho(ocorrencia.doc_colaborador);
+
+            if (pathRH) arquivosParaDeletar.push(pathRH);
+            if (pathColab) arquivosParaDeletar.push(pathColab);
+
+            // Deleta os arquivos físicos do Storage (Pasta 'documentos')
+            if (arquivosParaDeletar.length > 0) {
+                await supabaseClient.storage.from('documentos').remove(arquivosParaDeletar);
+            }
+        }
+
+        // 2. Apaga a notificação vinculada (se houver) para limpar o sininho
+        await supabaseClient.from('notificacoes').delete().eq('referencia_id', id).eq('tipo', 'Ocorrencia_Ponto');
+
+        // 3. Apaga a ocorrência do banco de dados
+        const { error } = await supabaseClient.from('ocorrencias_ponto').delete().eq('id', id);
+
+        if (error) throw error;
+
+        mostrarAlerta("Justificativa e arquivos excluídos com sucesso!", "sucesso");
+        carregarJustificativasZap();
+        atualizarContador(); // Atualiza o sininho
+    } catch (err) {
+        mostrarAlerta("Erro ao excluir: " + err.message, "erro");
+    }
 };
 
         // =====================================
@@ -12077,15 +12126,18 @@ window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, 
         const primeiroNome = nomeColab.split(' ')[0];
         const dataFormatada = formatarDataBR(dataFalha);
 
-        // 3. Dispara a mensagem via Meta API com o template 'justificativa_recusada'
-        // Template vars: {{1}} = Nome, {{2}} = Data, {{3}} = Motivo
-        // E injetamos o '?oc=ID' no botão do template
+        // 👇 MÁGICA CONTRA CACHE DO WHATSAPP 👇
+        // Adicionamos um &t=número_aleatório no final da URL para forçar o celular a baixar a página de novo.
+        const cacheBuster = "&t=" + new Date().getTime(); 
+        const urlParams = "?oc=" + idOcorrencia + cacheBuster;
+
+        // 3. Dispara a mensagem via Meta API com o template 'ocorrencia_recusada'
         const sucessoZap = await enviarMensagemGraphAPI(
             fone, 
-            'justificativa_recusada', 
+            'ocorrencia_recusada', 
             [primeiroNome, dataFormatada, motivoRecusa], 
             null, // Sem PDF novo no cabeçalho
-            "?oc=" + idOcorrencia // Parâmetro injetado no botão do ZAP
+            urlParams // Parâmetro injetado no botão do ZAP com o bloqueador de cache!
         );
 
         if (sucessoZap) {
