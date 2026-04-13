@@ -175,7 +175,7 @@
             });
         });
 
-        // LÓGICA DO CANVAS DE ASSINATURA CORRIGIDA
+        // LÓGICA DO CANVAS DE ASSINATURA
         const canvas = document.getElementById('canvas-assinatura');
         const ctx = canvas.getContext('2d');
         let desenhando = false;
@@ -283,13 +283,22 @@
             const justificativa = document.getElementById('texto-motivo').value;
             const dataHoraAtual = new Date().toLocaleString('pt-BR');
 
-            // 1. Extrai a assinatura em JPEG (Evita bugs de transparência e blocos pretos no celular)
+            // 1. Extrai a imagem
             const assinaturaBase64 = canvas.toDataURL('image/jpeg', 1.0);
             
-            // 2. MÁGICA ANTICONGELAMENTO: Passamos o HTML como STRING direto para o gerador de PDF
-            // Não colocamos NADA na tela, então o WhatsApp não tem como bloquear/congelar!
-            const htmlParaPDF = `
-                <div style="width: 800px; padding: 40px; font-family: Arial, sans-serif; color: #333; background: white; margin: 0 auto;">
+            // 2. CRIA O ELEMENTO FÍSICO NA TELA (Escondido)
+            const pdfContainer = document.createElement('div');
+            pdfContainer.style.position = 'absolute';
+            pdfContainer.style.top = '0';
+            pdfContainer.style.left = '0';
+            pdfContainer.style.width = '800px'; 
+            pdfContainer.style.backgroundColor = '#ffffff';
+            pdfContainer.style.opacity = '0.01'; // Transparente pro usuário não ver
+            pdfContainer.style.zIndex = '-100';  // Atrás de tudo
+            pdfContainer.style.pointerEvents = 'none';
+
+            pdfContainer.innerHTML = `
+                <div style="padding: 40px; font-family: Arial, sans-serif; color: #333; background: white; margin: 0 auto;">
                     <div style="text-align: center; border-bottom: 2px solid #002347; padding-bottom: 20px; margin-bottom: 30px;">
                         <h1 style="color: #002347; margin: 0; font-size: 24px;">JUSTIFICATIVA DE PONTO</h1>
                         <p style="margin: 5px 0 0 0; color: #666;">Documento gerado eletronicamente em ${dataHoraAtual}</p>
@@ -324,20 +333,29 @@
                 </div>
             `;
 
+            // Anexa no corpo da página
+            document.body.appendChild(pdfContainer);
+
+            // 👇 MÁGICA ABSOLUTA: Trava o código por meio segundo para o WhatsApp pintar a imagem na tela!
+            await new Promise(resolve => setTimeout(resolve, 500));
+            window.scrollTo(0, 0);
+
             try {
-                // 3. GERA O PDF
+                // 3. Tira a "foto" da div renderizada
                 const opt = {
-                    margin: [10, 10, 10, 10], // Margens [top, left, bottom, right]
+                    margin: [10, 10, 10, 10],
                     filename: `Justificativa_${nome.replace(/\s+/g, '_')}_${dataFalha}.pdf`,
                     image: { type: 'jpeg', quality: 0.98 },
-                    html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+                    html2canvas: { scale: 2, useCORS: true },
                     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
                 };
 
-                // Passa a STRING direto para o gerador
-                const pdfBlob = await html2pdf().set(opt).from(htmlParaPDF).output('blob');
+                const pdfBlob = await html2pdf().set(opt).from(pdfContainer).output('blob');
 
-                // 4. FAZ UPLOAD PARA O SUPABASE
+                // Apaga a div fantasma da tela pra limpar
+                document.body.removeChild(pdfContainer);
+
+                // 4. UPLOAD SUPABASE
                 const caminhoPdf = `Justificativas_Ponto/${Date.now()}_${nome.replace(/\s+/g, '_')}.pdf`;
                 const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(caminhoPdf, pdfBlob, { contentType: 'application/pdf' });
                 if (uploadError) throw uploadError;
@@ -345,7 +363,7 @@
                 const { data: publicData } = supabaseClient.storage.from('documentos').getPublicUrl(caminhoPdf);
                 const pdfUrlFinal = publicData.publicUrl;
 
-                // 5. SALVA NO BANCO
+                // 5. BANCO DE DADOS
                 const objBanco = {
                     colaborador_id: colabId,
                     nome: nome,
@@ -364,7 +382,7 @@
                 const { error: dbError } = await supabaseClient.from('ocorrencias_ponto').insert([objBanco]);
                 if (dbError) throw dbError;
 
-                // 6. AVISA O ADMIN
+                // 6. NOTIFICA O ADMIN
                 await supabaseClient.from('notificacoes').insert([{
                     colaborador_id: colabId, 
                     nome: `Ocorrência Respondida: ${nome}`, 
@@ -377,6 +395,7 @@
                 document.getElementById('sucesso-msg').style.display = 'block';
 
             } catch (err) {
+                if(document.body.contains(pdfContainer)) document.body.removeChild(pdfContainer);
                 alert("Erro ao processar e enviar: " + err.message);
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Assinar e Enviar ao RH';
