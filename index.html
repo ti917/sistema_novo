@@ -1175,6 +1175,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <div id="menu-abas-zap" style="display: flex; gap: 10px; margin-bottom: 25px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 15px; overflow-x: auto;">
             <button type="button" class="btn-aba-zap active" data-aba="aba-zap-ponto" style="background: #25D366; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;"><i class="fa-solid fa-clock"></i> Ocorrência de Ponto</button>
             <button type="button" class="btn-aba-zap" data-aba="aba-zap-boasvindas" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;"><i class="fa-solid fa-hand-sparkles"></i> Boas-Vindas em Massa</button>
+            <button type="button" class="btn-aba-zap" data-aba="aba-zap-justificativas" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;"><i class="fa-solid fa-list-check"></i> Acompanhar Justificativas</button>
         </div>
 
         <div id="aba-zap-ponto" class="conteudo-aba-zap">
@@ -1206,6 +1207,26 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <i class="fa-brands fa-whatsapp"></i> Gerar Link e Enviar Alerta
                 </button>
             </form>
+        </div>
+
+        <div id="aba-zap-justificativas" class="conteudo-aba-zap hidden">
+            <div class="controls-escala" style="justify-content: flex-start; gap: 15px; margin-bottom: 20px;">
+                <div class="input-wrapper" style="flex: 1; min-width: 250px;">
+                    <i class="fa-solid fa-search"></i>
+                    <input type="text" id="busca-zap-justificativas" placeholder="Buscar por colaborador..." oninput="filtrarJustificativasZap()">
+                </div>
+                <div class="input-wrapper" style="width: 250px;">
+                    <i class="fa-solid fa-filter"></i>
+                    <select id="filtro-status-justificativas" onchange="filtrarJustificativasZap()">
+                        <option value="Todos" selected>Ver Todas</option>
+                        <option value="Aguardando Colaborador">Aguardando Resposta</option>
+                        <option value="Pendente">Respondidas (Pendente RH)</option>
+                        <option value="Concluído">Arquivadas / Concluídas</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div id="lista-zap-justificativas-container" style="display: flex; flex-direction: column; gap: 15px;"></div>
         </div>
 
         <div id="aba-zap-boasvindas" class="conteudo-aba-zap hidden">
@@ -11808,7 +11829,7 @@ async function enviarMensagemGraphAPI(telefoneBruto, templateName, variaveisBody
 }
 
 // =====================================
-// 1. ENVIAR FALHA DE PONTO (1 Colaborador) - NOVO FORMATO COM BOTÃO
+// 1. ENVIAR FALHA DE PONTO (COM PRÉ-CADASTRO NO BANCO)
 // =====================================
 document.getElementById('form-zap-ponto').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -11827,10 +11848,10 @@ document.getElementById('form-zap-ponto').addEventListener('submit', async (e) =
 
     if (!fone) return mostrarAlerta("Este colaborador não possui telefone cadastrado!", "erro");
 
-    const confirmado = await mostrarConfirmacao(`Deseja anexar o espelho e enviar o alerta para o WhatsApp de ${nome}?`, "Disparar WhatsApp");
+    const confirmado = await mostrarConfirmacao(`Deseja anexar o espelho, registrar no sistema e enviar o alerta para o WhatsApp de ${nome}?`, "Disparar WhatsApp");
     if (!confirmado) return;
 
-    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando para a Meta...';
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Registrando e Enviando...';
 
     try {
         // 1. Faz upload do espelho e pega o link
@@ -11838,33 +11859,52 @@ document.getElementById('form-zap-ponto').addEventListener('submit', async (e) =
         const urls = await subirDocumentos(caminhoBase, file);
         const linkDocumento = urls[0];
 
-        // 2. Monta os parâmetros escondendo o link do documento com Base64
+        // 👇 2. MÁGICA: CRIA A PRÉVIA NA TABELA COM STATUS "AGUARDANDO COLABORADOR" 👇
+        const objPrevia = {
+            colaborador_id: idColab,
+            nome: nome,
+            unidade: unidade,
+            data_falha: dataFalha,
+            doc_rh: linkDocumento,
+            status: 'Aguardando Colaborador' // NOVO STATUS
+        };
+        
+        // Verifica se já mandou hoje pra não duplicar, se mandou, atualiza
+        const { data: existe } = await supabaseClient.from('ocorrencias_ponto').select('id').eq('colaborador_id', idColab).eq('data_falha', dataFalha).maybeSingle();
+        
+        if (existe) {
+            await supabaseClient.from('ocorrencias_ponto').update(objPrevia).eq('id', existe.id);
+        } else {
+            await supabaseClient.from('ocorrencias_ponto').insert([objPrevia]);
+        }
+
+        // 3. Monta os parâmetros escondendo o link do documento com Base64
         const parametrosDaURL = "?" + new URLSearchParams({
             id: idColab,
             nome: nome,
             unidade: unidade,
             data: dataFalha,
-            doc: btoa(linkDocumento) // ⬅️ MÁGICA AQUI: Converte o "https://..." para um código seguro!
-        }).toString(); // Retorna "?id=123&nome=Joao&doc=aHR0cHM6Ly..."
+            doc: btoa(linkDocumento)
+        }).toString(); 
 
-        // 3. Prepara as variáveis de TEXTO do Body (Nome, Data)
+        // 4. Prepara as variáveis e Dispara
         const primeiroNome = nome.split(' ')[0];
         const dataFormatada = formatarDataBR(dataFalha);
-
-        // 4. Dispara a API da Meta (⚠️ COLOQUE O NOME DO SEU NOVO TEMPLATE AQUI)
-        const NOME_DO_TEMPLATE_NA_META = 'alerta_ponto_doc'; // <-- Troque para o nome real que você criou!
+        const NOME_DO_TEMPLATE_NA_META = 'alerta_ponto_doc';
 
         const sucesso = await enviarMensagemGraphAPI(
             fone, 
             NOME_DO_TEMPLATE_NA_META, 
-            [primeiroNome, dataFormatada], // Variáveis do texto
-            linkDocumento,                 // O Documento do cabeçalho
-            parametrosDaURL                // Os dados que vão pro link do botão
+            [primeiroNome, dataFormatada], 
+            linkDocumento,                 
+            parametrosDaURL                
         );
 
         if (sucesso) {
             mostrarAlerta("Notificação e documento enviados com sucesso no WhatsApp!", "sucesso");
             document.getElementById('form-zap-ponto').reset();
+            // Atualiza a lista da nova aba
+            if(typeof carregarJustificativasZap === 'function') carregarJustificativasZap();
         } else {
             mostrarAlerta("Falha ao enviar pelo WhatsApp.", "erro");
         }
@@ -11921,6 +11961,118 @@ document.getElementById('form-zap-boasvindas').addEventListener('submit', async 
     tomSelectZAP.clear(); // Limpa as seleções do TomSelect
     btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Disparar Boas-Vindas';
 });
+
+        // =====================================
+// ABA: ACOMPANHAR JUSTIFICATIVAS DE PONTO
+// =====================================
+let todasJustificativasZap = [];
+
+document.querySelector('[data-aba="aba-zap-justificativas"]').addEventListener('click', () => {
+    carregarJustificativasZap();
+});
+
+async function carregarJustificativasZap() {
+    const container = document.getElementById('lista-zap-justificativas-container');
+    container.innerHTML = '<p style="text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando justificativas...</p>';
+
+    let query = supabaseClient.from('ocorrencias_ponto').select('*').order('criado_em', { ascending: false });
+
+    // Filtra pela unidade do Gestor ou do Admin
+    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        query = query.in('unidade', unids);
+    } else if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
+        const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
+        if (unidsFiltro) query = query.in('unidade', unidsFiltro);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+        container.innerHTML = '<p style="color:var(--cor-perigo); text-align:center;">Erro ao buscar dados.</p>';
+        return;
+    }
+
+    todasJustificativasZap = data || [];
+    filtrarJustificativasZap();
+}
+
+window.filtrarJustificativasZap = function() {
+    const termo = document.getElementById('busca-zap-justificativas').value.toLowerCase();
+    const status = document.getElementById('filtro-status-justificativas').value;
+    const container = document.getElementById('lista-zap-justificativas-container');
+
+    container.innerHTML = '';
+
+    const filtrados = todasJustificativasZap.filter(j => {
+        const matchNome = j.nome.toLowerCase().includes(termo);
+        const matchStatus = status === 'Todos' || j.status === status;
+        return matchNome && matchStatus;
+    });
+
+    if (filtrados.length === 0) {
+        container.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario);">Nenhuma justificativa encontrada.</p>';
+        return;
+    }
+
+    filtrados.forEach(j => {
+        let corStatus = '#a6b0cf'; // Aguardando
+        let iconStatus = 'fa-clock';
+        let badgeStyle = 'background: rgba(255,255,255,0.1); color: #fff;';
+
+        if (j.status === 'Pendente') {
+            corStatus = '#4fc3f7'; iconStatus = 'fa-file-signature';
+            badgeStyle = 'background: rgba(79, 195, 247, 0.1); color: #4fc3f7; border: 1px solid #4fc3f7;';
+        } else if (j.status === 'Concluído') {
+            corStatus = 'var(--cor-sucesso)'; iconStatus = 'fa-check-double';
+            badgeStyle = 'background: rgba(40, 167, 69, 0.1); color: var(--cor-sucesso); border: 1px solid var(--cor-sucesso);';
+        }
+
+        let linkRH = j.doc_rh ? `<a href="${j.doc_rh}" target="_blank" class="badge" style="background: rgba(255,255,255,0.1); color: #fff; text-decoration: none;"><i class="fa-solid fa-file-pdf"></i> Enviado pelo RH</a>` : '';
+        let linkColab = j.doc_colaborador ? `<a href="${j.doc_colaborador}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; text-decoration: none; border: 1px solid #4fc3f7;"><i class="fa-solid fa-file-signature"></i> Assinado pelo Colaborador</a>` : '';
+
+        let botoesAcao = '';
+        if (j.status === 'Pendente') {
+            botoesAcao = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="arquivarJustificativa('${j.id}')"><i class="fa-solid fa-folder-open"></i> Arquivar (Concluído)</button>`;
+        } else if (j.status === 'Aguardando Colaborador') {
+            botoesAcao = `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirJustificativa('${j.id}')"><i class="fa-solid fa-trash"></i> Cancelar</button>`;
+        }
+
+        container.innerHTML += `
+            <div class="admissao-card" style="border-left: 4px solid ${corStatus}; display: flex; flex-direction: column; align-items: stretch; gap: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <div>
+                        <strong style="font-size: 1.15rem; color: ${corStatus};"><i class="fa-solid fa-user"></i> ${j.nome}</strong><br>
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${j.unidade} | Data Falha: <b>${formatarDataBR(j.data_falha)}</b></span>
+                    </div>
+                    <span class="badge" style="${badgeStyle}"><i class="fa-solid ${iconStatus}"></i> ${j.status}</span>
+                </div>
+                
+                ${j.justificativa ? `<div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; font-size: 0.85rem; color: var(--cor-texto-principal);"><b style="color: var(--cor-texto-secundario);">Motivo do Colaborador:</b><br>${j.justificativa}</div>` : ''}
+
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px;">
+                    <div style="display: flex; gap: 5px;">${linkRH} ${linkColab}</div>
+                    <div style="display: flex; gap: 6px;">${botoesAcao}</div>
+                </div>
+            </div>
+        `;
+    });
+};
+
+window.arquivarJustificativa = async function(id) {
+    const btn = event.currentTarget;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; btn.disabled = true;
+    await supabaseClient.from('ocorrencias_ponto').update({ status: 'Concluído' }).eq('id', id);
+    mostrarAlerta("Justificativa arquivada e concluída com sucesso!", "sucesso");
+    carregarJustificativasZap();
+};
+
+window.excluirJustificativa = async function(id) {
+    const confirmado = await mostrarConfirmacao("Deseja cancelar esta cobrança de justificativa?", "Excluir");
+    if (!confirmado) return;
+    await supabaseClient.from('ocorrencias_ponto').delete().eq('id', id);
+    mostrarAlerta("Cobrança cancelada.", "sucesso");
+    carregarJustificativasZap();
+};
     </script>
 </body>
 </html>
