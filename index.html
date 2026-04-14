@@ -1207,10 +1207,16 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
 
            <section id="tela-documentos" class="view-section hidden">
                     <div class="glass-card">
-                        <h3 style="margin-bottom: 20px; color: #a6b0cf;">
-                            <i class="fa-solid fa-folder-tree"></i> Arquivo Digital do Colaborador
-                        </h3>
-                        <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 20px;">Selecione um colaborador para visualizar todos os seus documentos (Admissão, Atestados, Advertências, etc) gerados no sistema.</p>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                            <h3 style="color: #a6b0cf; margin: 0;">
+                                <i class="fa-solid fa-folder-tree"></i> Arquivo Digital do Colaborador
+                            </h3>
+                            <button id="btn-nova-pasta" class="btn-success hidden" onclick="criarNovaPasta()" style="padding: 10px 15px;">
+                                <i class="fa-solid fa-folder-plus"></i> Nova Pasta Manual
+                            </button>
+                        </div>
+                        
+                        <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 20px;">Selecione um colaborador para visualizar e gerenciar todos os seus documentos. Adicione arquivos avulsos nas pastas padrão ou crie as suas próprias.</p>
 
                         <div class="form-row">
                             <div class="form-group">
@@ -1227,10 +1233,12 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                             </div>
                         </div>
 
+                        <input type="file" id="upload-doc-extra" class="hidden" multiple accept="image/*,.pdf">
+
                         <div id="lista-documentos-container" style="margin-top: 20px; display: flex; flex-direction: column; gap: 15px;">
                             </div>
                     </div>
-                </section>     
+                </section>    
 
 <section id="tela-ocorrencias-admin" class="view-section hidden">
     <div class="glass-card">
@@ -13209,14 +13217,18 @@ window.abrirOcorrenciaDestacadaAdmin = async function(idReferencia) {
     }, 400);
 };
 
-        // ==========================================
-// MÓDULO ARQUIVO DIGITAL DE FUNCIONÁRIOS
+       // ==========================================
+// MÓDULO ARQUIVO DIGITAL DE FUNCIONÁRIOS (GED)
 // ==========================================
+let docEmpresaAlvo = ''; // Guarda a empresa do colab selecionado
+let docNomeAlvo = '';    // Guarda o nome do colab selecionado
+
 window.abrirAbaDocumentos = async function() {
     const selectUnidade = document.getElementById('doc-unidade');
     document.getElementById('doc-colaborador').innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
     document.getElementById('doc-colaborador').disabled = true;
     document.getElementById('lista-documentos-container').innerHTML = '';
+    document.getElementById('btn-nova-pasta').classList.add('hidden');
 
     let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
     if (empresaSelecionadaFiltro !== 'Todas') query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -13233,6 +13245,8 @@ window.buscarColaboradoresParaDocumentos = async function() {
     const unidade = document.getElementById('doc-unidade').value;
     const selectColab = document.getElementById('doc-colaborador');
     
+    document.getElementById('btn-nova-pasta').classList.add('hidden');
+
     if (!unidade) { 
         selectColab.innerHTML = '<option value="">Selecione a Unidade primeiro...</option>'; 
         selectColab.disabled = true; 
@@ -13245,7 +13259,7 @@ window.buscarColaboradoresParaDocumentos = async function() {
     document.getElementById('lista-documentos-container').innerHTML = '';
     
     let query = supabaseClient.from('perfis')
-        .select('id, nome, status')
+        .select('id, nome, status, empresa')
         .eq('perfil', 'Colaborador')
         .eq('unidade', unidade)
         .order('nome');
@@ -13259,28 +13273,34 @@ window.buscarColaboradoresParaDocumentos = async function() {
         return;
     }
 
-    // No arquivo digital, mostramos todos (Ativos e Desligados) para auditoria!
     selectColab.innerHTML = '<option value="">Selecione o colaborador...</option>';
     data.forEach(c => {
         let tagStatus = c.status !== 'Ativo' ? ` ( ${c.status} )` : '';
-        selectColab.innerHTML += `<option value="${c.id}">${c.nome}${tagStatus}</option>`;
+        selectColab.innerHTML += `<option value="${c.id}" data-empresa="${c.empresa}" data-nome="${c.nome}">${c.nome}${tagStatus}</option>`;
     });
     selectColab.disabled = false;
 };
 
 window.carregarDocumentosColaborador = async function() {
-    const idColab = document.getElementById('doc-colaborador').value;
+    const selectColab = document.getElementById('doc-colaborador');
+    const idColab = selectColab.value;
     const container = document.getElementById('lista-documentos-container');
     
     if (!idColab) {
         container.innerHTML = '';
+        document.getElementById('btn-nova-pasta').classList.add('hidden');
         return;
     }
 
+    // Guarda dados na global para o Upload
+    const optSelecionada = selectColab.options[selectColab.selectedIndex];
+    docEmpresaAlvo = optSelecionada.getAttribute('data-empresa') || 'Sem_Empresa';
+    docNomeAlvo = optSelecionada.getAttribute('data-nome');
+
+    document.getElementById('btn-nova-pasta').classList.remove('hidden');
     container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Coletando arquivo digital no banco de dados...</p>';
 
     try {
-        // Dispara as consultas em paralelo para ser mais rápido
         const [resPerfil, resAus, resAdv, resAlt, resPonto] = await Promise.all([
             supabaseClient.from('perfis').select('dados_admissao, dados_rescisao').eq('id', idColab).single(),
             supabaseClient.from('ausencias').select('motivo, data_inicio, documento').eq('colaborador_id', idColab).not('documento', 'is', null),
@@ -13289,75 +13309,219 @@ window.carregarDocumentosColaborador = async function() {
             supabaseClient.from('ocorrencias_ponto').select('data_falha, doc_rh, doc_colaborador').eq('colaborador_id', idColab)
         ]);
 
-        let htmlDocs = '';
+        const adm = resPerfil.data?.dados_admissao || {};
+        if (!adm.documentos_extras) adm.documentos_extras = {};
+        const extras = adm.documentos_extras;
+
+        // Função construtora de Caixas (Pastas)
+        const criarCaixaPasta = (titulo, icon, cor, htmlSistema, nomePastaChave) => {
+            let linksExtraHTML = '';
+            
+            // Renderiza os arquivos que o Admin jogou manualmente nesta pasta
+            if (extras[nomePastaChave] && extras[nomePastaChave].length > 0) {
+                extras[nomePastaChave].forEach((doc, index) => {
+                    linksExtraHTML += `
+                        <div style="display: inline-flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid var(--cor-borda); border-radius: 6px; padding: 4px 10px; margin-right: 8px; margin-bottom: 8px;">
+                            <a href="${doc.url}" target="_blank" style="color: #fff; text-decoration: none; font-size: 0.8rem; margin-right: 8px;"><i class="fa-solid fa-file"></i> ${doc.nome}</a>
+                            <i class="fa-solid fa-trash" style="color: var(--cor-perigo); font-size: 0.8rem; cursor: pointer;" onclick="excluirDocumentoExtra('${idColab}', '${nomePastaChave}', ${index})" title="Apagar este arquivo"></i>
+                        </div>
+                    `;
+                });
+                linksExtraHTML = `<div style="margin-top: 10px; border-top: 1px dashed var(--cor-borda); padding-top: 10px;"><strong style="font-size: 0.8rem; color: ${cor}; display: block; margin-bottom: 8px;">Arquivos Adicionais:</strong>${linksExtraHTML}</div>`;
+            }
+
+            let conteudoFinal = htmlSistema + linksExtraHTML;
+            if (!conteudoFinal.trim()) conteudoFinal = '<p style="color:var(--cor-texto-secundario); font-size: 0.85rem; margin-top: 5px;">Pasta vazia.</p>';
+
+            return `
+            <div class="box-interior" style="border-left: 4px solid ${cor};">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h5 style="color: ${cor}; margin: 0;"><i class="fa-solid ${icon}"></i> ${titulo}</h5>
+                    <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; border-color: ${cor}; color: ${cor};" onclick="abrirUploadExtra('${nomePastaChave}')"><i class="fa-solid fa-plus"></i> Inserir Documento</button>
+                </div>
+                <div>${conteudoFinal}</div>
+            </div>`;
+        };
+
+        let htmlFinal = '';
 
         // 1. ADMISSÃO
-        const adm = resPerfil.data?.dados_admissao;
+        let htmlAdm = '';
         if (adm?.documentos && adm.documentos.length > 0) {
-            let links = adm.documentos.map((lnk, i) => `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-pdf"></i> Documento ${i+1}</a>`).join('');
-            htmlDocs += `<div class="box-interior" style="border-left: 4px solid #28a745;"><h5 style="color: #28a745; margin-bottom: 10px;"><i class="fa-solid fa-folder-open"></i> Admissão</h5>${links}</div>`;
+            htmlAdm = adm.documentos.map((lnk, i) => `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-pdf"></i> Arquivo Admissão ${i+1}</a>`).join('');
         }
+        htmlFinal += criarCaixaPasta('Admissão e Contratos', 'fa-folder-open', '#28a745', htmlAdm, 'Admissão');
 
         // 2. RESCISÃO
+        let htmlResc = '';
         const r = resPerfil.data?.dados_rescisao;
-        let rescLinks = '';
         if (r) {
-            if (r.documentos && r.documentos.length > 0) {
-                r.documentos.forEach((lnk, i) => rescLinks += `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid #dc3545; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-pdf"></i> Doc Gestor ${i+1}</a>`);
-            }
-            if (r.doc_gerado_rh) rescLinks += `<a href="${r.doc_gerado_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-export"></i> Termo RH</a>`;
-            if (r.doc_assinado) rescLinks += `<a href="${r.doc_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-check-double"></i> Termo Assinado</a>`;
+            if (r.documentos) r.documentos.forEach((lnk, i) => htmlResc += `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid #dc3545; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-pdf"></i> Doc Gestor ${i+1}</a>`);
+            if (r.doc_gerado_rh) htmlResc += `<a href="${r.doc_gerado_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-export"></i> Termo RH</a>`;
+            if (r.doc_assinado) htmlResc += `<a href="${r.doc_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-check-double"></i> Termo Assinado</a>`;
         }
-        if (rescLinks) htmlDocs += `<div class="box-interior" style="border-left: 4px solid #dc3545;"><h5 style="color: #dc3545; margin-bottom: 10px;"><i class="fa-solid fa-user-slash"></i> Rescisão / Desligamento</h5>${rescLinks}</div>`;
+        htmlFinal += criarCaixaPasta('Rescisão / Desligamento', 'fa-user-slash', '#dc3545', htmlResc, 'Rescisão');
 
-        // 3. AUSÊNCIAS (ATESTADOS)
+        // 3. ATESTADOS
+        let htmlAus = '';
         if (resAus.data && resAus.data.length > 0) {
-            let ausLinks = resAus.data.map(a => `<a href="${a.documento}" target="_blank" class="badge" style="background: rgba(255,152,0,0.1); color: #ff9800; border: 1px solid #ff9800; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-notes-medical"></i> ${formatarDataBR(a.data_inicio)} - ${a.motivo}</a>`).join('');
-            htmlDocs += `<div class="box-interior" style="border-left: 4px solid #ff9800;"><h5 style="color: #ff9800; margin-bottom: 10px;"><i class="fa-solid fa-user-clock"></i> Atestados e Licenças</h5>${ausLinks}</div>`;
+            htmlAus = resAus.data.map(a => `<a href="${a.documento}" target="_blank" class="badge" style="background: rgba(255,152,0,0.1); color: #ff9800; border: 1px solid #ff9800; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-notes-medical"></i> ${formatarDataBR(a.data_inicio)} - ${a.motivo}</a>`).join('');
         }
+        htmlFinal += criarCaixaPasta('Atestados e Licenças', 'fa-user-clock', '#ff9800', htmlAus, 'Atestados');
 
         // 4. ADVERTÊNCIAS
+        let htmlAdv = '';
         if (resAdv.data && resAdv.data.length > 0) {
-            let advLinks = '';
             resAdv.data.forEach(a => {
                 const dataFormat = formatarDataBR(a.created_at.split('T')[0]);
                 let links = '';
-                if(a.evidencias) a.evidencias.forEach((e,i) => links += `<a href="${e}" target="_blank" class="badge admin" style="margin-right:5px; margin-bottom:5px; text-decoration:none;"><i class="fa-solid fa-paperclip"></i> Evidência ${i+1}</a>`);
-                if(a.carta_rh) links += `<a href="${a.carta_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; margin-right:5px; margin-bottom:5px; text-decoration:none;"><i class="fa-solid fa-file-export"></i> Carta RH</a>`;
-                if(a.documento_assinado) links += `<a href="${a.documento_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; margin-right:5px; margin-bottom:5px; text-decoration:none;"><i class="fa-solid fa-check-double"></i> Assinada</a>`;
+                if(a.evidencias) a.evidencias.forEach((e,i) => links += `<a href="${e}" target="_blank" class="badge admin" style="margin-right:5px; margin-bottom:5px; text-decoration:none; padding: 6px 10px;"><i class="fa-solid fa-paperclip"></i> Evidência ${i+1}</a>`);
+                if(a.carta_rh) links += `<a href="${a.carta_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; margin-right:5px; margin-bottom:5px; text-decoration:none; padding: 6px 10px;"><i class="fa-solid fa-file-export"></i> Carta RH</a>`;
+                if(a.documento_assinado) links += `<a href="${a.documento_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; margin-right:5px; margin-bottom:5px; text-decoration:none; padding: 6px 10px;"><i class="fa-solid fa-check-double"></i> Assinada</a>`;
                 
-                if(links) advLinks += `<div style="margin-bottom: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;"><strong style="color:var(--cor-advertencia); font-size:0.85rem; display:block; margin-bottom:5px;">Data Registro: ${dataFormat}</strong>${links}</div>`;
+                if(links) htmlAdv += `<div style="margin-bottom: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;"><strong style="color:var(--cor-advertencia); font-size:0.8rem; display:block; margin-bottom:5px;">Data: ${dataFormat}</strong>${links}</div>`;
             });
-            if(advLinks) htmlDocs += `<div class="box-interior" style="border-left: 4px solid var(--cor-advertencia);"><h5 style="color: var(--cor-advertencia); margin-bottom: 10px;"><i class="fa-solid fa-gavel"></i> Medidas Disciplinares</h5>${advLinks}</div>`;
         }
+        htmlFinal += criarCaixaPasta('Medidas Disciplinares', 'fa-gavel', 'var(--cor-advertencia)', htmlAdv, 'Advertências');
 
-        // 5. ALTERAÇÕES
+        // 5. ALTERAÇÕES CADASTRAIS
+        let htmlAlt = '';
         if (resAlt.data && resAlt.data.length > 0) {
-            let altLinks = resAlt.data.map(a => `<a href="${a.anexo}" target="_blank" class="badge" style="background: rgba(32,201,151,0.1); color: #20c997; border: 1px solid #20c997; text-decoration: none; padding: 8px 12px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-paperclip"></i> Evidência - ${formatarDataBR(a.created_at.split('T')[0])}</a>`).join('');
-            htmlDocs += `<div class="box-interior" style="border-left: 4px solid #20c997;"><h5 style="color: #20c997; margin-bottom: 10px;"><i class="fa-solid fa-user-pen"></i> Alterações Cadastrais</h5>${altLinks}</div>`;
+            htmlAlt = resAlt.data.map(a => `<a href="${a.anexo}" target="_blank" class="badge" style="background: rgba(32,201,151,0.1); color: #20c997; border: 1px solid #20c997; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-paperclip"></i> Alteração de ${formatarDataBR(a.created_at.split('T')[0])}</a>`).join('');
         }
+        htmlFinal += criarCaixaPasta('Alterações Cadastrais', 'fa-user-pen', '#20c997', htmlAlt, 'Alterações');
 
-        // 6. OCORRÊNCIAS DE PONTO (ZAP)
+        // 6. JUSTIFICATIVAS DE PONTO
+        let htmlPonto = '';
         if (resPonto.data && resPonto.data.length > 0) {
-            let pontoLinks = '';
             resPonto.data.forEach(o => {
                 let l = '';
                 if(o.doc_rh) l += `<a href="${o.doc_rh}" target="_blank" class="badge" style="background: rgba(255,255,255,0.1); color: #fff; border: 1px solid var(--cor-borda); text-decoration: none; padding: 5px 10px; margin-right: 5px; margin-bottom: 5px;"><i class="fa-solid fa-file-pdf"></i> Espelho RH</a>`;
                 if(o.doc_colaborador) l += `<a href="${o.doc_colaborador}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 5px 10px; margin-right: 5px; margin-bottom: 5px;"><i class="fa-solid fa-file-signature"></i> Justificativa Colaborador</a>`;
-                
-                if(l) pontoLinks += `<div style="margin-bottom: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;"><strong style="color:var(--cor-texto-secundario); font-size:0.85rem; display:block; margin-bottom:5px;">Data da Falha: ${formatarDataBR(o.data_falha)}</strong>${l}</div>`;
+                if(l) htmlPonto += `<div style="margin-bottom: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;"><strong style="color:var(--cor-texto-secundario); font-size:0.8rem; display:block; margin-bottom:5px;">Data da Falha: ${formatarDataBR(o.data_falha)}</strong>${l}</div>`;
             });
-            if(pontoLinks) htmlDocs += `<div class="box-interior" style="border-left: 4px solid #a6b0cf;"><h5 style="color: #a6b0cf; margin-bottom: 10px;"><i class="fa-solid fa-clock"></i> Justificativas de Ponto</h5>${pontoLinks}</div>`;
         }
+        htmlFinal += criarCaixaPasta('Justificativas de Ponto', 'fa-clock', '#a6b0cf', htmlPonto, 'Justificativas de Ponto');
 
-        if (!htmlDocs) {
-            container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-folder-open fa-2x" style="margin-bottom: 10px; opacity: 0.5;"></i><br>Nenhum documento encontrado para este colaborador.</p>';
-        } else {
-            container.innerHTML = htmlDocs;
-        }
+        // 7. PASTAS CUSTOMIZADAS (Criadas manualmente pelo Admin)
+        const chavesPadrão = ['Admissão', 'Rescisão', 'Atestados', 'Advertências', 'Alterações', 'Justificativas de Ponto'];
+        Object.keys(extras).forEach(pastaNome => {
+            if (!chavesPadrão.includes(pastaNome)) {
+                htmlFinal += criarCaixaPasta(pastaNome, 'fa-folder', '#ffc107', '', pastaNome);
+            }
+        });
+
+        container.innerHTML = htmlFinal;
 
     } catch (err) {
-        container.innerHTML = `<p style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao buscar documentos.</p>`;
+        container.innerHTML = `<p style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao montar arquivo digital.</p>`;
+    }
+};
+
+        // ---------------------------------------------------------
+// FUNÇÕES DE UPLOAD E CRIAÇÃO DE PASTAS EXTRAS
+// ---------------------------------------------------------
+let pastaAlvoAtual = '';
+
+window.abrirUploadExtra = function(nomeDaPasta) {
+    pastaAlvoAtual = nomeDaPasta;
+    document.getElementById('upload-doc-extra').click();
+};
+
+document.getElementById('upload-doc-extra').addEventListener('change', async function(e) {
+    const files = e.target.files;
+    if(files.length === 0) return;
+
+    const idColab = document.getElementById('doc-colaborador').value;
+    const unidade = document.getElementById('doc-unidade').value;
+    
+    mostrarAlerta(`Fazendo upload para a pasta "${pastaAlvoAtual}"...`, "aviso", "Aguarde");
+
+    try {
+        const empresaLimpa = formatarNomePasta(docEmpresaAlvo);
+        const unidadeLimpa = formatarNomePasta(unidade);
+        const nomeLimpo = formatarNomePasta(docNomeAlvo);
+        const pastaLimpa = formatarNomePasta(pastaAlvoAtual);
+
+        const caminhoBase = `${empresaLimpa}/${unidadeLimpa}/${nomeLimpo}/${pastaLimpa}`;
+        const urls = await subirDocumentos(caminhoBase, files);
+
+        // Salva as URLs no JSON do perfil
+        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let adm = perfil.dados_admissao || {};
+        if (!adm.documentos_extras) adm.documentos_extras = {};
+        if (!adm.documentos_extras[pastaAlvoAtual]) adm.documentos_extras[pastaAlvoAtual] = [];
+
+        // Adiciona os novos arquivos
+        Array.from(files).forEach((arquivo, i) => {
+            adm.documentos_extras[pastaAlvoAtual].push({
+                url: urls[i],
+                nome: arquivo.name
+            });
+        });
+
+        await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+
+        mostrarAlerta("Arquivos armazenados com sucesso!", "sucesso");
+        carregarDocumentosColaborador(); // Recarrega a UI
+    } catch(err) {
+        mostrarAlerta("Erro ao salvar arquivo: " + err.message, "erro");
+    } finally {
+        e.target.value = ''; // Limpa o input
+    }
+});
+
+window.criarNovaPasta = async function() {
+    const idColab = document.getElementById('doc-colaborador').value;
+    if(!idColab) return;
+
+    const nomePasta = prompt("Digite o nome da nova pasta (Ex: Exames ASO, Férias, etc):");
+    if(!nomePasta || nomePasta.trim() === '') return;
+
+    const nomeTratado = nomePasta.trim();
+
+    try {
+        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let adm = perfil.dados_admissao || {};
+        if (!adm.documentos_extras) adm.documentos_extras = {};
+        
+        if (adm.documentos_extras[nomeTratado]) {
+            mostrarAlerta("Esta pasta já existe no arquivo deste colaborador!", "aviso"); 
+            return;
+        }
+
+        adm.documentos_extras[nomeTratado] = []; // Inicializa a pasta vazia
+        await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+        
+        mostrarAlerta(`Pasta "${nomeTratado}" criada!`, "sucesso");
+        carregarDocumentosColaborador();
+    } catch(err) {
+        mostrarAlerta("Erro ao criar pasta.", "erro");
+    }
+};
+
+window.excluirDocumentoExtra = async function(idColab, pasta, index) {
+    const confirmado = await mostrarConfirmacao("Tem certeza que deseja apagar este arquivo da pasta?", "Excluir Arquivo");
+    if (!confirmado) return;
+
+    try {
+        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let adm = perfil.dados_admissao || {};
+        
+        // Remove do Array
+        adm.documentos_extras[pasta].splice(index, 1);
+        
+        // Se a pasta era customizada e ficou vazia, a gente exclui ela inteira pra manter limpo!
+        const chavesPadrão = ['Admissão', 'Rescisão', 'Atestados', 'Advertências', 'Alterações', 'Justificativas de Ponto'];
+        if (!chavesPadrão.includes(pasta) && adm.documentos_extras[pasta].length === 0) {
+            delete adm.documentos_extras[pasta];
+        }
+
+        await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+        mostrarAlerta("Arquivo removido.", "sucesso");
+        carregarDocumentosColaborador();
+    } catch(err) {
+        mostrarAlerta("Erro ao apagar.", "erro");
     }
 };
     </script>
