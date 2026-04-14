@@ -4213,19 +4213,21 @@ async function limparNotificacoesAntigas() {
                     })
                     .subscribe();
 
-                // 👇 NOVO: Escuta as Justificativas de Ponto em Tempo Real para o ADMIN 👇
+                // (DENTRO DO BLOCO DO ADMIN) 👇 NOVO: Escuta as Justificativas de Ponto em Tempo Real para o ADMIN 👇
                 supabaseClient
                     .channel('escuta-justificativas-admin')
                     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ocorrencias_ponto' }, (payload) => {
                         atualizarContador(); 
-                        if (!document.getElementById('tela-whatsapp').classList.contains('hidden')) carregarJustificativasZap();
+                        if (!document.getElementById('tela-whatsapp').classList.contains('hidden')) {
+                            // TELA ABERTA -> Recarrega silenciosamente mantendo o scroll
+                            carregarJustificativasZap(true);
+                        }
                         
                         if (payload.new.status === 'Pendente' && payload.old.status === 'Aguardando Colaborador') {
                             mostrarAlerta(`A justificativa de ponto de <b>${payload.new.nome}</b> (${payload.new.unidade}) foi recebida!`, 'aviso', '📝 Ponto Justificado!');
                         }
                     })
                     .subscribe();
-
                  // Escuta Advertências
                 supabaseClient
                     .channel('escuta-advs-admin')
@@ -4340,14 +4342,17 @@ async function limparNotificacoesAntigas() {
                     })
                     .subscribe();
 
-        // 👇 NOVO: Escuta as Justificativas de Ponto em Tempo Real para o GESTOR 👇
+        // (DENTRO DO BLOCO DO GESTOR) 👇 NOVO: Escuta as Justificativas de Ponto em Tempo Real para o GESTOR 👇
                 supabaseClient
                     .channel('escuta-justificativas-gestor')
                     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ocorrencias_ponto' }, (payload) => {
                         const unidJust = payload.new.unidade ? payload.new.unidade.trim() : '';
                         if(unidadesGestor.includes(unidJust)) {
                             atualizarContador(); 
-                            if (!document.getElementById('tela-whatsapp').classList.contains('hidden')) carregarJustificativasZap();
+                            if (!document.getElementById('tela-whatsapp').classList.contains('hidden')) {
+                                // TELA ABERTA -> Recarrega silenciosamente mantendo o scroll
+                                carregarJustificativasZap(true);
+                            }
                             
                             if (payload.new.status === 'Pendente' && payload.old.status === 'Aguardando Colaborador') {
                                 mostrarAlerta(`A justificativa de ponto de <b>${payload.new.nome}</b> foi recebida!`, 'aviso', '📝 Ponto Justificado!');
@@ -12668,9 +12673,14 @@ document.querySelector('[data-aba="aba-zap-justificativas"]').addEventListener('
     carregarJustificativasZap();
 });
 
-async function carregarJustificativasZap() {
+async function carregarJustificativasZap(manterScroll = false) {
     const container = document.getElementById('lista-zap-justificativas-container');
-    container.innerHTML = '<p style="text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando justificativas...</p>';
+    const scrollAnterior = window.scrollY; // Salva a posição exata da tela
+
+    // Só mostra o 'Carregando...' girando se NÃO for uma atualização silenciosa
+    if (!manterScroll) {
+        container.innerHTML = '<p style="text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando justificativas...</p>';
+    }
 
     let query = supabaseClient.from('ocorrencias_ponto').select('*').order('criado_em', { ascending: false });
 
@@ -12685,12 +12695,19 @@ async function carregarJustificativasZap() {
 
     const { data, error } = await query;
     if (error) {
-        container.innerHTML = '<p style="color:var(--cor-perigo); text-align:center;">Erro ao buscar dados.</p>';
+        if (!manterScroll) container.innerHTML = '<p style="color:var(--cor-perigo); text-align:center;">Erro ao buscar dados.</p>';
         return;
     }
 
     todasJustificativasZap = data || [];
-    filtrarJustificativasZap();
+    filtrarJustificativasZap(); // Reconstrói os cards
+
+    // DEVOLVE A TELA EXATAMENTE DE ONDE ELA NÃO DEVIA TER SAÍDO
+    if (manterScroll) {
+        setTimeout(() => {
+            window.scrollTo(0, scrollAnterior);
+        }, 10);
+    }
 }
 
 window.filtrarJustificativasZap = function() {
@@ -12815,46 +12832,28 @@ window.filtrarJustificativasZap = function() {
 
 window.arquivarJustificativa = async function(id) {
     const btn = event.currentTarget;
-    const textoOriginal = btn.innerHTML; // Guarda o visual original do botão
+    const textoOriginal = btn.innerHTML; 
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Arquivando...'; 
     btn.disabled = true;
 
     try {
-        // 1. Atualiza o status da ocorrência para 'Concluído'
         const { error } = await supabaseClient.from('ocorrencias_ponto').update({ status: 'Concluído' }).eq('id', id);
         if (error) throw error;
 
-        // 2. Puxa os dados da justificativa da memória (nome, data, id do colaborador)
         const justificativa = todasJustificativasZap.find(j => j.id === id);
-        
         if (justificativa) {
-            // 3. Busca o telefone do colaborador lá na tabela de perfis
-            const { data: perfilColab } = await supabaseClient
-                .from('perfis')
-                .select('dados_admissao')
-                .eq('id', justificativa.colaborador_id)
-                .single();
-
+            const { data: perfilColab } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', justificativa.colaborador_id).single();
             const telefoneColab = perfilColab?.dados_admissao?.telefone;
 
             if (telefoneColab) {
-                // Prepara as variáveis para o WhatsApp (Nome e Data)
                 const primeiroNome = justificativa.nome.split(' ')[0];
                 const dataFormatadaBr = formatarDataBR(justificativa.data_falha);
-
-                // 4. Dispara a mensagem da Clara confirmando o arquivamento
-                await enviarMensagemGraphAPI(
-                    telefoneColab, 
-                    'justificativa_aprovada', // Nome do template na Meta
-                    [primeiroNome, dataFormatadaBr], // {{1}} e {{2}}
-                    null, 
-                    null
-                );
+                await enviarMensagemGraphAPI(telefoneColab, 'justificativa_aprovada', [primeiroNome, dataFormatadaBr], null, null);
             }
         }
 
         mostrarAlerta("Justificativa arquivada e colaborador notificado no WhatsApp!", "sucesso");
-        carregarJustificativasZap(); // Recarrega a lista
+        carregarJustificativasZap(true); // <--- AQUI (MANTÉM O SCROLL)
         
     } catch (err) {
         mostrarAlerta("Erro ao arquivar: " + err.message, "erro");
@@ -12862,42 +12861,29 @@ window.arquivarJustificativa = async function(id) {
         btn.disabled = false;
     }
 };
-
-        window.desarquivarJustificativa = async function(id) {
+       window.desarquivarJustificativa = async function(id) {
     const confirmado = await mostrarConfirmacao("Deseja DESARQUIVAR esta justificativa? Ela voltará para a lista de Pendentes.", "Voltar para Pendente");
     if (!confirmado) return;
 
-    // Coloca o botão em loading para mostrar que está processando
     const cardBtn = document.querySelector(`#card-just-${id} .btn-secondary`);
     const textoOriginal = cardBtn ? cardBtn.innerHTML : '';
-    if (cardBtn) { 
-        cardBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; 
-        cardBtn.disabled = true; 
-    }
+    if (cardBtn) { cardBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; cardBtn.disabled = true; }
 
     try {
-        // Atualiza o status de volta para 'Pendente' no banco
         const { error } = await supabaseClient.from('ocorrencias_ponto').update({ status: 'Pendente' }).eq('id', id);
-        
         if (error) throw error;
 
         mostrarAlerta("Justificativa voltou para Pendente com sucesso!", "sucesso");
-        
-        // Recarrega a lista e atualiza o contador do sino
-        carregarJustificativasZap();
+        carregarJustificativasZap(true); // <--- AQUI (MANTÉM O SCROLL)
         atualizarContador();
-        
     } catch (err) {
         mostrarAlerta("Erro ao desarquivar: " + err.message, "erro");
-        if (cardBtn) { 
-            cardBtn.innerHTML = textoOriginal; 
-            cardBtn.disabled = false; 
-        }
+        if (cardBtn) { cardBtn.innerHTML = textoOriginal; cardBtn.disabled = false; }
     }
 };
 
 window.excluirJustificativa = async function(id) {
-    const confirmado = await mostrarConfirmacao("⚠️ ATENÇÃO: Deseja apagar esta justificativa DEFINITIVAMENTE? Isso excluirá o registro, a notificação e todos os PDFs anexados (tanto do RH quanto do colaborador) do sistema.", "Excluir Definitivamente");
+    const confirmado = await mostrarConfirmacao("⚠️ ATENÇÃO: Deseja apagar esta justificativa DEFINITIVAMENTE?", "Excluir Definitivamente");
     if (!confirmado) return;
 
     try {
@@ -12921,14 +12907,12 @@ window.excluirJustificativa = async function(id) {
             }
         }
 
-        // 👇 MATA AS NOTIFICAÇÕES DOS DOIS 👇
         await supabaseClient.from('notificacoes').delete().eq('referencia_id', id).in('tipo', ['Ocorrencia_Ponto', 'Ocorrencia_Ponto_Admin']);
-
         const { error } = await supabaseClient.from('ocorrencias_ponto').delete().eq('id', id);
         if (error) throw error;
 
         mostrarAlerta("Justificativa e arquivos excluídos com sucesso!", "sucesso");
-        carregarJustificativasZap();
+        carregarJustificativasZap(true); // <--- AQUI (MANTÉM O SCROLL)
         atualizarContador(); 
     } catch (err) {
         mostrarAlerta("Erro ao excluir: " + err.message, "erro");
@@ -13022,38 +13006,24 @@ window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, 
 
         const primeiroNome = nomeColab.split(' ')[0];
         const dataFormatada = formatarDataBR(dataFalha);
-
         const cacheBuster = "&t=" + new Date().getTime(); 
         const urlParams = "?oc=" + idOcorrencia + cacheBuster;
 
-        const sucessoZap = await enviarMensagemGraphAPI(
-            fone, 
-            'ocorrencia_recusada', 
-            [primeiroNome, dataFormatada, motivoRecusa], 
-            null, 
-            urlParams 
-        );
+        const sucessoZap = await enviarMensagemGraphAPI(fone, 'ocorrencia_recusada', [primeiroNome, dataFormatada, motivoRecusa], null, urlParams);
 
         if (sucessoZap) {
             const { error: errUpdate } = await supabaseClient.from('ocorrencias_ponto')
                 .update({
-                    status: 'Aguardando Colaborador',
-                    justificativa: null,
-                    doc_colaborador: null,
-                    entrada: null,
-                    ida_refeicao: null,
-                    volta_refeicao: null,
-                    saida: null
-                })
-                .eq('id', idOcorrencia);
+                    status: 'Aguardando Colaborador', justificativa: null, doc_colaborador: null,
+                    entrada: null, ida_refeicao: null, volta_refeicao: null, saida: null
+                }).eq('id', idOcorrencia);
 
             if (errUpdate) throw errUpdate;
 
-            // 👇 MATA AS NOTIFICAÇÕES DOS DOIS 👇
             await supabaseClient.from('notificacoes').delete().eq('referencia_id', idOcorrencia).in('tipo', ['Ocorrencia_Ponto', 'Ocorrencia_Ponto_Admin']);
 
             mostrarAlerta("Justificativa devolvida com sucesso! O colaborador foi notificado.", "sucesso");
-            carregarJustificativasZap();
+            carregarJustificativasZap(true); // <--- AQUI (MANTÉM O SCROLL)
             atualizarContador();
         } else {
             mostrarAlerta("Falha ao disparar o WhatsApp. Verifique se o template está aprovado na Meta.", "erro");
