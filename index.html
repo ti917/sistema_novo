@@ -1504,6 +1504,9 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                             <button type="button" class="btn-aba-usuario" id="btn-aba-vt" data-aba="aba-vale-transporte" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;">
     <i class="fa-solid fa-bus"></i> Vale Transporte
 </button>
+                            <button type="button" class="btn-aba-usuario" id="btn-aba-vr" data-aba="aba-vale-refeicao" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;">
+    <i class="fa-solid fa-utensils"></i> Vale Refeição
+</button>
                         </div>
 
                         <div id="aba-cadastro-geral" class="conteudo-aba-usuario">
@@ -1982,6 +1985,45 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <tbody id="lista-vt-body"></tbody>
     </table>
 </div>
+
+                        <div id="aba-vale-refeicao" class="conteudo-aba-usuario hidden">
+                            <h3 style="margin-bottom: 20px; color: #ff9800;"><i class="fa-solid fa-utensils"></i> Calculadora de Vale Refeição (VR)</h3>
+                            <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">Este módulo lê a <b>Escala Salva</b> do mês e calcula os dias com base na jornada de cada colaborador (12x36 ou 44h), já abatendo faltas, licenças e atestados automaticamente.</p>
+                            
+                            <div class="controls-escala" style="background: rgba(255, 152, 0, 0.05); border: 1px solid rgba(255, 152, 0, 0.3);">
+                                <div class="input-wrapper" style="width: 200px;">
+                                    <i class="fa-regular fa-calendar"></i>
+                                    <input type="month" id="vr-mes" onclick="this.showPicker()">
+                                </div>
+                                <div class="input-wrapper" style="width: 250px;">
+                                    <i class="fa-solid fa-map-marker-alt"></i>
+                                    <select id="vr-unidade"><option value="">Selecione a Unidade...</option></select>
+                                </div>
+                                <div class="input-wrapper" style="width: 200px;">
+                                    <i class="fa-solid fa-money-bill" style="color: #ff9800;"></i>
+                                    <input type="number" id="vr-valor-diaria" step="0.01" value="21.80" placeholder="Valor da Diária" style="border-color: #ff9800;">
+                                </div>
+                                <button class="btn-success" style="background-color: #ff9800; color: #000; border: none; padding: 12px 25px;" onclick="calcularVRAgora()">
+                                    <i class="fa-solid fa-calculator"></i> Calcular VR
+                                </button>
+                            </div>
+
+                            <table id="tabela-vr" style="margin-top: 20px;">
+                                <thead>
+                                    <tr>
+                                        <th style="text-align: left;">Colaborador</th>
+                                        <th>Jornada Base</th>
+                                        <th>Dias Padrão</th>
+                                        <th>Abatimentos</th>
+                                        <th>Dias a Pagar</th>
+                                        <th>Valor Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="lista-vr-body">
+                                    <tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario);">Selecione o mês, a unidade, confira a diária e clique em Calcular.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
 
                     </div>
                 </section>
@@ -6303,6 +6345,7 @@ document.getElementById('btn-add-vt').addEventListener('click', function() {
 
     if(selectColab) selectColab.innerHTML = optionsHtml;
     if(selectSalarioAdmin) selectSalarioAdmin.innerHTML = optionsHtml;
+    if(document.getElementById('vr-unidade')) document.getElementById('vr-unidade').innerHTML = optionsHtml;
 }
 
         async function subirDocumentos(caminhoBase, arquivos) {
@@ -13581,6 +13624,136 @@ window.excluirDocumentoExtra = async function(idColab, pasta, index) {
         carregarDocumentosColaborador();
     } catch(err) {
         mostrarAlerta("Erro ao apagar.", "erro");
+    }
+};
+
+        // ==========================================
+// MÓDULO DE CÁLCULO DO VALE REFEIÇÃO (VR)
+// ==========================================
+window.calcularVRAgora = async function() {
+    const mesAno = document.getElementById('vr-mes').value;
+    const unidade = document.getElementById('vr-unidade').value;
+    const valorDiaria = parseFloat(document.getElementById('vr-valor-diaria').value);
+    const tbody = document.getElementById('lista-vr-body');
+
+    if (!mesAno || !unidade || isNaN(valorDiaria)) {
+        return mostrarAlerta("Preencha o Mês, a Unidade e o Valor da Diária corretamente!", "aviso");
+    }
+
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Lendo escala e regras de jornada no banco de dados...</td></tr>';
+
+    try {
+        // 1. Puxa a Escala daquele Mês e Unidade
+        const { data: escala } = await supabaseClient.from('escalas_mensais')
+            .select('dados_escala')
+            .eq('mes_ano', mesAno)
+            .eq('unidade', unidade)
+            .maybeSingle();
+
+        if (!escala || !escala.dados_escala || escala.dados_escala.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Nenhuma escala gerada ou salva para este mês e unidade.<br><small>Vá até "Escalas & Plantões", gere a escala e salve para poder calcular o VR.</small></td></tr>';
+            return;
+        }
+
+        // 2. Puxa o Perfil (Para pegar a Jornada e ver se é 12x36 ou 44h)
+        const idsNaEscala = escala.dados_escala.map(colab => colab.id_colaborador);
+        const { data: perfis } = await supabaseClient.from('perfis')
+            .select('id, dados_admissao')
+            .in('id', idsNaEscala);
+
+        // Códigos de abatimendo do seu sistema antigo
+        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM'];
+        const CODIGOS_DESLIGAMENTO = ['DES', 'AD'];
+        const CODIGOS_TRABALHADOS = ['D', 'N', 'FT', 'TP', 'LDP']; 
+
+        let html = '';
+        let totalFinanceiroUnidade = 0;
+
+        escala.dados_escala.forEach(colabEscala => {
+            const perfil = perfis?.find(p => p.id === colabEscala.id_colaborador);
+            const adm = perfil?.dados_admissao || {};
+            
+            // Identifica qual a Jornada baseando-se no histórico
+            let jornada = adm.jornada || { tipo: '12x36' };
+            const dataPrimeiroDiaMes = new Date(mesAno + '-01T00:00:00');
+            
+            if (jornada.historico_alteracoes && jornada.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornada.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    const dHist = new Date(h.data_inicio + 'T00:00:00');
+                    if (dataPrimeiroDiaMes >= dHist) {
+                        jornada = h;
+                        break;
+                    }
+                }
+            }
+            
+            const tipoJornada = jornada.tipo || '12x36';
+            const diasFixosDaEscala = tipoJornada.includes('12x36') ? 15.5 : 21.5;
+            
+            // Analisa o que rolou dia a dia na escala do cara
+            let abatimentos = 0;
+            let foiDesligado = false;
+            let diasInativoAntesAdmissao = 0;
+            let diasTrabalhadosReais = 0; 
+
+            const diasMes = Object.keys(colabEscala.dias);
+            
+            diasMes.forEach(diaNum => {
+                const infoDia = colabEscala.dias[diaNum];
+                if (!infoDia) return;
+                
+                const sigla = infoDia.sigla;
+                
+                if (CODIGOS_ABATIMENTO.includes(sigla)) abatimentos++;
+                if (CODIGOS_DESLIGAMENTO.includes(sigla)) foiDesligado = true;
+                if (sigla === '-' || sigla === 'AL' || sigla === 'TR') diasInativoAntesAdmissao++;
+                if (CODIGOS_TRABALHADOS.includes(sigla)) diasTrabalhadosReais++;
+            });
+
+            // Se foi desligado neste mês, não entra na conta de adiantamento padrão de VR
+            if (foiDesligado) return; 
+
+            let diasAPagar = 0;
+            let labelDiasFixos = diasFixosDaEscala;
+
+            // Se o colaborador entrou no meio do mês atual (Cálculo Proporcional)
+            if (diasInativoAntesAdmissao > 0) {
+                diasAPagar = (diasTrabalhadosReais + 0.5) - abatimentos;
+                labelDiasFixos = `Prop. (${(diasTrabalhadosReais + 0.5).toFixed(1)})`;
+            } else {
+                diasAPagar = diasFixosDaEscala - abatimentos;
+            }
+
+            // Não deixa dar número negativo
+            if (diasAPagar < 0) diasAPagar = 0;
+
+            const valorFinal = diasAPagar * valorDiaria;
+            totalFinanceiroUnidade += valorFinal;
+
+            html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
+                <td style="text-align: left; color: #ff9800; padding: 12px;"><strong>${colabEscala.nome}</strong></td>
+                <td><span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda);">${tipoJornada}</span></td>
+                <td>${labelDiasFixos}</td>
+                <td style="color: var(--cor-perigo); font-weight: bold;">${abatimentos > 0 ? '-' + abatimentos : '0'}</td>
+                <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagar.toFixed(1)}</td>
+                <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">${valorFinal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+            </tr>`;
+        });
+
+        if (html === '') {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador elegível (ou todos foram desligados/transferidos).</td></tr>';
+        } else {
+            // Linha de totalizadora no rodapé da tabela
+            html += `<tr style="background: rgba(255, 152, 0, 0.15);">
+                <td colspan="5" style="text-align: right; color: #ff9800; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VR DA UNIDADE:</strong></td>
+                <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalFinanceiroUnidade.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+            </tr>`;
+            tbody.innerHTML = html;
+        }
+
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Erro: ${err.message}</td></tr>`;
     }
 };
     </script>
