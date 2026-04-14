@@ -1997,7 +1997,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                                 </div>
                                 <div class="input-wrapper" style="width: 250px;">
                                     <i class="fa-solid fa-map-marker-alt"></i>
-                                    <select id="vr-unidade"><option value="">Selecione a Unidade...</option></select>
+                                    <select id="vr-unidade"><option value="">Selecione a Unidade...</option><option value="Todas" style="font-weight: bold; color: #ff9800;">🏢 Todas as Unidades</option></select>
                                 </div>
                                 <div class="input-wrapper" style="width: 200px;">
                                     <i class="fa-solid fa-money-bill" style="color: #ff9800;"></i>
@@ -13627,127 +13627,138 @@ window.excluirDocumentoExtra = async function(idColab, pasta, index) {
     }
 };
 
-        // ==========================================
+      // ==========================================
 // MÓDULO DE CÁLCULO DO VALE REFEIÇÃO (VR)
 // ==========================================
 window.calcularVRAgora = async function() {
     const mesAno = document.getElementById('vr-mes').value;
-    const unidade = document.getElementById('vr-unidade').value;
+    const unidadeSelecionada = document.getElementById('vr-unidade').value;
+    // 👇 PEGA O VALOR QUE O RH DIGITOU NA CAIXINHA (21.80 OU QUALQUER OUTRO) 👇
     const valorDiaria = parseFloat(document.getElementById('vr-valor-diaria').value);
     const tbody = document.getElementById('lista-vr-body');
 
-    if (!mesAno || !unidade || isNaN(valorDiaria)) {
+    if (!mesAno || !unidadeSelecionada || isNaN(valorDiaria)) {
         return mostrarAlerta("Preencha o Mês, a Unidade e o Valor da Diária corretamente!", "aviso");
     }
 
     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Lendo escala e regras de jornada no banco de dados...</td></tr>';
 
     try {
-        // 1. Puxa a Escala daquele Mês e Unidade
-        const { data: escala } = await supabaseClient.from('escalas_mensais')
-            .select('dados_escala')
-            .eq('mes_ano', mesAno)
-            .eq('unidade', unidade)
-            .maybeSingle();
+        // 1. Puxa as Escalas do Mês (Se for 'Todas', puxa todas da empresa)
+        let queryEscalas = supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno);
+        if (unidadeSelecionada !== 'Todas') {
+            queryEscalas = queryEscalas.eq('unidade', unidadeSelecionada);
+        } else if (empresaSelecionadaFiltro !== 'Todas') {
+            // Se o admin escolheu uma empresa no topo, precisamos buscar só as unidades dela
+            const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
+            if (unidsFiltro) queryEscalas = queryEscalas.in('unidade', unidsFiltro);
+        }
 
-        if (!escala || !escala.dados_escala || escala.dados_escala.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Nenhuma escala gerada ou salva para este mês e unidade.<br><small>Vá até "Escalas & Plantões", gere a escala e salve para poder calcular o VR.</small></td></tr>';
+        const { data: escalas } = await queryEscalas;
+
+        if (!escalas || escalas.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Nenhuma escala salva encontrada para este mês. Vá em Escalas & Plantões e salve primeiro.</td></tr>';
             return;
         }
 
-        // 2. Puxa o Perfil (Para pegar a Jornada e ver se é 12x36 ou 44h)
-        const idsNaEscala = escala.dados_escala.map(colab => colab.id_colaborador);
-        const { data: perfis } = await supabaseClient.from('perfis')
-            .select('id, dados_admissao')
-            .in('id', idsNaEscala);
-
-        // Códigos de abatimendo do seu sistema antigo
+        // Códigos do sistema (Igual ao seu antigo)
         const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM'];
         const CODIGOS_DESLIGAMENTO = ['DES', 'AD'];
         const CODIGOS_TRABALHADOS = ['D', 'N', 'FT', 'TP', 'LDP']; 
 
         let html = '';
-        let totalFinanceiroUnidade = 0;
+        let totalFinanceiroGeral = 0;
 
-        escala.dados_escala.forEach(colabEscala => {
-            const perfil = perfis?.find(p => p.id === colabEscala.id_colaborador);
-            const adm = perfil?.dados_admissao || {};
-            
-            // Identifica qual a Jornada baseando-se no histórico
-            let jornada = adm.jornada || { tipo: '12x36' };
-            const dataPrimeiroDiaMes = new Date(mesAno + '-01T00:00:00');
-            
-            if (jornada.historico_alteracoes && jornada.historico_alteracoes.length > 0) {
-                const histOrdenado = [...jornada.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
-                for (let h of histOrdenado) {
-                    const dHist = new Date(h.data_inicio + 'T00:00:00');
-                    if (dataPrimeiroDiaMes >= dHist) {
-                        jornada = h;
-                        break;
+        // Loop em todas as escalas encontradas (pode ser 1 unidade ou todas)
+        for (const esc of escalas) {
+            if (!esc.dados_escala || esc.dados_escala.length === 0) continue;
+
+            const idsNaEscala = esc.dados_escala.map(colab => colab.id_colaborador);
+            const { data: perfis } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsNaEscala);
+
+            esc.dados_escala.forEach(colabEscala => {
+                const perfil = perfis?.find(p => p.id === colabEscala.id_colaborador);
+                const adm = perfil?.dados_admissao || {};
+                
+                // MÁGICA 1: Busca o tipo de jornada (12x36 ou 44h) no perfil real do funcionário
+                let jornada = adm.jornada || { tipo: '12x36' };
+                const dataPrimeiroDiaMes = new Date(mesAno + '-01T00:00:00');
+                
+                if (jornada.historico_alteracoes && jornada.historico_alteracoes.length > 0) {
+                    const histOrdenado = [...jornada.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                    for (let h of histOrdenado) {
+                        const dHist = new Date(h.data_inicio + 'T00:00:00');
+                        if (dataPrimeiroDiaMes >= dHist) {
+                            jornada = h; break;
+                        }
                     }
                 }
-            }
-            
-            const tipoJornada = jornada.tipo || '12x36';
-            const diasFixosDaEscala = tipoJornada.includes('12x36') ? 15.5 : 21.5;
-            
-            // Analisa o que rolou dia a dia na escala do cara
-            let abatimentos = 0;
-            let foiDesligado = false;
-            let diasInativoAntesAdmissao = 0;
-            let diasTrabalhadosReais = 0; 
+                
+                const tipoJornada = jornada.tipo || '12x36';
+                const diasFixosDaEscala = tipoJornada.includes('12x36') ? 15.5 : 21.5;
+                
+                // Variáveis de contagem
+                let abatimentos = 0;
+                let foiDesligado = false;
+                let isAdmissaoNoMes = false;
+                let diasTrabalhadosReais = 0; 
 
-            const diasMes = Object.keys(colabEscala.dias);
-            
-            diasMes.forEach(diaNum => {
-                const infoDia = colabEscala.dias[diaNum];
-                if (!infoDia) return;
+                const diasMes = Object.keys(colabEscala.dias);
                 
-                const sigla = infoDia.sigla;
-                
-                if (CODIGOS_ABATIMENTO.includes(sigla)) abatimentos++;
-                if (CODIGOS_DESLIGAMENTO.includes(sigla)) foiDesligado = true;
-                if (sigla === '-' || sigla === 'AL' || sigla === 'TR') diasInativoAntesAdmissao++;
-                if (CODIGOS_TRABALHADOS.includes(sigla)) diasTrabalhadosReais++;
+                // MÁGICA 2: Lê o que realmente aconteceu na escala salva
+                diasMes.forEach(diaNum => {
+                    const infoDia = colabEscala.dias[diaNum];
+                    if (!infoDia) return;
+                    
+                    const sigla = infoDia.sigla;
+                    
+                    if (CODIGOS_ABATIMENTO.includes(sigla)) abatimentos++;
+                    if (CODIGOS_DESLIGAMENTO.includes(sigla)) foiDesligado = true;
+                    if (sigla === '-') isAdmissaoNoMes = true; // Se tem '-', ele não existia no começo do mês
+                    if (CODIGOS_TRABALHADOS.includes(sigla)) diasTrabalhadosReais++;
+                });
+
+                // Se o cara foi desligado no meio do mês, o VR do seu sistema antigo não paga adiantado.
+                if (foiDesligado) return; 
+
+                let diasAPagar = 0;
+                let labelDiasFixos = diasFixosDaEscala;
+
+                // MÁGICA 3: Cálculo Proporcional para admissão vs Fixo para veteranos
+                if (isAdmissaoNoMes) {
+                    // Cálculo proporcional igual ao seu código antigo: Trabalhados + 0.5 - Abatimentos
+                    diasAPagar = (diasTrabalhadosReais + 0.5) - abatimentos;
+                    labelDiasFixos = `Prop. (${(diasTrabalhadosReais + 0.5).toFixed(1)})`;
+                } else {
+                    // Cálculo padrão: Dias fixos da jornada - Abatimentos
+                    diasAPagar = diasFixosDaEscala - abatimentos;
+                }
+
+                if (diasAPagar < 0) diasAPagar = 0;
+
+                // 👇 MULTIPLICA PELO VALOR QUE VOCÊ DIGITOU NA CAIXINHA 👇
+                const valorFinal = diasAPagar * valorDiaria;
+                totalFinanceiroGeral += valorFinal;
+
+                let tagUnidade = unidadeSelecionada === 'Todas' ? `<br><small style="color: var(--cor-texto-secundario);">${esc.unidade}</small>` : '';
+
+                html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
+                    <td style="text-align: left; color: #ff9800; padding: 12px;"><strong>${colabEscala.nome}</strong>${tagUnidade}</td>
+                    <td><span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda);">${tipoJornada}</span></td>
+                    <td>${labelDiasFixos}</td>
+                    <td style="color: var(--cor-perigo); font-weight: bold;">${abatimentos > 0 ? '-' + abatimentos : '0'}</td>
+                    <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagar.toFixed(1)}</td>
+                    <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">${valorFinal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+                </tr>`;
             });
-
-            // Se foi desligado neste mês, não entra na conta de adiantamento padrão de VR
-            if (foiDesligado) return; 
-
-            let diasAPagar = 0;
-            let labelDiasFixos = diasFixosDaEscala;
-
-            // Se o colaborador entrou no meio do mês atual (Cálculo Proporcional)
-            if (diasInativoAntesAdmissao > 0) {
-                diasAPagar = (diasTrabalhadosReais + 0.5) - abatimentos;
-                labelDiasFixos = `Prop. (${(diasTrabalhadosReais + 0.5).toFixed(1)})`;
-            } else {
-                diasAPagar = diasFixosDaEscala - abatimentos;
-            }
-
-            // Não deixa dar número negativo
-            if (diasAPagar < 0) diasAPagar = 0;
-
-            const valorFinal = diasAPagar * valorDiaria;
-            totalFinanceiroUnidade += valorFinal;
-
-            html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
-                <td style="text-align: left; color: #ff9800; padding: 12px;"><strong>${colabEscala.nome}</strong></td>
-                <td><span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda);">${tipoJornada}</span></td>
-                <td>${labelDiasFixos}</td>
-                <td style="color: var(--cor-perigo); font-weight: bold;">${abatimentos > 0 ? '-' + abatimentos : '0'}</td>
-                <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagar.toFixed(1)}</td>
-                <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">${valorFinal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
-            </tr>`;
-        });
+        }
 
         if (html === '') {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador elegível (ou todos foram desligados/transferidos).</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador elegível para este mês.</td></tr>';
         } else {
-            // Linha de totalizadora no rodapé da tabela
             html += `<tr style="background: rgba(255, 152, 0, 0.15);">
-                <td colspan="5" style="text-align: right; color: #ff9800; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VR DA UNIDADE:</strong></td>
-                <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalFinanceiroUnidade.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+                <td colspan="5" style="text-align: right; color: #ff9800; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VR (DIÁRIA DE R$ ${valorDiaria.toFixed(2).replace('.',',')}):</strong></td>
+                <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalFinanceiroGeral.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
             tbody.innerHTML = html;
         }
