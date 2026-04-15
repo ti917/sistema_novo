@@ -5637,11 +5637,14 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
         });
     }
 
-    // 👇 6. AVALIAÇÕES DE EXPERIÊNCIA (O BLOCO QUE FALTAVA!) 👇
+    // 👇 6. AVALIAÇÕES DE EXPERIÊNCIA 👇
     if (expData) {
         expData.forEach(exp => {
             let tipoBadge = `<span class="badge" style="background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid #ffc107;">Avaliação Experiência</span>`;
             let funcAcao = `aprovarAvaliacaoExperiencia('${exp.id}', '${exp.colaborador_id}', '${exp.nome_colaborador.replace(/'/g, "\\'")}')`;
+            
+            // NOVO: Função para o botão de recusar
+            let funcRecusar = `reprovarAvaliacaoExperiencia('${exp.id}', '${exp.colaborador_id}', '${exp.periodo}', '${exp.documento}')`;
 
             tbody.innerHTML += `<tr>
                 <td><strong>${exp.nome_colaborador}</strong></td>
@@ -5649,9 +5652,10 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
                 <td><span class="badge pendente">Pendente</span></td>
                 <td>${exp.empresa || '-'}</td>
                 <td>${exp.unidade || '-'}</td>
-                <td style="text-align: center;">
-                    <a href="${exp.documento}" target="_blank" class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #ffc107; color: #ffc107; margin-right: 5px;"><i class="fa-solid fa-file-pdf"></i> PDF</a>
-                    <button class="btn-success" style="padding: 5px 10px; font-size: 0.8rem;" onclick="${funcAcao}"><i class="fa-solid fa-check"></i> Arquivar</button>
+                <td style="text-align: center; display: flex; gap: 5px; justify-content: center;">
+                    <a href="${exp.documento}" target="_blank" class="btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; border-color: #ffc107; color: #ffc107;" title="Ver PDF"><i class="fa-solid fa-file-pdf"></i></a>
+                    <button class="btn-success" style="padding: 5px 10px; font-size: 0.8rem;" onclick="${funcAcao}" title="Aprovar e Arquivar"><i class="fa-solid fa-check"></i></button>
+                    <button class="btn-danger-mini" style="padding: 5px 10px; font-size: 0.8rem;" onclick="${funcRecusar}" title="Recusar, apagar PDF e devolver pro Gestor"><i class="fa-solid fa-xmark"></i></button>
                 </td>
             </tr>`;
         });
@@ -16070,6 +16074,59 @@ document.getElementById('form-avaliacao-exp').addEventListener('submit', async (
         atualizarContador();
     } catch(e) {
         mostrarAlerta("Erro ao aprovar.", "erro");
+    }
+};
+        
+        window.reprovarAvaliacaoExperiencia = async function(idAvaliacao, idColab, periodoStr, urlDocumento) {
+    const confirmado = await mostrarConfirmacao(
+        "Tem certeza que deseja RECUSAR esta avaliação? <br><br>O PDF será excluído do sistema e a pendência voltará para a tela do Gestor para que ele refaça o processo.", 
+        "Recusar e Apagar Avaliação"
+    );
+    if (!confirmado) return;
+
+    try {
+        // 1. Descobrir qual chave do JSON resetar baseado no texto do período
+        let periodoKey = '';
+        if (periodoStr.includes('1º')) periodoKey = 'p1_done';
+        else if (periodoStr.includes('2º')) periodoKey = 'p2_done';
+
+        // 2. Atualizar JSON do Colaborador (Voltar de true para false)
+        if (periodoKey) {
+            const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+            if (perfil) {
+                let adm = perfil.dados_admissao || {};
+                if (!adm.avaliacoes_exp) adm.avaliacoes_exp = { p1_done: false, p2_done: false };
+                
+                adm.avaliacoes_exp[periodoKey] = false; // <-- A MÁGICA DE VOLTAR PRO GESTOR AQUI
+                await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+            }
+        }
+
+        // 3. Excluir o PDF físico do Storage da Nuvem (Pasta do funcionário)
+        if (urlDocumento) {
+            // Separa a URL pública para pegar o caminho interno do bucket 'documentos'
+            const partes = urlDocumento.split('/storage/v1/object/public/documentos/');
+            if (partes.length > 1) {
+                const pathStorage = partes[1];
+                await supabaseClient.storage.from('documentos').remove([pathStorage]);
+            }
+        }
+
+        // 4. Limpar Notificações Fantasmas do sininho
+        await supabaseClient.from('notificacoes').delete().eq('referencia_id', idAvaliacao);
+
+        // 5. Excluir o registro oficial da tabela de avaliações pendentes
+        const { error: deleteErr } = await supabaseClient.from('avaliacoes_experiencia').delete().eq('id', idAvaliacao);
+        if (deleteErr) throw deleteErr;
+
+        mostrarAlerta("Avaliação recusada e apagada com sucesso. O Gestor foi notificado com a pendência novamente.", "sucesso");
+        
+        // Atualiza a tela
+        listarSolicitacoes();
+        atualizarContador();
+
+    } catch(e) {
+        mostrarAlerta("Erro ao recusar avaliação: " + e.message, "erro");
     }
 };
     </script>
