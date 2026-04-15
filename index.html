@@ -4658,7 +4658,7 @@ async function limparNotificacoesAntigas() {
     }
 }
 
-        async function carregarTabelaUnidades() {
+      async function carregarTabelaUnidades() {
     if (usuarioAtual.perfil !== 'Admin') return;
     const tbody = document.getElementById('lista-unidades-oficiais-body');
     if (!tbody) return;
@@ -4679,8 +4679,10 @@ async function limparNotificacoesAntigas() {
         return;
     }
 
+    // Guarda os dados brutos numa variável global para usarmos na hora de editar
+    window.todasUnidadesOficiaisCarregadas = data;
+
     data.forEach(u => {
-        // Se a unidade for antiga e não tiver endereço no banco, mostra um aviso
         const enderecoExibicao = u.endereco ? u.endereco : 'Endereço não cadastrado';
 
         tbody.innerHTML += `
@@ -4692,8 +4694,9 @@ async function limparNotificacoesAntigas() {
                     <i class="fa-solid fa-location-dot"></i> ${enderecoExibicao}
                 </span>
             </td>
-            <td style="text-align: center; padding: 12px;">
-                <button class="btn-danger-mini" onclick="deletarUnidadeOficial('${u.id}')" title="Excluir"><i class="fa-solid fa-trash"></i> Excluir</button>
+            <td style="text-align: center; padding: 12px; display: flex; justify-content: center; gap: 8px;">
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="abrirEdicaoUnidade('${u.id}')" title="Editar Nome e Endereço"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.8rem;" onclick="deletarUnidadeOficial('${u.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>
             </td>
         </tr>`;
     });
@@ -4714,10 +4717,18 @@ window.salvarUnidadeOficial = async function() {
 
     const enderecoCompleto = `${rua}, Nº ${num} - ${bairro}, ${cidade} - CEP: ${cep}`;
 
-    btnAcao = document.querySelector('#aba-gestao-unidades .btn-success');
+    const btnAcao = document.querySelector('#aba-gestao-unidades .btn-success');
     btnAcao.disabled = true;
+    btnAcao.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando...';
 
-    // 👇 Inserindo com a nova coluna de endereço
+    // 👇 TRAVA DE NOME REPETIDO 👇
+    const { data: existente } = await supabaseClient.from('unidades_oficiais').select('id').eq('empresa', empresa).eq('nome', nome).maybeSingle();
+    if (existente) {
+        btnAcao.disabled = false;
+        btnAcao.innerHTML = '<i class="fa-solid fa-save"></i> Cadastrar Unidade';
+        return mostrarAlerta(`Já existe uma unidade chamada <b>${nome}</b> vinculada a esta empresa! Escolha outro nome.`, "erro", "Nome Duplicado");
+    }
+
     const { error } = await supabaseClient.from('unidades_oficiais').insert([{ 
         empresa: empresa, 
         nome: nome,
@@ -4740,6 +4751,143 @@ window.salvarUnidadeOficial = async function() {
         popularUnidades(); // Recarrega as tabelas
     }
     btnAcao.disabled = false;
+    btnAcao.innerHTML = '<i class="fa-solid fa-save"></i> Cadastrar Unidade';
+};
+
+        window.abrirEdicaoUnidade = function(idUnidade) {
+    const u = window.todasUnidadesOficiaisCarregadas.find(x => x.id === idUnidade);
+    if (!u) return mostrarAlerta("Erro ao localizar unidade.", "erro");
+
+    // Tenta quebrar o endereço (se foi salvo no padrão do sistema)
+    let rua='', num='', bairro='', cidade='', cep='';
+    if (u.endereco) {
+        const match = u.endereco.match(/(.*), Nº (.*) - (.*), (.*) - CEP: (.*)/);
+        if (match) {
+            rua = match[1]; num = match[2]; bairro = match[3]; cidade = match[4]; cep = match[5];
+        }
+    }
+
+    const modalHtml = `
+    <div id="modal-editar-unidade" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; border: 1px solid #ffc107; position: relative;">
+            <button onclick="document.getElementById('modal-editar-unidade').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #ffc107; margin-bottom: 5px;"><i class="fa-solid fa-pen"></i> Editar Unidade Oficial</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 20px;">Atenção: Se você mudar o nome, o sistema vai varrer todo o banco de dados para atualizar o cadastro e as escalas de todos os colaboradores afetados.</p>
+            
+            <form id="form-editar-unidade">
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label style="color: #ffc107;">Nome da Unidade <span style="color: var(--cor-perigo);">*</span></label>
+                    <input type="text" id="edit-uni-nome-input" value="${u.nome}" required style="text-transform: uppercase; font-weight: bold; border-color: #ffc107;">
+                </div>
+                
+                <div class="form-row" style="margin-top: 15px;">
+                    <div class="form-group" style="margin-bottom: 0;"><label>CEP <span style="color: var(--cor-perigo);">*</span></label><div class="input-wrapper"><i class="fa-solid fa-location-dot"></i><input type="text" id="edit-uni-cep" value="${cep}" required placeholder="00000-000" oninput="this.value = this.value.replace(/\\D/g, '').replace(/^(\\d{5})(\\d)/, '$1-$2').substr(0, 9)" onblur="buscarCEPNovaUnidade(this.value, 'edit-uni')"></div></div>
+                    <div class="form-group" style="margin-bottom: 0;"><label>Rua / Logradouro <span style="color: var(--cor-perigo);">*</span></label><div class="input-wrapper"><i class="fa-solid fa-road"></i><input type="text" id="edit-uni-rua" value="${rua}" required placeholder="Nome da rua, avenida..."></div></div>
+                </div>
+                <div class="form-row-3" style="margin-top: 15px;">
+                    <div class="form-group" style="margin-bottom: 0;"><label>Número <span style="color: var(--cor-perigo);">*</span></label><div class="input-wrapper"><i class="fa-solid fa-hashtag"></i><input type="text" id="edit-uni-numero" value="${num}" required placeholder="123"></div></div>
+                    <div class="form-group" style="margin-bottom: 0;"><label>Bairro <span style="color: var(--cor-perigo);">*</span></label><div class="input-wrapper"><i class="fa-solid fa-map-signs"></i><input type="text" id="edit-uni-bairro" value="${bairro}" required placeholder="Bairro"></div></div>
+                    <div class="form-group" style="margin-bottom: 0;"><label>Cidade/UF <span style="color: var(--cor-perigo);">*</span></label><div class="input-wrapper"><i class="fa-solid fa-city"></i><input type="text" id="edit-uni-cidade" value="${cidade}" required placeholder="Cidade/UF"></div></div>
+                </div>
+
+                <button type="submit" id="btn-salvar-edicao-uni" class="btn-success" style="width: 100%; height: 50px; background-color: #ffc107; color: #000; border: none; font-weight: bold; margin-top: 25px;">
+                    <i class="fa-solid fa-rotate"></i> Atualizar Unidade
+                </button>
+            </form>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    document.getElementById('form-editar-unidade').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('btn-salvar-edicao-uni');
+        
+        const novoNome = document.getElementById('edit-uni-nome-input').value.trim().toUpperCase();
+        const nCep = document.getElementById('edit-uni-cep').value;
+        const nRua = document.getElementById('edit-uni-rua').value;
+        const nNum = document.getElementById('edit-uni-numero').value;
+        const nBairro = document.getElementById('edit-uni-bairro').value;
+        const nCidade = document.getElementById('edit-uni-cidade').value;
+        const enderecoCompleto = `${nRua}, Nº ${nNum} - ${nBairro}, ${nCidade} - CEP: ${nCep}`;
+
+        const mudouNome = (novoNome !== u.nome);
+
+        // Se o nome for diferente, verifica duplicidade no banco e pede confirmação severa
+        if (mudouNome) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando...';
+            
+            const { data: existente } = await supabaseClient.from('unidades_oficiais')
+                .select('id').eq('empresa', u.empresa).eq('nome', novoNome).maybeSingle();
+            
+            if (existente) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Atualizar Unidade';
+                return mostrarAlerta(`O nome <b>${novoNome}</b> já está em uso na empresa ${u.empresa}!`, "erro", "Nome Duplicado");
+            }
+
+            const confirmado = await mostrarConfirmacao(`ATENÇÃO: Você está mudando o nome oficial de <b>${u.nome}</b> para <b>${novoNome}</b>.\n\nO sistema vai varrer os colaboradores, escalas, salários e atestados para atualizar o nome em todos os lugares.\n\nDeseja prosseguir?`, "Propagação de Nome");
+            if (!confirmado) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Atualizar Unidade';
+                return;
+            }
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Atualizando banco de dados...';
+
+        try {
+            // 1. Atualiza a tabela mãe (Unidades Oficiais)
+            await supabaseClient.from('unidades_oficiais').update({ 
+                nome: novoNome, 
+                endereco: enderecoCompleto 
+            }).eq('id', u.id);
+
+            // 2. Cascade Update (Se o nome mudou, varre tudo)
+            if (mudouNome) {
+                const nomeAntigo = u.nome;
+
+                // A. Atualiza as unidades no PERFIL (lembrando que para gestores é separado por vírgula)
+                const { data: perfis } = await supabaseClient.from('perfis').select('id, unidade').ilike('unidade', `%${nomeAntigo}%`);
+                if (perfis && perfis.length > 0) {
+                    for (let p of perfis) {
+                        if (p.unidade) {
+                            let arrayUnidades = p.unidade.split(',').map(x => x.trim());
+                            let arrayCorrigido = arrayUnidades.map(x => x === nomeAntigo ? novoNome : x);
+                            await supabaseClient.from('perfis').update({ unidade: arrayCorrigido.join(', ') }).eq('id', p.id);
+                        }
+                    }
+                }
+
+                // B. Atualiza as tabelas de uso simples
+                const tabelasSimples = [
+                    'ausencias', 'horas_extras_ft', 'advertencias', 'ocorrencias_plantao',
+                    'ocorrencias_ponto', 'notificacoes', 'config_vr', 'config_cesta2', 'salarios_base',
+                    'escalas_mensais'
+                ];
+                for (let tab of tabelasSimples) {
+                    await supabaseClient.from(tab).update({ unidade: novoNome }).eq('unidade', nomeAntigo);
+                }
+
+                // C. Tabelas com nomes de coluna diferentes
+                await supabaseClient.from('solicitacoes_alteracao').update({ unidade_atual: novoNome }).eq('unidade_atual', nomeAntigo);
+                await supabaseClient.from('trocas_turno').update({ unidade_solicitante: novoNome }).eq('unidade_solicitante', nomeAntigo);
+                await supabaseClient.from('trocas_turno').update({ unidade_substituto: novoNome }).eq('unidade_substituto', nomeAntigo);
+            }
+
+            mostrarAlerta("Unidade atualizada e propagada com sucesso!", "sucesso");
+            document.getElementById('modal-editar-unidade').remove();
+            
+            // Recarrega todos os seletores e tabelas da tela
+            popularUnidades(); 
+
+        } catch (err) {
+            mostrarAlerta("Erro ao atualizar: " + err.message, "erro");
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Atualizar Unidade';
+        }
+    });
 };
 
 window.deletarUnidadeOficial = async function(id) {
