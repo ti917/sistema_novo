@@ -4799,7 +4799,7 @@ const u = window.todasUnidadesOficiaisCarregadas.find(x => String(x.id) === Stri
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-    document.getElementById('form-editar-unidade').addEventListener('submit', async (e) => {
+   document.getElementById('form-editar-unidade').addEventListener('submit', async (e) => {
         e.preventDefault();
         const btn = document.getElementById('btn-salvar-edicao-uni');
         
@@ -4827,7 +4827,7 @@ const u = window.todasUnidadesOficiaisCarregadas.find(x => String(x.id) === Stri
                 return mostrarAlerta(`O nome <b>${novoNome}</b> já está em uso na empresa ${u.empresa}!`, "erro", "Nome Duplicado");
             }
 
-            const confirmado = await mostrarConfirmacao(`ATENÇÃO: Você está mudando o nome oficial de <b>${u.nome}</b> para <b>${novoNome}</b>.\n\nO sistema vai varrer os colaboradores, escalas, salários e atestados para atualizar o nome em todos os lugares.\n\nDeseja prosseguir?`, "Propagação de Nome");
+            const confirmado = await mostrarConfirmacao(`ATENÇÃO: Você está mudando o nome oficial de <b>${u.nome}</b> para <b>${novoNome}</b>.\n\nO sistema vai varrer os colaboradores, escalas, históricos de transferência e atestados para atualizar o nome em todos os lugares.\n\nDeseja prosseguir?`, "Propagação de Nome");
             if (!confirmado) {
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Atualizar Unidade';
@@ -4845,23 +4845,52 @@ const u = window.todasUnidadesOficiaisCarregadas.find(x => String(x.id) === Stri
                 endereco: enderecoCompleto 
             }).eq('id', u.id);
 
-            // 2. Cascade Update (Se o nome mudou, varre tudo)
+            // 2. Cascade Update (Se o nome mudou, varre tudo de forma profunda)
             if (mudouNome) {
                 const nomeAntigo = u.nome;
 
-                // A. Atualiza as unidades no PERFIL (lembrando que para gestores é separado por vírgula)
-                const { data: perfis } = await supabaseClient.from('perfis').select('id, unidade').ilike('unidade', `%${nomeAntigo}%`);
-                if (perfis && perfis.length > 0) {
-                    for (let p of perfis) {
-                        if (p.unidade) {
+                // A. Puxa todos os perfis daquela empresa para analisar a fundo
+                const { data: todosPerfisDaEmpresa } = await supabaseClient.from('perfis').select('id, unidade, dados_admissao').eq('empresa', u.empresa);
+
+                if (todosPerfisDaEmpresa && todosPerfisDaEmpresa.length > 0) {
+                    for (let p of todosPerfisDaEmpresa) {
+                        let mudouPerfil = false;
+                        let novaUnidadeStr = p.unidade;
+                        let novoDadosAdmissao = p.dados_admissao || {};
+
+                        // Altera a coluna unidade (Gestores tem várias por vírgula, Colabs tem 1 só)
+                        if (p.unidade && p.unidade.includes(nomeAntigo)) {
                             let arrayUnidades = p.unidade.split(',').map(x => x.trim());
                             let arrayCorrigido = arrayUnidades.map(x => x === nomeAntigo ? novoNome : x);
-                            await supabaseClient.from('perfis').update({ unidade: arrayCorrigido.join(', ') }).eq('id', p.id);
+                            novaUnidadeStr = arrayCorrigido.join(', ');
+                            if (novaUnidadeStr !== p.unidade) mudouPerfil = true;
+                        }
+
+                        // 👇 A MÁGICA: Mergulha no JSON para trocar o histórico de transferências 👇
+                        if (novoDadosAdmissao.historico_transferencias && novoDadosAdmissao.historico_transferencias.length > 0) {
+                            novoDadosAdmissao.historico_transferencias.forEach(hist => {
+                                if (hist.unidade_antiga === nomeAntigo) {
+                                    hist.unidade_antiga = novoNome;
+                                    mudouPerfil = true;
+                                }
+                                if (hist.unidade_nova === nomeAntigo) {
+                                    hist.unidade_nova = novoNome;
+                                    mudouPerfil = true;
+                                }
+                            });
+                        }
+
+                        // Se mudou alguma coisa nesse colaborador, manda pro banco!
+                        if (mudouPerfil) {
+                            await supabaseClient.from('perfis').update({ 
+                                unidade: novaUnidadeStr, 
+                                dados_admissao: novoDadosAdmissao 
+                            }).eq('id', p.id);
                         }
                     }
                 }
 
-                // B. Atualiza as tabelas de uso simples
+                // B. Atualiza as tabelas de uso simples em massa
                 const tabelasSimples = [
                     'ausencias', 'horas_extras_ft', 'advertencias', 'ocorrencias_plantao',
                     'ocorrencias_ponto', 'notificacoes', 'config_vr', 'config_cesta2', 'salarios_base',
@@ -4880,8 +4909,11 @@ const u = window.todasUnidadesOficiaisCarregadas.find(x => String(x.id) === Stri
             mostrarAlerta("Unidade atualizada e propagada com sucesso!", "sucesso");
             document.getElementById('modal-editar-unidade').remove();
             
-            // Recarrega todos os seletores e tabelas da tela
-            popularUnidades(); 
+            // 👇 ATUALIZA TODAS AS CAIXINHAS EM TEMPO REAL 👇
+            popularUnidades();         // Atualiza formulários de admissão e VR/VA
+            setupFiltroEscala();       // Atualiza a caixinha da aba Escalas
+            prepararAbaGestaoHorarios(); // Atualiza a caixinha de Gestão de Horários
+            carregarTabelaUnidades();  // Recarrega a tabela que o Admin está olhando agora
 
         } catch (err) {
             mostrarAlerta("Erro ao atualizar: " + err.message, "erro");
@@ -4889,7 +4921,6 @@ const u = window.todasUnidadesOficiaisCarregadas.find(x => String(x.id) === Stri
             btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Atualizar Unidade';
         }
     });
-};
 
 window.deletarUnidadeOficial = async function(id) {
     const confirmado = await mostrarConfirmacao("Deseja apagar esta unidade? Isso a removerá das listas de seleção de novas fichas, mas NÃO apaga os colaboradores que já estão nela.", "Excluir Unidade");
