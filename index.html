@@ -2401,20 +2401,27 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
     </p>
     
     <div class="controls-escala" style="background: rgba(233, 30, 99, 0.05); border: 1px solid rgba(233, 30, 99, 0.3);">
-        <div class="input-wrapper" style="width: 200px;">
-            <i class="fa-regular fa-calendar"></i>
-            <input type="month" id="cesta-mes" onclick="this.showPicker()">
-        </div>
-        <div class="input-wrapper" style="width: 300px; flex-grow: 1;">
-            <i class="fa-solid fa-map-marker-alt"></i>
-            <select id="cesta-unidade">
-                <option value="">Carregando...</option>
-            </select>
-        </div>
+    <div class="input-wrapper" style="width: 200px;">
+        <i class="fa-regular fa-calendar"></i>
+        <input type="month" id="cesta-mes" onclick="this.showPicker()">
+    </div>
+    <div class="input-wrapper" style="width: 300px; flex-grow: 1;">
+        <i class="fa-solid fa-map-marker-alt"></i>
+        <select id="cesta-unidade">
+            <option value="">Carregando...</option>
+        </select>
+    </div>
+    
+    <div style="display: flex; gap: 15px; align-items: center;">
         <button class="btn-success" style="background-color: #e91e63; color: #fff; border: none; padding: 12px 30px;" onclick="calcularCestaAgora()">
             <i class="fa-solid fa-calculator"></i> Calcular Cesta
         </button>
+        <button id="btn-exportar-cesta" class="btn-secondary hidden" style="border-color: #e91e63; color: #e91e63; padding: 12px 20px;" onclick="exportarExcelCesta()">
+            <i class="fa-solid fa-file-excel"></i> Exportar Excel
+        </button>
     </div>
+    
+</div>
 
     <table id="tabela-cesta" style="margin-top: 20px;">
         <thead>
@@ -16220,20 +16227,23 @@ document.getElementById('form-config-cesta').addEventListener('submit', async (e
     }
 });
         
-// A NOVA CALCULADORA (Usa o BD em vez de arrays hardcoded)
+window.cestaCalculadaPorUnidade = {}; // Cache para o Excel
+
 window.calcularCestaAgora = async function() {
     const mesAno = document.getElementById('cesta-mes').value;
     const unidadeSelecionada = document.getElementById('cesta-unidade').value; 
     const tbody = document.getElementById('lista-cesta-body');
+    const btnExcel = document.getElementById('btn-exportar-cesta');
 
     if (!mesAno || !unidadeSelecionada) {
         return mostrarAlerta("Preencha o Mês e a Unidade corretamente!", "aviso");
     }
 
     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #e91e63; margin-bottom: 10px;"></i><br>Buscando regras e analisando o ponto...</td></tr>';
+    btnExcel.classList.add('hidden');
+    window.cestaCalculadaPorUnidade = {}; 
 
     try {
-        // Puxa as regras cadastradas no Banco
         const { data: regrasDB, error: errRegras } = await supabaseClient.from('config_cesta2').select('*');
         if (errRegras || !regrasDB || regrasDB.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-perigo);">Nenhuma regra cadastrada. Clique em "Configurar Regras".</td></tr>';
@@ -16248,16 +16258,12 @@ window.calcularCestaAgora = async function() {
         if (mesAnt === 0) { mesAnt = 12; anoAnt -= 1; }
         const mesAnteriorStr = `${anoAnt}-${String(mesAnt).padStart(2, '0')}`;
 
-        // 1. Busca Dados Básicos (CORRIGIDO: Removido 'cpf' que não existe solto na tabela e quebrava o banco)
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao').eq('perfil', 'Colaborador');
         if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
-        const { data: resPerfis, error: errPerfis } = await queryPerfis;
-        if (errPerfis) throw new Error("Erro de conexão com colaboradores: " + errPerfis.message);
-
+        const { data: resPerfis } = await queryPerfis;
         const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
 
-        // 2. Ocorrências
         const dAntI = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-01`;
         const dAntF = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-${new Date(anoAnt, mesAnt, 0).getDate()}`;
         
@@ -16276,9 +16282,7 @@ window.calcularCestaAgora = async function() {
         unidadesProcessar.forEach(u => {
             const escAnt = algoritmoGeradorDeEscala(colabsAtivos, mesAnteriorStr, ocorrenciasAnt, u);
             escAnt.forEach(linha => {
-                if(!faltasEAtestados[linha.id_colaborador]) {
-                    faltasEAtestados[linha.id_colaborador] = { faltas: 0, atestados: 0 };
-                }
+                if(!faltasEAtestados[linha.id_colaborador]) faltasEAtestados[linha.id_colaborador] = { faltas: 0, atestados: 0 };
                 Object.values(linha.dias).forEach(diaObj => {
                     if (diaObj && diaObj.sigla) {
                         const s = diaObj.sigla.toUpperCase();
@@ -16291,12 +16295,11 @@ window.calcularCestaAgora = async function() {
 
         let html = '';
         let totalGeral = 0;
+        let contagemValidada = 0;
 
         colabsAtivos.forEach(colab => {
-            // Filtra pela unidade que o usuário escolheu na caixinha
             if (unidadeSelecionada !== 'Todas' && !colab.unidade.includes(unidadeSelecionada)) return;
 
-            // Lógica blindada para achar a regra (Ignora espaços e letras minúsculas)
             let regraUnidade;
             if (unidadeSelecionada !== 'Todas') {
                 regraUnidade = regrasDB.find(r => (r.unidade || '').trim().toUpperCase() === unidadeSelecionada.trim().toUpperCase());
@@ -16305,63 +16308,58 @@ window.calcularCestaAgora = async function() {
                 regraUnidade = regrasDB.find(r => unidadesDoColab.includes((r.unidade || '').trim().toUpperCase()));
             }
 
-            if (!regraUnidade) return; // Se a unidade não tem regra cadastrada, ignora na lista.
+            if (!regraUnidade) return;
 
             const adm = colab.dados_admissao || {};
             const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
             let dataInicioObj = new Date(1970, 0, 1);
-            let mesInicio = -1, anoInicio = -1, diaInicio = -1;
-            
             if (dataInicioStr) {
                 const p = dataInicioStr.split('-');
-                anoInicio = parseInt(p[0]); mesInicio = parseInt(p[1]); diaInicio = parseInt(p[2]);
-                dataInicioObj = new Date(anoInicio, mesInicio - 1, diaInicio, 0,0,0,0);
+                dataInicioObj = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]), 0,0,0,0);
             }
 
-            // Ignora admissão no futuro
-            if (anoInicio > anoAtual || (anoInicio === anoAtual && mesInicio > mesAtual)) return;
+            if (dataInicioObj.getFullYear() > anoAtual || (dataInicioObj.getFullYear() === anoAtual && (dataInicioObj.getMonth() + 1) > mesAtual)) return;
 
             const contagem = faltasEAtestados[colab.id] || { faltas: 0, atestados: 0 };
             let valorFinal = 0;
             let statusTexto = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
+            let statusExcel = 'Apto (Base Cheia)';
 
             const dataCorte = new Date(anoAnt, mesAnt - 1, 15, 23, 59, 59);
             
-            // REGRAS DE RETENÇÃO POR DATA (Passado o dia 15)
             if (dataInicioObj.getFullYear() === anoAtual && dataInicioObj.getMonth() === (mesAtual - 1)) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Admissão no mês atual</span>`;
+                statusExcel = 'Retido (Admissão no mês atual)';
             } else if (dataInicioObj > dataCorte) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Admitido após dia 15</span>`;
+                statusExcel = 'Retido (Admissão após dia 15)';
             } else {
-                // APLICA AS REGRAS DINÂMICAS DO BANCO DE DADOS
                 if (regraUnidade.zera_falta && contagem.faltas > 0) {
                     statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: Possui Falta (FA)</span>`;
+                    statusExcel = `Perdeu (${contagem.faltas} Faltas)`;
                     valorFinal = 0;
                 } else {
-                    // SE A UNIDADE PERDOA ATESTADOS
                     if (regraUnidade.desconta_atestado === false) {
                         valorFinal = regraUnidade.valor_base;
                         if (contagem.atestados > 0) {
                             statusTexto = `<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia (Atestado não afeta)</span>`;
+                            statusExcel = 'Apto (Atestados perdoados)';
                         }
-                    } 
-                    // SE A UNIDADE DESCONTA ATESTADOS (Escalonamento)
-                    else {
+                    } else {
                         if (contagem.atestados === 0) {
                             valorFinal = regraUnidade.valor_base;
                         } else if (contagem.atestados === 1) {
                             valorFinal = regraUnidade.valor_1_atestado;
-                            if (valorFinal < regraUnidade.valor_base) statusTexto = `<span style="color: #ff9800;">Desc. 1 Atestado</span>`;
+                            statusTexto = `<span style="color: #ff9800;">Desc. 1 Atestado</span>`;
+                            statusExcel = 'Desconto (1 Atestado)';
                         } else if (contagem.atestados === 2) {
                             valorFinal = regraUnidade.valor_2_atestados;
-                            if (valorFinal < regraUnidade.valor_base) statusTexto = `<span style="color: #ff9800;">Desc. 2 Atestados</span>`;
+                            statusTexto = `<span style="color: #ff9800;">Desc. 2 Atestados</span>`;
+                            statusExcel = 'Desconto (2 Atestados)';
                         } else if (contagem.atestados >= 3) {
                             valorFinal = regraUnidade.valor_3_atestados;
-                            if (valorFinal === 0) {
-                                statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: 3+ Atestados</span>`;
-                            } else {
-                                statusTexto = `<span style="color: #ff9800;">Desc. Máximo</span>`;
-                            }
+                            statusTexto = valorFinal === 0 ? `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: 3+ Atestados</span>` : `<span style="color: #ff9800;">Desc. Máximo</span>`;
+                            statusExcel = `Desconto (3+ Atestados: ${contagem.atestados})`;
                         }
                     }
                 }
@@ -16369,10 +16367,23 @@ window.calcularCestaAgora = async function() {
 
             totalGeral += valorFinal;
             const cpfColab = colab.cpf || adm.cpf || 'CPF não cadastrado';
-            const tagCpf = `<br><span style="font-size: 0.8rem; color: var(--cor-texto-principal);"><i class="fa-solid fa-id-card" style="color: #e91e63;"></i> ${cpfColab}</span>`;
 
+            // ALIMENTA DADOS PARA EXCEL
+            const nomeDaUnidade = regraUnidade.unidade.trim();
+            if (!window.cestaCalculadaPorUnidade[nomeDaUnidade]) window.cestaCalculadaPorUnidade[nomeDaUnidade] = [];
+            
+            window.cestaCalculadaPorUnidade[nomeDaUnidade].push({
+                nome: colab.nome,
+                cpf: cpfColab,
+                faltas: contagem.faltas,
+                atestados: contagem.atestados,
+                statusInfo: statusExcel,
+                valorTotal: valorFinal
+            });
+
+            contagemValidada++;
             html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
-                <td style="text-align: left; color: #e91e63; padding: 12px; line-height: 1.4;"><strong>${colab.nome}</strong>${tagCpf}</td>
+                <td style="text-align: left; color: #e91e63; padding: 12px; line-height: 1.4;"><strong>${colab.nome}</strong><br><span style="font-size: 0.8rem; color: var(--cor-texto-principal);"><i class="fa-solid fa-id-card" style="color: #e91e63;"></i> ${cpfColab}</span></td>
                 <td>${regraUnidade.unidade}</td>
                 <td style="color: #ff9800; font-weight: bold;">FA: ${contagem.faltas} | ATM: ${contagem.atestados}</td>
                 <td>${statusTexto}</td>
@@ -16380,19 +16391,197 @@ window.calcularCestaAgora = async function() {
             </tr>`;
         });
 
-        if (html === '') {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador elegível / Unidade sem regra configurada.</td></tr>';
+        if (contagemValidada === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador elegível nesta busca.</td></tr>';
         } else {
             html += `<tr style="background: rgba(233, 30, 99, 0.15);">
                 <td colspan="4" style="text-align: right; color: #e91e63; font-size: 1.2rem; padding: 15px;"><strong>TOTAL CESTA BÁSICA 2:</strong></td>
                 <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalGeral.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
             tbody.innerHTML = html;
+            btnExcel.classList.remove('hidden');
         }
 
     } catch (err) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
-        console.error(err);
+    }
+};
+
+        // =============================================================
+// GERADOR DE EXCEL PREMIUM COLORIDO PARA CESTA BÁSICA 2
+// =============================================================
+window.exportarExcelCesta = async function() {
+    if (!window.cestaCalculadaPorUnidade || Object.keys(window.cestaCalculadaPorUnidade).length === 0) {
+        return mostrarAlerta("Nenhum dado encontrado. Calcule a Cesta primeiro.", "aviso");
+    }
+
+    try {
+        mostrarAlerta("Pintando e formatando planilha de Cesta Básica...", "sucesso");
+        
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Portal';
+        workbook.calcProperties.fullCalcOnLoad = true;
+        
+        const mesReferencia = document.getElementById('cesta-mes').value;
+        const dataHoje = new Date().toLocaleDateString('pt-BR');
+        let resumoTotais = []; 
+
+        for (const [unidade, colaboradores] of Object.entries(window.cestaCalculadaPorUnidade)) {
+            
+            let sheetName = unidade.substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '');
+            const sheet = workbook.addWorksheet(sheetName);
+
+            // --- 1. CABEÇALHO DO RELATÓRIO ---
+            sheet.mergeCells('A1:G1');
+            const titulo = sheet.getCell('A1');
+            titulo.value = 'RELATÓRIO EXECUTIVO DE CUSTO - CESTA BÁSICA 2';
+            titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+            titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+            titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.mergeCells('A2:G2');
+            const subtitulo = sheet.getCell('A2');
+            subtitulo.value = `UNIDADE: ${unidade.toUpperCase()}   |   MÊS: ${mesReferencia}   |   GERADO EM: ${dataHoje}`;
+            subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+            subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
+            subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.addRow([]);
+
+            // --- 2. CABEÇALHOS DA TABELA ---
+            const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "FALTAS", "ATESTADOS", "STATUS / REGRA", "VALOR BASE", "TOTAL LÍQUIDO"]); 
+            headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            headerRow.height = 25;
+            headerRow.eachCell((cell) => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE91E63' } }; // Rosa
+                cell.alignment = { vertical: 'middle', horizontal: 'center' };
+                cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            });
+
+            sheet.columns = [
+                { width: 45 }, { width: 18 }, { width: 12 }, 
+                { width: 15 }, { width: 35 }, { width: 15 }, { width: 20 }
+            ];
+
+            let currentRow = 5; 
+            let somaTotalUnidade = 0;
+            colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
+
+            // --- 3. INJEÇÃO DE DADOS ---
+            colaboradores.forEach(c => {
+                somaTotalUnidade += c.valorTotal;
+                const row = sheet.addRow([
+                    c.nome, c.cpf, c.faltas, c.atestados, c.statusInfo, 
+                    (c.valorTotal > 0 ? c.valorTotal : 0), c.valorTotal 
+                ]);
+
+                if (c.faltas > 0) row.getCell(3).font = { color: { argb: 'FFDC3545' }, bold: true };
+                if (c.atestados > 0) row.getCell(4).font = { color: { argb: 'FFFF9800' }, bold: true };
+                
+                row.getCell(5).font = { bold: true, color: c.valorTotal === 0 ? { argb: 'FFDC3545' } : { argb: 'FF28A745' } };
+                row.getCell(6).numFmt = '"R$ "#,##0.00';
+                row.getCell(7).numFmt = '"R$ "#,##0.00';
+                row.getCell(7).font = { bold: true, color: { argb: 'FF28A745' } };
+
+                row.eachCell((cell, colNumber) => {
+                    cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+                    if(colNumber > 1) cell.alignment = { horizontal: 'center' };
+                });
+
+                if (currentRow % 2 === 0) {
+                    row.eachCell(cell => cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F9FA' } });
+                }
+                currentRow++;
+            });
+
+            // --- 4. FECHAMENTO DA UNIDADE ---
+            sheet.addRow([]);
+            const totalRow = sheet.addRow(["", "", "", "", "", "TOTAL UNIDADE:", { formula: `SUM(G5:G${currentRow-1})`, result: somaTotalUnidade }]);
+            totalRow.getCell(6).font = { bold: true, size: 12, color: { argb: 'FFE91E63' } };
+            totalRow.getCell(6).alignment = { horizontal: 'right' };
+            totalRow.getCell(7).font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+            totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+            totalRow.getCell(7).numFmt = '"R$ "#,##0.00';
+            totalRow.getCell(7).alignment = { horizontal: 'center' };
+
+            resumoTotais.push({ unidade: unidade, qtd: colaboradores.length, soma: somaTotalUnidade, sheet: sheetName, lastRow: currentRow + 1 });
+        }
+
+        // --- 5. ABA MESTRA (DASHBOARD) ---
+        if (resumoTotais.length > 1) {
+            const sheetResumo = workbook.addWorksheet('RESUMO GERAL');
+            sheetResumo.mergeCells('A1:C1');
+            sheetResumo.getCell('A1').value = 'PAINEL DE CONTROLE GERAL - CESTA BÁSICA 2';
+            sheetResumo.getCell('A1').font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+            sheetResumo.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+            sheetResumo.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheetResumo.mergeCells('A2:C2');
+            sheetResumo.getCell('A2').value = `PERÍODO: ${mesReferencia}`;
+            sheetResumo.getCell('A2').font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+            sheetResumo.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+            sheetResumo.getCell('A2').alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheetResumo.addRow([]);
+            const headResumo = sheetResumo.addRow(["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO TOTAL LÍQUIDO"]);
+            headResumo.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            headResumo.height = 25;
+            headResumo.eachCell(c => {
+                c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE91E63' } };
+                c.alignment = { horizontal: 'center', vertical: 'middle' };
+                c.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            });
+
+            sheetResumo.columns = [ { width: 50 }, { width: 25 }, { width: 30 } ];
+
+            let curResRow = 5; 
+            let somaSuperTotal = 0;
+            let somaQtdTotal = 0;
+            let arrayFormulaSomaDinheiro = [];
+            let arrayFormulaSomaQtd = [];
+
+            resumoTotais.forEach(r => {
+                somaSuperTotal += r.soma;
+                somaQtdTotal += r.qtd;
+                const row = sheetResumo.addRow([ r.unidade, r.qtd, { formula: `'${r.sheet}'!G${r.lastRow}`, result: r.soma } ]);
+                row.getCell(2).alignment = { horizontal: 'center' };
+                row.getCell(3).numFmt = '"R$ "#,##0.00';
+                row.getCell(3).alignment = { horizontal: 'center' };
+                row.getCell(3).font = { bold: true, color: { argb: 'FF28A745' } };
+                row.eachCell(cell => cell.border = { bottom: {style:'thin', color: {argb:'FFDDDDDD'}} });
+
+                arrayFormulaSomaQtd.push(`B${curResRow}`);
+                arrayFormulaSomaDinheiro.push(`C${curResRow}`);
+                curResRow++;
+            });
+
+            sheetResumo.addRow([]);
+            const finalRow = sheetResumo.addRow([ "CUSTO TOTAL GERAL", { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal }, { formula: arrayFormulaSomaDinheiro.join('+'), result: somaSuperTotal } ]);
+            finalRow.height = 30; 
+            finalRow.font = { bold: true, size: 13, color: { argb: 'FFFFFFFF' } };
+            finalRow.eachCell(c => { 
+                c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+                c.alignment = { vertical: 'middle', horizontal: 'center' };
+            });
+            finalRow.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
+            finalRow.getCell(3).numFmt = '"R$ "#,##0.00';
+
+            const worksheets = workbook.worksheets;
+            const resumoIndex = worksheets.findIndex(ws => ws.name === 'RESUMO GERAL');
+            const [resumoWs] = worksheets.splice(resumoIndex, 1);
+            worksheets.unshift(resumoWs);
+        }
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Custo_CestaBasica_${mesReferencia}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+    } catch(err) {
+        mostrarAlerta("Erro ao gerar Excel: " + err.message, "erro");
     }
 };
 
