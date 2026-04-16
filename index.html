@@ -13,6 +13,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     
     <style>
         /* TEMA DARK BLUE PREMIUM */
@@ -2310,9 +2311,15 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                 <option value="">Carregando...</option>
             </select>
         </div>
-        <button class="btn-success" style="background-color: #ff9800; color: #000; border: none; padding: 12px 30px;" onclick="calcularVRAgora()">
-            <i class="fa-solid fa-calculator"></i> Calcular VR
-        </button>
+        
+        <div style="display: flex; gap: 10px;">
+            <button class="btn-success" style="background-color: #ff9800; color: #000; border: none; padding: 12px 20px;" onclick="calcularVRAgora()">
+                <i class="fa-solid fa-calculator"></i> Calcular VR
+            </button>
+            <button id="btn-exportar-vr" class="btn-secondary hidden" style="border-color: #28a745; color: #28a745; padding: 12px 20px;" onclick="exportarExcelVR()">
+                <i class="fa-solid fa-file-excel"></i> Exportar Excel
+            </button>
+        </div>
     </div>
 
     <table id="tabela-vr" style="margin-top: 20px;">
@@ -15165,17 +15172,24 @@ document.getElementById('form-config-vr').addEventListener('submit', async (e) =
     }
 });
 
-// A NOVA CALCULADORA DO VR (Lendo do BD e sem o bug do CPF)
+// ==========================================
+// A NOVA CALCULADORA DO VR (Com suporte a Exportação Excel)
+// ==========================================
+window.vrCalculadoPorUnidade = {}; // Guarda os dados limpos para o Excel
+
 window.calcularVRAgora = async function() {
     const mesAno = document.getElementById('vr-mes').value;
     const unidadeSelecionada = document.getElementById('vr-unidade').value;
     const tbody = document.getElementById('lista-vr-body');
+    const btnExcel = document.getElementById('btn-exportar-vr');
 
     if (!mesAno || !unidadeSelecionada) {
         return mostrarAlerta("Preencha o Mês e a Unidade corretamente!", "aviso");
     }
 
     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Consultando regras de unidade e processando escalas virtuais...</td></tr>';
+    btnExcel.classList.add('hidden');
+    window.vrCalculadoPorUnidade = {}; // Zera o cache do Excel
 
     try {
         // Puxa as regras do VR
@@ -15199,7 +15213,6 @@ window.calcularVRAgora = async function() {
         const dAntI = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-01`;
         const dAntF = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-${new Date(anoAnt, mesAnt, 0).getDate()}`;
 
-        // 👇 CORREÇÃO: Removido o 'cpf' da busca do banco para não dar erro
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
@@ -15276,6 +15289,7 @@ window.calcularVRAgora = async function() {
 
         let html = '';
         let totalFinanceiroGeral = 0;
+        let contagemValidada = 0; // Quantos entraram na lista
 
         for (let id in consolidados) {
             const colab = consolidados[id];
@@ -15284,7 +15298,6 @@ window.calcularVRAgora = async function() {
             if (unidadeSelecionada !== 'Todas' && !(colab.unidadeReal || '').includes(unidadeSelecionada)) continue;
             if (colab.foiDesligadoAtual) continue; 
 
-            // Acha a regra da unidade no BD 
             let regraUnidade;
             if (unidadeSelecionada !== 'Todas') {
                 regraUnidade = regrasVR.find(r => (r.unidade || '').trim().toUpperCase() === unidadeSelecionada.trim().toUpperCase());
@@ -15293,7 +15306,6 @@ window.calcularVRAgora = async function() {
                 regraUnidade = regrasVR.find(r => unidadesDoColab.includes((r.unidade || '').trim().toUpperCase()));
             }
 
-            // Se não tem regra ou se tá configurado pra NÃO RECEBER VR, pula ele!
             if (!regraUnidade || String(regraUnidade.recebe_vr) === 'false') continue;
 
             const valorDiariaUnidade = parseFloat(regraUnidade.valor_diaria) || 0;
@@ -15379,6 +15391,27 @@ window.calcularVRAgora = async function() {
             const valorFinal = diasAPagar * valorDiariaUnidade;
             totalFinanceiroGeral += valorFinal;
 
+            // 👇 ALIMENTA OS DADOS PARA O EXCEL (Se a unidade não existe no objeto, cria) 👇
+            const nomeDaUnidade = regraUnidade.unidade.trim();
+            if (!window.vrCalculadoPorUnidade[nomeDaUnidade]) {
+                window.vrCalculadoPorUnidade[nomeDaUnidade] = [];
+            }
+            
+            // Extrai o valor limpo sem HTML pro excel ficar perfeito
+            let diasPadraoLimpo = typeof labelDiasFixos === 'number' ? labelDiasFixos : parseFloat(labelDiasFixos.toString().match(/[\d.]+/)[0]);
+
+            window.vrCalculadoPorUnidade[nomeDaUnidade].push({
+                nome: colab.nome,
+                cpf: colab.cpf || 'Não Cadastrado',
+                jornada: tipoJornada,
+                diaria: valorDiariaUnidade,
+                diasPadrao: diasPadraoLimpo,
+                abatimentos: abatimentosMesAnterior,
+                diasAPagar: diasAPagar
+            });
+
+            contagemValidada++;
+
             const cpfColab = colab.cpf || adm.cpf || 'CPF não cadastrado';
             const tagCpf = `<br><span style="font-size: 0.8rem; color: var(--cor-texto-principal);"><i class="fa-solid fa-id-card" style="color: #ff9800;"></i> ${cpfColab}</span>`;
 
@@ -15397,7 +15430,7 @@ window.calcularVRAgora = async function() {
             </tr>`;
         }
 
-        if (html === '') {
+        if (html === '' || contagemValidada === 0) {
             tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador recebe VR neste mês ou unidade selecionada.</td></tr>';
         } else {
             html += `<tr style="background: rgba(255, 152, 0, 0.15);">
@@ -15405,11 +15438,121 @@ window.calcularVRAgora = async function() {
                 <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalFinanceiroGeral.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
             tbody.innerHTML = html;
+            
+            // Habilita o botão do Excel
+            btnExcel.classList.remove('hidden');
         }
 
     } catch (err) {
         tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
         console.error(err);
+    }
+};
+
+// =============================================================
+// GERADOR DO ARQUIVO EXCEL MÚLTIPLAS ABAS (SHEETJS NATIVO)
+// =============================================================
+window.exportarExcelVR = function() {
+    if (!window.vrCalculadoPorUnidade || Object.keys(window.vrCalculadoPorUnidade).length === 0) {
+        return mostrarAlerta("Nenhum dado encontrado. Por favor, clique em Calcular VR primeiro.", "aviso");
+    }
+
+    try {
+        mostrarAlerta("Construindo planilha, aguarde...", "sucesso");
+        
+        // Inicia o livro de Excel em branco
+        var wb = XLSX.utils.book_new();
+        var resumoTotais = []; // Guarda o total de cada unidade para fazer a Aba Mestra
+        
+        // Loop por cada unidade calculada
+        for (const [unidade, colaboradores] of Object.entries(window.vrCalculadoPorUnidade)) {
+            // A matriz de dados começa com os Cabeçalhos (A1 até H1)
+            var ws_data = [
+                ["Colaborador", "CPF", "Jornada", "Valor Diária", "Dias Padrão", "Abatimentos", "Dias a Pagar", "Total (R$)"]
+            ];
+
+            let rowNum = 2; // Começa na linha 2
+            
+            // Ordem Alfabética pra ficar bonitinho
+            colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
+
+            colaboradores.forEach(c => {
+                ws_data.push([
+                    c.nome,
+                    c.cpf,
+                    c.jornada,
+                    { t: 'n', v: c.diaria, z: '"R$ "#,##0.00' },          // Formata como Dinheiro
+                    { t: 'n', v: c.diasPadrao, z: '0.0' },                // Formata número com 1 casa
+                    { t: 'n', v: c.abatimentos },                         // Número inteiro
+                    { t: 'n', v: c.diasAPagar, z: '0.0' },                // Número com 1 casa
+                    { t: 'n', f: `D${rowNum}*G${rowNum}`, z: '"R$ "#,##0.00' } // FÓRMULA: Diária * Dias
+                ]);
+                rowNum++;
+            });
+
+            // Linha final do Total desta unidade (Fórmula SUM inteligente)
+            ws_data.push([
+                "TOTAL DA UNIDADE", "", "", "", "", "", "",
+                { t: 'n', f: `SUM(H2:H${rowNum-1})`, z: '"R$ "#,##0.00' } // Soma a coluna H inteira
+            ]);
+
+            // Transforma o array em Aba do Excel
+            var ws = XLSX.utils.aoa_to_sheet(ws_data);
+            
+            // Largura das colunas (Beleza)
+            ws['!cols'] = [ {wch: 40}, {wch: 16}, {wch: 16}, {wch: 15}, {wch: 12}, {wch: 12}, {wch: 14}, {wch: 18} ];
+
+            // O Excel aceita abas com no máximo 31 caracteres e sem símbolos doidos
+            let sheetName = unidade.substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '');
+            XLSX.utils.book_append_sheet(wb, ws, sheetName);
+
+            // Joga os dados da unidade para o Resumo Mestre (Fórmula linkando as planilhas)
+            resumoTotais.push([
+                unidade,
+                colaboradores.length,
+                { t: 'n', f: `SUM('${sheetName}'!H2:H${rowNum-1})`, z: '"R$ "#,##0.00' } // Ex: =SUM('MATRIZ'!H2:H20)
+            ]);
+        }
+
+        // Cria a Aba "TOTAIS" apenas se gerou de múltiplas unidades
+        if (Object.keys(window.vrCalculadoPorUnidade).length > 1) {
+            var ws_resumo_data = [
+                ["Unidade Operacional", "Qtd Funcionários", "Valor Total VR"]
+            ];
+            
+            let rowResumo = 2;
+            resumoTotais.forEach(r => {
+                ws_resumo_data.push(r);
+                rowResumo++;
+            });
+
+            // Linha final de soma geral
+            ws_resumo_data.push([
+                "CUSTO TOTAL DE VR", 
+                { t: 'n', f: `SUM(B2:B${rowResumo-1})` }, 
+                { t: 'n', f: `SUM(C2:C${rowResumo-1})`, z: '"R$ "#,##0.00' }
+            ]);
+
+            var ws_resumo = XLSX.utils.aoa_to_sheet(ws_resumo_data);
+            ws_resumo['!cols'] = [ {wch: 40}, {wch: 20}, {wch: 22} ];
+            
+            // Adiciona a aba TOTAIS
+            XLSX.utils.book_append_sheet(wb, ws_resumo, "TOTAIS");
+            
+            // Joga a aba de TOTAIS para ser a PRIMEIRA aba do Excel (Índice 0)
+            let sheetNames = wb.SheetNames;
+            let totaisIndex = sheetNames.indexOf("TOTAIS");
+            sheetNames.splice(totaisIndex, 1);
+            sheetNames.unshift("TOTAIS");
+        }
+
+        // Salva e faz o download
+        const mes = document.getElementById('vr-mes').value;
+        XLSX.writeFile(wb, `Relatorio_VR_${mes}.xlsx`);
+
+    } catch(err) {
+        console.error(err);
+        mostrarAlerta("Ocorreu um erro ao gerar a planilha.", "erro");
     }
 };
        // ==========================================
