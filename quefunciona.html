@@ -10147,6 +10147,31 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
                 }
             }
 
+        // 👇 RADAR ANTI-CONFLITO: AUSÊNCIAS 👇
+            btn.disabled = true; 
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando datas...';
+
+            const { data: conflitoAus } = await supabaseClient.from('ausencias')
+                .select('sigla, status')
+                .eq('colaborador_id', idColab)
+                .in('status', ['Pendente', 'Aprovado'])
+                .lte('data_inicio', dataFim)
+                .gte('data_fim', dataInicio);
+
+            const { data: conflitoFT } = await supabaseClient.from('horas_extras_ft')
+                .select('sigla, status')
+                .eq('colaborador_id', idColab)
+                .in('status', ['Pendente', 'Aprovado'])
+                .lte('data_inicio', dataFim)
+                .gte('data_fim', dataInicio);
+
+            if ((conflitoAus && conflitoAus.length > 0) || (conflitoFT && conflitoFT.length > 0)) {
+                btn.disabled = false; 
+                btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação de Ausência';
+                return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Já existe um registro (Atestado, Falta ou FT) neste mesmo período para este colaborador.<br>Verifique o histórico ou a Central.`, "erro", "⛔ Conflito de Datas");
+            }
+            // 👆 FIM DO RADAR 👆
+
             const confirmado = await mostrarConfirmacao(`Deseja enviar o registro de <b>${sigla}</b> para <b>${colabNome}</b>?`, "Confirmar Ausência");
             if (!confirmado) return;
 
@@ -12165,6 +12190,34 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
         objBanco.observacao = motivoText;
     }
 
+        // 👇 RADAR ANTI-CONFLITO: FT E HORA EXTRA 👇
+    btn.disabled = true; 
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando datas...';
+
+    // Monta um array com os dias que precisam ser checados (A FT em si e a Folga Programada se houver)
+    let datasParaChecar = [dataAlvo];
+    if (tipo === 'FT' && document.getElementById('ft-pagamento').value !== 'Dinheiro') {
+        datasParaChecar.push(document.getElementById('ft-data-fp').value);
+    }
+
+    let temConflito = false;
+    for (let dataCheck of datasParaChecar) {
+        const { data: confA } = await supabaseClient.from('ausencias').select('id').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
+        const { data: confF } = await supabaseClient.from('horas_extras_ft').select('id').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
+        
+        if ((confA && confA.length > 0) || (confF && confF.length > 0)) {
+            temConflito = true;
+            break;
+        }
+    }
+
+    if (temConflito) {
+        btn.disabled = false; 
+        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação para o Admin';
+        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>O colaborador já possui outro lançamento (Atestado, Falta, etc.) no dia do plantão extra ou no dia da folga programada.`, "erro", "⛔ Conflito de Datas");
+    }
+    // 👆 FIM DO RADAR 👆
+
     const confirmado = await mostrarConfirmacao(`Deseja enviar este registro de ${tipo} para o Admin aprovar?`, "Confirmar Lançamento");
     if (!confirmado) return;
 
@@ -12678,6 +12731,30 @@ document.getElementById('form-troca-turno').addEventListener('submit', async (e)
     if (obj.solicitante_id === obj.substituto_id) {
         return mostrarAlerta("O solicitante não pode ser o mesmo que o substituto!", "erro");
     }
+
+        // 👇 RADAR ANTI-CONFLITO: TROCA DE TURNO 👇
+    btn.disabled = true; 
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando agendas...';
+
+    // Função interna rápida para checar um dia de um colaborador
+    const checkConflito = async (id, dataCheck) => {
+        const { data: confA } = await supabaseClient.from('ausencias').select('id').eq('colaborador_id', id).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
+        const { data: confF } = await supabaseClient.from('horas_extras_ft').select('id').eq('colaborador_id', id).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
+        return (confA && confA.length > 0) || (confF && confF.length > 0);
+    };
+
+    // Checa se algum dos 2 está atestado/faltou no dia que precisa trabalhar ou no dia que vai folgar
+    const conflitoSol1 = await checkConflito(obj.solicitante_id, obj.dia_solicitante_ira);
+    const conflitoSol2 = await checkConflito(obj.solicitante_id, obj.dia_substituto_ira);
+    const conflitoSub1 = await checkConflito(obj.substituto_id, obj.dia_substituto_ira);
+    const conflitoSub2 = await checkConflito(obj.substituto_id, obj.dia_solicitante_ira);
+
+    if (conflitoSol1 || conflitoSol2 || conflitoSub1 || conflitoSub2) {
+         btn.disabled = false; 
+         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Troca para o Admin';
+         return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Um dos colaboradores envolvidos possui Atestado, Falta ou Folga Trabalhada registrada em um dos dias dessa troca.`, "erro", "⛔ Conflito na Escala");
+    }
+    // 👆 FIM DO RADAR 👆
 
     const confirmado = await mostrarConfirmacao(`Deseja enviar a solicitação de troca entre ${obj.nome_solicitante} e ${obj.nome_substituto}?`, "Confirmar Troca");
     if (!confirmado) return;
