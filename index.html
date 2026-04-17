@@ -6776,28 +6776,51 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     const resc = colab.dados_rescisao || {};
     const adm = colab.dados_admissao || {};
     
-    // --- CÁLCULO DE FÉRIAS PROPORCIONAIS NA RESCISÃO ---
-    let resumoFeriasHtml = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.8rem;"><i class="fa-solid fa-spinner fa-spin"></i> Calculando férias proporcionais...</p>';
+    // --- CÁLCULO DE FÉRIAS COMPLETAS NA RESCISÃO ---
+    let resumoFeriasHtml = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.8rem;"><i class="fa-solid fa-spinner fa-spin"></i> Levantando histórico de férias e cálculos rescisórios...</p>';
     
     try {
         const dataAdm = new Date((adm.jornada?.data_inicio || adm.data_inicio) + 'T00:00:00');
         const partesResc = resc.ultimo_dia.split('/');
         const dataResc = new Date(partesResc[2], partesResc[1] - 1, partesResc[0], 23, 59, 59);
 
-        // 1. Descobrir o Início do Último Período Aquisitivo (Sempre reseta no aniversário de admissão)
+        // 1. BUSCAR TODAS AS FÉRIAS QUE ELE JÁ TIROU NO SISTEMA
+        const { data: feriasTiradas } = await supabaseClient
+            .from('solicitacoes_ferias')
+            .select('data_inicio_ferias, data_fim_ferias')
+            .eq('colaborador_id', colab.id)
+            .eq('status', 'Aprovado');
+
+        let diasJaGozados = 0;
+        if (feriasTiradas) {
+            feriasTiradas.forEach(f => {
+                const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
+                const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
+                diasJaGozados += Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+            });
+        }
+
+        // 2. CALCULAR ANOS COMPLETOS E FÉRIAS VENCIDAS
         let anosCompletos = dataResc.getFullYear() - dataAdm.getFullYear();
         let ultimoAniversario = new Date(dataAdm);
         ultimoAniversario.setFullYear(dataAdm.getFullYear() + anosCompletos);
         
+        // Se a rescisão foi antes do aniversário de admissão deste ano
         if (dataResc < ultimoAniversario) {
+            anosCompletos--;
             ultimoAniversario.setFullYear(ultimoAniversario.getFullYear() - 1);
         }
         
-        const dataInicioPA = ultimoAniversario;
-        const dataInicioPA_ISO = dataInicioPA.toISOString().split('T')[0];
+        // Ganha 30 dias para cada ano completo. Depois deduzimos as que ele já tirou.
+        let diasVencidosGanhos = anosCompletos * 30;
+        let saldoVencidas = diasVencidosGanhos - diasJaGozados;
+        if (saldoVencidas < 0) saldoVencidas = 0;
+
+        // 3. CALCULAR FÉRIAS PROPORCIONAIS DO ANO ATUAL (A partir do último aniversário)
+        const dataInicioPA_ISO = ultimoAniversario.toISOString().split('T')[0];
         const dataFimPA_ISO = dataResc.toISOString().split('T')[0];
 
-        // 2. Buscar Faltas (FA) APENAS do período atual incompleto
+        // Busca Faltas (FA) APENAS deste último ciclo para deduzir das proporcionais
         const { data: faltasData } = await supabaseClient
             .from('ausencias')
             .select('id')
@@ -6809,9 +6832,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
         const totalFaltas = faltasData?.length || 0;
 
-        // 3. Calcular "Avos" (Meses trabalhados no período)
+        // Conta quantos meses inteiros (ou com mais de 14 dias) ele trabalhou no ciclo atual
         let mesesTrabalhados = 0;
-        let tempData = new Date(dataInicioPA);
+        let tempData = new Date(ultimoAniversario);
         while (tempData < dataResc) {
             let proxMes = new Date(tempData);
             proxMes.setMonth(proxMes.getMonth() + 1);
@@ -6823,36 +6846,54 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             tempData = proxMes;
         }
 
-        // 4. Tabela de Direito (Baseada nas faltas)
+        // Tabela da CLT (Redução por Faltas)
         let diasBase = 30;
         if (totalFaltas >= 6 && totalFaltas <= 14) diasBase = 24;
         else if (totalFaltas >= 15 && totalFaltas <= 23) diasBase = 18;
         else if (totalFaltas >= 24 && totalFaltas <= 32) diasBase = 12;
         else if (totalFaltas > 32) diasBase = 0;
 
-        // 5. Cálculo Final e Formatação Bonita (Tira o .0 e bota vírgula)
         const diasProporcionais = (diasBase / 12) * mesesTrabalhados;
-        const diasExibicao = parseFloat(diasProporcionais.toFixed(1)).toString().replace('.', ',');
+        
+        // 4. SOMA FINAL E FORMATAÇÃO (Sem ".0")
+        const totalGeralDias = saldoVencidas + diasProporcionais;
+        
+        // Funçãozinha para tirar o ".0" e transformar ponto em vírgula
+        const formatarDias = (num) => parseFloat(num.toFixed(1)).toString().replace('.', ',');
 
         resumoFeriasHtml = `
-            <div style="background: rgba(40, 167, 69, 0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(40, 167, 69, 0.2); margin-bottom: 20px;">
-                <strong style="color: var(--cor-sucesso); font-size: 0.9rem;"><i class="fa-solid fa-umbrella-beach"></i> Férias Proporcionais na Rescisão</strong>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; font-size: 0.85rem;">
-                    <div><b style="color: var(--cor-texto-secundario);">Início do Período Atual:</b><br>${formatarDataBR(dataInicioPA_ISO)}</div>
-                    <div><b style="color: var(--cor-texto-secundario);">Tempo de Casa (Atual):</b><br>${mesesTrabalhados} mês(es) (${mesesTrabalhados}/12)</div>
-                    <div><b style="color: var(--cor-texto-secundario);">Faltas no Período (FA):</b><br><span style="color: ${totalFaltas > 5 ? 'var(--cor-perigo)' : 'inherit'}">${totalFaltas} faltas</span></div>
-                    <div><b style="color: var(--cor-texto-secundario);">Proporcional a Receber:</b><br><b style="font-size: 1.1rem; color: var(--cor-sucesso);">${diasExibicao} dias</b></div>
+            <div style="background: rgba(40, 167, 69, 0.05); padding: 15px; border-radius: 8px; border: 1px solid rgba(40, 167, 69, 0.3); margin-bottom: 20px;">
+                <strong style="color: var(--cor-sucesso); font-size: 1.05rem; display: block; margin-bottom: 15px; border-bottom: 1px dashed rgba(40, 167, 69, 0.3); padding-bottom: 8px;">
+                    <i class="fa-solid fa-file-invoice-dollar"></i> Resumo de Férias a Indenizar
+                </strong>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 0.85rem;">
+                    <div style="background: rgba(0,0,0,0.15); padding: 12px; border-radius: 6px; border-left: 3px solid #ffd54f;">
+                        <b style="color: #ffd54f; font-size: 0.95rem;"><i class="fa-solid fa-clock-rotate-left"></i> Vencidas / Acumuladas</b><br>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 6px;">Tempo na empresa: ${anosCompletos} ano(s)</span>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 2px;">Dias já tirados (sistema): ${diasJaGozados} dia(s)</span>
+                        <span style="display: block; margin-top: 8px; font-size: 1.05rem;">Saldo Vencidas: <b style="color: #fff;">${formatarDias(saldoVencidas)} dias</b></span>
+                    </div>
+                    
+                    <div style="background: rgba(0,0,0,0.15); padding: 12px; border-radius: 6px; border-left: 3px solid #4fc3f7;">
+                        <b style="color: #4fc3f7; font-size: 0.95rem;"><i class="fa-solid fa-chart-pie"></i> Proporcionais (Ano Atual)</b><br>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 6px;">Ciclo atual: ${mesesTrabalhados}/12 avos</span>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 2px;">Faltas (FA) no ciclo: <span style="color: ${totalFaltas > 5 ? 'var(--cor-perigo)' : 'inherit'}">${totalFaltas} falta(s)</span></span>
+                        <span style="display: block; margin-top: 8px; font-size: 1.05rem;">Saldo Proporcional: <b style="color: #fff;">${formatarDias(diasProporcionais)} dias</b></span>
+                    </div>
                 </div>
-                <small style="display: block; margin-top: 8px; color: var(--cor-texto-secundario); font-style: italic; font-size: 0.75rem; border-top: 1px dashed rgba(40, 167, 69, 0.3); padding-top: 5px;">
-                    * Este cálculo reflete apenas o <b>período aquisitivo atual (incompleto)</b>. Verifique no histórico se o colaborador possui férias de anos anteriores vencidas.
-                </small>
+                
+                <div style="margin-top: 15px; background: rgba(40, 167, 69, 0.15); padding: 12px; border-radius: 6px; text-align: right; font-size: 1.1rem; border: 1px solid rgba(40, 167, 69, 0.3);">
+                    Total Geral a Indenizar: <b style="color: var(--cor-sucesso); font-size: 1.5rem; margin-left: 10px;">${formatarDias(totalGeralDias)} dias</b>
+                </div>
             </div>
         `;
     } catch (e) {
-        resumoFeriasHtml = '<p style="color: var(--cor-perigo);">Erro ao calcular verbas de férias.</p>';
+        console.error("Erro ao calcular férias na rescisão:", e);
+        resumoFeriasHtml = '<p style="color: var(--cor-perigo);">Erro ao processar o cálculo financeiro das férias.</p>';
     }
 
-    // --- MONTAGEM DO MODAL ---
+    // --- MONTAGEM DOS LINKS DE ARQUIVOS (MANTIDO IGUAL) ---
     let linksDocs = '';
     if (resc.documentos) resc.documentos.forEach((lnk, i) => linksDocs += `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(220,53,69,0.1); color: var(--cor-perigo); border: 1px solid var(--cor-perigo); text-decoration: none; padding: 8px 12px; margin-right: 10px; margin-bottom: 10px;"><i class="fa-solid fa-file-arrow-down"></i> Doc Gestor ${i + 1}</a>`);
     if (resc.doc_gerado_rh) linksDocs += `<a href="${resc.doc_gerado_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 8px 12px; margin-right: 10px; margin-bottom: 10px;"><i class="fa-solid fa-file-export"></i> Termo RH</a>`;
@@ -6860,7 +6901,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
     const modalHtml = `
     <div id="modal-resc-concluida" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 650px; border: 1px solid var(--cor-perigo); position: relative; max-height: 95vh; overflow-y: auto;">
+        <div class="glass-card" style="width: 100%; max-width: 700px; border: 1px solid var(--cor-perigo); position: relative; max-height: 95vh; overflow-y: auto;">
             <button onclick="document.getElementById('modal-resc-concluida').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
             <h3 style="color: var(--cor-perigo); margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;"><i class="fa-solid fa-user-slash"></i> Desligamento Concluído: ${colab.nome}</h3>
             
