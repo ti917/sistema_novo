@@ -10115,6 +10115,39 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         ausDataInicio.addEventListener('change', atualizarPainelAusenciaTempoReal);
         ausDataFim.addEventListener('change', atualizarPainelAusenciaTempoReal);
 
+        // ========================================================
+// 🚨 RADAR GLOBAL ANTI-CONFLITO DE AGENDAS 🚨
+// ========================================================
+window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck) {
+    // 1. Checa Ausências / Atestados / Faltas
+    const { data: confA } = await supabaseClient.from('ausencias').select('sigla').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataFimCheck).gte('data_fim', dataIniCheck);
+    if (confA && confA.length > 0) return confA[0].sigla;
+
+    // 2. Checa Férias
+    const { data: confFer } = await supabaseClient.from('solicitacoes_ferias').select('id').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio_ferias', dataFimCheck).gte('data_fim_ferias', dataIniCheck);
+    if (confFer && confFer.length > 0) return 'Férias';
+
+    // 3. Checa Horas Extras e Folgas Programadas (FT / FP)
+    const { data: confF } = await supabaseClient.from('horas_extras_ft').select('data_inicio, data_fim').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']);
+    if (confF && confF.length > 0) {
+        for (let f of confF) {
+            if (f.data_inicio >= dataIniCheck && f.data_inicio <= dataFimCheck) return 'FT/Hora Extra';
+            if (f.data_fim && f.data_fim >= dataIniCheck && f.data_fim <= dataFimCheck) return 'Folga Programada (FP)';
+        }
+    }
+
+    // 4. Checa Trocas de Turno (TP / FP)
+    const { data: confT } = await supabaseClient.from('trocas_turno').select('dia_solicitante_ira, dia_substituto_ira').in('status', ['Pendente', 'Aprovado']).or(`solicitante_id.eq.${idColab},substituto_id.eq.${idColab}`);
+    if (confT && confT.length > 0) {
+        for (let t of confT) {
+            if (t.dia_solicitante_ira >= dataIniCheck && t.dia_solicitante_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+            if (t.dia_substituto_ira >= dataIniCheck && t.dia_substituto_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+        }
+    }
+
+    return null; // Caminho Livre!
+};
+
         document.getElementById('form-ausencia').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('btn-salvar-ausencia');
@@ -10151,24 +10184,12 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
             btn.disabled = true; 
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando datas...';
 
-            const { data: conflitoAus } = await supabaseClient.from('ausencias')
-                .select('sigla, status')
-                .eq('colaborador_id', idColab)
-                .in('status', ['Pendente', 'Aprovado'])
-                .lte('data_inicio', dataFim)
-                .gte('data_fim', dataInicio);
-
-            const { data: conflitoFT } = await supabaseClient.from('horas_extras_ft')
-                .select('sigla, status')
-                .eq('colaborador_id', idColab)
-                .in('status', ['Pendente', 'Aprovado'])
-                .lte('data_inicio', dataFim)
-                .gte('data_fim', dataInicio);
-
-            if ((conflitoAus && conflitoAus.length > 0) || (conflitoFT && conflitoFT.length > 0)) {
+            const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim);
+            
+            if (motivoConflito) {
                 btn.disabled = false; 
                 btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação de Ausência';
-                return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Já existe um registro (Atestado, Falta ou FT) neste mesmo período para este colaborador.<br>Verifique o histórico ou a Central.`, "erro", "⛔ Conflito de Datas");
+                return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Já existe um registro de <b>${motivoConflito}</b> cruzando com este período.<br>Verifique a Escala ou a Central.`, "erro", "⛔ Conflito de Datas");
             }
             // 👆 FIM DO RADAR 👆
 
@@ -12190,31 +12211,21 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
         objBanco.observacao = motivoText;
     }
 
-        // 👇 RADAR ANTI-CONFLITO: FT E HORA EXTRA 👇
+       // 👇 RADAR ANTI-CONFLITO: FT E HORA EXTRA 👇
     btn.disabled = true; 
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando datas...';
 
-    // Monta um array com os dias que precisam ser checados (A FT em si e a Folga Programada se houver)
-    let datasParaChecar = [dataAlvo];
+    let conf1 = await window.checarConflitoGlobal(idColab, dataAlvo, dataAlvo);
+    let conf2 = null;
     if (tipo === 'FT' && document.getElementById('ft-pagamento').value !== 'Dinheiro') {
-        datasParaChecar.push(document.getElementById('ft-data-fp').value);
+        const dFp = document.getElementById('ft-data-fp').value;
+        if (dFp) conf2 = await window.checarConflitoGlobal(idColab, dFp, dFp);
     }
 
-    let temConflito = false;
-    for (let dataCheck of datasParaChecar) {
-        const { data: confA } = await supabaseClient.from('ausencias').select('id').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
-        const { data: confF } = await supabaseClient.from('horas_extras_ft').select('id').eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
-        
-        if ((confA && confA.length > 0) || (confF && confF.length > 0)) {
-            temConflito = true;
-            break;
-        }
-    }
-
-    if (temConflito) {
+    if (conf1 || conf2) {
         btn.disabled = false; 
         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação para o Admin';
-        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>O colaborador já possui outro lançamento (Atestado, Falta, etc.) no dia do plantão extra ou no dia da folga programada.`, "erro", "⛔ Conflito de Datas");
+        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>O colaborador já possui um registro de <b>${conf1 || conf2}</b> no dia do plantão ou da folga programada.`, "erro", "⛔ Conflito de Datas");
     }
     // 👆 FIM DO RADAR 👆
 
@@ -12736,23 +12747,16 @@ document.getElementById('form-troca-turno').addEventListener('submit', async (e)
     btn.disabled = true; 
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando agendas...';
 
-    // Função interna rápida para checar um dia de um colaborador
-    const checkConflito = async (id, dataCheck) => {
-        const { data: confA } = await supabaseClient.from('ausencias').select('id').eq('colaborador_id', id).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
-        const { data: confF } = await supabaseClient.from('horas_extras_ft').select('id').eq('colaborador_id', id).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', dataCheck).gte('data_fim', dataCheck);
-        return (confA && confA.length > 0) || (confF && confF.length > 0);
-    };
+    const confSol1 = await window.checarConflitoGlobal(obj.solicitante_id, obj.dia_solicitante_ira, obj.dia_solicitante_ira);
+    const confSol2 = await window.checarConflitoGlobal(obj.solicitante_id, obj.dia_substituto_ira, obj.dia_substituto_ira);
+    const confSub1 = await window.checarConflitoGlobal(obj.substituto_id, obj.dia_substituto_ira, obj.dia_substituto_ira);
+    const confSub2 = await window.checarConflitoGlobal(obj.substituto_id, obj.dia_solicitante_ira, obj.dia_solicitante_ira);
 
-    // Checa se algum dos 2 está atestado/faltou no dia que precisa trabalhar ou no dia que vai folgar
-    const conflitoSol1 = await checkConflito(obj.solicitante_id, obj.dia_solicitante_ira);
-    const conflitoSol2 = await checkConflito(obj.solicitante_id, obj.dia_substituto_ira);
-    const conflitoSub1 = await checkConflito(obj.substituto_id, obj.dia_substituto_ira);
-    const conflitoSub2 = await checkConflito(obj.substituto_id, obj.dia_solicitante_ira);
-
-    if (conflitoSol1 || conflitoSol2 || conflitoSub1 || conflitoSub2) {
+    if (confSol1 || confSol2 || confSub1 || confSub2) {
          btn.disabled = false; 
          btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Troca para o Admin';
-         return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Um dos colaboradores envolvidos possui Atestado, Falta ou Folga Trabalhada registrada em um dos dias dessa troca.`, "erro", "⛔ Conflito na Escala");
+         const qual = confSol1 || confSol2 || confSub1 || confSub2;
+         return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Um dos colaboradores já possui um registro de <b>${qual}</b> em um dos dias dessa troca.`, "erro", "⛔ Conflito na Escala");
     }
     // 👆 FIM DO RADAR 👆
 
