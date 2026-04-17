@@ -570,6 +570,11 @@ input[type="month"]::-webkit-calendar-picker-indicator {
             pointer-events: none;
         }
 
+        .celula-ferias { background: rgba(255, 213, 79, 0.15); color: #ffd54f; font-weight: bold; cursor: pointer; transition: 0.2s; border-bottom: 2px solid #ffd54f; }
+        .celula-ferias:hover { background: rgba(255, 213, 79, 0.4); }
+        
+        [data-theme="light"] .celula-ferias { background: #fff8e1; color: #f57f17; border-color: #f57f17; }
+
         .celula-fe { 
     background: rgba(0, 150, 136, 0.15); /* Verde-azulado (Teal) */
     color: #009688; 
@@ -3623,6 +3628,7 @@ document.addEventListener('DOMContentLoaded', () => {
     else if(sigla === 'AD') { corTema = '#ff9800'; tituloStatus = 'Antecipação de Demissão'; iconeHead = 'fa-user-clock'; }
     else if(sigla === 'AL') { corTema = '#a6b0cf'; tituloStatus = 'Escala em Outra Unidade'; iconeHead = 'fa-clock-rotate-left'; }
     else if(sigla === 'TR') { corTema = '#a6b0cf'; tituloStatus = 'Transferido'; iconeHead = 'fa-right-from-bracket'; }
+    else if(sigla === 'FER') { corTema = '#ffd54f'; tituloStatus = 'Férias Concedidas'; iconeHead = 'fa-plane-departure'; }
     
     else if(sigla === 'FT') { corTema = '#20c997'; tituloStatus = 'Folga Trabalhada'; iconeHead = 'fa-briefcase'; }
     else if(sigla === 'FP') { corTema = '#28a745'; tituloStatus = 'Folga Programada'; iconeHead = 'fa-mug-hot'; }
@@ -3737,6 +3743,10 @@ document.addEventListener('DOMContentLoaded', () => {
             boxTitle = '<i class="fa-solid fa-briefcase"></i> Detalhes da Folga Trabalhada:';
             boxColor = '#20c997';
             boxBg = 'rgba(32, 201, 151, 0.15)';
+        } else if (sigla === 'FER') { // 👇 NOVO AQUI 👇
+            boxTitle = '<i class="fa-solid fa-plane-departure"></i> Agendamento de Férias:';
+            boxColor = '#ffd54f';
+            boxBg = 'rgba(255, 213, 79, 0.15)';
         }
         
         conteudoExtra += `
@@ -6760,74 +6770,163 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
         };
 
-       // Substitua o trecho dos linksDocs e o modalHtml por este:
-        window.verDetalhesRescisaoConcluida = function(idStr) {
-            const colab = todasRescisoesAprovadas.find(c => c.id === idStr);
-            if(!colab) return;
-            const resc = colab.dados_rescisao || {};
+       window.verDetalhesRescisaoConcluida = async function(idStr) {
+    const colab = todasRescisoesAprovadas.find(c => c.id === idStr);
+    if(!colab) return;
+    const resc = colab.dados_rescisao || {};
+    const adm = colab.dados_admissao || {};
+    
+    // --- CÁLCULO DE FÉRIAS COMPLETAS NA RESCISÃO ---
+    let resumoFeriasHtml = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.8rem;"><i class="fa-solid fa-spinner fa-spin"></i> Levantando histórico de férias e cálculos rescisórios...</p>';
+    
+    try {
+        const dataAdm = new Date((adm.jornada?.data_inicio || adm.data_inicio) + 'T00:00:00');
+        const partesResc = resc.ultimo_dia.split('/');
+        const dataResc = new Date(partesResc[2], partesResc[1] - 1, partesResc[0], 23, 59, 59);
+
+        // 1. BUSCAR TODAS AS FÉRIAS QUE ELE JÁ TIROU NO SISTEMA
+        const { data: feriasTiradas } = await supabaseClient
+            .from('solicitacoes_ferias')
+            .select('data_inicio_ferias, data_fim_ferias')
+            .eq('colaborador_id', colab.id)
+            .eq('status', 'Aprovado');
+
+        let diasJaGozados = 0;
+        if (feriasTiradas) {
+            feriasTiradas.forEach(f => {
+                const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
+                const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
+                diasJaGozados += Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+            });
+        }
+
+        // 2. CALCULAR ANOS COMPLETOS E FÉRIAS VENCIDAS
+        let anosCompletos = dataResc.getFullYear() - dataAdm.getFullYear();
+        let ultimoAniversario = new Date(dataAdm);
+        ultimoAniversario.setFullYear(dataAdm.getFullYear() + anosCompletos);
+        
+        // Se a rescisão foi antes do aniversário de admissão deste ano
+        if (dataResc < ultimoAniversario) {
+            anosCompletos--;
+            ultimoAniversario.setFullYear(ultimoAniversario.getFullYear() - 1);
+        }
+        
+        // Ganha 30 dias para cada ano completo. Depois deduzimos as que ele já tirou.
+        let diasVencidosGanhos = anosCompletos * 30;
+        let saldoVencidas = diasVencidosGanhos - diasJaGozados;
+        if (saldoVencidas < 0) saldoVencidas = 0;
+
+        // 3. CALCULAR FÉRIAS PROPORCIONAIS DO ANO ATUAL (A partir do último aniversário)
+        const dataInicioPA_ISO = ultimoAniversario.toISOString().split('T')[0];
+        const dataFimPA_ISO = dataResc.toISOString().split('T')[0];
+
+        // Busca Faltas (FA) APENAS deste último ciclo para deduzir das proporcionais
+        const { data: faltasData } = await supabaseClient
+            .from('ausencias')
+            .select('id')
+            .eq('colaborador_id', colab.id)
+            .eq('status', 'Aprovado')
+            .eq('sigla', 'FA')
+            .gte('data_inicio', dataInicioPA_ISO)
+            .lte('data_fim', dataFimPA_ISO);
+
+        const totalFaltas = faltasData?.length || 0;
+
+        // Conta quantos meses inteiros (ou com mais de 14 dias) ele trabalhou no ciclo atual
+        let mesesTrabalhados = 0;
+        let tempData = new Date(ultimoAniversario);
+        while (tempData < dataResc) {
+            let proxMes = new Date(tempData);
+            proxMes.setMonth(proxMes.getMonth() + 1);
             
-            let linksDocs = '';
-            if (resc.documentos && resc.documentos.length > 0) {
-                resc.documentos.forEach((docLink, i) => {
-                    linksDocs += `<a href="${docLink}" target="_blank" style="color: var(--cor-perigo); display: inline-block; margin-right: 10px; margin-bottom: 10px; text-decoration: none; padding: 8px 12px; background: rgba(220,53,69,0.1); border-radius: 6px; border: 1px solid rgba(220,53,69,0.3); font-size: 0.8rem;"><i class="fa-solid fa-file-arrow-down"></i> Documento do Gestor ${i + 1}</a>`;
-                });
-            }
-            if (resc.doc_gerado_rh) {
-                linksDocs += `<a href="${resc.doc_gerado_rh}" target="_blank" style="color: #4fc3f7; display: inline-block; margin-right: 10px; margin-bottom: 10px; text-decoration: none; padding: 8px 12px; background: rgba(79,195,247,0.1); border-radius: 6px; border: 1px solid rgba(79,195,247,0.3); font-size: 0.8rem;"><i class="fa-solid fa-file-export"></i> Termo Gerado (RH)</a>`;
-            }
+            let fimContagem = proxMes < dataResc ? proxMes : dataResc;
+            let diffDias = Math.floor((fimContagem - tempData) / (1000 * 3600 * 24));
             
-            // 👇 A MÁGICA ENTRA AQUI: Adicionamos o botão "Refazer" apenas se houver documento assinado e for Admin 👇
-            let btnRefazerHtml = '';
-            if (resc.doc_assinado) {
-                linksDocs += `<a href="${resc.doc_assinado}" target="_blank" style="color: var(--cor-sucesso); display: inline-block; margin-right: 10px; margin-bottom: 10px; text-decoration: none; padding: 8px 12px; background: rgba(40,167,69,0.1); border-radius: 6px; border: 1px solid rgba(40,167,69,0.3); font-size: 0.8rem;"><i class="fa-solid fa-check-double"></i> Termo Assinado (Final)</a>`;
+            if (diffDias >= 15) mesesTrabalhados++;
+            tempData = proxMes;
+        }
+
+        // Tabela da CLT (Redução por Faltas)
+        let diasBase = 30;
+        if (totalFaltas >= 6 && totalFaltas <= 14) diasBase = 24;
+        else if (totalFaltas >= 15 && totalFaltas <= 23) diasBase = 18;
+        else if (totalFaltas >= 24 && totalFaltas <= 32) diasBase = 12;
+        else if (totalFaltas > 32) diasBase = 0;
+
+        const diasProporcionais = (diasBase / 12) * mesesTrabalhados;
+        
+        // 4. SOMA FINAL E FORMATAÇÃO (Sem ".0")
+        const totalGeralDias = saldoVencidas + diasProporcionais;
+        
+        // Funçãozinha para tirar o ".0" e transformar ponto em vírgula
+        const formatarDias = (num) => parseFloat(num.toFixed(1)).toString().replace('.', ',');
+
+        resumoFeriasHtml = `
+            <div style="background: rgba(40, 167, 69, 0.05); padding: 15px; border-radius: 8px; border: 1px solid rgba(40, 167, 69, 0.3); margin-bottom: 20px;">
+                <strong style="color: var(--cor-sucesso); font-size: 1.05rem; display: block; margin-bottom: 15px; border-bottom: 1px dashed rgba(40, 167, 69, 0.3); padding-bottom: 8px;">
+                    <i class="fa-solid fa-file-invoice-dollar"></i> Resumo de Férias a Indenizar
+                </strong>
                 
-                // Se o usuário logado for o Admin, mostramos o botão de Refazer
-                if (usuarioAtual && usuarioAtual.perfil === 'Admin') {
-                     btnRefazerHtml = `
-                        <div style="margin-top: 15px; border-top: 1px dashed var(--cor-borda); padding-top: 15px;">
-                            <button class="btn-danger-mini" style="padding: 10px 15px; font-weight: bold; width: 100%; text-align: center;" onclick="removerAssinaturaRescisaoAdmin('${colab.id}')">
-                                <i class="fa-solid fa-rotate-left"></i> O termo final veio errado? Clique aqui para recusar e devolver para o Gestor
-                            </button>
-                        </div>
-                     `;
-                }
-            }
-            if (!linksDocs) {
-                linksDocs = '<p style="font-size: 0.85rem; color:var(--cor-texto-secundario);">Nenhum documento anexado.</p>';
-            }
-
-            const modalHtml = `
-            <div id="modal-resc-concluida" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
-                <div class="glass-card" style="width: 100%; max-width: 650px; border: 1px solid var(--cor-perigo); position: relative; max-height: 95vh; overflow-y: auto;">
-                    <button onclick="document.getElementById('modal-resc-concluida').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
-                    <h3 style="color: var(--cor-perigo); margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
-                        <i class="fa-solid fa-user-slash"></i> Desligamento Concluído: ${colab.nome}
-                    </h3>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
-                        <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-perigo);">
-                            <small style="color:var(--cor-texto-secundario)">TIPO / AVISO:</small><br>
-                            <b style="font-size:1.1rem; color:var(--cor-texto-principal)">${resc.tipo}</b><br>
-                            <span style="color: var(--cor-perigo); font-weight: bold; font-size: 0.9rem;">${resc.aviso_cumprido}</span>
-                        </div>
-                        <div style="background: rgba(255,193,7,0.05); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-acento);">
-                            <small style="color:var(--cor-texto-secundario)">DATAS IMPORTANTES:</small><br>
-                            <span style="font-size: 0.9rem;">Comunicado: ${formatarDataBR(resc.data_comunicado)}</span><br>
-                            <span style="font-size: 0.9rem;">Último Dia: <b style="color: var(--cor-acento);">${resc.ultimo_dia}</b></span><br>
-                            <span style="font-size: 0.9rem;">Pagamento: <b style="color: var(--cor-sucesso);">${resc.data_pagamento || '-'}</b></span>
-                        </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 0.85rem;">
+                    <div style="background: rgba(0,0,0,0.15); padding: 12px; border-radius: 6px; border-left: 3px solid #ffd54f;">
+                        <b style="color: #ffd54f; font-size: 0.95rem;"><i class="fa-solid fa-clock-rotate-left"></i> Vencidas / Acumuladas</b><br>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 6px;">Tempo na empresa: ${anosCompletos} ano(s)</span>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 2px;">Dias já tirados (sistema): ${diasJaGozados} dia(s)</span>
+                        <span style="display: block; margin-top: 8px; font-size: 1.05rem;">Saldo Vencidas: <b style="color: #fff;">${formatarDias(saldoVencidas)} dias</b></span>
                     </div>
-                    <h4 style="color: var(--cor-texto-secundario); margin-bottom: 10px; font-size: 0.9rem;"><i class="fa-solid fa-paperclip"></i> Documentos da Rescisão:</h4>
-                    <div style="margin-bottom: 20px;">${linksDocs}</div>
                     
-                    ${btnRefazerHtml}
-
-                    <div style="display: flex; gap: 10px; margin-top: 25px;">
-                        <button class="btn-primary" style="width: 100%; height: 50px;" onclick="document.getElementById('modal-resc-concluida').remove()">Fechar Visualização</button>
+                    <div style="background: rgba(0,0,0,0.15); padding: 12px; border-radius: 6px; border-left: 3px solid #4fc3f7;">
+                        <b style="color: #4fc3f7; font-size: 0.95rem;"><i class="fa-solid fa-chart-pie"></i> Proporcionais (Ano Atual)</b><br>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 6px;">Ciclo atual: ${mesesTrabalhados}/12 avos</span>
+                        <span style="color: var(--cor-texto-secundario); display: block; margin-top: 2px;">Faltas (FA) no ciclo: <span style="color: ${totalFaltas > 5 ? 'var(--cor-perigo)' : 'inherit'}">${totalFaltas} falta(s)</span></span>
+                        <span style="display: block; margin-top: 8px; font-size: 1.05rem;">Saldo Proporcional: <b style="color: #fff;">${formatarDias(diasProporcionais)} dias</b></span>
                     </div>
                 </div>
-            </div>`;
-            document.body.insertAdjacentHTML('beforeend', modalHtml);
-        };
+                
+                <div style="margin-top: 15px; background: rgba(40, 167, 69, 0.15); padding: 12px; border-radius: 6px; text-align: right; font-size: 1.1rem; border: 1px solid rgba(40, 167, 69, 0.3);">
+                    Total Geral a Indenizar: <b style="color: var(--cor-sucesso); font-size: 1.5rem; margin-left: 10px;">${formatarDias(totalGeralDias)} dias</b>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        console.error("Erro ao calcular férias na rescisão:", e);
+        resumoFeriasHtml = '<p style="color: var(--cor-perigo);">Erro ao processar o cálculo financeiro das férias.</p>';
+    }
+
+    // --- MONTAGEM DOS LINKS DE ARQUIVOS (MANTIDO IGUAL) ---
+    let linksDocs = '';
+    if (resc.documentos) resc.documentos.forEach((lnk, i) => linksDocs += `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(220,53,69,0.1); color: var(--cor-perigo); border: 1px solid var(--cor-perigo); text-decoration: none; padding: 8px 12px; margin-right: 10px; margin-bottom: 10px;"><i class="fa-solid fa-file-arrow-down"></i> Doc Gestor ${i + 1}</a>`);
+    if (resc.doc_gerado_rh) linksDocs += `<a href="${resc.doc_gerado_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 8px 12px; margin-right: 10px; margin-bottom: 10px;"><i class="fa-solid fa-file-export"></i> Termo RH</a>`;
+    if (resc.doc_assinado) linksDocs += `<a href="${resc.doc_assinado}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: var(--cor-sucesso); border: 1px solid var(--cor-sucesso); text-decoration: none; padding: 8px 12px; margin-right: 10px; margin-bottom: 10px;"><i class="fa-solid fa-check-double"></i> Termo Assinado</a>`;
+
+    const modalHtml = `
+    <div id="modal-resc-concluida" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 700px; border: 1px solid var(--cor-perigo); position: relative; max-height: 95vh; overflow-y: auto;">
+            <button onclick="document.getElementById('modal-resc-concluida').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: var(--cor-perigo); margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;"><i class="fa-solid fa-user-slash"></i> Desligamento Concluído: ${colab.nome}</h3>
+            
+            ${resumoFeriasHtml} <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+                <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-perigo);">
+                    <small style="color:var(--cor-texto-secundario)">TIPO / AVISO:</small><br>
+                    <b style="font-size:1.1rem; color:var(--cor-texto-principal)">${resc.tipo}</b><br>
+                    <span style="color: var(--cor-perigo); font-weight: bold;">${resc.aviso_cumprido}</span>
+                </div>
+                <div style="background: rgba(255,193,7,0.05); padding: 15px; border-radius: 8px; border-left: 4px solid var(--cor-acento);">
+                    <small style="color:var(--cor-texto-secundario)">ÚLTIMO DIA OFICIAL:</small><br>
+                    <b style="font-size:1.3rem; color:var(--cor-acento)">${resc.ultimo_dia}</b>
+                </div>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <h4 style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 10px;"><i class="fa-solid fa-paperclip"></i> Documentos do Arquivo Morto:</h4>
+                ${linksDocs}
+            </div>
+
+            <button class="btn-primary" style="width: 100%; height: 50px;" onclick="document.getElementById('modal-resc-concluida').remove()">Fechar Histórico</button>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
 
         // ==========================================
         // MÓDULO DE ESCALAS MENSAIS E FORMULÁRIOS
@@ -6959,11 +7058,11 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const ultimoDia = new Date(anoSelecionado, mesSelecionado, 0).getDate();
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(ultimoDia).padStart(2, '0')}`;
 
-            // Puxa as ocorrências
+            // 1. Puxa as ocorrências e AGORA AS FÉRIAS TAMBÉM! 👇
             const { data: ausenciasAprovadas } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
             const { data: ftsAprovadas } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
+            const { data: feriasAprovadas } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
             
-            // 👇 ATUALIZADO: Puxa documentos e textos também
             const { data: ocorrenciasPonto } = await supabaseClient.from('ocorrencias_ponto')
                 .select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa')
                 .lte('data_falha', dataFimMes)
@@ -6976,7 +7075,8 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
             const ocorrenciasMescladas = [...(ausenciasAprovadas || []), ...(ftsAprovadas || [])];
 
-            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || []);
+            // 2. Injeta as férias na função do algoritmo 👇
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || []);
             
             if (escalaSalva) {
                 await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
@@ -6997,7 +7097,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     }
 }
         
-       function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = []) {
+      function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = [], listaFerias = []) {
     const partes = mesAno.split('-');
     const ano = parseInt(partes[0]);
     const mes = parseInt(partes[1]) - 1; 
@@ -7211,6 +7311,25 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                         const turno = descobreTurno(hora, '44h Semanais'); 
                         sigla = turno.sigla; cssTipo = turno.css;
                     }
+                }
+            }
+
+        // 👇 LÓGICA DE FÉRIAS NA ESCALA 👇
+            if (listaFerias && listaFerias.length > 0) {
+                const feriasHoje = listaFerias.find(f => {
+                    if (String(f.colaborador_id).trim() !== String(colab.id).trim()) return false;
+                    const [anoIni, mesIni, diaIni] = f.data_inicio_ferias.split('-');
+                    const dIni = new Date(anoIni, mesIni - 1, diaIni, 0, 0, 0, 0);
+                    const [anoFim, mesFim, diaFim] = f.data_fim_ferias.split('-');
+                    const dFim = new Date(anoFim, mesFim - 1, diaFim, 23, 59, 59, 999);
+                    return (dataAtual >= dIni && dataAtual <= dFim);
+                });
+
+                if (feriasHoje) {
+                    sigla = 'FER'; 
+                    cssTipo = 'celula-ferias'; 
+                    hora = 'Férias Acordadas';
+                    obsHPlus = `Período oficial de férias: de <b>${formatarDataBR(feriasHoje.data_inicio_ferias)}</b> até <b>${formatarDataBR(feriasHoje.data_fim_ferias)}</b>.`;
                 }
             }
 
@@ -8095,6 +8214,7 @@ window.exportarPDF = function() {
             else if(txt === 'DES' || txt === 'AD') { cellBg = '#fff3e0'; cellColor = '#e65100'; }
             else if(txt === 'ATM') { cellBg = '#fff3e0'; cellColor = '#f57c00'; bold = 'bold';}
             else if(txt === 'D') { cellBg = '#f5f5f5'; cellColor = '#424242'; } 
+            else if(txt === 'FER') { cellBg = '#fff8e1'; cellColor = '#f57f17'; bold = 'bold'; }
             
             let pad = (index === 0 || index === 1) ? '4px 2px' : '4px 0px';
             let extraCss = (index === 0 || index === 1) ? 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' : '';
@@ -8147,6 +8267,7 @@ window.exportarPDF = function() {
     <span style="width:6px; height:6px; background:#e0f2f1; border:1px solid #009688; border-radius:1px;"></span>
     <b style="color:#00796b">FE:</b> Folga Extra
 </div>
+                    <div style="display: flex; align-items: center; gap: 4px;"><span style="width:6px; height:6px; background:#fff8e1; border:1px solid #f57f17; border-radius:1px;"></span><b style="color:#f57f17">FER:</b> Férias</div>
                     <div style="display: flex; align-items: center; gap: 4px;"><span style="width:6px; height:6px; background:#e8f5e9; border:1px solid #81c784; border-radius:1px;"></span><b style="color:#2e7d32">F:</b> Folga Padrão</div>
                     <div style="display: flex; align-items: center; gap: 4px;"><span style="width:6px; height:6px; background:#e0f7fa; border:1px solid #4db6ac; border-radius:1px;"></span><b style="color:#00897b">FT:</b> Folga Trabalhada</div>
                     <div style="display: flex; align-items: center; gap: 4px;"><span style="width:6px; height:6px; background:#e8f5e9; border:1px solid #81c784; border-radius:1px;"></span><b style="color:#2e7d32">FP:</b> Folga Programada</div>
