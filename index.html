@@ -2273,7 +2273,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
     <button type="button" class="btn-success" style="width: 100%; height: 50px; font-size: 1.1rem; margin-top: 15px;" onclick="salvarGestaoHorarios()"><i class="fa-solid fa-floppy-disk"></i> Salvar Alteração na Escala</button>
 </div>
 
-                        <div id="aba-vale-transporte" class="conteudo-aba-usuario hidden">
+                       <div id="aba-vale-transporte" class="conteudo-aba-usuario hidden">
     <h3 style="margin-bottom: 20px; color: #4fc3f7;"><i class="fa-solid fa-bus"></i> Calculadora de Vale Transporte (VT)</h3>
     <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
         Cálculo baseado na jornada (<b>44h = 21.5 dias</b> / <b>12x36 = 15.5 dias</b>), abatendo qualquer ausência do mês. Os valores e passagens são lidos diretamente do cadastro de admissão.
@@ -2295,6 +2295,9 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <button class="btn-success" style="background-color: #4fc3f7; color: #000; border: none; padding: 12px 30px;" onclick="calcularVTAgora()">
                 <i class="fa-solid fa-calculator"></i> Calcular VT
             </button>
+            <button id="btn-exportar-vt" class="btn-secondary hidden" style="border-color: #4fc3f7; color: #4fc3f7; padding: 12px 20px;" onclick="exportarExcelVT()">
+                <i class="fa-solid fa-file-excel"></i> Exportar Excel
+            </button>
         </div>
     </div>
 
@@ -2302,15 +2305,16 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <thead>
             <tr>
                 <th style="text-align: left;">Colaborador</th>
-                <th>Alocação / Empresa VT</th>
-                <th>Jornada / Dias Base</th>
-                <th>Ausências Abatidas</th>
+                <th>Empresa VT</th>
+                <th>Jornada Base</th>
+                <th>Abatimentos</th>
+                <th>Dias a Pagar</th>
                 <th>Custo Diário</th>
-                <th>Total a Pagar</th>
+                <th>Total Líquido</th>
             </tr>
         </thead>
         <tbody id="lista-vt-body">
-            <tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario);">Selecione o mês, a unidade e clique em Calcular.</td></tr>
+            <tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario);">Selecione o mês, a unidade e clique em Calcular.</td></tr>
         </tbody>
     </table>
 </div>
@@ -17734,19 +17738,24 @@ window.calcularVTDinâmicoAdmissao = function() {
     }
 };
 
-        window.calcularVTAgora = async function() {
+       window.vtCalculadoPorUnidade = {}; // Guarda a conta em memória pro Excel
+
+window.calcularVTAgora = async function() {
     const mesAno = document.getElementById('vt-mes').value;
     const unidadeSelecionada = document.getElementById('vt-unidade').value;
     const tbody = document.getElementById('lista-vt-body');
+    const btnExcel = document.getElementById('btn-exportar-vt');
 
     if (!mesAno || !unidadeSelecionada) {
         return mostrarAlerta("Preencha o Mês e a Unidade corretamente!", "aviso");
     }
 
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando jornadas, valores e ausências...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando jornadas, valores e ausências...</td></tr>';
+    btnExcel.classList.add('hidden');
+    window.vtCalculadoPorUnidade = {};
 
     try {
-        // 1. Busca os valores oficiais de VT nas unidades
+        // Busca os valores oficiais de VT nas unidades
         const { data: unidadesOficiais, error: errUni } = await supabaseClient.from('unidades_oficiais').select('*');
         if (errUni) throw errUni;
 
@@ -17754,20 +17763,20 @@ window.calcularVTDinâmicoAdmissao = function() {
         const anoAtual = parseInt(anoStr);
         const mesAtual = parseInt(mesStr);
 
-        // 2. Busca Colaboradores
+        // Busca Colaboradores
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao').eq('perfil', 'Colaborador');
         if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
         
         const { data: resPerfis } = await queryPerfis;
         const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
 
-        // 3. Busca Ausências do mês alvo
+        // Busca Ausências do mês alvo
         const dataInicioMes = `${anoAtual}-${String(mesAtual).padStart(2,'0')}-01`;
         const dataFimMes = `${anoAtual}-${String(mesAtual).padStart(2,'0')}-${new Date(anoAtual, mesAtual, 0).getDate()}`;
         const { data: ausenciasDB } = await supabaseClient.from('ausencias')
             .select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
 
-        // Calcula a quantidade de dias ausentes por colaborador dentro deste mês
+        // Conta quantos dias de falta o cara tem dentro do mês
         const faltasPorColab = {};
         if (ausenciasDB) {
             ausenciasDB.forEach(a => {
@@ -17794,9 +17803,9 @@ window.calcularVTDinâmicoAdmissao = function() {
             if (unidadeSelecionada !== 'Todas' && !(colab.unidade || '').includes(unidadeSelecionada)) return;
 
             const adm = colab.dados_admissao || {};
-            if (!adm.vt || adm.vt.precisa !== 'Sim') return; // Filtra só quem pediu VT
+            if (!adm.vt || adm.vt.precisa !== 'Sim') return; // Pula quem não tem VT
 
-            // Tenta achar o valor do VT cruzando a empresa de VT selecionada com o banco de unidades
+            // Cruzamento para achar o R$ do VT
             let valorPassagem = 0;
             const unidadeRealDoColab = colab.unidade.split(',')[0].trim();
             const configUnidade = unidadesOficiais.find(u => u.nome === unidadeRealDoColab);
@@ -17811,18 +17820,16 @@ window.calcularVTDinâmicoAdmissao = function() {
                 });
             }
 
-            if (valorPassagem === 0) return; // Se por acaso não achar o valor, pula para não quebrar a tela
+            if (valorPassagem === 0) return; // Se a empresa de ônibus sumiu do mapa, pula
 
-            // Define Jornada Base
+            // As variáveis da matemática
             let jornada = adm.jornada?.tipo || '12x36';
             let diasBase = jornada.includes('12x36') ? 15.5 : 21.5;
 
-            // Puxa as ausências e calcula o que sobrou
             let ausencias = faltasPorColab[colab.id] || 0;
             let diasAPagar = diasBase - ausencias;
-            if (diasAPagar < 0) diasAPagar = 0; // Proteção para não dar negativo
+            if (diasAPagar < 0) diasAPagar = 0; // Impede descontar do salário do cara rs
 
-            // Matemática Final
             let qtdPassagens = adm.vt.quantidade || 2;
             let valorDiario = qtdPassagens * valorPassagem;
             let valorTotal = diasAPagar * valorDiario;
@@ -17832,6 +17839,23 @@ window.calcularVTDinâmicoAdmissao = function() {
 
             const cpfColab = colab.cpf || adm.cpf || 'CPF não cadastrado';
 
+            // ALIMENTA A MEMÓRIA PARA O EXCEL
+            if (!window.vtCalculadoPorUnidade[unidadeRealDoColab]) {
+                window.vtCalculadoPorUnidade[unidadeRealDoColab] = [];
+            }
+            window.vtCalculadoPorUnidade[unidadeRealDoColab].push({
+                nome: colab.nome,
+                cpf: cpfColab,
+                empresaVT: adm.vt.empresa,
+                passagensDia: qtdPassagens,
+                jornada: jornada,
+                diasBase: diasBase,
+                ausencias: ausencias,
+                diasAPagar: diasAPagar,
+                valorDiario: valorDiario,
+                valorTotal: valorTotal
+            });
+
             html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
                 <td style="text-align: left; color: #4fc3f7; padding: 12px; line-height: 1.4;">
                     <strong>${colab.nome}</strong><br>
@@ -17839,17 +17863,19 @@ window.calcularVTDinâmicoAdmissao = function() {
                 </td>
                 <td>
                     <span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda); margin-bottom: 5px;">${unidadeRealDoColab}</span><br>
-                    <small style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-bus"></i> ${adm.vt.empresa}</small>
+                    <small style="color: #4fc3f7;"><i class="fa-solid fa-bus"></i> ${adm.vt.empresa} (${qtdPassagens} un)</small>
                 </td>
                 <td>
                     <strong style="color: var(--cor-texto-principal);">${jornada}</strong><br>
-                    <small style="color: #4fc3f7;">Base: ${diasBase} dias</small>
+                    <small style="color: var(--cor-texto-secundario);">${diasBase} dias fixos</small>
                 </td>
                 <td style="color: var(--cor-perigo); font-weight: bold;">
-                    - ${ausencias} dia(s)
+                    - ${ausencias}
+                </td>
+                <td style="font-weight: bold; font-size: 1.1rem;">
+                    ${diasAPagar}
                 </td>
                 <td>
-                    <strong style="color: var(--cor-texto-principal);">${qtdPassagens} passagens</strong><br>
                     <small style="color: var(--cor-sucesso);">${valorDiario.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} / dia</small>
                 </td>
                 <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">
@@ -17859,18 +17885,232 @@ window.calcularVTDinâmicoAdmissao = function() {
         });
 
         if (html === '' || contagemValidada === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador com VT elegível encontrado nesta busca.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador com VT elegível encontrado nesta busca.</td></tr>';
         } else {
             html += `<tr style="background: rgba(79, 195, 247, 0.15);">
-                <td colspan="5" style="text-align: right; color: #4fc3f7; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VT A PAGAR:</strong></td>
+                <td colspan="6" style="text-align: right; color: #4fc3f7; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VT A PAGAR:</strong></td>
                 <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalGeral.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
             tbody.innerHTML = html;
+            btnExcel.classList.remove('hidden'); // Exibe o botão milagroso
         }
 
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
         console.error(err);
+    }
+};
+
+        window.exportarExcelVT = async function() {
+    if (!window.vtCalculadoPorUnidade || Object.keys(window.vtCalculadoPorUnidade).length === 0) {
+        return mostrarAlerta("Nenhum dado encontrado. Calcule o VT primeiro.", "aviso");
+    }
+
+    try {
+        mostrarAlerta("Pintando e formatando planilha executiva...", "sucesso");
+        
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Portal';
+        workbook.calcProperties.fullCalcOnLoad = true; // Excel calcula tudo sozinho ao abrir
+        
+        const mesAnoOriginal = document.getElementById('vt-mes').value;
+        const [anoStr, mesStr] = mesAnoOriginal.split('-');
+        const mesReferencia = `${mesStr}/${anoStr}`;
+        
+        const dataHoje = new Date().toLocaleDateString('pt-BR');
+        let resumoTotais = []; 
+
+        for (const [unidade, colaboradores] of Object.entries(window.vtCalculadoPorUnidade)) {
+            
+            let sheetName = unidade.substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '');
+            const sheet = workbook.addWorksheet(sheetName);
+
+            // --- CABEÇALHO DO RELATÓRIO ---
+            sheet.mergeCells('A1:I1');
+            const titulo = sheet.getCell('A1');
+            titulo.value = 'RELATÓRIO EXECUTIVO DE CUSTO - VALE TRANSPORTE';
+            titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+            titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+            titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.mergeCells('A2:I2');
+            const subtitulo = sheet.getCell('A2');
+            subtitulo.value = `UNIDADE: ${unidade.toUpperCase()}   |   MÊS: ${mesReferencia}   |   GERADO EM: ${dataHoje}`;
+            subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+            subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
+            subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.addRow([]); // Linha 3 (Vazia de respiro)
+
+            // --- CABEÇALHOS DA TABELA ---
+            const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "EMPRESA VT (LINHA)", "JORNADA BASE", "DIAS PADRÃO", "AUSÊNCIAS (-)", "DIAS A PAGAR", "CUSTO DIÁRIO", "TOTAL LÍQUIDO"]);
+            headerRow.font = { bold: true, color: { argb: 'FF000000' } };
+            headerRow.height = 25;
+            headerRow.eachCell((cell) => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4FC3F7' } }; // Azul claro do VT
+                cell.alignment = { vertical: 'middle', horizontal: 'center' };
+                cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            });
+
+            // Largura fixa para as colunas
+            sheet.columns = [
+                { width: 40 }, { width: 16 }, { width: 25 }, { width: 16 }, 
+                { width: 14 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 20 }
+            ];
+
+            let currentRow = 5; 
+            let somaTotalUnidade = 0;
+            
+            colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
+
+            // --- INJEÇÃO DE DADOS ---
+            colaboradores.forEach(c => {
+                somaTotalUnidade += c.valorTotal;
+                
+                const row = sheet.addRow([
+                    c.nome, c.cpf, `${c.empresaVT} (${c.passagensDia} unid.)`, c.jornada, c.diasBase, c.ausencias,
+                    { formula: `E${currentRow}-F${currentRow}`, result: c.diasAPagar }, // DIAS A PAGAR VIRA FORMULA AQUI = PADRÃO - AUSENCIA
+                    c.valorDiario,
+                    { formula: `G${currentRow}*H${currentRow}`, result: c.valorTotal } // TOTAL VIRA FORMULA = DIAS A PAGAR * VALOR
+                ]);
+
+                row.getCell(5).numFmt = '0.0';
+                row.getCell(6).numFmt = '0';
+                row.getCell(6).font = { color: { argb: 'FFDC3545' }, bold: true }; 
+                row.getCell(7).numFmt = '0.0';
+                row.getCell(7).font = { bold: true };
+                row.getCell(8).numFmt = '"R$ "#,##0.00'; 
+                row.getCell(9).numFmt = '"R$ "#,##0.00';
+                row.getCell(9).font = { bold: true, color: { argb: 'FF28A745' } };
+
+                row.eachCell((cell, colNumber) => {
+                    cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+                    if(colNumber > 1) cell.alignment = { horizontal: 'center' };
+                });
+
+                if (currentRow % 2 === 0) {
+                    row.eachCell(cell => cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F9FA' } });
+                }
+
+                currentRow++;
+            });
+
+            // --- FECHAMENTO DA UNIDADE ---
+            sheet.addRow([]); 
+            
+            const totalRow = sheet.addRow([
+                "", "", "", "", "", "", "", "TOTAL DA UNIDADE:", 
+                { formula: `SUM(I5:I${currentRow-1})`, result: somaTotalUnidade }
+            ]);
+            
+            totalRow.getCell(8).font = { bold: true, size: 12, color: { argb: 'FF4FC3F7' } }; 
+            totalRow.getCell(8).alignment = { horizontal: 'right' };
+            
+            totalRow.getCell(9).font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } }; 
+            totalRow.getCell(9).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+            totalRow.getCell(9).numFmt = '"R$ "#,##0.00';
+            totalRow.getCell(9).alignment = { horizontal: 'center' };
+
+            resumoTotais.push({ unidade: unidade, qtd: colaboradores.length, soma: somaTotalUnidade, sheet: sheetName, lastRow: currentRow + 1 });
+        }
+
+        // --- ABA MESTRA (DASHBOARD) ---
+        if (resumoTotais.length > 1) {
+            const sheetResumo = workbook.addWorksheet('RESUMO GERAL');
+
+            sheetResumo.mergeCells('A1:C1');
+            sheetResumo.getCell('A1').value = 'PAINEL DE CONTROLE GERAL - VALE TRANSPORTE';
+            sheetResumo.getCell('A1').font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+            sheetResumo.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+            sheetResumo.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheetResumo.mergeCells('A2:C2');
+            sheetResumo.getCell('A2').value = `MÊS: ${mesReferencia}`;
+            sheetResumo.getCell('A2').font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+            sheetResumo.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+            sheetResumo.getCell('A2').alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheetResumo.addRow([]); 
+            
+            const headResumo = sheetResumo.addRow(["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO TOTAL LÍQUIDO"]); 
+            headResumo.font = { bold: true, color: { argb: 'FF000000' } };
+            headResumo.height = 25;
+            headResumo.eachCell(c => {
+                c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4FC3F7' } };
+                c.alignment = { horizontal: 'center', vertical: 'middle' };
+                c.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            });
+
+            sheetResumo.columns = [ { width: 50 }, { width: 25 }, { width: 30 } ];
+
+            let curResRow = 5; 
+            let somaSuperTotal = 0;
+            let somaQtdTotal = 0;
+
+            let arrayFormulaSomaDinheiro = [];
+            let arrayFormulaSomaQtd = [];
+
+            resumoTotais.forEach(r => {
+                somaSuperTotal += r.soma;
+                somaQtdTotal += r.qtd;
+                
+                const row = sheetResumo.addRow([
+                    r.unidade, 
+                    r.qtd, 
+                    { formula: `'${r.sheet}'!I${r.lastRow}`, result: r.soma }
+                ]);
+                
+                row.getCell(2).alignment = { horizontal: 'center' };
+                row.getCell(3).numFmt = '"R$ "#,##0.00';
+                row.getCell(3).alignment = { horizontal: 'center' };
+                row.getCell(3).font = { bold: true, color: { argb: 'FF28A745' } };
+                
+                row.eachCell(cell => {
+                    cell.border = { bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+                });
+
+                arrayFormulaSomaQtd.push(`B${curResRow}`);
+                arrayFormulaSomaDinheiro.push(`C${curResRow}`);
+                
+                curResRow++;
+            });
+
+            sheetResumo.addRow([]); 
+
+            const finalRow = sheetResumo.addRow([
+                "CUSTO TOTAL GERAL", 
+                { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal }, 
+                { formula: arrayFormulaSomaDinheiro.join('+'), result: somaSuperTotal }
+            ]);
+            
+            finalRow.height = 30; 
+            finalRow.font = { bold: true, size: 13, color: { argb: 'FFFFFFFF' } };
+            finalRow.eachCell(c => { 
+                c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+                c.alignment = { vertical: 'middle', horizontal: 'center' };
+            });
+            finalRow.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
+            finalRow.getCell(3).numFmt = '"R$ "#,##0.00';
+
+            const worksheets = workbook.worksheets;
+            const resumoIndex = worksheets.findIndex(ws => ws.name === 'RESUMO GERAL');
+            const [resumoWs] = worksheets.splice(resumoIndex, 1);
+            worksheets.unshift(resumoWs);
+        }
+
+        // --- SALVA O ARQUIVO ---
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Custo_ValeTransporte_${mesAnoOriginal}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+    } catch(err) {
+        console.error(err);
+        mostrarAlerta("Erro ao gerar Excel: " + err.message, "erro");
     }
 };
     </script>
