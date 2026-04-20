@@ -2267,10 +2267,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                                         <div class="form-group"><label>E-mail Pessoal</label><input type="email" id="adm-email-pessoal" placeholder="email@exemplo.com"></div>
                                     </div>
                                     <hr style="border: 0; border-top: 1px dashed var(--cor-borda); margin: 20px 0;">
-                                    <div class="form-row">
-                                        <div class="form-group"><label>Cargo</label><select id="adm-cargo"><option value="Controlador de Acesso">Controlador de Acesso</option><option value="Auxiliar de Serviços Gerais">Auxiliar de Serviços Gerais</option><option value="Coletor">Coletor</option><option value="Manutenção">Manutenção</option><option value="Jardineiro">Jardineiro</option><option value="Estoquista">Estoquista</option><option value="Limpador de Vidro">Limpador de Vidro</option><option value="Enfermeiro">Enfermeiro</option><option value="Encarregado">Encarregado</option><option value="Auxiliar de RH">Auxiliar de RH</option><option value="Auxiliar Administrativo">Auxiliar Administrativo</option><option value="Biomédico">Biomédico</option><option value="Técnico de Laboratório">Técnico de Laboratório</option><option value="Analista Clinico">Analista Clinico</option><option value="Auxiliar de Laboratório">Auxiliar de Laboratório</option><option value="Biomédico RT">Biomédico RT</option><option value="Outro">Outro (Digitar)</option></select></div>
-                                        <div class="form-group hidden" id="box-cargo-outro"><label>Digite o Cargo</label><input type="text" id="adm-cargo-outro" placeholder="Qual cargo?"></div>
-                                    </div>
+                                    <div class="form-group">
+                                     <label>Cargo</label>
+                                     <select id="adm-cargo"><option value="">Carregando...</option></select>
+                                          </div>
                                     <div class="form-row"><div class="form-group"><label>Salário Base (R$)</label><input type="text" id="novo-salario" placeholder="R$ 0,00" oninput="this.value = mascaraMoeda(this.value)"></div></div>
 
                                     <hr style="border: 0; border-top: 1px dashed var(--cor-borda); margin: 20px 0;">
@@ -4410,7 +4410,6 @@ window.carregarCargosOficiais = async function() {
     window.cargosGlobais.forEach(c => {
         optionsHtml += `<option value="${c.nome}">${c.nome} ${c.cbo ? `(CBO: ${c.cbo})` : ''}</option>`;
     });
-    optionsHtml += '<option value="Outro">Outro (Digitar manualmente)</option>';
 
     // Atualiza magicamente todos os selects de cargo nas telas
     const selectsParaAtualizar = ['adm-cargo', 'gestao-salario-cargo', 'inp-alt-cargo'];
@@ -4452,27 +4451,71 @@ window.renderizarTabelaCargos = function() {
 window.salvarCargoOficial = async function(e) {
     e.preventDefault();
     const id = document.getElementById('gestao-cargo-id').value;
-    const nome = document.getElementById('gestao-cargo-nome').value.trim().toUpperCase();
+    const novoNome = document.getElementById('gestao-cargo-nome').value.trim().toUpperCase();
     const cbo = document.getElementById('gestao-cargo-cbo').value.trim();
     const btn = document.getElementById('btn-salvar-cargo');
 
-    if (!nome) return mostrarAlerta("O nome do cargo é obrigatório!", "aviso");
+    if (!novoNome) return mostrarAlerta("O nome do cargo é obrigatório!", "aviso");
 
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
 
     try {
         if (id) {
-            await supabaseClient.from('cargos_oficiais').update({ nome, cbo }).eq('id', id);
+            // É UMA EDIÇÃO: Verifica se o nome mudou para propagar
+            const cargoAntigoObj = window.cargosGlobais.find(c => c.id === id);
+            const nomeAntigo = cargoAntigoObj ? cargoAntigoObj.nome : null;
+            const mudouNome = nomeAntigo && (nomeAntigo !== novoNome);
+
+            if (mudouNome) {
+                const confirmado = await mostrarConfirmacao(`Você está alterando o nome de <b>${nomeAntigo}</b> para <b>${novoNome}</b>. Deseja propagar essa mudança para todos os colaboradores (ativos e desligados) e regras de salário atreladas a esse cargo?`, "Atualizar Cargo em Massa");
+                
+                if (!confirmado) {
+                    btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
+                    return;
+                }
+            }
+
+            await supabaseClient.from('cargos_oficiais').update({ nome: novoNome, cbo }).eq('id', id);
+
+            if (mudouNome) {
+                // 1. Atualiza Perfis (Ficha de Admissão e Histórico de Transferências)
+                const { data: perfis } = await supabaseClient.from('perfis').select('id, dados_admissao');
+                if (perfis) {
+                    for (let p of perfis) {
+                        let mudouPerfil = false;
+                        let adm = p.dados_admissao || {};
+
+                        if (adm.cargo === nomeAntigo) {
+                            adm.cargo = novoNome;
+                            mudouPerfil = true;
+                        }
+
+                        if (adm.historico_transferencias && adm.historico_transferencias.length > 0) {
+                            adm.historico_transferencias.forEach(h => {
+                                if (h.cargo_antigo === nomeAntigo) { h.cargo_antigo = novoNome; mudouPerfil = true; }
+                                if (h.cargo_novo === nomeAntigo) { h.cargo_novo = novoNome; mudouPerfil = true; }
+                            });
+                        }
+
+                        if (mudouPerfil) {
+                            await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', p.id);
+                        }
+                    }
+                }
+
+                // 2. Atualiza Salários Base
+                await supabaseClient.from('salarios_base').update({ cargo: novoNome }).eq('cargo', nomeAntigo);
+            }
+
             mostrarAlerta("Cargo atualizado com sucesso!", "sucesso");
         } else {
-            const { data: existente } = await supabaseClient.from('cargos_oficiais').select('id').eq('nome', nome).maybeSingle();
+            const { data: existente } = await supabaseClient.from('cargos_oficiais').select('id').eq('nome', novoNome).maybeSingle();
             if (existente) {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
-                return mostrarAlerta(`O cargo <b>${nome}</b> já existe no sistema!`, "erro");
+                btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
+                return mostrarAlerta(`O cargo <b>${novoNome}</b> já existe no sistema!`, "erro");
             }
-            await supabaseClient.from('cargos_oficiais').insert([{ nome, cbo }]);
+            await supabaseClient.from('cargos_oficiais').insert([{ nome: novoNome, cbo }]);
             mostrarAlerta("Cargo criado com sucesso!", "sucesso");
         }
         
@@ -4481,12 +4524,11 @@ window.salvarCargoOficial = async function(e) {
         btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
         btn.disabled = false;
         
-        // Recarrega tudo (atualizando os selects nas telas de admissão)
         carregarCargosOficiais();
+        if (typeof carregarTabelaSalarios === 'function') carregarTabelaSalarios(); // Recarrega a tela de salários
     } catch (err) {
         mostrarAlerta("Erro ao salvar: " + err.message, "erro");
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
+        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cargo';
     }
 };
 
@@ -4833,14 +4875,10 @@ window.deletarCargoOficial = async function(id) {
                 painel.classList.remove('active');
             }
         });
-
-        // Gatilhos para o salário automático
         document.getElementById('adm-cargo').addEventListener('change', function() {
-            document.getElementById('gestao-salario-outro-box').classList.toggle('hidden', this.value !== 'Outro');
-            puxarSalarioAutomatico();
-            carregarOpcoesVTDaUnidade();
-        });
-        document.getElementById('adm-cargo-outro').addEventListener('input', puxarSalarioAutomatico);
+    puxarSalarioAutomatico();
+    carregarOpcoesVTDaUnidade();
+});
         document.getElementById('novo-unidade-select').addEventListener('change', function() {
     puxarSalarioAutomatico();
     // Avisa o VT que a unidade mudou!
@@ -5707,7 +5745,6 @@ async function limparNotificacoesAntigas() {
 
        function puxarSalarioAutomatico() {
     let cargo = document.getElementById('adm-cargo').value;
-    if(cargo === 'Outro') cargo = document.getElementById('adm-cargo-outro').value;
     const empresa = document.getElementById('novo-empresa').value;
     const unidade = document.getElementById('novo-unidade-select').value;
     const inputSalario = document.getElementById('novo-salario');
@@ -5727,7 +5764,6 @@ async function limparNotificacoesAntigas() {
     const empresa = document.getElementById('gestao-salario-empresa').value;
     const unidade = document.getElementById('gestao-salario-unidade').value;
     let cargo = document.getElementById('gestao-salario-cargo').value;
-    if(cargo === 'Outro') cargo = document.getElementById('gestao-salario-cargo-outro').value;
     let valorStr = document.getElementById('gestao-salario-valor').value;
     
     // NOVO: Pega o valor da insalubridade
@@ -9031,8 +9067,6 @@ document.getElementById('novo-perfil').addEventListener('change', async function
     }
 });
 
-        document.getElementById('adm-cargo').addEventListener('change', function() { document.getElementById('box-cargo-outro').classList.toggle('hidden', this.value !== 'Outro'); });
-
         document.getElementById('adm-tem-santander').addEventListener('change', function() {
             document.getElementById('box-dados-bancarios').classList.toggle('hidden', this.value !== 'Sim');
         });
@@ -11839,9 +11873,8 @@ let cargoOutroValue = isCargoPadrao ? '' : (adm.cargo || '');
 
 let optionsCargo = '<option value="">Selecione o cargo...</option>';
 window.cargosGlobais.forEach(c => {
-    optionsCargo += `<option value="${c.nome}" ${cargoSelectValue === c.nome ? 'selected' : ''}>${c.nome} ${c.cbo ? `(CBO: ${c.cbo})` : ''}</option>`;
+    optionsCargo += `<option value="${c.nome}" ${adm.cargo === c.nome ? 'selected' : ''}>${c.nome} ${c.cbo ? `(CBO: ${c.cbo})` : ''}</option>`;
 });
-optionsCargo += `<option value="Outro" ${cargoSelectValue === 'Outro' ? 'selected' : ''}>Outro (Digitar manualmente)</option>`;
 
     const modalHtml = `
     <div id="modal-edicao-admissao" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -11869,14 +11902,6 @@ optionsCargo += `<option value="Outro" ${cargoSelectValue === 'Outro' ? 'selecte
                     <div class="form-group" style="margin-bottom: 0;">
                         <label>Cargo Atual</label>
                         <select id="edit-adm-cargo" required>${optionsCargo}</select>
-                    </div>
-                </div>
-
-                <div class="form-row ${cargoSelectValue === 'Outro' ? '' : 'hidden'}" id="edit-box-cargo-outro">
-                    <div class="form-group"></div>
-                    <div class="form-group">
-                        <label>Digite o Cargo Específico</label>
-                        <input type="text" id="edit-adm-cargo-outro" value="${cargoOutroValue}" placeholder="Qual cargo?">
                     </div>
                 </div>
 
