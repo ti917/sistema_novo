@@ -22951,35 +22951,33 @@ window.analisarArquivosLote = async function(input) {
 
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
 
-    // Organiza do maior nome pro menor para não confundir "Ana" com "Ana Maria"
+    // Organiza do maior nome pro menor
     const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
     let countSucesso = 0;
-    let html = '';
+    
+    // 👇 A MÁGICA: Separamos as variáveis para agrupar os Sucessos em cima e os Avisos embaixo! 👇
+    let htmlSucesso = '';
+    let htmlAvisos = '';
 
     const padronizarNome = (texto) => {
         if (!texto) return '';
         return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
     };
 
-    // Para cada arquivo anexado (mesmo que seja um só de 100 páginas)
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
 
         try {
             const arrayBuffer = await file.arrayBuffer();
-            
-            // pdfjsDoc = Lê o texto (Cérebro)
             const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-            
-            // pdfLibDoc = Recorta o papel (Músculo/Tesoura)
             const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
 
             let donoAtual = null;
             let mapaColabPaginas = new Map();
+            let paginasIdentificadas = 0;
 
-            // 1. LÊ PÁGINA POR PÁGINA
             for (let j = 1; j <= pdfjsDoc.numPages; j++) {
                 const page = await pdfjsDoc.getPage(j);
                 const textContent = await page.getTextContent();
@@ -22993,80 +22991,86 @@ window.analisarArquivosLote = async function(input) {
                     }
                 }
 
-                // Se achou um nome nessa página, o "donoAtual" muda pra ele.
-                // Se NÃO achou nome (ex: página 2 do holerite é só o resumo), o donoAtual continua sendo o da página 1!
-                if (matchColab) {
-                    donoAtual = matchColab;
-                }
+                if (matchColab) { donoAtual = matchColab; }
 
-                // Se a gente já sabe de quem é essa folha, anota o número da página no nome dele
                 if (donoAtual) {
                     if (!mapaColabPaginas.has(donoAtual.id)) {
                         mapaColabPaginas.set(donoAtual.id, { colab: donoAtual, paginas: [] });
                     }
-                    mapaColabPaginas.get(donoAtual.id).paginas.push(j - 1); // pdf-lib usa índice começando do 0
+                    mapaColabPaginas.get(donoAtual.id).paginas.push(j - 1);
+                    paginasIdentificadas++;
                 }
             }
 
-            // Se o robô não achou O NOME DE NINGUÉM no arquivo inteiro
+            // SE O ROBÔ NÃO ACHOU O NOME DE NINGUÉM NESTE ARQUIVO
             if (mapaColabPaginas.size === 0) {
-                 html += `<tr style="background: rgba(220,53,69,0.1);">
+                 htmlAvisos += `<tr style="background: rgba(220,53,69,0.1);">
                     <td>${file.name}</td>
-                    <td style="color: #dc3545;"><i class="fa-solid fa-xmark"></i> Nenhum nome encontrado</td>
-                    <td><span class="badge desligado">Ignorado</span></td>
+                    <td style="color: #dc3545;"><i class="fa-solid fa-user-xmark"></i> Nome não localizado na base</td>
+                    <td><span class="badge desligado">Aviso: Será Ignorado</span></td>
                 </tr>`;
                 continue;
             }
 
-            // 2. A TESOURA EM AÇÃO: Cria os PDFs separados
+            // SE SOBRARAM PÁGINAS "EM BRANCO" OU SEM DONO DENTRO DO PDF
+            if (paginasIdentificadas < pdfjsDoc.numPages) {
+                let paginasOrfas = pdfjsDoc.numPages - paginasIdentificadas;
+                htmlAvisos += `<tr style="background: rgba(255,152,0,0.1);">
+                    <td>${file.name}</td>
+                    <td style="color: #ff9800;"><i class="fa-solid fa-triangle-exclamation"></i> ${paginasOrfas} pág(s) sem nome legível</td>
+                    <td><span class="badge pendente">Aviso: Páginas Ignoradas</span></td>
+                </tr>`;
+            }
+
+            // CORTA O PDF PARA OS QUE FORAM ENCONTRADOS
             for (let [id, dados] of mapaColabPaginas.entries()) {
-                // Cria um arquivo PDF em branco
                 const novoPdf = await PDFLib.PDFDocument.create();
-                
-                // Copia as páginas exatas desse funcionário do arquivo original
                 const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, dados.paginas);
                 paginasCopiadas.forEach(p => novoPdf.addPage(p));
                 
-                // Salva o novo arquivo
                 const novoPdfBytes = await novoPdf.save();
                 const novoBlob = new Blob([novoPdfBytes], { type: 'application/pdf' });
                 
-                // Dá o nome correto para ele
                 const nomeDoNovoArquivo = `${dados.colab.nome}.pdf`;
                 const novoFileSeparado = new File([novoBlob], nomeDoNovoArquivo, { type: 'application/pdf' });
 
                 const fone = dados.colab.dados_admissao?.telefone;
                 
-                // Adiciona na lista de envio final
                 if (fone) {
+                    // SUCESSO ABSOLUTO (Vai pro envio e fica no topo da tabela)
                     arquivosLoteValidados.push({ file: novoFileSeparado, colab: dados.colab, valido: true });
-                    html += `<tr>
+                    htmlSucesso += `<tr>
                         <td>${nomeDoNovoArquivo} <small style="color: #8b5cf6;">(${dados.paginas.length} pág)</small></td>
                         <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> ${dados.colab.nome}</td>
                         <td><span class="badge ativo">Pronto p/ Envio</span></td>
                     </tr>`;
                     countSucesso++;
                 } else {
-                    html += `<tr>
+                    // ACHOU O CARA, MAS ELE NÃO TEM ZAP (Vai pro final da tabela como aviso)
+                    htmlAvisos += `<tr style="background: rgba(255,152,0,0.1);">
                         <td>${nomeDoNovoArquivo}</td>
                         <td style="color: #ff9800;">${dados.colab.nome}</td>
-                        <td><span class="badge pendente" style="background: rgba(255,152,0,0.1); color: #ff9800;">Sem Telefone</span></td>
+                        <td><span class="badge pendente">Sem WhatsApp (Ignorado)</span></td>
                     </tr>`;
                 }
             }
 
         } catch (err) {
             console.error("Erro na tesoura digital:", err);
-            html += `<tr style="background: rgba(220,53,69,0.1);">
+            htmlAvisos += `<tr style="background: rgba(220,53,69,0.1);">
                 <td>${file.name}</td>
                 <td style="color: #dc3545;"><i class="fa-solid fa-bug"></i> Arquivo Ilegível</td>
-                <td><span class="badge desligado">Corrompido/Bloqueado</span></td>
+                <td><span class="badge desligado">Erro/Corrompido</span></td>
             </tr>`;
         }
     }
 
-    tbody.innerHTML = html;
+    // 👇 JUNTA AS DUAS LISTAS (O Sucesso fica em cima, os Avisos ficam em baixo!) 👇
+    tbody.innerHTML = htmlSucesso + htmlAvisos;
+    
     document.getElementById('contador-lote-sucesso').innerText = `${countSucesso} Prontos para Envio`;
+    
+    // Libera o botão de envio se tiver PELO MENOS UM verde!
     document.getElementById('btn-disparar-lote').disabled = countSucesso === 0;
 };
 
