@@ -4374,6 +4374,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return v;
 }
 
+        const MAPA_MESES_SISTEMA = {
+    'JANEIRO': '01', 'FEVEREIRO': '02', 'MARCO': '03', 'ABRIL': '04',
+    'MAIO': '05', 'JUNHO': '06', 'JULHO': '07', 'AGOSTO': '08',
+    'SETEMBRO': '09', 'OUTUBRO': '10', 'NOVEMBRO': '11', 'DEZEMBRO': '12'
+};
+
         // 👇 FUNÇÃO ATUALIZADA COM 5 DIAS DE CARÊNCIA 👇
         window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
             const hoje = new Date();
@@ -22971,10 +22977,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 window.analisarArquivosLote = async function(input) {
     const empresa = document.getElementById('doc-lote-empresa').value;
     const tipo = document.getElementById('doc-lote-tipo').value;
-    const mes = document.getElementById('doc-lote-mes').value;
+    let mesInput = document.getElementById('doc-lote-mes');
 
-    if (!empresa || !tipo || !mes) {
-        mostrarAlerta("Preencha os campos superiores antes de anexar!", "aviso");
+    if (!empresa || !tipo) {
+        mostrarAlerta("Selecione a Empresa e o Tipo antes de anexar!", "aviso");
         input.value = ''; return;
     }
 
@@ -22983,7 +22989,7 @@ window.analisarArquivosLote = async function(input) {
 
     document.getElementById('preview-lote-container').classList.remove('hidden');
     const tbody = document.getElementById('lista-lote-body');
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-scissors fa-spin fa-2x"></i><br>Fatiando PDFs com Segurança Máxima...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-robot fa-spin fa-2x"></i><br>Lendo conteúdo e detectando datas...</td></tr>';
 
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
     const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
@@ -23005,13 +23011,32 @@ window.analisarArquivosLote = async function(input) {
             const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
 
-            // Objeto para guardar as páginas separadas por ID de colaborador
             let mapaColabPaginas = {}; 
 
             for (let j = 1; j <= pdfjsDoc.numPages; j++) {
                 const page = await pdfjsDoc.getPage(j);
                 const textContent = await page.getTextContent();
-                const pageText = padronizarNome(textContent.items.map(item => item.str).join(' '));
+                const pageTextRaw = textContent.items.map(item => item.str).join(' ');
+                const pageText = padronizarNome(pageTextRaw);
+
+                // 👇 MÁGICA: DETECÇÃO AUTOMÁTICA DO MÊS (Apenas na primeira página lida) 👇
+                if (!mesInput.value) {
+                    // 1. Tenta formato Holerite: "JANEIRO DE 2026"
+                    const regexH = /(JANEIRO|FEVEREIRO|MARCO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)\s+DE\s+(\d{4})/i;
+                    const matchH = pageText.match(regexH);
+                    
+                    if (matchH) {
+                        const mesCod = MAPA_MESES_SISTEMA[matchH[1].toUpperCase()];
+                        mesInput.value = `${matchH[2]}-${mesCod}`;
+                    } else {
+                        // 2. Tenta formato Ponto: "ATE 22/04/2026" (Pega sempre a data final do período)
+                        const regexP = /ATE\s+(\d{2})\/(\d{2})\/(\d{4})/i;
+                        const matchP = pageText.match(regexP);
+                        if (matchP) {
+                            mesInput.value = `${matchP[3]}-${matchP[2]}`;
+                        }
+                    }
+                }
 
                 let donoDestaPagina = null;
                 for (let c of colabsOrdenados) {
@@ -23021,36 +23046,31 @@ window.analisarArquivosLote = async function(input) {
                     }
                 }
 
-                // 👇 SEGURANÇA MÁXIMA: Se não achou nome na página, NÃO "CHUTA" QUEM É O DONO 👇
                 if (donoDestaPagina) {
                     if (!mapaColabPaginas[donoDestaPagina.id]) {
                         mapaColabPaginas[donoDestaPagina.id] = { colab: donoDestaPagina, paginas: [] };
                     }
                     mapaColabPaginas[donoDestaPagina.id].paginas.push(j - 1);
                 } else {
-                    // PÁGINA ÓRFÃ: Avisa o RH que essa página específica foi ignorada
                     htmlAvisos += `<tr style="background: rgba(220,53,69,0.1);">
                         <td>${file.name} (Pág ${j})</td>
-                        <td style="color: #dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> Nome não detectado nesta página</td>
-                        <td><span class="badge desligado">Ignorada por Segurança</span></td>
+                        <td style="color: #dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> Nome não identificado</td>
+                        <td><span class="badge desligado">Ignorada</span></td>
                     </tr>`;
                 }
             }
 
-            // 2. CRIA OS ARQUIVOS INDIVIDUAIS (Apenas das páginas identificadas)
+            // Corte e fatiamento (mesma lógica anterior)
             for (let id in mapaColabPaginas) {
                 const dados = mapaColabPaginas[id];
                 const novoPdf = await PDFLib.PDFDocument.create();
                 const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, dados.paginas);
                 paginasCopiadas.forEach(p => novoPdf.addPage(p));
-                
                 const novoPdfBytes = await novoPdf.save();
                 const novoFileSeparado = new File([novoPdfBytes], `${dados.colab.nome}.pdf`, { type: 'application/pdf' });
-
                 const fone = dados.colab.dados_admissao?.telefone;
                 
                 if (fone) {
-                    // 👇 AQUI ESTÁ A CHAVE: arquivosLoteValidados SÓ RECEBE O ARQUIVO CORTADO 👇
                     arquivosLoteValidados.push({ file: novoFileSeparado, colab: dados.colab, valido: true });
                     htmlSucesso += `<tr>
                         <td>${dados.colab.nome}.pdf <small>(${dados.paginas.length} pág)</small></td>
@@ -23059,23 +23079,22 @@ window.analisarArquivosLote = async function(input) {
                     </tr>`;
                     countSucesso++;
                 } else {
-                    htmlAvisos += `<tr>
-                        <td>${dados.colab.nome}.pdf</td>
-                        <td style="color: #ff9800;">${dados.colab.nome}</td>
-                        <td><span class="badge pendente">Sem WhatsApp</span></td>
-                    </tr>`;
+                    htmlAvisos += `<tr><td>${dados.colab.nome}.pdf</td><td>${dados.colab.nome}</td><td><span class="badge pendente">Sem Zap</span></td></tr>`;
                 }
             }
-
         } catch (err) {
             console.error(err);
-            htmlAvisos += `<tr><td>${file.name}</td><td colspan="2">Erro ao ler arquivo</td></tr>`;
         }
     }
 
     tbody.innerHTML = htmlSucesso + htmlAvisos;
     document.getElementById('contador-lote-sucesso').innerText = `${countSucesso} Prontos para Envio`;
     document.getElementById('btn-disparar-lote').disabled = countSucesso === 0;
+
+    // Se após ler tudo o mês ainda estiver vazio, avisa o RH
+    if (!mesInput.value) {
+        mostrarAlerta("Não conseguimos detectar o mês automaticamente. Por favor, selecione manualmente.", "aviso");
+    }
 };
 
 window.iniciarDisparoEmLote = async function() {
