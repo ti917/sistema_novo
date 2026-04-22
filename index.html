@@ -22980,7 +22980,7 @@ window.analisarArquivosLote = async function(input) {
     let mesInput = document.getElementById('doc-lote-mes');
 
     if (!empresa || !tipo) {
-        mostrarAlerta("Selecione a Empresa e o Tipo antes de anexar!", "aviso");
+        mostrarAlerta("Selecione Empresa e Tipo antes de anexar!", "aviso");
         input.value = ''; return;
     }
 
@@ -22989,10 +22989,14 @@ window.analisarArquivosLote = async function(input) {
 
     document.getElementById('preview-lote-container').classList.remove('hidden');
     const tbody = document.getElementById('lista-lote-body');
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-robot fa-spin fa-2x"></i><br>Lendo conteúdo e detectando datas...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-magnifying-glass-chart fa-spin fa-2x" style="color: #8b5cf6;"></i><br>Mapeando páginas e cruzando dados dos colaboradores...</td></tr>';
 
+    // Busca todos os colabs da empresa para saber quem "deveria" estar no PDF
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
-    const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
+    
+    // Criamos um controle para saber quem foi achado e quem não foi
+    let statusColabsEmpresa = colabs.map(c => ({ ...c, achadoNoPdf: false, paginas: [] }));
+    const colabsOrdenados = [...statusColabsEmpresa].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
     let countSucesso = 0;
@@ -23011,90 +23015,88 @@ window.analisarArquivosLote = async function(input) {
             const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
 
-            let mapaColabPaginas = {}; 
-
             for (let j = 1; j <= pdfjsDoc.numPages; j++) {
                 const page = await pdfjsDoc.getPage(j);
                 const textContent = await page.getTextContent();
-                const pageTextRaw = textContent.items.map(item => item.str).join(' ');
-                const pageText = padronizarNome(pageTextRaw);
+                const pageText = padronizarNome(textContent.items.map(item => item.str).join(' '));
 
-                // 👇 MÁGICA: DETECÇÃO AUTOMÁTICA DO MÊS (Apenas na primeira página lida) 👇
+                // Tenta detectar o mês se ainda estiver vazio
                 if (!mesInput.value) {
-                    // 1. Tenta formato Holerite: "JANEIRO DE 2026"
                     const regexH = /(JANEIRO|FEVEREIRO|MARCO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)\s+DE\s+(\d{4})/i;
                     const matchH = pageText.match(regexH);
-                    
                     if (matchH) {
-                        const mesCod = MAPA_MESES_SISTEMA[matchH[1].toUpperCase()];
-                        mesInput.value = `${matchH[2]}-${mesCod}`;
-                    } else {
-                        // 2. Tenta formato Ponto: "ATE 22/04/2026" (Pega sempre a data final do período)
-                        const regexP = /ATE\s+(\d{2})\/(\d{2})\/(\d{4})/i;
-                        const matchP = pageText.match(regexP);
-                        if (matchP) {
-                            mesInput.value = `${matchP[3]}-${matchP[2]}`;
-                        }
+                        mesInput.value = `${matchH[2]}-${MAPA_MESES_SISTEMA[matchH[1].toUpperCase()]}`;
                     }
                 }
 
-                let donoDestaPagina = null;
+                let achouAlguemNestaPagina = false;
                 for (let c of colabsOrdenados) {
                     if (pageText.includes(padronizarNome(c.nome))) {
-                        donoDestaPagina = c;
-                        break;
+                        c.achadoNoPdf = true;
+                        c.paginas.push(j - 1);
+                        achouAlguemNestaPagina = true;
+                        break; 
                     }
                 }
 
-                if (donoDestaPagina) {
-                    if (!mapaColabPaginas[donoDestaPagina.id]) {
-                        mapaColabPaginas[donoDestaPagina.id] = { colab: donoDestaPagina, paginas: [] };
-                    }
-                    mapaColabPaginas[donoDestaPagina.id].paginas.push(j - 1);
-                } else {
-                    htmlAvisos += `<tr style="background: rgba(220,53,69,0.1);">
-                        <td>${file.name} (Pág ${j})</td>
-                        <td style="color: #dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> Nome não identificado</td>
-                        <td><span class="badge desligado">Ignorada</span></td>
+                if (!achouAlguemNestaPagina) {
+                    htmlAvisos += `<tr style="background: rgba(255,152,0,0.05);">
+                        <td><small>${file.name}</small></td>
+                        <td style="color: #ff9800;"><i class="fa-solid fa-file-circle-question"></i> Pág. ${j} Sem Identificação</td>
+                        <td><span class="badge pendente">Página Ignorada</span></td>
                     </tr>`;
                 }
             }
 
-            // Corte e fatiamento (mesma lógica anterior)
-            for (let id in mapaColabPaginas) {
-                const dados = mapaColabPaginas[id];
-                const novoPdf = await PDFLib.PDFDocument.create();
-                const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, dados.paginas);
-                paginasCopiadas.forEach(p => novoPdf.addPage(p));
-                const novoPdfBytes = await novoPdf.save();
-                const novoFileSeparado = new File([novoPdfBytes], `${dados.colab.nome}.pdf`, { type: 'application/pdf' });
-                const fone = dados.colab.dados_admissao?.telefone;
-                
-                if (fone) {
-                    arquivosLoteValidados.push({ file: novoFileSeparado, colab: dados.colab, valido: true });
-                    htmlSucesso += `<tr>
-                        <td>${dados.colab.nome}.pdf <small>(${dados.paginas.length} pág)</small></td>
-                        <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> Identificado</td>
-                        <td><span class="badge ativo">Pronto p/ Envio</span></td>
-                    </tr>`;
-                    countSucesso++;
-                } else {
-                    htmlAvisos += `<tr><td>${dados.colab.nome}.pdf</td><td>${dados.colab.nome}</td><td><span class="badge pendente">Sem Zap</span></td></tr>`;
+            // Após ler o PDF, gera os arquivos recortados para quem foi achado
+            for (let c of colabsOrdenados) {
+                if (c.achadoNoPdf && c.paginas.length > 0) {
+                    const novoPdf = await PDFLib.PDFDocument.create();
+                    const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, c.paginas);
+                    paginasCopiadas.forEach(p => novoPdf.addPage(p));
+                    
+                    const novoPdfBytes = await novoPdf.save();
+                    const novoFile = new File([novoPdfBytes], `${c.nome}.pdf`, { type: 'application/pdf' });
+
+                    const fone = c.dados_admissao?.telefone;
+                    if (fone) {
+                        arquivosLoteValidados.push({ file: novoFile, colab: c, valido: true });
+                        htmlSucesso += `<tr>
+                            <td><i class="fa-solid fa-file-pdf" style="color:#8b5cf6"></i> Pág(s): ${(c.paginas.map(p => p+1)).join(', ')}</td>
+                            <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-user-check"></i> ${c.nome}</td>
+                            <td><span class="badge ativo">Pronto p/ Envio</span></td>
+                        </tr>`;
+                        countSucesso++;
+                    } else {
+                        htmlAvisos += `<tr>
+                            <td>Pág(s): ${(c.paginas.map(p => p+1)).join(', ')}</td>
+                            <td style="color: #ff9800;">${c.nome}</td>
+                            <td><span class="badge pendente">Sem WhatsApp</span></td>
+                        </tr>`;
+                    }
+                    // Limpa para o próximo arquivo no loop não duplicar
+                    c.achadoNoPdf = false; 
+                    c.paginas = [];
                 }
             }
-        } catch (err) {
-            console.error(err);
-        }
+
+        } catch (err) { console.error(err); }
     }
+
+    // 👇 ADICIONA QUEM NÃO FOI ENCONTRADO NO PDF (Para o RH saber quem falta) 👇
+    colabsOrdenados.forEach(c => {
+        if (!c.achadoNoPdf && !arquivosLoteValidados.some(a => a.colab.id === c.id)) {
+            htmlAvisos += `<tr style="background: rgba(220,53,69,0.05);">
+                <td>---</td>
+                <td style="color: #dc3545;"><i class="fa-solid fa-user-slash"></i> ${c.nome}</td>
+                <td><span class="badge desligado">Não achou no PDF</span></td>
+            </tr>`;
+        }
+    });
 
     tbody.innerHTML = htmlSucesso + htmlAvisos;
     document.getElementById('contador-lote-sucesso').innerText = `${countSucesso} Prontos para Envio`;
     document.getElementById('btn-disparar-lote').disabled = countSucesso === 0;
-
-    // Se após ler tudo o mês ainda estiver vazio, avisa o RH
-    if (!mesInput.value) {
-        mostrarAlerta("Não conseguimos detectar o mês automaticamente. Por favor, selecione manualmente.", "aviso");
-    }
 };
 
 window.iniciarDisparoEmLote = async function() {
