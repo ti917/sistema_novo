@@ -4955,17 +4955,20 @@ window.atualizarTotalLimite = function(prefix) {
 
 window.mudarEmpresaGlobal = async function(empresa) {
     empresaSelecionadaFiltro = empresa;
-
     localStorage.setItem('rh-empresa-salva', empresa);
-
     atualizarLogoApp(empresa);
     
-    // Atualiza todos os filtros de Select de Unidade
+    // Atualiza filtros de unidade
     setupFiltroEscala();
     popularUnidades();
-    prepararAbaGestaoHorarios(); // 👇 AGORA ELE ATUALIZA AS UNIDADES DA GESTÃO DE HORÁRIOS TAMBÉM
+    prepararAbaGestaoHorarios();
     
-    // Recarrega o Sino de Notificações e Central
+    // Atualiza o Dashboard de Início se a tela estiver visível
+    if(!document.getElementById('tela-inicio').classList.contains('hidden')) {
+        window.carregarDashboardInicio();
+    }
+    
+    // Atualiza o Sino e outras abas administrativas
     await atualizarContador();
     
     // Se ele estiver com alguma aba aberta, já recarrega ela na mesma hora com o novo filtro
@@ -23898,7 +23901,6 @@ window.carregarDashboardInicio = async function() {
     const dataISOFimMes = `${anoAtual}-${mesAtualStr}-${new Date(anoAtual, mesAtual, 0).getDate()}`;
 
     try {
-        // 1. Monta os filtros baseados em quem está logado
         let unidsFiltro = null;
         let empresaFiltro = null;
 
@@ -23909,15 +23911,17 @@ window.carregarDashboardInicio = async function() {
             unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
         }
 
-        // 2. Dispara as buscas em paralelo para ser rápido
+        // Buscas
         let qPerfis = supabaseClient.from('perfis').select('id, nome, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         let qFaltas = supabaseClient.from('ausencias').select('id').eq('sigla', 'FA').eq('status', 'Aprovado').gte('data_inicio', dataISOInicioMes).lte('data_inicio', dataISOFimMes);
         let qFerias = supabaseClient.from('solicitacoes_ferias').select('id').eq('status', 'Aprovado').lte('data_inicio_ferias', dataAtual.toISOString().split('T')[0]).gte('data_fim_ferias', dataAtual.toISOString().split('T')[0]);
-        let qAdvs = supabaseClient.from('advertencias').select('nome, unidade, gravidade, status').in('status', ['Concluído', 'Aguardando Assinatura']);
+        
+        // Buscamos TODAS as advertências que não foram reprovadas para o ranking
+        let qAdvs = supabaseClient.from('advertencias').select('nome, unidade, gravidade, status, empresa').neq('status', 'Reprovado');
 
-        // Aplica os filtros de empresa/unidade
         if (empresaFiltro) {
             qPerfis = qPerfis.eq('empresa', empresaFiltro);
+            qAdvs = qAdvs.eq('empresa', empresaFiltro);
         }
         if (unidsFiltro && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
             if (usuarioAtual.perfil === 'Gestor') qPerfis = qPerfis.in('unidade', unidsFiltro);
@@ -23928,126 +23932,111 @@ window.carregarDashboardInicio = async function() {
 
         const [resPerfis, resFaltas, resFerias, resAdvs] = await Promise.all([qPerfis, qFaltas, qFerias, qAdvs]);
 
-        // 3. Processa KPIs do Topo
+        // KPIs de topo
         let countAdmissoesMes = 0;
         let countRescisoesMes = 0;
-        let countAtivosGeral = 0; // <--- NOVA VARIÁVEL
+        let countAtivosGeral = 0;
         let aniversariantes = [];
 
         if (resPerfis.data) {
             resPerfis.data.forEach(c => {
                 const adm = c.dados_admissao || {};
                 const resc = c.dados_rescisao || {};
-
-                // Checa Colaboradores Ativos REAIS (Exclui Desligados e Cancelados)
-                if (c.status === 'Ativo') {
-                    countAtivosGeral++;
-                }
-
-                // Checa Admissão no mês atual
+                if (c.status === 'Ativo') countAtivosGeral++;
                 const dAdm = adm.jornada?.data_inicio || adm.data_inicio;
                 if (dAdm && dAdm.startsWith(`${anoAtual}-${mesAtualStr}`)) countAdmissoesMes++;
-
-                // Checa Rescisão no mês atual
                 if (c.status === 'Desligado' && resc.ultimo_dia) {
                     const udParts = resc.ultimo_dia.split('/');
-                    if (udParts.length === 3 && udParts[1] === mesAtualStr && udParts[2] === String(anoAtual)) {
-                        countRescisoesMes++;
-                    }
+                    if (udParts.length === 3 && udParts[1] === mesAtualStr && udParts[2] === String(anoAtual)) countRescisoesMes++;
                 }
-
-                // Checa Aniversário
                 if (adm.nascimento && c.status === 'Ativo') {
-                    const pNasc = adm.nascimento.split('-'); // AAAA-MM-DD
-                    if (pNasc[1] === mesAtualStr) {
-                        aniversariantes.push({ nome: c.nome, dia: parseInt(pNasc[2]), unidade: c.unidade });
-                    }
+                    const pNasc = adm.nascimento.split('-');
+                    if (pNasc[1] === mesAtualStr) aniversariantes.push({ nome: c.nome, dia: parseInt(pNasc[2]), unidade: c.unidade });
                 }
             });
         }
 
-        // Popula as Caixinhas
-        document.getElementById('dash-ativos-total').innerText = countAtivosGeral; // <--- ALIMENTA O CARD NOVO
+        document.getElementById('dash-ativos-total').innerText = countAtivosGeral;
         document.getElementById('dash-adm-mes').innerText = countAdmissoesMes;
         document.getElementById('dash-resc-mes').innerText = countRescisoesMes;
         document.getElementById('dash-falta-mes').innerText = resFaltas.data ? resFaltas.data.length : 0;
         document.getElementById('dash-ferias-ativas').innerText = resFerias.data ? resFerias.data.length : 0;
 
-        // 4. Processa Radar Disciplinar (Top Infratores)
+        // --- LÓGICA DO RANKING DISCIPLINAR ---
         const advHtmlContainer = document.getElementById('dash-lista-advertencias');
         if (resAdvs.data && resAdvs.data.length > 0) {
             let mapaInfratores = {};
             resAdvs.data.forEach(a => {
                 if (!mapaInfratores[a.nome]) {
-                    mapaInfratores[a.nome] = { nome: a.nome, unidade: a.unidade, pontos: 0, leve: 0, media: 0, grave: 0, suspensao: 0 };
+                    mapaInfratores[a.nome] = { nome: a.nome, unidade: a.unidade, pontos: 0, leve: 0, media: 0, grave: 0, suspensao: 0, justa: 0 };
                 }
                 
                 let grav = a.gravidade || '';
-                if (grav.includes('Leve')) { mapaInfratores[a.nome].leve++; mapaInfratores[a.nome].pontos += 1; }
-                else if (grav.includes('Média')) { mapaInfratores[a.nome].media++; mapaInfratores[a.nome].pontos += 2; }
-                else if (grav.includes('Grave')) { mapaInfratores[a.nome].grave++; mapaInfratores[a.nome].pontos += 3; }
-                else if (grav.includes('Suspensão')) { mapaInfratores[a.nome].suspensao++; mapaInfratores[a.nome].pontos += 5; }
-                else { mapaInfratores[a.nome].pontos += 1; } // Qualquer outra advertência genérica ganha 1 ponto
+                // PESOS DEFINIDOS: Justa Causa e Suspensão sobem o rank agressivamente
+                if (grav.includes('Justa Causa')) { mapaInfratores[a.nome].justa++; mapaInfratores[a.nome].pontos += 100; }
+                else if (grav.includes('Suspensão')) { mapaInfratores[a.nome].suspensao++; mapaInfratores[a.nome].pontos += 50; }
+                else if (grav.includes('Grave')) { mapaInfratores[a.nome].grave++; mapaInfratores[a.nome].pontos += 15; }
+                else if (grav.includes('Média')) { mapaInfratores[a.nome].media++; mapaInfratores[a.nome].pontos += 5; }
+                else if (grav.includes('Leve')) { mapaInfratores[a.nome].leve++; mapaInfratores[a.nome].pontos += 1; }
+                else { mapaInfratores[a.nome].pontos += 0.5; }
             });
 
-            // Transforma em Array, ordena por pontos e pega os Top 5
-            const topInfratores = Object.values(mapaInfratores).sort((a, b) => b.pontos - a.pontos).slice(0, 5);
+            // Ordena pelo total de pontos (quem tem grave/suspensão terá muito mais pontos)
+            const topInfratores = Object.values(mapaInfratores)
+                .filter(i => i.pontos > 0)
+                .sort((a, b) => b.pontos - a.pontos)
+                .slice(0, 5);
 
             advHtmlContainer.innerHTML = '';
             topInfratores.forEach((inf, index) => {
-                let medalha = index === 0 ? '<i class="fa-solid fa-triangle-exclamation" style="color: #dc3545;"></i>' : `#${index+1}`;
                 let tags = '';
-                if(inf.leve > 0) tags += `<span style="background: rgba(255,193,7,0.1); color: #ffc107; border: 1px solid #ffc107; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 5px;">${inf.leve} Leve</span>`;
-                if(inf.media > 0) tags += `<span style="background: rgba(255,152,0,0.1); color: #ff9800; border: 1px solid #ff9800; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 5px;">${inf.media} Média</span>`;
-                if(inf.grave > 0) tags += `<span style="background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid #dc3545; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 5px;">${inf.grave} Grave</span>`;
-                if(inf.suspensao > 0) tags += `<span style="background: rgba(156, 39, 176, 0.1); color: #9c27b0; border: 1px solid #9c27b0; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-right: 5px;">${inf.suspensao} Susp.</span>`;
+                if(inf.justa > 0) tags += `<span class="badge" style="background:rgba(220,53,69,0.2); color:#ff4d4d; border:1px solid #ff4d4d; margin-right:5px; font-size:0.65rem;">${inf.justa} Justa Causa</span>`;
+                if(inf.suspensao > 0) tags += `<span class="badge" style="background:rgba(156, 39, 176, 0.2); color:#ce93d8; border:1px solid #ce93d8; margin-right:5px; font-size:0.65rem;">${inf.suspensao} Suspensão</span>`;
+                if(inf.grave > 0) tags += `<span class="badge" style="background:rgba(220,53,69,0.1); color:#dc3545; border:1px solid #dc3545; margin-right:5px; font-size:0.65rem;">${inf.grave} Grave</span>`;
+                if(inf.media > 0) tags += `<span class="badge" style="background:rgba(255,152,0,0.1); color:#ff9800; border:1px solid #ff9800; margin-right:5px; font-size:0.65rem;">${inf.media} Média</span>`;
+                if(inf.leve > 0) tags += `<span class="badge" style="background:rgba(255,193,7,0.1); color:#ffc107; border:1px solid #ffc107; margin-right:5px; font-size:0.65rem;">${inf.leve} Leve</span>`;
 
                 advHtmlContainer.innerHTML += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border-left: 3px solid ${index === 0 ? '#dc3545' : 'var(--cor-advertencia)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border-left: 4px solid ${inf.pontos >= 15 ? '#dc3545' : '#ffc107'}; transition: 0.3s;">
                         <div>
-                            <strong style="color: #fff; font-size: 0.95rem;"><span style="color: var(--cor-advertencia); margin-right: 5px;">${medalha}</span> ${inf.nome}</strong><br>
-                            <div style="margin-top: 5px;">${tags}</div>
+                            <strong style="color: #fff; font-size: 0.95rem;">${index + 1}º - ${inf.nome}</strong>
+                            <div style="margin-top: 6px; display:flex; flex-wrap:wrap; gap:3px;">${tags}</div>
                         </div>
-                        <span style="font-size: 0.8rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${inf.unidade}</span>
+                        <div style="text-align:right;">
+                             <span style="font-size: 0.75rem; color: var(--cor-texto-secundario); display:block;"><i class="fa-solid fa-building"></i> ${inf.unidade}</span>
+                        </div>
                     </div>
                 `;
             });
         } else {
-            advHtmlContainer.innerHTML = '<p style="text-align: center; color: var(--cor-sucesso); margin: 20px 0;"><i class="fa-solid fa-face-smile-beam fa-2x"></i><br><br>Nenhuma advertência! Equipe exemplar.</p>';
+            advHtmlContainer.innerHTML = '<div style="text-align:center; padding:20px;"><i class="fa-solid fa-face-smile fa-3x" style="color:var(--cor-sucesso); opacity:0.5; margin-bottom:10px;"></i><p style="color:var(--cor-texto-secundario);">Nenhuma ocorrência registrada.</p></div>';
         }
 
-        // 5. Processa Aniversariantes
+        // Aniversariantes (mantido igual)
         const anivHtmlContainer = document.getElementById('dash-lista-aniversarios');
         if (aniversariantes.length > 0) {
-            aniversariantes.sort((a, b) => a.dia - b.dia); // Ordena pelo dia do mês
+            aniversariantes.sort((a, b) => a.dia - b.dia);
             anivHtmlContainer.innerHTML = '';
-            
             aniversariantes.forEach(a => {
                 const isHoje = a.dia === dataAtual.getDate();
-                const bgCor = isHoje ? 'rgba(79, 195, 247, 0.15)' : 'rgba(0,0,0,0.2)';
-                const bordaCor = isHoje ? '1px solid #4fc3f7' : '1px solid var(--cor-borda)';
-                const textCor = isHoje ? '#4fc3f7' : '#fff';
-                const tagHoje = isHoje ? '<span class="badge" style="background: #4fc3f7; color: #000; font-size: 0.65rem; margin-left: 10px; padding: 2px 6px;">É HOJE! 🎉</span>' : '';
-
                 anivHtmlContainer.innerHTML += `
-                    <div style="display: flex; align-items: center; justify-content: space-between; background: ${bgCor}; padding: 10px 15px; border-radius: 8px; border: ${bordaCor};">
+                    <div style="display: flex; align-items: center; justify-content: space-between; background: ${isHoje ? 'rgba(79, 195, 247, 0.15)' : 'rgba(0,0,0,0.2)'}; padding: 10px 15px; border-radius: 8px; border: ${isHoje ? '1px solid #4fc3f7' : '1px solid var(--cor-borda)'};">
                         <div>
-                            <strong style="color: ${textCor}; font-size: 0.9rem;"><i class="fa-solid fa-gift" style="margin-right: 5px; color: #4fc3f7;"></i> ${a.nome} ${tagHoje}</strong><br>
-                            <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${a.unidade}</span>
+                            <strong style="color: ${isHoje ? '#4fc3f7' : '#fff'}; font-size: 0.9rem;"><i class="fa-solid fa-cake-candles"></i> ${a.nome}</strong><br>
+                            <span style="font-size: 0.7rem; color: var(--cor-texto-secundario);">${a.unidade}</span>
                         </div>
-                        <div style="text-align: center; background: rgba(0,0,0,0.3); padding: 5px 10px; border-radius: 6px;">
-                            <span style="display: block; font-size: 0.65rem; color: var(--cor-texto-secundario); text-transform: uppercase;">Dia</span>
+                        <div style="text-align: center; min-width: 40px;">
+                            <span style="display: block; font-size: 0.6rem; color: var(--cor-texto-secundario);">DIA</span>
                             <strong style="color: #4fc3f7; font-size: 1.1rem;">${String(a.dia).padStart(2, '0')}</strong>
                         </div>
-                    </div>
-                `;
+                    </div>`;
             });
         } else {
-            anivHtmlContainer.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); margin: 20px 0;"><i class="fa-solid fa-calendar-xmark fa-2x"></i><br><br>Nenhum aniversariante neste mês.</p>';
+            anivHtmlContainer.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); margin: 20px 0;">Nenhum aniversariante no mês.</p>';
         }
 
     } catch (e) {
-        console.error("Erro ao carregar Dashboard Inicial:", e);
+        console.error("Erro no Dashboard:", e);
     }
 };
     </script>
