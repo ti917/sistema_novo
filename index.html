@@ -16,6 +16,7 @@
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     
     <style>
         :root {
@@ -22899,6 +22900,9 @@ window.limparLoteDocs = function() {
     arquivosLoteValidados = [];
 };
 
+// Ativa o "trabalhador de fundo" do leitor de PDF
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
 window.analisarArquivosLote = async function(input) {
     const empresa = document.getElementById('doc-lote-empresa').value;
     const tipo = document.getElementById('doc-lote-tipo').value;
@@ -22912,68 +22916,85 @@ window.analisarArquivosLote = async function(input) {
     const files = input.files;
     if (files.length === 0) return;
 
-    mostrarAlerta("Analisando nomes dos arquivos...", "aviso");
+    mostrarAlerta("O Robô está lendo o conteúdo dos PDFs. Aguarde...", "aviso");
     document.getElementById('preview-lote-container').classList.remove('hidden');
     const tbody = document.getElementById('lista-lote-body');
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i> Cruzando dados com o banco...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-robot fa-bounce fa-2x" style="color: #8b5cf6; margin-bottom: 10px;"></i><br>Lendo texto dentro dos arquivos...</td></tr>';
 
-    // Puxa todos os colabs da empresa selecionada
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
+
+    // Organiza a lista do maior nome pro menor (para evitar que ele ache "Ana" quando o texto diz "Ana Maria")
+    const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
     let countSucesso = 0;
     let html = '';
 
-    // 👇 A MÁGICA: FUNÇÃO QUE LIMPA ACENTOS E ESPAÇOS DUPLOS 👇
     const padronizarNome = (texto) => {
         if (!texto) return '';
-        return texto.normalize('NFD') // Separa os acentos das letras
-                    .replace(/[\u0300-\u036f]/g, '') // Arranca os acentos
-                    .replace(/\s+/g, ' ') // Se tiver 2 espaços seguidos, vira 1 só
-                    .trim() // Tira espaço do começo e do final
-                    .toUpperCase(); // Tudo maiúsculo
+        return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
     };
 
+    // Começa a ler arquivo por arquivo
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        
-        // 1. Tira o .pdf do final (O regex /\.pdf$/i faz ele ignorar se está .pdf, .PDF ou .Pdf)
-        let nomeSemExtensao = file.name.replace(/\.pdf$/i, '');
-        
-        // 2. Passa o nome do arquivo na máquina de lavar
-        let nomeArquivoLimpo = padronizarNome(nomeSemExtensao);
+        let textoDoPDF = "";
 
-        // 3. Tenta achar o colaborador passando o nome do banco na MESMA máquina de lavar
-        const matchColab = colabs.find(c => {
-            let nomeBancoLimpo = padronizarNome(c.nome);
-            // Compara se é igual, se um contém o outro, ou vice-versa
-            return nomeBancoLimpo === nomeArquivoLimpo || 
-                   nomeBancoLimpo.includes(nomeArquivoLimpo) || 
-                   nomeArquivoLimpo.includes(nomeBancoLimpo);
-        });
+        try {
+            // 👇 A MÁGICA: ABRE E LÊ O PDF POR DENTRO 👇
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            
+            // Lê o texto de todas as páginas desse PDF
+            for (let j = 1; j <= pdf.numPages; j++) {
+                const page = await pdf.getPage(j);
+                const textContent = await page.getTextContent();
+                const pageText = textContent.items.map(item => item.str).join(' ');
+                textoDoPDF += " " + pageText;
+            }
 
-        if (matchColab) {
-            const fone = matchColab.dados_admissao?.telefone;
-            if (fone) {
-                arquivosLoteValidados.push({ file: file, colab: matchColab, valido: true });
-                html += `<tr>
-                    <td>${file.name}</td>
-                    <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check"></i> ${matchColab.nome}</td>
-                    <td><span class="badge ativo">Pronto p/ Envio</span></td>
-                </tr>`;
-                countSucesso++;
+            textoDoPDF = padronizarNome(textoDoPDF);
+
+            // Tenta achar o nome do funcionário DENTRO do texto do PDF
+            let matchColab = null;
+            for (let c of colabsOrdenados) {
+                let nomeBancoLimpo = padronizarNome(c.nome);
+                if (textoDoPDF.includes(nomeBancoLimpo)) {
+                    matchColab = c;
+                    break; // Achou o dono do PDF! Para de procurar.
+                }
+            }
+
+            if (matchColab) {
+                const fone = matchColab.dados_admissao?.telefone;
+                if (fone) {
+                    arquivosLoteValidados.push({ file: file, colab: matchColab, valido: true });
+                    html += `<tr>
+                        <td>${file.name}</td>
+                        <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> ${matchColab.nome}</td>
+                        <td><span class="badge ativo">Pronto p/ Envio</span></td>
+                    </tr>`;
+                    countSucesso++;
+                } else {
+                    html += `<tr>
+                        <td>${file.name}</td>
+                        <td style="color: #ff9800;">${matchColab.nome}</td>
+                        <td><span class="badge pendente" style="background: rgba(255,152,0,0.1); color: #ff9800;">Sem Telefone</span></td>
+                    </tr>`;
+                }
             } else {
-                html += `<tr>
+                html += `<tr style="background: rgba(220,53,69,0.1);">
                     <td>${file.name}</td>
-                    <td style="color: #ff9800;">${matchColab.nome}</td>
-                    <td><span class="badge pendente" style="background: rgba(255,152,0,0.1); color: #ff9800;">Sem Telefone</span></td>
+                    <td style="color: #dc3545;"><i class="fa-solid fa-xmark"></i> Não Encontrado</td>
+                    <td><span class="badge desligado">Rejeitado</span></td>
                 </tr>`;
             }
-        } else {
+        } catch (err) {
+            console.error("Erro ao ler PDF:", err);
             html += `<tr style="background: rgba(220,53,69,0.1);">
                 <td>${file.name}</td>
-                <td style="color: #dc3545;"><i class="fa-solid fa-xmark"></i> Não Encontrado</td>
-                <td><span class="badge desligado">Arquivo Ignorado</span></td>
+                <td style="color: #dc3545;"><i class="fa-solid fa-bug"></i> Erro de Leitura</td>
+                <td><span class="badge desligado">PDF Protegido/Corrompido</span></td>
             </tr>`;
         }
     }
