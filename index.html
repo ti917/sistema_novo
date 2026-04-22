@@ -3943,6 +3943,12 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                 </div>
             </div>
 
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 15px;">
+                <button id="btn-reenviar-todos" class="btn-secondary hidden" style="border-color: #25D366; color: #25D366; font-size: 0.95rem; padding: 10px 20px; font-weight: bold;" onclick="reenviarParaTodosPendentes()">
+                    <i class="fa-brands fa-whatsapp"></i> Cobrar Todos os Pendentes
+                </button>
+            </div>
+
             <div id="lista-status-holerites-container" style="display: flex; flex-direction: column; gap: 10px; max-height: 400px; overflow-y: auto; padding-right: 5px;">
                 </div>
         </div>
@@ -23215,11 +23221,14 @@ window.carregarStatusHolerites = async function() {
     window.filtrarTabelaDocs();
 };
 
+// Variável global para guardar a lista de quem falta assinar nos filtros atuais
+let pendentesAtuaisFiltro = [];
+
 window.filtrarTabelaDocs = function() {
     const container = document.getElementById('lista-status-holerites-container');
     const filtroStatus = document.getElementById('filtro-status-doc').value;
     const filtroMes = document.getElementById('filtro-mes-status-doc').value;
-    const filtroTipo = document.getElementById('filtro-tipo-doc').value; // O Novo Filtro
+    const filtroTipo = document.getElementById('filtro-tipo-doc').value; 
 
     let filtrados = dadosDocsMensais;
 
@@ -23229,13 +23238,14 @@ window.filtrarTabelaDocs = function() {
         filtrados = filtrados.filter(d => d.tipo_documento && d.tipo_documento.toUpperCase() === filtroTipo.toUpperCase());
     }
 
-    // 2. A MÁGICA DO DASHBOARD: Calcula os totais ANTES de aplicar o filtro de Status
-    // (Isso impede que a barra zere se você quiser ver só os que faltam)
+    // 2. Calcula Totais
     let totalDocs = filtrados.length;
     let qtdAssinados = filtrados.filter(d => d.status === 'Assinado').length;
-    let qtdPendentes = filtrados.filter(d => d.status === 'Pendente').length;
     
-    // Calcula a porcentagem
+    // 👇 GUARDA OS PENDENTES PARA O BOTÃO DE ENVIO EM MASSA 👇
+    pendentesAtuaisFiltro = filtrados.filter(d => d.status === 'Pendente');
+    let qtdPendentes = pendentesAtuaisFiltro.length;
+    
     let porcentagem = totalDocs === 0 ? 0 : Math.round((qtdAssinados / totalDocs) * 100);
 
     // 3. Atualiza os textos e a Barra Visual
@@ -23245,11 +23255,22 @@ window.filtrarTabelaDocs = function() {
     document.getElementById('txt-progresso-holerite').innerText = `${porcentagem}% Concluído`;
     document.getElementById('barra-progresso-holerite').style.width = `${porcentagem}%`;
 
-    // 4. Agora sim, aplica o filtro de Status para desenhar a lista abaixo do painel
+    // 👇 MOSTRA OU ESCONDE O BOTÃO DE COBRANÇA EM MASSA 👇
+    const btnReenviarTodos = document.getElementById('btn-reenviar-todos');
+    if (btnReenviarTodos) {
+        if (qtdPendentes > 0) {
+            btnReenviarTodos.classList.remove('hidden');
+            btnReenviarTodos.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar ${qtdPendentes} Pendente(s) no Zap`;
+        } else {
+            btnReenviarTodos.classList.add('hidden');
+        }
+    }
+
+    // 4. Aplica o filtro de Status para desenhar a lista abaixo
     if (filtroStatus !== 'Todos') filtrados = filtrados.filter(d => d.status === filtroStatus);
 
     if (filtrados.length === 0) {
-        container.innerHTML = '<div style="text-align: center; color: var(--cor-texto-secundario); padding: 40px;"><i class="fa-solid fa-folder-open fa-3x" style="margin-bottom:15px;"></i><br>Nenhum documento encontrado com estes filtros.</div>';
+        container.innerHTML = '<div style="text-align: center; color: var(--cor-texto-secundario); padding: 40px;"><i class="fa-solid fa-folder-open fa-3x" style="margin-bottom:15px;"></i><br>Nenhum documento encontrado.</div>';
         return;
     }
 
@@ -23321,6 +23342,58 @@ window.reenviarZapDoc = async function(docId) {
         mostrarAlerta("Erro interno ao tentar reenviar: " + err.message, "erro");
     }
 }
+
+        // ==========================================
+// FUNÇÃO: COBRANÇA EM MASSA NO WHATSAPP
+// ==========================================
+window.reenviarParaTodosPendentes = async function() {
+    if (!pendentesAtuaisFiltro || pendentesAtuaisFiltro.length === 0) return;
+
+    const confirmado = await mostrarConfirmacao(`Atenção: Você vai disparar mensagens no WhatsApp para <b>${pendentesAtuaisFiltro.length}</b> pessoas cobrando a assinatura. Deseja continuar?`, "Cobrança em Massa");
+    if (!confirmado) return;
+
+    const btn = document.getElementById('btn-reenviar-todos');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando cobranças...';
+
+    mostrarAlerta("Iniciando envios em massa. Por favor, aguarde...", "aviso");
+
+    let enviados = 0;
+
+    for (let doc of pendentesAtuaisFiltro) {
+        try {
+            // Busca o telefone do cara no banco na hora
+            const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', doc.colaborador_id).single();
+            const fone = perfil?.dados_admissao?.telefone;
+
+            if (fone) {
+                const primeiroNome = doc.nome.split(' ')[0];
+                
+                // Dispara usando a API (com o Token e o PDF corretos)
+                const sucesso = await enviarMensagemGraphAPI(
+                    fone, 
+                    'envio_de_holerite_sistema_novo', 
+                    [primeiroNome, doc.tipo_documento, doc.mes_ano], 
+                    doc.documento_pdf,                  
+                    doc.token                        
+                );
+                
+                if (sucesso) enviados++;
+                
+                // Trava de 1 segundo entre envios para a Meta não dar block de Spam!
+                await new Promise(r => setTimeout(r, 1000)); 
+            }
+        } catch (err) {
+            console.error(`Erro ao reenviar para ${doc.nome}:`, err);
+        }
+    }
+
+    mostrarAlerta(`Cobrança em massa concluída!<br><b>${enviados}</b> mensagens enviadas com sucesso.`, "sucesso");
+    
+    // Devolve o botão ao normal
+    btn.disabled = false;
+    btn.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar ${pendentesAtuaisFiltro.length} Pendente(s) no Zap`;
+};
     </script>
 </body>
 </html>
