@@ -98,78 +98,91 @@
             resizeCanvas();
         }
 
-        async function processarAssinaturaNoPDF() {
-            if (signaturePad.isEmpty()) { alert("Por favor, realize a sua assinatura."); return; }
+       async function processarAssinaturaNoPDF() {
+    if (signaturePad.isEmpty()) { alert("Por favor, realize a sua assinatura."); return; }
 
-            const btn = document.getElementById('btn-confirmar');
-            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gravando assinatura no PDF...';
-            btn.disabled = true;
+    const btn = document.getElementById('btn-confirmar');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gravando assinatura e selo digital...';
+    btn.disabled = true;
 
-            try {
-                // 1. Baixa o PDF CORTADO (individual) do colaborador
-                const response = await fetch(dadosDoc.documento_pdf);
-                const pdfBytesOriginal = await response.arrayBuffer();
+    try {
+        // 1. Baixa o PDF original (individual)
+        const response = await fetch(dadosDoc.documento_pdf);
+        const pdfBytesOriginal = await response.arrayBuffer();
 
-                // 2. Carrega o PDF na biblioteca de edição
-                const pdfDoc = await PDFLib.PDFDocument.load(pdfBytesOriginal);
-                const pages = pdfDoc.getPages();
-                const lastPage = pages[pages.length - 1]; // Pega a última página (onde costumam ficar as assinaturas)
-                const { width, height } = lastPage.getSize();
+        // 2. Carrega o documento e define fontes
+        const pdfDoc = await PDFLib.PDFDocument.load(pdfBytesOriginal);
+        const pages = pdfDoc.getPages();
+        const lastPage = pages[pages.length - 1]; 
+        const { width, height } = lastPage.getSize();
+        
+        // 3. Prepara a imagem da assinatura (Diminuída para 0.22 para ser mais elegante)
+        const signatureImage = await pdfDoc.embedPng(signaturePad.toDataURL());
+        const sigDims = signatureImage.scale(0.22); 
 
-                // 3. Prepara a imagem da assinatura
-                const signatureImage = await pdfDoc.embedPng(signaturePad.toDataURL());
-                const sigDims = signatureImage.scale(0.35); // Ajusta o tamanho da assinatura
+        // 4. Prepara o texto do Selo Digital (Data e Hora)
+        const agora = new Date();
+        const dataFormatada = agora.toLocaleDateString('pt-BR');
+        const horaFormatada = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const textoSelo = `Assinado digitalmente em ${dataFormatada} às ${horaFormatada}`;
 
-                // 4. LÓGICA DE POSICIONAMENTO
-                let posX, posY;
+        // 5. LÓGICA DE POSICIONAMENTO REFINADA
+        // Alinhado para ficar abaixo do bloco de Totais/Base INSS
+        let posX, posY;
 
-                if (dadosDoc.tipo_documento.includes("Ponto")) {
-                    // Posição aproximada para Folha de Ponto (Em cima da linha do colaborador no rodapé)
-                    posX = 50; 
-                    posY = 85; 
-                } else {
-                    // Posição para Holerite (Geralmente canto inferior direito ou centralizado no fim)
-                    posX = width / 2 - (sigDims.width / 2);
-                    posY = 50;
-                }
-
-                // Desenha a assinatura no PDF!
-                lastPage.drawImage(signatureImage, {
-                    x: posX,
-                    y: posY,
-                    width: sigDims.width,
-                    height: sigDims.height,
-                });
-
-                // 5. Salva o novo PDF (Original + Assinatura)
-                const pdfBytesAssinado = await pdfDoc.save();
-                const pdfBlob = new Blob([pdfBytesAssinado], { type: 'application/pdf' });
-
-                // 6. Faz o upload da versão assinada pro Supabase
-                const nomeArquivo = `Assinados/${Date.now()}_${dadosDoc.nome.replace(/\s/g, '_')}.pdf`;
-                await supabaseClient.storage.from('documentos').upload(nomeArquivo, pdfBlob);
-                const { data: pUrl } = supabaseClient.storage.from('documentos').getPublicUrl(nomeArquivo);
-
-                // 7. Atualiza o banco de dados
-                await supabaseClient.from('documentos_mensais').update({
-                    status: 'Assinado',
-                    documento_assinado: pUrl.publicUrl,
-                    assinado_em: new Date().toISOString()
-                }).eq('id', dadosDoc.id);
-
-                document.getElementById('conteudo-principal').innerHTML = `
-                    <i class="fa-solid fa-circle-check fa-5x" style="color: #28a745; margin-bottom: 20px;"></i>
-                    <h2>Sucesso!</h2>
-                    <p>Sua assinatura foi gravada diretamente no documento. O RH já foi notificado.</p>
-                `;
-
-            } catch (err) {
-                console.error(err);
-                alert("Erro ao processar o documento. Tente novamente.");
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fa-solid fa-check"></i> Finalizar e Assinar PDF';
-            }
+        if (dadosDoc.tipo_documento.includes("Ponto")) {
+            // Folha de Ponto: Geralmente mais à esquerda no rodapé
+            posX = 60; 
+            posY = 65; 
+        } else {
+            // Holerite: Centralizado na parte inferior, abaixo da linha de bases
+            posX = (width / 2) - (sigDims.width / 2) + 120; // Ajuste para alinhar com o campo de assinatura à direita
+            posY = 35; // Posicionado mais para o final da folha 
         }
+
+        // Desenha a Assinatura (Imagem)
+        lastPage.drawImage(signatureImage, {
+            x: posX,
+            y: posY,
+            width: sigDims.width,
+            height: sigDims.height,
+        });
+
+        // Desenha o Selo Digital (Texto informativo embaixo da assinatura)
+        lastPage.drawText(textoSelo, {
+            x: posX - 10, // Centraliza levemente com a imagem
+            y: posY - 10, // 10 pontos abaixo da imagem
+            size: 7, // Fonte pequena e discreta
+            color: PDFLib.rgb(0.4, 0.4, 0.4), // Cinza escuro para não sobrepor o documento
+        });
+
+        // 6. Finalização e Upload
+        const pdfBytesAssinado = await pdfDoc.save();
+        const pdfBlob = new Blob([pdfBytesAssinado], { type: 'application/pdf' });
+
+        const nomeArquivo = `Assinados/${Date.now()}_${dadosDoc.nome.replace(/\s/g, '_')}.pdf`;
+        await supabaseClient.storage.from('documentos').upload(nomeArquivo, pdfBlob);
+        const { data: pUrl } = supabaseClient.storage.from('documentos').getPublicUrl(nomeArquivo);
+
+        await supabaseClient.from('documentos_mensais').update({
+            status: 'Assinado',
+            documento_assinado: pUrl.publicUrl,
+            assinado_em: agora.toISOString()
+        }).eq('id', dadosDoc.id);
+
+        document.getElementById('conteudo-principal').innerHTML = `
+            <i class="fa-solid fa-circle-check fa-5x" style="color: #28a745; margin-bottom: 20px;"></i>
+            <h2>Documento Assinado!</h2>
+            <p>Sua assinatura e o selo digital de autenticidade foram aplicados com sucesso no rodapé do seu holerite.</p>
+        `;
+
+    } catch (err) {
+        console.error(err);
+        alert("Erro ao processar o documento. Verifique sua conexão.");
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-check"></i> Finalizar e Assinar PDF';
+    }
+}
 
         window.onload = inicializar;
     </script>
