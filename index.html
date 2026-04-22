@@ -17,6 +17,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
     
     <style>
         :root {
@@ -22916,14 +22917,14 @@ window.analisarArquivosLote = async function(input) {
     const files = input.files;
     if (files.length === 0) return;
 
-    mostrarAlerta("O Robô está lendo o conteúdo dos PDFs. Aguarde...", "aviso");
+    mostrarAlerta("Lendo e fatiando os PDFs... Isso pode levar alguns segundos.", "aviso");
     document.getElementById('preview-lote-container').classList.remove('hidden');
     const tbody = document.getElementById('lista-lote-body');
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-robot fa-bounce fa-2x" style="color: #8b5cf6; margin-bottom: 10px;"></i><br>Lendo texto dentro dos arquivos...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-scissors fa-bounce fa-2x" style="color: #8b5cf6; margin-bottom: 10px;"></i><br>A Tesoura Digital está processando as páginas...</td></tr>';
 
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
 
-    // Organiza a lista do maior nome pro menor (para evitar que ele ache "Ana" quando o texto diz "Ana Maria")
+    // Organiza do maior nome pro menor para não confundir "Ana" com "Ana Maria"
     const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
@@ -22935,66 +22936,104 @@ window.analisarArquivosLote = async function(input) {
         return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
     };
 
-    // Começa a ler arquivo por arquivo
+    // Para cada arquivo anexado (mesmo que seja um só de 100 páginas)
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        let textoDoPDF = "";
 
         try {
-            // 👇 A MÁGICA: ABRE E LÊ O PDF POR DENTRO 👇
             const arrayBuffer = await file.arrayBuffer();
-            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             
-            // Lê o texto de todas as páginas desse PDF
-            for (let j = 1; j <= pdf.numPages; j++) {
-                const page = await pdf.getPage(j);
+            // pdfjsDoc = Lê o texto (Cérebro)
+            const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            
+            // pdfLibDoc = Recorta o papel (Músculo/Tesoura)
+            const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
+
+            let donoAtual = null;
+            let mapaColabPaginas = new Map();
+
+            // 1. LÊ PÁGINA POR PÁGINA
+            for (let j = 1; j <= pdfjsDoc.numPages; j++) {
+                const page = await pdfjsDoc.getPage(j);
                 const textContent = await page.getTextContent();
-                const pageText = textContent.items.map(item => item.str).join(' ');
-                textoDoPDF += " " + pageText;
-            }
+                const pageText = padronizarNome(textContent.items.map(item => item.str).join(' '));
 
-            textoDoPDF = padronizarNome(textoDoPDF);
+                let matchColab = null;
+                for (let c of colabsOrdenados) {
+                    if (pageText.includes(padronizarNome(c.nome))) {
+                        matchColab = c;
+                        break;
+                    }
+                }
 
-            // Tenta achar o nome do funcionário DENTRO do texto do PDF
-            let matchColab = null;
-            for (let c of colabsOrdenados) {
-                let nomeBancoLimpo = padronizarNome(c.nome);
-                if (textoDoPDF.includes(nomeBancoLimpo)) {
-                    matchColab = c;
-                    break; // Achou o dono do PDF! Para de procurar.
+                // Se achou um nome nessa página, o "donoAtual" muda pra ele.
+                // Se NÃO achou nome (ex: página 2 do holerite é só o resumo), o donoAtual continua sendo o da página 1!
+                if (matchColab) {
+                    donoAtual = matchColab;
+                }
+
+                // Se a gente já sabe de quem é essa folha, anota o número da página no nome dele
+                if (donoAtual) {
+                    if (!mapaColabPaginas.has(donoAtual.id)) {
+                        mapaColabPaginas.set(donoAtual.id, { colab: donoAtual, paginas: [] });
+                    }
+                    mapaColabPaginas.get(donoAtual.id).paginas.push(j - 1); // pdf-lib usa índice começando do 0
                 }
             }
 
-            if (matchColab) {
-                const fone = matchColab.dados_admissao?.telefone;
+            // Se o robô não achou O NOME DE NINGUÉM no arquivo inteiro
+            if (mapaColabPaginas.size === 0) {
+                 html += `<tr style="background: rgba(220,53,69,0.1);">
+                    <td>${file.name}</td>
+                    <td style="color: #dc3545;"><i class="fa-solid fa-xmark"></i> Nenhum nome encontrado</td>
+                    <td><span class="badge desligado">Ignorado</span></td>
+                </tr>`;
+                continue;
+            }
+
+            // 2. A TESOURA EM AÇÃO: Cria os PDFs separados
+            for (let [id, dados] of mapaColabPaginas.entries()) {
+                // Cria um arquivo PDF em branco
+                const novoPdf = await PDFLib.PDFDocument.create();
+                
+                // Copia as páginas exatas desse funcionário do arquivo original
+                const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, dados.paginas);
+                paginasCopiadas.forEach(p => novoPdf.addPage(p));
+                
+                // Salva o novo arquivo
+                const novoPdfBytes = await novoPdf.save();
+                const novoBlob = new Blob([novoPdfBytes], { type: 'application/pdf' });
+                
+                // Dá o nome correto para ele
+                const nomeDoNovoArquivo = `${dados.colab.nome}.pdf`;
+                const novoFileSeparado = new File([novoBlob], nomeDoNovoArquivo, { type: 'application/pdf' });
+
+                const fone = dados.colab.dados_admissao?.telefone;
+                
+                // Adiciona na lista de envio final
                 if (fone) {
-                    arquivosLoteValidados.push({ file: file, colab: matchColab, valido: true });
+                    arquivosLoteValidados.push({ file: novoFileSeparado, colab: dados.colab, valido: true });
                     html += `<tr>
-                        <td>${file.name}</td>
-                        <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> ${matchColab.nome}</td>
+                        <td>${nomeDoNovoArquivo} <small style="color: #8b5cf6;">(${dados.paginas.length} pág)</small></td>
+                        <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> ${dados.colab.nome}</td>
                         <td><span class="badge ativo">Pronto p/ Envio</span></td>
                     </tr>`;
                     countSucesso++;
                 } else {
                     html += `<tr>
-                        <td>${file.name}</td>
-                        <td style="color: #ff9800;">${matchColab.nome}</td>
+                        <td>${nomeDoNovoArquivo}</td>
+                        <td style="color: #ff9800;">${dados.colab.nome}</td>
                         <td><span class="badge pendente" style="background: rgba(255,152,0,0.1); color: #ff9800;">Sem Telefone</span></td>
                     </tr>`;
                 }
-            } else {
-                html += `<tr style="background: rgba(220,53,69,0.1);">
-                    <td>${file.name}</td>
-                    <td style="color: #dc3545;"><i class="fa-solid fa-xmark"></i> Não Encontrado</td>
-                    <td><span class="badge desligado">Rejeitado</span></td>
-                </tr>`;
             }
+
         } catch (err) {
-            console.error("Erro ao ler PDF:", err);
+            console.error("Erro na tesoura digital:", err);
             html += `<tr style="background: rgba(220,53,69,0.1);">
                 <td>${file.name}</td>
-                <td style="color: #dc3545;"><i class="fa-solid fa-bug"></i> Erro de Leitura</td>
-                <td><span class="badge desligado">PDF Protegido/Corrompido</span></td>
+                <td style="color: #dc3545;"><i class="fa-solid fa-bug"></i> Arquivo Ilegível</td>
+                <td><span class="badge desligado">Corrompido/Bloqueado</span></td>
             </tr>`;
         }
     }
@@ -23016,7 +23055,7 @@ window.iniciarDisparoEmLote = async function() {
     const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
     const mesNomeAno = `${mesesExtenso[parseInt(mesStr) - 1]} de ${anoStr}`;
 
-    const confirmou = await mostrarConfirmacao(`Deseja disparar os PDFs no WhatsApp de ${arquivosLoteValidados.length} colaborador(es)?`, "Iniciar Disparo");
+    const confirmado = await mostrarConfirmacao(`Deseja disparar os PDFs no WhatsApp de ${arquivosLoteValidados.length} colaborador(es)?`, "Iniciar Disparo");
     if (!confirmado) return;
 
     btn.disabled = true;
