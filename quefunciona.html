@@ -4374,6 +4374,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return v;
 }
 
+        const MAPA_MESES_SISTEMA = {
+    'JANEIRO': '01', 'FEVEREIRO': '02', 'MARCO': '03', 'ABRIL': '04',
+    'MAIO': '05', 'JUNHO': '06', 'JULHO': '07', 'AGOSTO': '08',
+    'SETEMBRO': '09', 'OUTUBRO': '10', 'NOVEMBRO': '11', 'DEZEMBRO': '12'
+};
+
         // 👇 FUNÇÃO ATUALIZADA COM 5 DIAS DE CARÊNCIA 👇
         window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
             const hoje = new Date();
@@ -22971,10 +22977,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 window.analisarArquivosLote = async function(input) {
     const empresa = document.getElementById('doc-lote-empresa').value;
     const tipo = document.getElementById('doc-lote-tipo').value;
-    const mes = document.getElementById('doc-lote-mes').value;
+    let mesInput = document.getElementById('doc-lote-mes');
 
-    if (!empresa || !tipo || !mes) {
-        mostrarAlerta("Preencha os campos superiores antes de anexar!", "aviso");
+    if (!empresa || !tipo) {
+        mostrarAlerta("Selecione Empresa e Tipo antes de anexar!", "aviso");
         input.value = ''; return;
     }
 
@@ -22983,10 +22989,12 @@ window.analisarArquivosLote = async function(input) {
 
     document.getElementById('preview-lote-container').classList.remove('hidden');
     const tbody = document.getElementById('lista-lote-body');
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-scissors fa-spin fa-2x"></i><br>Fatiando PDFs com Segurança Máxima...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-magnifying-glass-chart fa-spin fa-2x" style="color: #8b5cf6;"></i><br>Mapeando páginas e cruzando dados dos colaboradores...</td></tr>';
 
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
-    const colabsOrdenados = [...colabs].sort((a, b) => b.nome.length - a.nome.length);
+    
+    let statusColabsEmpresa = colabs.map(c => ({ ...c, achadoNoPdf: false, paginas: [] }));
+    const colabsOrdenados = [...statusColabsEmpresa].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
     let countSucesso = 0;
@@ -22998,6 +23006,8 @@ window.analisarArquivosLote = async function(input) {
         return texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
     };
 
+    let mesJaAtualizadoNesteLote = false; 
+
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
         try {
@@ -23005,77 +23015,107 @@ window.analisarArquivosLote = async function(input) {
             const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
 
-            // Objeto para guardar as páginas separadas por ID de colaborador
-            let mapaColabPaginas = {}; 
-
             for (let j = 1; j <= pdfjsDoc.numPages; j++) {
                 const page = await pdfjsDoc.getPage(j);
                 const textContent = await page.getTextContent();
-                const pageText = padronizarNome(textContent.items.map(item => item.str).join(' '));
+                const pageTextRaw = textContent.items.map(item => item.str).join(' ');
+                
+                // Texto normal para tentar achar o mês
+                const pageText = padronizarNome(pageTextRaw);
+                
+                // 👇 O TRUQUE NINJA: Texto espremido (sem NENHUM espaço) para achar o nome!
+                const pageTextSemEspaco = pageText.replace(/\s/g, ''); 
 
-                let donoDestaPagina = null;
+                if (!mesJaAtualizadoNesteLote) {
+                    const regexH = /(JANEIRO|FEVEREIRO|MARCO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)\s+DE\s+(\d{4})/i;
+                    const matchH = pageText.match(regexH);
+                    
+                    if (matchH) {
+                        mesInput.value = `${matchH[2]}-${MAPA_MESES_SISTEMA[matchH[1].toUpperCase()]}`;
+                        mesJaAtualizadoNesteLote = true; 
+                    } else {
+                        const regexP = /ATE\s+(\d{2})\/(\d{2})\/(\d{4})/i;
+                        const matchP = pageText.match(regexP);
+                        if (matchP) {
+                            mesInput.value = `${matchP[3]}-${matchP[2]}`;
+                            mesJaAtualizadoNesteLote = true; 
+                        }
+                    }
+                }
+
+                let achouAlguemNestaPagina = false;
                 for (let c of colabsOrdenados) {
-                    if (pageText.includes(padronizarNome(c.nome))) {
-                        donoDestaPagina = c;
-                        break;
+                    // Tira os espaços do nome do banco de dados também!
+                    const nomeBancoSemEspaco = padronizarNome(c.nome).replace(/\s/g, '');
+
+                    // Compara as duas strings juntas: "RENATATESTE" bate com "RENATATESTE"
+                    if (pageTextSemEspaco.includes(nomeBancoSemEspaco)) {
+                        c.achadoNoPdf = true;
+                        c.paginas.push(j - 1);
+                        achouAlguemNestaPagina = true;
+                        break; 
                     }
                 }
 
-                // 👇 SEGURANÇA MÁXIMA: Se não achou nome na página, NÃO "CHUTA" QUEM É O DONO 👇
-                if (donoDestaPagina) {
-                    if (!mapaColabPaginas[donoDestaPagina.id]) {
-                        mapaColabPaginas[donoDestaPagina.id] = { colab: donoDestaPagina, paginas: [] };
-                    }
-                    mapaColabPaginas[donoDestaPagina.id].paginas.push(j - 1);
-                } else {
-                    // PÁGINA ÓRFÃ: Avisa o RH que essa página específica foi ignorada
-                    htmlAvisos += `<tr style="background: rgba(220,53,69,0.1);">
-                        <td>${file.name} (Pág ${j})</td>
-                        <td style="color: #dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> Nome não detectado nesta página</td>
-                        <td><span class="badge desligado">Ignorada por Segurança</span></td>
+                if (!achouAlguemNestaPagina) {
+                    htmlAvisos += `<tr style="background: rgba(255,152,0,0.05);">
+                        <td><small>${file.name}</small></td>
+                        <td style="color: #ff9800;"><i class="fa-solid fa-file-circle-question"></i> Pág. ${j} Sem Identificação</td>
+                        <td><span class="badge pendente">Página Ignorada</span></td>
                     </tr>`;
                 }
             }
 
-            // 2. CRIA OS ARQUIVOS INDIVIDUAIS (Apenas das páginas identificadas)
-            for (let id in mapaColabPaginas) {
-                const dados = mapaColabPaginas[id];
-                const novoPdf = await PDFLib.PDFDocument.create();
-                const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, dados.paginas);
-                paginasCopiadas.forEach(p => novoPdf.addPage(p));
-                
-                const novoPdfBytes = await novoPdf.save();
-                const novoFileSeparado = new File([novoPdfBytes], `${dados.colab.nome}.pdf`, { type: 'application/pdf' });
+            for (let c of colabsOrdenados) {
+                if (c.achadoNoPdf && c.paginas.length > 0) {
+                    const novoPdf = await PDFLib.PDFDocument.create();
+                    const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, c.paginas);
+                    paginasCopiadas.forEach(p => novoPdf.addPage(p));
+                    
+                    const novoPdfBytes = await novoPdf.save();
+                    const novoFile = new File([novoPdfBytes], `${c.nome}.pdf`, { type: 'application/pdf' });
 
-                const fone = dados.colab.dados_admissao?.telefone;
-                
-                if (fone) {
-                    // 👇 AQUI ESTÁ A CHAVE: arquivosLoteValidados SÓ RECEBE O ARQUIVO CORTADO 👇
-                    arquivosLoteValidados.push({ file: novoFileSeparado, colab: dados.colab, valido: true });
-                    htmlSucesso += `<tr>
-                        <td>${dados.colab.nome}.pdf <small>(${dados.paginas.length} pág)</small></td>
-                        <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-check-double"></i> Identificado</td>
-                        <td><span class="badge ativo">Pronto p/ Envio</span></td>
-                    </tr>`;
-                    countSucesso++;
-                } else {
-                    htmlAvisos += `<tr>
-                        <td>${dados.colab.nome}.pdf</td>
-                        <td style="color: #ff9800;">${dados.colab.nome}</td>
-                        <td><span class="badge pendente">Sem WhatsApp</span></td>
-                    </tr>`;
+                    const fone = c.dados_admissao?.telefone;
+                    if (fone) {
+                        arquivosLoteValidados.push({ file: novoFile, colab: c, valido: true });
+                        htmlSucesso += `<tr>
+                            <td><i class="fa-solid fa-file-pdf" style="color:#8b5cf6"></i> Pág(s): ${(c.paginas.map(p => p+1)).join(', ')}</td>
+                            <td style="color: #28a745; font-weight: bold;"><i class="fa-solid fa-user-check"></i> ${c.nome}</td>
+                            <td><span class="badge ativo">Pronto p/ Envio</span></td>
+                        </tr>`;
+                        countSucesso++;
+                    } else {
+                        htmlAvisos += `<tr>
+                            <td>Pág(s): ${(c.paginas.map(p => p+1)).join(', ')}</td>
+                            <td style="color: #ff9800;">${c.nome}</td>
+                            <td><span class="badge pendente">Sem WhatsApp</span></td>
+                        </tr>`;
+                    }
+                    c.achadoNoPdf = false; 
+                    c.paginas = [];
                 }
             }
 
-        } catch (err) {
-            console.error(err);
-            htmlAvisos += `<tr><td>${file.name}</td><td colspan="2">Erro ao ler arquivo</td></tr>`;
-        }
+        } catch (err) { console.error(err); }
     }
+
+    colabsOrdenados.forEach(c => {
+        if (!c.achadoNoPdf && !arquivosLoteValidados.some(a => a.colab.id === c.id)) {
+            htmlAvisos += `<tr style="background: rgba(220,53,69,0.05);">
+                <td>---</td>
+                <td style="color: #dc3545;"><i class="fa-solid fa-user-slash"></i> ${c.nome}</td>
+                <td><span class="badge desligado">Não achou no PDF</span></td>
+            </tr>`;
+        }
+    });
 
     tbody.innerHTML = htmlSucesso + htmlAvisos;
     document.getElementById('contador-lote-sucesso').innerText = `${countSucesso} Prontos para Envio`;
     document.getElementById('btn-disparar-lote').disabled = countSucesso === 0;
+
+    if (!mesInput.value) {
+        mostrarAlerta("Não detectamos o mês automaticamente. Selecione manualmente.", "aviso");
+    }
 };
 
 window.iniciarDisparoEmLote = async function() {
@@ -23122,11 +23162,14 @@ window.iniciarDisparoEmLote = async function() {
 
             // 1. Sobe o arquivo FATIADO pro Storage
             const urls = await subirDocumentos(caminhoBase, [item.file], nomeUnicoParaStorage);
-            const linkPdfFinal = urls[0]; // 👇 NOME PADRONIZADO AQUI 👇
+            const linkPdfFinal = urls[0]; 
 
-            // 2. Gera o Token e SALVA NA TABELA
+            // 👇 A CORREÇÃO: CRIA AS VARIÁVEIS ANTES DE USAR NO BANCO 👇
             const tokenUnico = crypto.randomUUID();
+            const fone = c.dados_admissao?.telefone; 
+            const primeiroNome = c.nome.split(' ')[0];
             
+            // 2. SALVA NA TABELA (Agora o 'fone' já existe aqui)
             const { error: errInsert } = await supabaseClient.from('documentos_mensais').insert([{
                 colaborador_id: c.id, 
                 nome: c.nome, 
@@ -23136,7 +23179,8 @@ window.iniciarDisparoEmLote = async function() {
                 tipo_documento: tipo, 
                 mes_ano: mesFormatado,
                 token: tokenUnico, 
-                documento_pdf: linkPdfFinal // 👇 USANDO O NOME PADRONIZADO 👇
+                documento_pdf: linkPdfFinal,
+                telefone: fone // << SALVANDO O TELEFONE COM SEGURANÇA
             }]);
 
             if (errInsert) {
@@ -23144,15 +23188,12 @@ window.iniciarDisparoEmLote = async function() {
                 continue;
             }
 
-            // 3. Dispara o WhatsApp (Envia o PDF fatiado no cabeçalho)
-            const fone = c.dados_admissao?.telefone;
-            const primeiroNome = c.nome.split(' ')[0];
-            
+            // 3. Dispara o WhatsApp inicial avisando que tem documento
             const enviadoOk = await enviarMensagemGraphAPI(
                 fone, 
                 'envio_de_holerite_sistema_novo', 
                 [primeiroNome, tipo, mesNomeAno], 
-                linkPdfFinal, // 👇 USANDO O NOME PADRONIZADO 👇
+                linkPdfFinal, 
                 tokenUnico
             );
 
@@ -23295,9 +23336,13 @@ window.filtrarTabelaDocs = function() {
                 </div>
                 <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
                     <span style="color: ${corStatus}; font-size: 0.85rem; font-weight: bold;">${icone} ${d.status}</span>
-                    <div style="display:flex; gap: 5px;">
+                    <div style="display:flex; gap: 5px; align-items: center;">
                         ${botoes}
                         <a href="${d.documento_pdf}" target="_blank" class="badge admin" style="text-decoration:none; padding: 6px 10px;" title="Ver PDF Original que foi enviado"><i class="fa-solid fa-file-pdf"></i> Original</a>
+                        
+                        <button onclick="excluirDocumento('${d.id}', '${d.documento_pdf}', '${d.documento_assinado}')" style="background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid rgba(220,53,69,0.3); border-radius: 4px; padding: 5px 10px; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='rgba(220,53,69,0.2)'" onmouseout="this.style.background='rgba(220,53,69,0.1)'" title="Excluir Documento do Sistema">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -23393,6 +23438,53 @@ window.reenviarParaTodosPendentes = async function() {
     // Devolve o botão ao normal
     btn.disabled = false;
     btn.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar ${pendentesAtuaisFiltro.length} Pendente(s) no Zap`;
+};
+
+        // ==========================================
+// FUNÇÃO: EXCLUIR DOCUMENTO (BANCO E STORAGE)
+// ==========================================
+window.excluirDocumento = async function(idDocumento, urlPdfOriginal, urlPdfAssinado) {
+    const confirmado = await mostrarConfirmacao("Tem certeza que deseja excluir este documento?<br><b>Isso apagará o PDF original e a assinatura do sistema permanentemente.</b>", "Excluir Documento");
+    if (!confirmado) return;
+
+    mostrarAlerta("Excluindo documento e limpando arquivos...", "aviso");
+
+    try {
+        // Função auxiliar para extrair só o "caminho" do arquivo de dentro da URL gigante
+        const extrairCaminho = (url) => {
+            if (!url || url === 'undefined' || url === 'null') return null;
+            const parte = url.split('/public/documentos/')[1];
+            return parte ? decodeURIComponent(parte) : null;
+        };
+
+        const caminhosParaApagar = [];
+        const pathOriginal = extrairCaminho(urlPdfOriginal);
+        const pathAssinado = extrairCaminho(urlPdfAssinado);
+
+        // Coloca os arquivos na lista de exclusão do Storage
+        if (pathOriginal) caminhosParaApagar.push(pathOriginal);
+        if (pathAssinado) caminhosParaApagar.push(pathAssinado);
+
+        // 1. Apaga do Storage (Se houver arquivos)
+        if (caminhosParaApagar.length > 0) {
+            const { error: errStorage } = await supabaseClient.storage.from('documentos').remove(caminhosParaApagar);
+            if (errStorage) console.error("Erro ao apagar PDFs do Storage:", errStorage);
+        }
+
+        // 2. Apaga do Banco de Dados
+        const { error: errDb } = await supabaseClient.from('documentos_mensais').delete().eq('id', idDocumento);
+        if (errDb) throw errDb;
+
+        // 3. Atualiza a tela em tempo real
+        dadosDocsMensais = dadosDocsMensais.filter(d => d.id !== idDocumento); // Tira da lista global
+        filtrarTabelaDocs(); // Re-renderiza a tabela e as barrinhas de progresso
+
+        mostrarAlerta("Documento excluído com sucesso!", "sucesso");
+
+    } catch (err) {
+        console.error("Erro ao excluir documento:", err);
+        mostrarAlerta("Erro ao excluir o documento do banco de dados.", "erro");
+    }
 };
     </script>
 </body>
