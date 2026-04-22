@@ -23076,12 +23076,12 @@ window.analisarArquivosLote = async function(input) {
 
 window.iniciarDisparoEmLote = async function() {
     const btn = document.getElementById('btn-disparar-lote');
-    const empresa = document.getElementById('doc-lote-empresa').value;
+    // Pegamos os valores dos filtros como "Plano B" caso o cadastro do colab esteja incompleto
+    const empresaSelecionada = document.getElementById('doc-lote-empresa').value;
     const tipo = document.getElementById('doc-lote-tipo').value;
-    const mesAno = document.getElementById('doc-lote-mes').value; // Vem YYYY-MM
-    
-    // Converte YYYY-MM para "Mês/YYYY" e pega o nome do mês
-    const [anoStr, mesStr] = mesAno.split('-');
+    const mesAnoInput = document.getElementById('doc-lote-mes').value; 
+
+    const [anoStr, mesStr] = mesAnoInput.split('-');
     const mesFormatado = `${mesStr}/${anoStr}`;
     const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
     const mesNomeAno = `${mesesExtenso[parseInt(mesStr) - 1]} de ${anoStr}`;
@@ -23090,13 +23090,12 @@ window.iniciarDisparoEmLote = async function() {
     if (!confirmado) return;
 
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Fazendo uploads e enviando mensagens...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando...';
 
     let enviados = 0;
     
-    // Função localzinha para limpar os nomes pro link não quebrar
     const formatarNomePastaLocal = (str) => {
-        if (!str) return 'Sem_Info';
+        if (!str || str === 'undefined') return 'INFORMACAO_AUSENTE';
         return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
     };
 
@@ -23105,54 +23104,64 @@ window.iniciarDisparoEmLote = async function() {
         const c = item.colab;
 
         try {
-            // 1. Sobe o PDF pro Storage (Na pasta do Funcionário / Holerites_e_Ponto)
-            const empresaLimpa = formatarNomePastaLocal(c.empresa);
-            const uniLimpa = formatarNomePastaLocal(c.unidade);
+            // 👇 SEGURANÇA: Garante que os nomes das pastas existam 👇
+            const empresaFinal = c.empresa || empresaSelecionada;
+            const unidadeFinal = c.unidade || "UNIDADE_NAO_DEFINIDA";
+            
+            const empresaLimpa = formatarNomePastaLocal(empresaFinal);
+            const uniLimpa = formatarNomePastaLocal(unidadeFinal);
             const nomeLimpo = formatarNomePastaLocal(c.nome);
             const tipoLimpo = formatarNomePastaLocal(tipo);
+            
             const caminhoBase = `${empresaLimpa}/${uniLimpa}/${nomeLimpo}/Docs_Mensais`;
-            
-            // Subimos o PDF com um nome seguro (evita bug de acentos)
-            const nomeUnicoParaStorage = `${Date.now()}_${tipoLimpo}_${mesAno.replace('-','_')}.pdf`;
-            
-            // Reutiliza sua função nativa de subir documentos! 
-            // *Nota: Transformamos o File num Array [item.file] porque sua função original exige um Array (FileList)
+            const nomeUnicoParaStorage = `${Date.now()}_${tipoLimpo}_${mesStr}_${anoStr}.pdf`;
+
+            // 1. Sobe o arquivo pro Storage
             const urls = await subirDocumentos(caminhoBase, [item.file], nomeUnicoParaStorage);
             const linkPdfOriginal = urls[0];
 
-            // 2. Gera o Token e salva no banco de dados
+            // 2. Gera o Token e SALVA NA TABELA (Com tratamento de erro)
             const tokenUnico = crypto.randomUUID();
-            await supabaseClient.from('documentos_mensais').insert([{
-                colaborador_id: c.id, nome: c.nome, cpf: c.dados_admissao.cpf,
-                unidade: c.unidade, empresa: c.empresa,
-                tipo_documento: tipo, mes_ano: mesFormatado,
-                token: tokenUnico, documento_pdf: linkPdfOriginal
+            
+            // 👇 ADICIONADO: log para debugar se algo falhar 👇
+            const { error: errInsert } = await supabaseClient.from('documentos_mensais').insert([{
+                colaborador_id: c.id, 
+                nome: c.nome, 
+                cpf: c.dados_admissao?.cpf || '00000000000', // CPF reserva caso esteja nulo
+                unidade: unidadeFinal, 
+                empresa: empresaFinal,
+                tipo_documento: tipo, 
+                mes_ano: mesFormatado,
+                token: tokenUnico, 
+                documento_pdf: linkPdfOriginal
             }]);
 
-            // 3. Monta os dados e Dispara o WhatsApp (Envia o PDF no Cabeçalho!)
-            const fone = c.dados_admissao.telefone;
+            if (errInsert) {
+                console.error("Erro ao criar registro no banco para:", c.nome, errInsert);
+                continue; // Pula para o próximo se não conseguir salvar no banco
+            }
+
+            // 3. Dispara o WhatsApp
+            const fone = c.dados_admissao?.telefone;
             const primeiroNome = c.nome.split(' ')[0];
             
-            // Aqui passamos o link original (para o cabeçalho) e o token (pro botão do site novo)
             const enviadoOk = await enviarMensagemGraphAPI(
                 fone, 
                 'envio_de_holerite_sistema_novo', 
-                [primeiroNome, tipo, mesNomeAno], // Variáveis de texto do body
-                linkPdfOriginal,                  // PDF que vai aparecer em cima da mensagem
-                tokenUnico                        // Fica no botão: /assinar-documento.html?token=...
+                [primeiroNome, tipo, mesNomeAno], 
+                linkPdfOriginal,
+                tokenUnico
             );
 
             if (enviadoOk) enviados++;
-            
-            // Pausa pra não tomar block da Meta
             await new Promise(r => setTimeout(r, 600));
 
         } catch (e) {
-            console.error("Erro no colaborador", c.nome, e);
+            console.error("Erro crítico no processo de:", c.nome, e);
         }
     }
 
-    mostrarAlerta(`Disparo concluído! ${enviados} documentos processados e enviados.`, "sucesso");
+    mostrarAlerta(`Processo finalizado!<br>Enviados: <b>${enviados}</b>`, "sucesso");
     limparLoteDocs();
     btn.disabled = false;
     btn.innerHTML = '<i class="fa-brands fa-whatsapp"></i> Iniciar Disparo para o WhatsApp';
