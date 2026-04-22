@@ -6045,7 +6045,7 @@ window.exportarPDFBI = function() {
         }
     } else if (usuarioAtual.unidade) {
         const unidadesGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
-        queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor']);
+        queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Admissão_Devolvida']);
     }
 
     const { data: notifsAprovadasDb } = await queryNotifs;
@@ -6212,6 +6212,8 @@ window.exportarPDFBI = function() {
                     textoTitulo = 'Rescisão Liberada pelo RH!'; textoAcao = 'tem um documento aguardando assinatura.'; corTema = '#4fc3f7'; bgCor = 'rgba(79,195,247,0.05)'; icone = 'fa-file-signature';
                 } else if (isRescisao) {
                     textoTitulo = 'Desligamento Concluído!'; textoAcao = 'foi desligado(a) oficialmente.'; corTema = 'var(--cor-perigo)'; bgCor = 'rgba(220,53,69,0.05)'; icone = 'fa-user-slash';
+                    } else if (item.tipo === 'Admissão_Devolvida') {
+    textoTitulo = 'Ficha Devolvida!'; textoAcao = 'voltou para correção do cadastro.'; corTema = 'var(--cor-perigo)'; bgCor = 'rgba(220,53,69,0.05)'; icone = 'fa-user-xmark';
                 } else if (isAusencia) {
                     textoTitulo = 'Ausência Aprovada!'; textoAcao = 'teve o atestado/falta validado.'; corTema = '#ff9800'; bgCor = 'rgba(255,152,0,0.05)'; icone = 'fa-user-clock';
                 } else if (item.tipo === 'FT_Admin' || item.tipo === 'FT') { 
@@ -6634,7 +6636,9 @@ async function limparNotificacoesAntigas() {
                                 mostrarAlerta(`O RH gerou a carta disciplinar de <b>${payload.new.nome}</b>! Baixe e colete a assinatura.`, 'aviso', '⚖️ Carta Disciplinar Pronta!');
                             } else if (tipoN === 'Admissão') {
                                 mostrarAlerta(`A ficha de <b>${payload.new.nome}</b> acabou de ser aprovada pelo Admin!`, 'sucesso', '🎉 Admissão Aprovada!');
-                            }
+                            }else if (tipoN === 'Admissão_Devolvida') {
+    mostrarAlerta(`A admissão de <b>${payload.new.nome}</b> foi devolvida pelo RH para correção!`, 'erro', '⚠️ Ficha Devolvida');
+}
                         }
                     })
                     .on('postgres_changes', { event: '*', schema: 'public', table: 'notificacoes' }, async (payload) => {
@@ -8273,27 +8277,30 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const unids = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
             if(unids.length === 0) return container.innerHTML = '<p>Sem unidades vinculadas.</p>';
 
-            // Puxa do banco apenas as que ele enviou que voltaram com "Devolvido"
+            // 👇 A MÁGICA 1: Tiramos a ordenação direta do banco que causava o erro invisível
             const { data, error } = await supabaseClient.from('perfis')
                 .select('*')
                 .eq('perfil', 'Colaborador')
                 .eq('status_aprovacao', 'Reprovado')
                 .eq('status', 'Devolvido')
-                .in('unidade', unids)
-                .order('created_at', { ascending: false });
+                .in('unidade', unids);
 
             if(error || !data || data.length === 0) {
                 container.innerHTML = '<div style="text-align:center; padding: 30px; color: var(--cor-texto-secundario);"><i class="fa-solid fa-box-open fa-3x" style="margin-bottom: 10px;"></i><br>Nenhuma ficha devolvida para correção no momento. Ótimo trabalho!</div>';
                 return;
             }
 
+            // Ordena usando o Javascript para ficar seguro
+            data.sort((a, b) => new Date(b.dados_admissao?.data_envio || 0) - new Date(a.dados_admissao?.data_envio || 0));
+
             let html = '';
             data.forEach(c => {
                 const adm = c.dados_admissao || {};
                 const motivo = adm.motivo_reprovacao || 'Motivo não informado. Entre em contato com o RH.';
                 
+                // 👇 ADICIONADO O ID "card-devolvida-..." 👇
                 html += `
-                    <div class="admissao-card" style="border-left: 4px solid var(--cor-perigo); flex-direction: column; align-items: stretch;">
+                    <div class="admissao-card" id="card-devolvida-${c.id}" style="border-left: 4px solid var(--cor-perigo); flex-direction: column; align-items: stretch;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <div>
                                 <strong style="font-size: 1.15rem; color: var(--cor-perigo);"><i class="fa-solid fa-user-xmark"></i> ${c.nome}</strong><br>
@@ -11846,6 +11853,8 @@ window.rotearNotificacao = async function(idColab, tipoNotificacao, referenciaId
         document.querySelector('[data-aba="aba-andamento-rescisoes"]')?.click();
     } else if (tipoNotificacao.includes('Rescisão')) {
         abrirRescisaoDestacada(idColab);
+    } else if (tipoNotificacao === 'Admissão_Devolvida') {
+        abrirDevolvidaDestacada(idColab);
     } else if (tipoNotificacao.includes('Admissão')) {
         abrirAdmissaoDestacada(idColab);
     } else if (tipoNotificacao.includes('Ausência')) {
@@ -11887,6 +11896,26 @@ window.rotearNotificacao = async function(idColab, tipoNotificacao, referenciaId
             abrirAdmissaoDestacada(idColab);
         }
     }
+};
+
+        window.abrirDevolvidaDestacada = async function(idColab) {
+    // 1. Clica no Menu Lateral "Nova Admissão"
+    document.querySelector('[data-target="tela-usuarios"]')?.click();
+    
+    // 2. Clica na aba interna "Fichas Devolvidas"
+    document.querySelector('[data-aba="aba-fichas-devolvidas"]')?.click();
+    
+    await carregarFichasDevolvidas();
+
+    // 3. Destaca o card piscando
+    setTimeout(() => {
+        const card = document.getElementById(`card-devolvida-${idColab}`);
+        if(card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.style.boxShadow = '0 0 20px rgba(220, 53, 69, 0.6)';
+            setTimeout(() => card.style.boxShadow = 'none', 5000);
+        }
+    }, 500);
 };
 
         window.abrirAdvertenciaDestacadaAdmin = async function(idReferencia) {
