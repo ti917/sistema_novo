@@ -5990,7 +5990,7 @@ window.deletarCargoOficial = async function(id) {
 window.graficoMensalInstancia = null;
 
 // ========================================================
-// 📊 GERADOR DE INDICADORES (BI) - COMPLETO
+// 📊 GERADOR DE INDICADORES (BI) - ATUALIZADO (C/ CÁLCULO DE HORAS)
 // ========================================================
 window.gerarDadosBI = async function() {
     let dIni = document.getElementById('bi-data-inicio').value;
@@ -6010,14 +6010,13 @@ window.gerarDadosBI = async function() {
     document.getElementById('bi-loading').classList.remove('hidden');
     document.getElementById('bi-resultados').classList.add('hidden');
     
-    // Referências dos Blocos na Tela
     const containerCardsTopo = document.getElementById('bi-cards-container');
     const containerGrafico = document.getElementById('graficoMensalBI').parentElement.parentElement;
     const containerTabela = document.getElementById('bi-tabela-detalhes').parentElement.parentElement;
     const containerRankingMain = document.getElementById('bi-ranking-lista').parentElement.parentElement;
     const rankDiv = document.getElementById('bi-ranking-lista');
 
-    // 🛡️ RESET DE LAYOUT: Garante que os elementos voltem ao normal ao trocar de filtros
+    // RESET DE LAYOUT
     containerCardsTopo.style.display = 'grid';
     containerGrafico.style.display = 'block';
     containerTabela.style.display = 'block';
@@ -6030,7 +6029,8 @@ window.gerarDadosBI = async function() {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
 
         let qAus = supabaseClient.from('ausencias').select('colaborador_id, nome, unidade, sigla, motivo, data_inicio').gte('data_inicio', dIni).lte('data_inicio', dFim).eq('status', 'Aprovado');
-        let qFt = supabaseClient.from('horas_extras_ft').select('colaborador_id, nome, unidade, sigla, motivo, data_inicio, observacao').gte('data_inicio', dIni).lte('data_inicio', dFim).eq('status', 'Aprovado');
+        // 👇 Pegamos TUDO da FT para poder buscar colunas de horas ou pescar no texto
+        let qFt = supabaseClient.from('horas_extras_ft').select('*').gte('data_inicio', dIni).lte('data_inicio', dFim).eq('status', 'Aprovado');
         let qPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         
         if (empresaSelecionadaFiltro !== 'Todas') {
@@ -6055,10 +6055,42 @@ window.gerarDadosBI = async function() {
         });
 
         // ========================================================
-        // 📊 LÓGICA DE LOTAÇÃO (MODO ESPECIAL DE CARDS)
+        // ⏰ MÁGICA: CÁLCULO DE HORAS A PAGAR (FT E H+)
         // ========================================================
+        let totalHorasPagar = 0;
+        
+        const ftsMapeadas = fts.map(f => {
+            // 1. Tenta achar o número da hora na coluna exata, ou pesca na observação do gestor
+            let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
+            let horas = parseFloat(hText);
+            
+            if (!horas && f.observacao) {
+                const match = f.observacao.match(/(\d+([.,]\d+)?)/); // Captura números na observação
+                if (match) horas = parseFloat(match[1].replace(',', '.'));
+            }
+            horas = isNaN(horas) ? 0 : horas;
+
+            // 2. Define a forma de pagamento (Busca a palavra 'folga' em qualquer lugar do registro)
+            const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
+            let isFolga = textoBuscaPgto.includes('folga');
+            let formaPgtoTxt = isFolga ? 'Folga' : 'Dinheiro';
+
+            // 3. Regra de Negócio: H+ ou FT em Dinheiro soma no total! FT Folga não entra na conta.
+            if (f.sigla === 'H+' || !isFolga) {
+                totalHorasPagar += horas;
+                if (f.sigla === 'H+') formaPgtoTxt = 'Dinheiro (H+)';
+            }
+
+            // 4. Monta o detalhe pra tabela
+            let textoDetalhe = `${f.sigla}: ${horas}h (${formaPgtoTxt})`;
+            if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
+            if (f.observacao) textoDetalhe += ` | Obs: ${f.observacao}`;
+
+            return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
+        });
+
         if (indicador === 'Lotacao') {
-            // Esconde os blocos normais e expande a área principal
+            // (Código de lotação original mantido intacto)
             containerCardsTopo.style.display = 'none';
             containerGrafico.style.display = 'none';
             containerTabela.style.display = 'none';
@@ -6073,43 +6105,27 @@ window.gerarDadosBI = async function() {
                 unidadesLimit.forEach(u => {
                     let limitesCargosObj = {};
                     try { if (u.limites_cargos) limitesCargosObj = JSON.parse(u.limites_cargos); } catch(e){}
-
-                    dadosLotacao[u.nome] = {
-                        limiteTotal: u.capacidade_limite,
-                        limitesCargos: limitesCargosObj,
-                        ativosTotal: 0,
-                        avisoTotal: 0,
-                        ativosPorCargo: {} 
-                    };
+                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
                 });
             }
 
             perfis.forEach(p => {
-                if (!dadosLotacao[p.unidade]) {
-                    dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
-                }
-
+                if (!dadosLotacao[p.unidade]) dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
                 const cargo = (p.dados_admissao && p.dados_admissao.cargo) ? p.dados_admissao.cargo : 'Sem Cargo';
-                let isAtivo = false;
-                let isAviso = false;
+                let isAtivo = false; let isAviso = false;
 
-                if (p.status === 'Ativo') {
-                    isAtivo = true;
-                } else if (p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia) {
+                if (p.status === 'Ativo') isAtivo = true;
+                else if (p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia) {
                     const udRegex = p.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
                         const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
-                        ud.setHours(0,0,0,0);
-                        const hoje = new Date(); hoje.setHours(0,0,0,0);
+                        ud.setHours(0,0,0,0); const hoje = new Date(); hoje.setHours(0,0,0,0);
                         if (hoje <= ud) isAviso = true;
                     }
                 }
 
                 if (isAtivo || isAviso) {
-                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) {
-                        dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
-                    }
-
+                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
                     if (isAtivo) {
                         dadosLotacao[p.unidade].ativosTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAtivos++;
@@ -6129,32 +6145,18 @@ window.gerarDadosBI = async function() {
 
             Object.entries(dadosLotacao).forEach(([unidade, dados]) => {
                 if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
-
                 const totalPessoas = dados.ativosTotal + dados.avisoTotal;
                 const limiteGeral = dados.limiteTotal || '∞';
                 
-                let pctTotalReal = 0;
-                let pctTotalBarra = 0;
-                let corTotal = '#4fc3f7'; 
-                let statusTotalTxt = 'Ilimitado';
+                let pctTotalReal = 0; let pctTotalBarra = 0; let corTotal = '#4fc3f7'; let statusTotalTxt = 'Ilimitado';
 
                 if (dados.limiteTotal) {
                     pctTotalReal = (totalPessoas / dados.limiteTotal) * 100;
                     pctTotalBarra = Math.min(pctTotalReal, 100);
-
-                    if (totalPessoas > dados.limiteTotal) {
-                        corTotal = 'var(--cor-perigo)'; 
-                        statusTotalTxt = 'Excedido';
-                    } else if (totalPessoas === dados.limiteTotal) {
-                        corTotal = 'var(--cor-sucesso)'; 
-                        statusTotalTxt = 'Lotação Completa';
-                    } else {
-                        corTotal = '#4fc3f7'; 
-                        statusTotalTxt = 'Vagas Abertas';
-                    }
-                } else if (totalPessoas > 0) {
-                    pctTotalBarra = 100;
-                }
+                    if (totalPessoas > dados.limiteTotal) { corTotal = 'var(--cor-perigo)'; statusTotalTxt = 'Excedido'; } 
+                    else if (totalPessoas === dados.limiteTotal) { corTotal = 'var(--cor-sucesso)'; statusTotalTxt = 'Lotação Completa'; } 
+                    else { corTotal = '#4fc3f7'; statusTotalTxt = 'Vagas Abertas'; }
+                } else if (totalPessoas > 0) { pctTotalBarra = 100; }
 
                 let detalhesCargos = '';
                 let cargosUnicos = new Set([...Object.keys(dados.limitesCargos), ...Object.keys(dados.ativosPorCargo)]);
@@ -6163,24 +6165,14 @@ window.gerarDadosBI = async function() {
                     const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
                     const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAviso;
-
-                    let pctCargoBarra = 0;
-                    let corCargo = '#4fc3f7'; 
+                    let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
 
                     if (limiteCargo !== '∞') {
                         let pctCargoReal = (totalNoCargo / limiteCargo) * 100;
                         pctCargoBarra = Math.min(pctCargoReal, 100);
-
-                        if (totalNoCargo > limiteCargo) {
-                            corCargo = 'var(--cor-perigo)'; 
-                        } else if (totalNoCargo === limiteCargo) {
-                            corCargo = 'var(--cor-sucesso)'; 
-                        } else {
-                            corCargo = '#4fc3f7'; 
-                        }
-                    } else if (totalNoCargo > 0) {
-                        pctCargoBarra = 100;
-                    }
+                        if (totalNoCargo > limiteCargo) corCargo = 'var(--cor-perigo)'; 
+                        else if (totalNoCargo === limiteCargo) corCargo = 'var(--cor-sucesso)'; 
+                    } else if (totalNoCargo > 0) pctCargoBarra = 100;
 
                     let nomesAtivosHtml = infoCargo.nomesAtivos.length > 0 ? `<div style="margin-top: 8px; font-size: 0.75rem; color: var(--cor-texto-secundario); line-height: 1.5;"><b style="color: #4fc3f7;">Ativos:</b> ${infoCargo.nomesAtivos.join(', ')}</div>` : '';
                     let nomesAvisoHtml = infoCargo.nomesAviso.length > 0 ? `<div style="margin-top: 4px; font-size: 0.75rem; color: var(--cor-texto-secundario); line-height: 1.5;"><b style="color: #ff9800;">No Aviso:</b> ${infoCargo.nomesAviso.join(', ')}</div>` : '';
@@ -6189,15 +6181,11 @@ window.gerarDadosBI = async function() {
                         <div style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); padding: 12px; border-radius: 8px; margin-bottom: 12px; transition: 0.3s;" onmouseover="this.style.borderColor='${corCargo}55'" onmouseout="this.style.borderColor='rgba(255,255,255,0.05)'">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <strong style="color: #e2e8f0; font-size: 0.85rem;"><i class="fa-solid fa-user-tie" style="color: var(--cor-texto-secundario); margin-right: 5px;"></i> ${cargo}</strong>
-                                <span style="background: ${corCargo}22; color: ${corCargo}; padding: 2px 8px; border-radius: 12px; font-weight: bold; font-size: 0.75rem; border: 1px solid ${corCargo}55;">
-                                    ${totalNoCargo} / ${limiteCargo}
-                                </span>
+                                <span style="background: ${corCargo}22; color: ${corCargo}; padding: 2px 8px; border-radius: 12px; font-weight: bold; font-size: 0.75rem; border: 1px solid ${corCargo}55;">${totalNoCargo} / ${limiteCargo}</span>
                             </div>
-                            
                             <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-bottom: 5px;">
                                 <div style="width: ${pctCargoBarra}%; height: 100%; background: ${corCargo}; border-radius: 3px; transition: width 1s ease-in-out;"></div>
                             </div>
-                            
                             ${nomesAtivosHtml}
                             ${nomesAvisoHtml}
                         </div>
@@ -6216,7 +6204,6 @@ window.gerarDadosBI = async function() {
                                 <b style="font-size: 1.4rem; color: ${corTotal}; line-height: 1;">${totalPessoas}</b><span style="color: var(--cor-texto-secundario); font-size: 0.9rem;"> / ${limiteGeral}</span>
                             </div>
                         </div>
-
                         <div style="width: 100%; height: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-bottom: 8px; border: 1px solid rgba(255,255,255,0.05);">
                             <div style="width: ${pctTotalBarra}%; height: 100%; background: ${corTotal}; border-radius: 4px; transition: width 1s ease-in-out; box-shadow: 0 0 10px ${corTotal};"></div>
                         </div>
@@ -6224,14 +6211,12 @@ window.gerarDadosBI = async function() {
                             <span>Status: <span style="color: ${corTotal};">${statusTotalTxt}</span></span>
                             <span>${pctTotalReal.toFixed(0)}% Ocupado</span>
                         </div>
-
                         <div style="flex: 1; overflow-y: auto; padding-right: 5px; max-height: 300px;">
                             ${detalhesCargos}
                         </div>
                     </div>
                 `;
             });
-
             htmlCartoesLotacao += '</div>';
             rankDiv.innerHTML = htmlCartoesLotacao;
 
@@ -6240,9 +6225,6 @@ window.gerarDadosBI = async function() {
             return; 
         } 
         
-        // ========================================================
-        // 📈 LÓGICA DE INDICADORES (Modo Tabela, Ranking e Gráfico)
-        // ========================================================
         let listaDetalhada = [];
         let dadosParaGrafico = []; 
         let tituloRanking = "Top Ocorrências";
@@ -6250,10 +6232,7 @@ window.gerarDadosBI = async function() {
         
         const agruparPorMes = (arrayDados, dataChave) => {
             let mapa = {};
-            arrayDados.forEach(item => {
-                let mesAno = item[dataChave].substring(0, 7);
-                mapa[mesAno] = (mapa[mesAno] || 0) + 1;
-            });
+            arrayDados.forEach(item => { let mesAno = item[dataChave].substring(0, 7); mapa[mesAno] = (mapa[mesAno] || 0) + 1; });
             return mapa;
         };
 
@@ -6267,8 +6246,7 @@ window.gerarDadosBI = async function() {
                 ...admissoes.map(a => ({ nome: a.nome, uni: a.unidade, dt: a.data_acao, det: `Admissão: ${a.detalhe}` })),
                 ...rescisoes.map(r => ({ nome: r.nome, uni: r.unidade, dt: r.data_acao, det: `Desligamento: ${r.detalhe}` })),
                 ...ausencias.map(a => ({ nome: a.nome, uni: a.unidade, dt: a.data_inicio, det: `${a.sigla} - ${a.motivo}` })),
-                // ADICIONA AS HORAS / OBSERVAÇÃO NA FT
-                ...fts.map(f => ({ nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: `${f.sigla}: ${f.motivo} (${f.observacao || 'Horas não especificadas'})` }))
+                ...ftsMapeadas // Usa as FTs já calculadas e tratadas com as horas!
             ];
             dadosRanking = ausencias; 
             tituloRanking = "Top Ausências (Todos os tipos)";
@@ -6280,15 +6258,13 @@ window.gerarDadosBI = async function() {
             
             let corLinha = indicador === 'FA' ? '#dc3545' : '#ff9800';
             dadosParaGrafico.push({ label: `Registros de ${indicador}`, cor: corLinha, dataMap: agruparPorMes(filtrado, 'data_inicio') });
-            
             listaDetalhada = filtrado.map(a => ({ nome: a.nome, uni: a.unidade, dt: a.data_inicio, det: `${a.sigla} - ${a.motivo}` }));
             dadosRanking = filtrado;
             tituloRanking = `Top Registros: ${indicador}`;
         }
         else if (indicador === 'FT') {
             dadosParaGrafico.push({ label: 'Hora Extra / FT', cor: '#4fc3f7', dataMap: agruparPorMes(fts, 'data_inicio') });
-            // ADICIONA AS HORAS / OBSERVAÇÃO NA FT
-            listaDetalhada = fts.map(f => ({ nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: `${f.sigla}: ${f.motivo} (${f.observacao || 'Horas não especificadas'})` }));
+            listaDetalhada = ftsMapeadas; // Usa as FTs já calculadas e tratadas com as horas!
             dadosRanking = fts;
             tituloRanking = "Top Campeões de Hora Extra";
         }
@@ -6305,113 +6281,71 @@ window.gerarDadosBI = async function() {
             tituloRanking = "Top Unidades com Desligamentos";
         }
 
-        // Constrói os cards numéricos superiores
+        // =================================================================
+        // CONSTRÓI OS CARDS NUMÉRICOS INJETANDO A SOMA DAS HORAS NA TELA
+        // =================================================================
         document.getElementById('bi-cards-container').innerHTML = `
             <div class="box-interior" style="border-left: 4px solid #28a745; text-align: center;">
                 <h4 style="color: #28a745; margin-bottom: 5px; font-size: 0.85rem;"><i class="fa-solid fa-user-plus"></i> Admissões</h4>
-                <h2 id="bi-card-adm" style="color: var(--cor-texto-principal); font-size: 2rem;">${admissoes.length}</h2>
+                <h2 id="bi-card-adm" style="color: var(--cor-texto-principal); font-size: 2rem; margin:0;">${admissoes.length}</h2>
             </div>
             <div class="box-interior" style="border-left: 4px solid #dc3545; text-align: center;">
                 <h4 style="color: #dc3545; margin-bottom: 5px; font-size: 0.85rem;"><i class="fa-solid fa-user-minus"></i> Desligamentos</h4>
-                <h2 id="bi-card-resc" style="color: var(--cor-texto-principal); font-size: 2rem;">${rescisoes.length}</h2>
+                <h2 id="bi-card-resc" style="color: var(--cor-texto-principal); font-size: 2rem; margin:0;">${rescisoes.length}</h2>
             </div>
             <div class="box-interior" style="border-left: 4px solid #ff9800; text-align: center;">
                 <h4 style="color: #ff9800; margin-bottom: 5px; font-size: 0.85rem;"><i class="fa-solid fa-user-clock"></i> Ausências/Atestados</h4>
-                <h2 id="bi-card-aus" style="color: var(--cor-texto-principal); font-size: 2rem;">${ausencias.length}</h2>
+                <h2 id="bi-card-aus" style="color: var(--cor-texto-principal); font-size: 2rem; margin:0;">${ausencias.length}</h2>
             </div>
-            <div class="box-interior" style="border-left: 4px solid #4fc3f7; text-align: center;">
+            <div class="box-interior" style="border-left: 4px solid #4fc3f7; text-align: center; display: flex; flex-direction: column; justify-content: center;">
                 <h4 style="color: #4fc3f7; margin-bottom: 5px; font-size: 0.85rem;"><i class="fa-solid fa-business-time"></i> FT / H+</h4>
-                <h2 id="bi-card-ft" style="color: var(--cor-texto-principal); font-size: 2rem;">${fts.length}</h2>
+                <h2 id="bi-card-ft" style="color: var(--cor-texto-principal); font-size: 2rem; margin: 0; line-height: 1;">${fts.length}</h2>
+                <span id="bi-card-ft-horas" style="font-size: 0.75rem; color: #4fc3f7; font-weight: bold; background: rgba(79, 195, 247, 0.1); padding: 2px 8px; border-radius: 10px; margin-top: 6px; display: inline-block; width: fit-content; align-self: center;">${totalHorasPagar.toFixed(2)}h p/ pagar</span>
             </div>
         `;
 
-        // Processa as linhas do gráfico
-        let labelsX = [];
-        let dIniObj = new Date(dIni + 'T00:00:00');
-        let dFimObj = new Date(dFim + 'T00:00:00');
+        // Gráfico e Ranking normais...
+        let labelsX = []; let dIniObj = new Date(dIni + 'T00:00:00'); let dFimObj = new Date(dFim + 'T00:00:00');
         let cursor = new Date(dIniObj.getFullYear(), dIniObj.getMonth(), 1);
         const dictMeses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-        
         while (cursor <= dFimObj) {
-            let mesAnoBanco = `${cursor.getFullYear()}-${String(cursor.getMonth()+1).padStart(2,'0')}`;
-            let mesAnoLegivel = `${dictMeses[cursor.getMonth()]}/${cursor.getFullYear()}`;
-            labelsX.push({ banco: mesAnoBanco, legivel: mesAnoLegivel });
+            labelsX.push({ banco: `${cursor.getFullYear()}-${String(cursor.getMonth()+1).padStart(2,'0')}`, legivel: `${dictMeses[cursor.getMonth()]}/${cursor.getFullYear()}` });
             cursor.setMonth(cursor.getMonth() + 1);
         }
 
         let datasetsChart = dadosParaGrafico.map(dg => {
-            let dataArray = labelsX.map(lx => dg.dataMap[lx.banco] || 0);
-            return {
-                label: dg.label, data: dataArray, borderColor: dg.cor,
-                backgroundColor: dg.cor + '33', borderWidth: 3, pointRadius: 4,
-                fill: indicador !== 'Geral', tension: 0.3 
-            };
+            return { label: dg.label, data: labelsX.map(lx => dg.dataMap[lx.banco] || 0), borderColor: dg.cor, backgroundColor: dg.cor + '33', borderWidth: 3, pointRadius: 4, fill: indicador !== 'Geral', tension: 0.3 };
         });
 
         if(window.graficoMensalInstancia) window.graficoMensalInstancia.destroy();
         const ctxMensal = document.getElementById('graficoMensalBI').getContext('2d');
         window.graficoMensalInstancia = new Chart(ctxMensal, {
-            type: 'line', 
-            data: { labels: labelsX.map(lx => lx.legivel), datasets: datasetsChart },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                scales: {
-                    y: { beginAtZero: true, ticks: { color: '#a6b0cf', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                    x: { ticks: { color: '#a6b0cf' }, grid: { display: false } }
-                },
-                plugins: { legend: { labels: { color: '#a6b0cf', font: {size: 13} }, position: 'top' } }
-            }
+            type: 'line', data: { labels: labelsX.map(lx => lx.legivel), datasets: datasetsChart },
+            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: '#a6b0cf', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' } }, x: { ticks: { color: '#a6b0cf' }, grid: { display: false } } }, plugins: { legend: { labels: { color: '#a6b0cf', font: {size: 13} }, position: 'top' } } }
         });
 
-        // Monta o Ranking
         let mapaRanking = {};
-        dadosRanking.forEach(r => {
-            let chave = (indicador === 'Admissoes' || indicador === 'Rescisoes') ? r.unidade : r.nome;
-            mapaRanking[chave] = (mapaRanking[chave] || 0) + 1;
-        });
+        dadosRanking.forEach(r => { let chave = (indicador === 'Admissoes' || indicador === 'Rescisoes') ? r.unidade : r.nome; mapaRanking[chave] = (mapaRanking[chave] || 0) + 1; });
 
         let arrayRanking = Object.entries(mapaRanking).sort((a, b) => b[1] - a[1]).slice(0, 10);
         rankDiv.innerHTML = '';
         rankDiv.previousElementSibling.innerHTML = `<i class="fa-solid fa-trophy"></i> ${tituloRanking}`;
 
-        if(arrayRanking.length === 0) {
-            rankDiv.innerHTML = '<p style="color:var(--cor-texto-secundario); font-size:0.85rem; text-align:center; padding:10px;">Sem dados suficientes.</p>';
-        } else {
-            arrayRanking.forEach((item, index) => {
-                let corMedalha = index === 0 ? '#FFD700' : (index === 1 ? '#C0C0C0' : (index === 2 ? '#CD7F32' : 'var(--cor-texto-secundario)'));
-                rankDiv.innerHTML += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);">
-                        <div style="font-size: 0.85rem; color: var(--cor-texto-principal);">
-                            <strong style="color: ${corMedalha}; margin-right: 5px;">#${index + 1}</strong>
-                            ${item[0]}
-                        </div>
-                        <span class="badge" style="background: rgba(255,152,0,0.2); color: #ff9800;">${item[1]} reg.</span>
-                    </div>
-                `;
-            });
-        }
+        if(arrayRanking.length === 0) rankDiv.innerHTML = '<p style="color:var(--cor-texto-secundario); font-size:0.85rem; text-align:center; padding:10px;">Sem dados suficientes.</p>';
+        else arrayRanking.forEach((item, index) => {
+            let corMedalha = index === 0 ? '#FFD700' : (index === 1 ? '#C0C0C0' : (index === 2 ? '#CD7F32' : 'var(--cor-texto-secundario)'));
+            rankDiv.innerHTML += `<div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);"><div style="font-size: 0.85rem; color: var(--cor-texto-principal);"><strong style="color: ${corMedalha}; margin-right: 5px;">#${index + 1}</strong>${item[0]}</div><span class="badge" style="background: rgba(255,152,0,0.2); color: #ff9800;">${item[1]} reg.</span></div>`;
+        });
 
-        // Preenche a Tabela Detalhada
         const tbodyDetalhes = document.getElementById('bi-tabela-detalhes');
         tbodyDetalhes.innerHTML = '';
         listaDetalhada.sort((a, b) => new Date(b.dt) - new Date(a.dt)); 
 
-        if (listaDetalhada.length === 0) {
-            tbodyDetalhes.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--cor-texto-secundario);">Sem dados no período.</td></tr>';
-        } else {
-            listaDetalhada.forEach(l => {
-                let [a, m, d] = l.dt.split('-');
-                let dtForm = `${d}/${m}/${a}`;
-                tbodyDetalhes.innerHTML += `
-                    <tr>
-                        <td style="text-align: left; padding: 10px;"><b style="color: #4fc3f7;">${l.nome}</b></td>
-                        <td style="padding: 10px;">${l.uni}</td>
-                        <td style="padding: 10px; white-space: nowrap;">${dtForm}</td>
-                        <td style="text-align: center; padding: 10px; font-size: 0.75rem;">${l.det}</td>
-                    </tr>
-                `;
-            });
-        }
+        if (listaDetalhada.length === 0) tbodyDetalhes.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--cor-texto-secundario);">Sem dados no período.</td></tr>';
+        else listaDetalhada.forEach(l => {
+            let [a, m, d] = l.dt.split('-');
+            tbodyDetalhes.innerHTML += `<tr><td style="text-align: left; padding: 10px;"><b style="color: #4fc3f7;">${l.nome}</b></td><td style="padding: 10px;">${l.uni}</td><td style="padding: 10px; white-space: nowrap;">${d}/${m}/${a}</td><td style="text-align: left; padding: 10px; font-size: 0.75rem;">${l.det}</td></tr>`;
+        });
 
         document.getElementById('bi-resultados').classList.remove('hidden');
     } catch(e) {
@@ -6422,7 +6356,7 @@ window.gerarDadosBI = async function() {
 };
 
 // ========================================================
-// 🖨️ EXPORTADOR DO BI (HTML EM MEMÓRIA - INFALÍVEL)
+// 🖨️ EXPORTADOR DO BI (HTML EM MEMÓRIA NATIVO DO BROWSER)
 // ========================================================
 window.exportarPDFBI = function() {
     mostrarAlerta("Montando o relatório executivo de BI...", "sucesso");
@@ -6430,15 +6364,13 @@ window.exportarPDFBI = function() {
     const indicador = document.getElementById('bi-indicador').value;
     const dIni = document.getElementById('bi-data-inicio').value.split('-').reverse().join('/');
     const dFim = document.getElementById('bi-data-fim').value.split('-').reverse().join('/');
-    const empresa = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') 
-                    ? empresaSelecionadaFiltro : 'Todas as Empresas';
+    const empresa = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') ? empresaSelecionadaFiltro : 'Todas as Empresas';
     const dataGeracao = new Date().toLocaleString('pt-BR');
 
     let corpoDoRelatorio = '';
 
     if (indicador === 'Lotacao') {
         let htmlLotacao = document.getElementById('bi-ranking-lista').innerHTML;
-        // Transforma as cores escuras do site em cores próprias para impressão
         htmlLotacao = htmlLotacao.replace(/color:\s*#fff/gi, 'color: #111');
         htmlLotacao = htmlLotacao.replace(/color:\s*#e2e8f0/gi, 'color: #333');
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(0,0,0,0\.3\)/gi, 'background: #f8fafc');
@@ -6446,65 +6378,40 @@ window.exportarPDFBI = function() {
         htmlLotacao = htmlLotacao.replace(/rgba\(255,255,255,0\.05\)/gi, '#cbd5e1');
         htmlLotacao = htmlLotacao.replace(/rgba\(255,255,255,0\.1\)/gi, '#e2e8f0');
         
-        corpoDoRelatorio = `
-            <h3 style="font-size: 16px; color: #002347; margin: 0 0 15px 0; border-bottom: 2px solid #cbd5e1; padding-bottom: 5px;">
-                Mapeamento de Lotação e Capacidade Operacional
-            </h3>
-            <div class="color-block" style="margin-top: 15px;">
-                ${htmlLotacao}
-            </div>
-        `;
+        corpoDoRelatorio = `<h3 style="font-size: 16px; color: #002347; margin: 0 0 15px 0; border-bottom: 2px solid #cbd5e1; padding-bottom: 5px;">Mapeamento de Lotação e Capacidade Operacional</h3><div class="color-block" style="margin-top: 15px;">${htmlLotacao}</div>`;
     } else {
-        // Captura os valores dos cards superiores
         const valAdm = document.getElementById('bi-card-adm').innerText;
         const valResc = document.getElementById('bi-card-resc').innerText;
         const valAus = document.getElementById('bi-card-aus').innerText;
+        
+        // Puxa do card o texto e também a soma das horas geradas!
         const valFt = document.getElementById('bi-card-ft').innerText;
+        const valFtHoras = document.getElementById('bi-card-ft-horas') ? document.getElementById('bi-card-ft-horas').innerText : '';
 
-        // Captura a imagem do gráfico
         const canvas = document.getElementById('graficoMensalBI');
         let imgGrafico = canvas ? canvas.toDataURL("image/png", 1.0) : '';
 
-        // Monta a Tabela de Ranking
         const tituloRankOrig = document.querySelector('#bi-ranking-lista').previousElementSibling.innerText;
         const rankOrig = document.getElementById('bi-ranking-lista');
         let htmlRanking = '';
 
         Array.from(rankOrig.children).forEach((item, index) => {
-            if(item.innerText.includes('Sem dados')) {
-                htmlRanking = '<span style="color:#555; font-size:12px;">Sem dados suficientes no período.</span>';
-                return;
-            }
+            if(item.innerText.includes('Sem dados')) { htmlRanking = '<span style="color:#555; font-size:12px;">Sem dados suficientes no período.</span>'; return; }
             const textoSemHashtag = item.querySelector('div').innerText.replace(/#\d+\s/, ''); 
             const regs = item.querySelector('.badge').innerText;
-            
-            let corPos = '#555';
-            if(index === 0) corPos = '#ff9800'; 
-            else if(index === 1) corPos = '#9e9e9e'; 
-            else if(index === 2) corPos = '#a1887f'; 
-
-            htmlRanking += `
-                <div style="display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px;">
-                    <div><strong style="color: ${corPos}; margin-right: 5px;">#${index+1}</strong> <span style="color: #333;">${textoSemHashtag}</span></div>
-                    <strong style="color: #002347;">${regs}</strong>
-                </div>
-            `;
+            let corPos = index === 0 ? '#ff9800' : (index === 1 ? '#9e9e9e' : (index === 2 ? '#a1887f' : '#555')); 
+            htmlRanking += `<div style="display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px;"><div><strong style="color: ${corPos}; margin-right: 5px;">#${index+1}</strong> <span style="color: #333;">${textoSemHashtag}</span></div><strong style="color: #002347;">${regs}</strong></div>`;
         });
 
-        // Monta a Tabela de Detalhamento
         const tbodyOrig = document.getElementById('bi-tabela-detalhes');
         let htmlTabela = '';
-        
         if (tbodyOrig.rows.length === 0 || (tbodyOrig.rows.length === 1 && tbodyOrig.rows[0].innerText.includes('Sem dados'))) {
             htmlTabela = '<tr><td colspan="4" style="text-align:center; padding:15px; color:#555;">Nenhum registro detalhado neste período.</td></tr>';
         } else {
             Array.from(tbodyOrig.rows).forEach((row, i) => {
                 const bgCor = i % 2 === 0 ? '#ffffff' : '#f8fafc'; 
                 htmlTabela += `<tr style="background-color: ${bgCor}; page-break-inside: avoid;">`;
-                Array.from(row.cells).forEach(cell => {
-                    let texto = cell.innerText || cell.textContent;
-                    htmlTabela += `<td style="padding: 8px; border: 1px solid #cbd5e1; color: #333; vertical-align: top;">${texto}</td>`;
-                });
+                Array.from(row.cells).forEach(cell => { htmlTabela += `<td style="padding: 8px; border: 1px solid #cbd5e1; color: #333; vertical-align: top;">${cell.innerText || cell.textContent}</td>`; });
                 htmlTabela += `</tr>`;
             });
         }
@@ -6525,40 +6432,21 @@ window.exportarPDFBI = function() {
                 </div>
                 <div class="color-block" style="flex: 1; border: 1px solid #00bcd4; border-left: 5px solid #00bcd4; padding: 15px; border-radius: 6px; text-align: center; background: #f0fbff;">
                     <span style="font-size: 12px; color: #00bcd4; font-weight: bold; text-transform: uppercase;">Horas Extras (FT/h+)</span><br>
-                    <b style="font-size: 26px; color: #111;">${valFt}</b>
+                    <b style="font-size: 26px; color: #111; margin-bottom: 4px; display: block;">${valFt}</b>
+                    <span style="font-size: 11px; color: #00bcd4; font-weight: bold; background: rgba(0, 188, 212, 0.1); padding: 3px 8px; border-radius: 10px;">${valFtHoras}</span>
                 </div>
             </div>
-
-            ${imgGrafico ? `
-            <div class="color-block" style="margin-bottom: 20px; text-align: center; border: 1px solid #cbd5e1; border-radius: 8px; padding: 15px; background: #f8fafc; page-break-inside: avoid;">
-                <h3 style="font-size: 15px; color: #002347; margin: 0 0 15px 0;">Evolução Mensal (Tendência)</h3>
-                <div style="background: #ffffff; border-radius: 4px; padding: 10px; display: flex; justify-content: center;">
-                    <img src="${imgGrafico}" style="max-width: 100%; height: auto; max-height: 280px;" />
-                </div>
-            </div>
-            ` : ''}
-
+            ${imgGrafico ? `<div class="color-block" style="margin-bottom: 20px; text-align: center; border: 1px solid #cbd5e1; border-radius: 8px; padding: 15px; background: #f8fafc; page-break-inside: avoid;"><h3 style="font-size: 15px; color: #002347; margin: 0 0 15px 0;">Evolução Mensal (Tendência)</h3><div style="background: #ffffff; border-radius: 4px; padding: 10px; display: flex; justify-content: center;"><img src="${imgGrafico}" style="max-width: 100%; height: auto; max-height: 280px;" /></div></div>` : ''}
             <div style="display: flex; gap: 20px; align-items: flex-start;">
                 <div style="width: 35%;">
                     <h3 style="font-size: 14px; color: #ff9800; margin: 0 0 10px 0; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px;">${tituloRankOrig}</h3>
-                    <div style="display: flex; flex-direction: column; gap: 6px;">
-                        ${htmlRanking}
-                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 6px;">${htmlRanking}</div>
                 </div>
                 <div style="width: 65%;">
                     <h3 style="font-size: 14px; color: #002347; margin: 0 0 10px 0; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px;">Detalhamento dos Registros</h3>
                     <table class="color-block" style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
-                        <thead>
-                            <tr style="background-color: #002347; color: #fff;">
-                                <th style="padding: 8px; border: 1px solid #002347; width: 35%;">Colaborador</th>
-                                <th style="padding: 8px; border: 1px solid #002347; width: 25%;">Unidade</th>
-                                <th style="padding: 8px; border: 1px solid #002347; width: 15%;">Data Ref.</th>
-                                <th style="padding: 8px; border: 1px solid #002347; width: 25%;">Detalhe / Motivo</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${htmlTabela}
-                        </tbody>
+                        <thead><tr style="background-color: #002347; color: #fff;"><th style="padding: 8px; border: 1px solid #002347; width: 35%;">Colaborador</th><th style="padding: 8px; border: 1px solid #002347; width: 25%;">Unidade</th><th style="padding: 8px; border: 1px solid #002347; width: 15%;">Data Ref.</th><th style="padding: 8px; border: 1px solid #002347; width: 25%;">Detalhe / Motivo</th></tr></thead>
+                        <tbody>${htmlTabela}</tbody>
                     </table>
                 </div>
             </div>
@@ -6572,48 +6460,20 @@ window.exportarPDFBI = function() {
             <meta charset="UTF-8">
             <title>Relatório BI - ${empresa}</title>
             <style>
-                body { 
-                    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
-                    padding: 20px; 
-                    color: #111; 
-                    margin: 0;
-                }
-                @media print {
-                    body { padding: 0; }
-                    @page { margin: 10mm; size: landscape; } 
-                    thead { display: table-header-group; }
-                    tr { page-break-inside: avoid; }
-                    /* Impede o card da unidade de ser cortado na quebra de folha no modo Lotação */
-                    .glass-card { 
-                        page-break-inside: avoid !important; 
-                        border: 1px solid #cbd5e1 !important; 
-                        box-shadow: none !important; 
-                    }
-                }
-                .color-block {
-                    -webkit-print-color-adjust: exact !important; 
-                    print-color-adjust: exact !important;
-                }
+                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #111; margin: 0; }
+                @media print { body { padding: 0; } @page { margin: 10mm; size: landscape; } thead { display: table-header-group; } tr { page-break-inside: avoid; } .glass-card { page-break-inside: avoid !important; border: 1px solid #cbd5e1 !important; box-shadow: none !important; } }
+                .color-block { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             </style>
         </head>
         <body>
             <div style="border-bottom: 2px solid #002347; padding-bottom: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
                 <div style="display: flex; align-items: center; gap: 15px;">
-                    <div class="color-block" style="background-color: #002347; color: #ffc107; padding: 10px 15px; font-size: 16px; font-weight: bold; border-radius: 6px; text-align: center; line-height: 1.2;">
-                        RH SOUL<br><span style="font-size: 9px; color: #fff;">Gestão Inteligente</span>
-                    </div>
-                    <div>
-                        <h1 style="color: #002347; margin: 0; font-size: 22px; text-transform: uppercase;">Relatório Gerencial - Indicadores (BI)</h1>
-                        <h2 style="color: #555; margin: 5px 0 0 0; font-size: 12px; font-weight: 500;">Empresa: <b style="color:#002347">${empresa}</b> &nbsp;|&nbsp; Período: <b>${dIni} a ${dFim}</b></h2>
-                    </div>
+                    <div class="color-block" style="background-color: #002347; color: #ffc107; padding: 10px 15px; font-size: 16px; font-weight: bold; border-radius: 6px; text-align: center; line-height: 1.2;">RH SOUL<br><span style="font-size: 9px; color: #fff;">Gestão Inteligente</span></div>
+                    <div><h1 style="color: #002347; margin: 0; font-size: 22px; text-transform: uppercase;">Relatório Gerencial - Indicadores (BI)</h1><h2 style="color: #555; margin: 5px 0 0 0; font-size: 12px; font-weight: 500;">Empresa: <b style="color:#002347">${empresa}</b> &nbsp;|&nbsp; Período: <b>${dIni} a ${dFim}</b></h2></div>
                 </div>
-                <div style="text-align: right; color: #555; font-size: 10px;">
-                    Gerado no sistema em:<br><b style="color: #111; font-size: 11px;">${dataGeracao}</b>
-                </div>
+                <div style="text-align: right; color: #555; font-size: 10px;">Gerado no sistema em:<br><b style="color: #111; font-size: 11px;">${dataGeracao}</b></div>
             </div>
-
             ${corpoDoRelatorio}
-
         </body>
         </html>
     `;
