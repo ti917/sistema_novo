@@ -6061,7 +6061,7 @@ window.gerarDadosBI = async function() {
         const ftsMapeadas = fts.map(f => {
             let horas = 0;
 
-            // 1. Tenta achar o número da hora na coluna exata do banco (caso você crie esse campo no futuro)
+            // 1. Tenta achar o número da hora na coluna (se existir)
             let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
             horas = parseFloat(hText);
             
@@ -6071,27 +6071,51 @@ window.gerarDadosBI = async function() {
                 if (match) horas = parseFloat(match[1].replace(',', '.'));
             }
 
-            // Busca os dados da jornada do colaborador para cruzar informações
+            // 3. ACHA A JORNADA EXATA DO COLABORADOR NA DATA DA OCORRÊNCIA
             const perf = perfis.find(p => p.nome === f.nome);
-            const jornada = perf?.dados_admissao?.jornada || {};
-            const tipoJornada = jornada.tipo || '12x36';
+            let jornadaVigente = perf?.dados_admissao?.jornada || {};
 
-            // 3. LÓGICA PARA FT (Folga Trabalhada): Assumimos a jornada completa do dia!
-            if (!horas && f.sigla === 'FT') {
-                horas = (tipoJornada === '12x36') ? 12 : 8; // Assumimos 12h pra 12x36 e 8h pra 44h
+            if (jornadaVigente.historico_alteracoes && jornadaVigente.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornadaVigente.historico_alteracoes].sort((a,b) => new Date(a.data_inicio + 'T00:00:00') - new Date(b.data_inicio + 'T00:00:00'));
+                for (let h of histOrdenado) {
+                    if (new Date(f.data_inicio + 'T00:00:00') >= new Date(h.data_inicio + 'T00:00:00')) {
+                        jornadaVigente = h;
+                    }
+                }
             }
 
-            // 4. 🚀 O CÉREBRO PARA H+: CRUZA COM O HORÁRIO DA ESCALA DO FUNCIONÁRIO!
+            const tipoJornada = jornadaVigente.tipo || '12x36';
+
+            // LÓGICA DA FT: Se for folga trabalhada, assume o dia todo
+            if (!horas && f.sigla === 'FT') {
+                horas = (tipoJornada === '12x36') ? 12 : 8; 
+            }
+
+            // 4. 🚀 O CÉREBRO PARA H+: CRUZA COM O HORÁRIO DA ESCALA!
             if (!horas && f.sigla === 'H+') {
-                const horarioPadrao = jornada.horario || perf?.dados_admissao?.escala || '';
+                
+                let horarioPadrao = '';
+                // Descobre o horário dependendo do tipo da escala
+                if (tipoJornada === '12x36') {
+                    horarioPadrao = jornadaVigente.horario || '';
+                } else if (jornadaVigente.escala) {
+                    const nomesDias = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+                    const diaSemana = new Date(f.data_inicio + 'T00:00:00').getDay();
+                    const diaNome = nomesDias[diaSemana];
+                    if (jornadaVigente.escala[diaNome]) {
+                        horarioPadrao = jornadaVigente.escala[diaNome].horario || '';
+                    }
+                }
+
                 const textoCompleto = (f.motivo + ' ' + (f.observacao||''));
                 const tempoReal = textoCompleto.match(/(entrada|sa[íi]da).*?(\d{2}):(\d{2})/i);
-                const temposEscala = horarioPadrao.match(/(\d{2}):(\d{2})/g);
+                
+                // Extrai a hora de entrada e saída do padrão (Ex: Pega "18:00" e "06:00" de "18:00 às 06:00")
+                const temposEscala = horarioPadrao.match(/(\d{2}:\d{2})/g);
 
                 if (tempoReal && temposEscala && temposEscala.length >= 2) {
                     const isEntrada = tempoReal[1].toLowerCase() === 'entrada';
                     
-                    // Função para converter HH:MM para Minutos (Evita bugs matemáticos)
                     const toMinutes = (timeStr) => {
                         const [h, m] = timeStr.split(':').map(Number);
                         return (h * 60) + m;
@@ -6103,45 +6127,36 @@ window.gerarDadosBI = async function() {
 
                     let diffMinutos = 0;
 
+                    // Calcula a diferença em minutos
                     if (isEntrada) {
-                        // Se chegou antes, a escala é MAIOR que o tempo real. Ex: Escala 06:00 (360), Real 05:00 (300) = 60min.
-                        diffMinutos = minEscala - minReal;
+                        diffMinutos = minEscala - minReal; // Chegou antes = Saldo positivo
                     } else {
-                        // Se saiu depois, o tempo real é MAIOR que a escala. Ex: Escala 18:00 (1080), Real 20:00 (1200) = 120min.
-                        diffMinutos = minReal - minEscala;
+                        diffMinutos = minReal - minEscala; // Saiu depois = Saldo positivo
                     }
 
-                    // Se deu negativo, significa que cruzou a meia-noite (Ex: Escala 00:00, chegou 23:00)
-                    if (diffMinutos < 0) {
-                        diffMinutos += 1440; // Soma 24 horas (em minutos)
-                    }
+                    // Se cruzou a meia-noite (ex: escala 06:00, chegou 23:00)
+                    if (diffMinutos < 0) diffMinutos += 1440; 
 
-                    // Converte os minutos devolta para hora decimal (ex: 90 min = 1.5 horas)
                     const diffHorasDecimais = diffMinutos / 60;
                     
-                    // Trava de segurança: se deu menos de 12h de diferença, assume como válido!
+                    // Trava de segurança para não somar lixo
                     if (diffHorasDecimais > 0 && diffHorasDecimais <= 12) {
                         horas = diffHorasDecimais;
                     }
                 }
             }
 
-            // Garante que não fique NaN e limita a 2 casas decimais
             horas = isNaN(horas) ? 0 : parseFloat(horas.toFixed(2));
 
-            // 5. Define a forma de pagamento (Procura "Dinheiro" ou a sigla "H+")
+            // 5. Define se paga em dinheiro
             const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
             let isDinheiro = textoBuscaPgto.includes('dinheiro') || f.sigla === 'H+';
             
             let formaPgtoTxt = isDinheiro ? 'Dinheiro' : 'Folga';
             if (f.sigla === 'H+') formaPgtoTxt = 'Dinheiro (H+)';
 
-            // 6. Soma na "Conta do Mês" SOMENTE se for dinheiro/pagamento!
-            if (isDinheiro) {
-                totalHorasPagar += horas;
-            }
+            if (isDinheiro) totalHorasPagar += horas;
 
-            // 7. Monta o texto para a tabela de detalhamento
             let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); 
             
             let textoDetalhe = `${f.sigla}: ${horasFormatadas}h (${formaPgtoTxt})`;
@@ -6150,6 +6165,7 @@ window.gerarDadosBI = async function() {
 
             return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
         });
+        
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
             containerGrafico.style.display = 'none';
