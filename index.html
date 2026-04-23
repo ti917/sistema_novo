@@ -6054,41 +6054,79 @@ window.gerarDadosBI = async function() {
         });
 
         // ========================================================
-        // ⏰ MÁGICA: CÁLCULO DE HORAS A PAGAR (FT E H+)
+        // ⏰ MÁGICA SUPERIOR: CÁLCULO INTELIGENTE DE HORAS (FT E H+)
         // ========================================================
         let totalHorasPagar = 0;
         
         const ftsMapeadas = fts.map(f => {
+            // 1. Tenta achar o número da hora na coluna exata do banco
             let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
             let horas = parseFloat(hText);
             
+            // 2. Se for 0, tenta pescar na observação (ex: "8 horas", "8.5h")
             if (!horas && f.observacao) {
-                const match = f.observacao.match(/(\d+([.,]\d+)?)/); 
+                const match = f.observacao.match(/(\d+([.,]\d+)?)\s*(?:h|hora|hs)/i); 
                 if (match) horas = parseFloat(match[1].replace(',', '.'));
             }
-            horas = isNaN(horas) ? 0 : horas;
 
-            const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
-            let isDinheiro = false;
-            
-            if (textoBuscaPgto.includes('dinheiro') || f.sigla === 'H+') {
-                isDinheiro = true;
+            // 3. 🚀 O CÉREBRO: SE AINDA FOR 0 E FOR "H+", CRUZA COM O PLANTÃO DO FUNCIONÁRIO!
+            if (!horas && f.sigla === 'H+') {
+                // Acha o perfil do colaborador para ver a escala dele
+                const perf = perfis.find(p => p.nome === f.nome);
+                const horario = perf?.dados_admissao?.horario || perf?.dados_admissao?.jornada?.horario || perf?.dados_admissao?.escala || '';
+                
+                // Procura "Entrada: 17:00" ou "Saída: 07:00" no texto
+                const textoCompleto = (f.motivo + ' ' + (f.observacao||''));
+                const tempoReal = textoCompleto.match(/(entrada|sa[íi]da).*?(\d{2}):(\d{2})/i);
+                
+                // Procura os horários de início e fim no cadastro (ex: "18:00 às 06:00")
+                const temposEscala = horario.match(/(\d{2}):(\d{2})/g);
+
+                if (tempoReal && temposEscala && temposEscala.length >= 2) {
+                    const isEntrada = tempoReal[1].toLowerCase() === 'entrada';
+                    const hrReal = parseInt(tempoReal[2]) + (parseInt(tempoReal[3]) / 60);
+                    
+                    // Se for entrada, compara com o 1º horário. Se for saída, compara com o 2º.
+                    const hrEscalaStr = isEntrada ? temposEscala[0] : temposEscala[1];
+                    const hrEscalaArr = hrEscalaStr.split(':');
+                    const hrEscala = parseInt(hrEscalaArr[0]) + (parseInt(hrEscalaArr[1]) / 60);
+
+                    // Calcula a diferença (Ex: Escala 18h - Real 17h = 1h extra)
+                    let diff = isEntrada ? (hrEscala - hrReal) : (hrReal - hrEscala);
+                    
+                    // Ajuste de virada de meia-noite
+                    if (diff < 0) diff += 24;
+                    
+                    // Trava de segurança: se deu menos de 12h de diferença, assume como válido!
+                    if (diff > 0 && diff <= 12) {
+                        horas = diff;
+                    }
+                }
             }
 
+            horas = isNaN(horas) ? 0 : horas;
+
+            // 4. Define a forma de pagamento (Procura "Dinheiro" ou a sigla "H+")
+            const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
+            let isDinheiro = textoBuscaPgto.includes('dinheiro') || f.sigla === 'H+';
+            
             let formaPgtoTxt = isDinheiro ? 'Dinheiro' : 'Folga';
             if (f.sigla === 'H+') formaPgtoTxt = 'Dinheiro (H+)';
 
+            // 5. Soma na "Conta do Mês" se for dinheiro!
             if (isDinheiro) {
                 totalHorasPagar += horas;
             }
 
-            let textoDetalhe = `${f.sigla}: ${horas}h (${formaPgtoTxt})`;
+            // 6. Monta o texto para a tabela
+            let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); // Se for quebrado, mostra 1.50h
+            
+            let textoDetalhe = `${f.sigla}: ${horasFormatadas}h (${formaPgtoTxt})`;
             if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
             if (f.observacao) textoDetalhe += ` | Obs: ${f.observacao}`;
 
             return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
         });
-
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
             containerGrafico.style.display = 'none';
