@@ -6059,9 +6059,11 @@ window.gerarDadosBI = async function() {
         let totalHorasPagar = 0;
         
         const ftsMapeadas = fts.map(f => {
-            // 1. Tenta achar o número da hora na coluna exata do banco
+            let horas = 0;
+
+            // 1. Tenta achar o número da hora na coluna exata do banco (caso você crie esse campo no futuro)
             let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
-            let horas = parseFloat(hText);
+            horas = parseFloat(hText);
             
             // 2. Se for 0, tenta pescar na observação (ex: "8 horas", "8.5h")
             if (!horas && f.observacao) {
@@ -6069,57 +6071,78 @@ window.gerarDadosBI = async function() {
                 if (match) horas = parseFloat(match[1].replace(',', '.'));
             }
 
-            // 3. 🚀 O CÉREBRO: SE AINDA FOR 0 E FOR "H+", CRUZA COM O PLANTÃO DO FUNCIONÁRIO!
+            // Busca os dados da jornada do colaborador para cruzar informações
+            const perf = perfis.find(p => p.nome === f.nome);
+            const jornada = perf?.dados_admissao?.jornada || {};
+            const tipoJornada = jornada.tipo || '12x36';
+
+            // 3. LÓGICA PARA FT (Folga Trabalhada): Assumimos a jornada completa do dia!
+            if (!horas && f.sigla === 'FT') {
+                horas = (tipoJornada === '12x36') ? 12 : 8; // Assumimos 12h pra 12x36 e 8h pra 44h
+            }
+
+            // 4. 🚀 O CÉREBRO PARA H+: CRUZA COM O HORÁRIO DA ESCALA DO FUNCIONÁRIO!
             if (!horas && f.sigla === 'H+') {
-                // Acha o perfil do colaborador para ver a escala dele
-                const perf = perfis.find(p => p.nome === f.nome);
-                const horario = perf?.dados_admissao?.horario || perf?.dados_admissao?.jornada?.horario || perf?.dados_admissao?.escala || '';
-                
-                // Procura "Entrada: 17:00" ou "Saída: 07:00" no texto
+                const horarioPadrao = jornada.horario || perf?.dados_admissao?.escala || '';
                 const textoCompleto = (f.motivo + ' ' + (f.observacao||''));
                 const tempoReal = textoCompleto.match(/(entrada|sa[íi]da).*?(\d{2}):(\d{2})/i);
-                
-                // Procura os horários de início e fim no cadastro (ex: "18:00 às 06:00")
-                const temposEscala = horario.match(/(\d{2}):(\d{2})/g);
+                const temposEscala = horarioPadrao.match(/(\d{2}):(\d{2})/g);
 
                 if (tempoReal && temposEscala && temposEscala.length >= 2) {
                     const isEntrada = tempoReal[1].toLowerCase() === 'entrada';
-                    const hrReal = parseInt(tempoReal[2]) + (parseInt(tempoReal[3]) / 60);
                     
-                    // Se for entrada, compara com o 1º horário. Se for saída, compara com o 2º.
-                    const hrEscalaStr = isEntrada ? temposEscala[0] : temposEscala[1];
-                    const hrEscalaArr = hrEscalaStr.split(':');
-                    const hrEscala = parseInt(hrEscalaArr[0]) + (parseInt(hrEscalaArr[1]) / 60);
+                    // Função para converter HH:MM para Minutos (Evita bugs matemáticos)
+                    const toMinutes = (timeStr) => {
+                        const [h, m] = timeStr.split(':').map(Number);
+                        return (h * 60) + m;
+                    };
 
-                    // Calcula a diferença (Ex: Escala 18h - Real 17h = 1h extra)
-                    let diff = isEntrada ? (hrEscala - hrReal) : (hrReal - hrEscala);
-                    
-                    // Ajuste de virada de meia-noite
-                    if (diff < 0) diff += 24;
+                    let minReal = toMinutes(`${tempoReal[2]}:${tempoReal[3]}`);
+                    let hrEscalaStr = isEntrada ? temposEscala[0] : temposEscala[1];
+                    let minEscala = toMinutes(hrEscalaStr);
+
+                    let diffMinutos = 0;
+
+                    if (isEntrada) {
+                        // Se chegou antes, a escala é MAIOR que o tempo real. Ex: Escala 06:00 (360), Real 05:00 (300) = 60min.
+                        diffMinutos = minEscala - minReal;
+                    } else {
+                        // Se saiu depois, o tempo real é MAIOR que a escala. Ex: Escala 18:00 (1080), Real 20:00 (1200) = 120min.
+                        diffMinutos = minReal - minEscala;
+                    }
+
+                    // Se deu negativo, significa que cruzou a meia-noite (Ex: Escala 00:00, chegou 23:00)
+                    if (diffMinutos < 0) {
+                        diffMinutos += 1440; // Soma 24 horas (em minutos)
+                    }
+
+                    // Converte os minutos devolta para hora decimal (ex: 90 min = 1.5 horas)
+                    const diffHorasDecimais = diffMinutos / 60;
                     
                     // Trava de segurança: se deu menos de 12h de diferença, assume como válido!
-                    if (diff > 0 && diff <= 12) {
-                        horas = diff;
+                    if (diffHorasDecimais > 0 && diffHorasDecimais <= 12) {
+                        horas = diffHorasDecimais;
                     }
                 }
             }
 
-            horas = isNaN(horas) ? 0 : horas;
+            // Garante que não fique NaN e limita a 2 casas decimais
+            horas = isNaN(horas) ? 0 : parseFloat(horas.toFixed(2));
 
-            // 4. Define a forma de pagamento (Procura "Dinheiro" ou a sigla "H+")
+            // 5. Define a forma de pagamento (Procura "Dinheiro" ou a sigla "H+")
             const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
             let isDinheiro = textoBuscaPgto.includes('dinheiro') || f.sigla === 'H+';
             
             let formaPgtoTxt = isDinheiro ? 'Dinheiro' : 'Folga';
             if (f.sigla === 'H+') formaPgtoTxt = 'Dinheiro (H+)';
 
-            // 5. Soma na "Conta do Mês" se for dinheiro!
+            // 6. Soma na "Conta do Mês" SOMENTE se for dinheiro/pagamento!
             if (isDinheiro) {
                 totalHorasPagar += horas;
             }
 
-            // 6. Monta o texto para a tabela
-            let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); // Se for quebrado, mostra 1.50h
+            // 7. Monta o texto para a tabela de detalhamento
+            let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); 
             
             let textoDetalhe = `${f.sigla}: ${horasFormatadas}h (${formaPgtoTxt})`;
             if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
