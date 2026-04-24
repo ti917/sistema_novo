@@ -19333,12 +19333,24 @@ window.filtrarJustificativasZap = function() {
         return matchNome && matchStatus;
     });
 
-    if (filtrados.length === 0) {
+   if (filtrados.length === 0) {
         container.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario);">Nenhuma justificativa encontrada.</p>';
         return;
     }
 
-    let html = ''; // <--- A variável que faltava!
+    let html = ''; 
+
+    // 👇 MÁGICA DO BOTÃO EM MASSA: Filtra quantos estão aguardando e cria o botão no topo 👇
+    const aguardandoAtual = filtrados.filter(j => j.status === 'Aguardando Colaborador');
+    if (aguardandoAtual.length > 0) {
+        html += `
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 15px;">
+                <button class="btn-secondary" id="btn-reenviar-just-massa" style="border-color: #25D366; color: #25D366; transition: 0.2s; font-weight: bold; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(37, 211, 102, 0.1);" onmouseover="this.style.background='#25D366'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#25D366'" onclick="reenviarParaTodosAguardando()">
+                    <i class="fa-brands fa-whatsapp fa-lg"></i> Reenviar para Aguardando Colaborador (${aguardandoAtual.length})
+                </button>
+            </div>
+        `;
+    }
 
     filtrados.forEach(j => {
         let corStatus = '#a6b0cf'; 
@@ -26622,6 +26634,81 @@ window.reenviarCobrancaPonto = async function(idOcorrencia) {
         }
     } catch (err) {
         mostrarAlerta("Erro ao tentar reenviar: " + err.message, "erro");
+    }
+};
+
+        // =====================================
+// BOTÃO: COBRANÇA EM MASSA (PONTO)
+// =====================================
+window.reenviarParaTodosAguardando = async function() {
+    // Pega só quem tá na tela e está como 'Aguardando Colaborador'
+    const termo = document.getElementById('busca-zap-justificativas').value.toLowerCase();
+    const alvo = todasJustificativasZap.filter(j => j.status === 'Aguardando Colaborador' && j.nome.toLowerCase().includes(termo));
+    
+    if (alvo.length === 0) return;
+
+    const confirmado = await mostrarConfirmacao(`Deseja disparar um lembrete no WhatsApp para <b>${alvo.length}</b> colaborador(es) cobrando as justificativas pendentes?`, "Cobrança em Massa");
+    if (!confirmado) return;
+
+    const btn = document.getElementById('btn-reenviar-just-massa');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando lembretes...';
+    }
+
+    mostrarAlerta("Iniciando envio em massa. Por favor, aguarde...", "aviso");
+
+    let enviados = 0;
+    let falhas = 0;
+
+    try {
+        // Puxa os telefones de todo mundo de uma vez para otimizar o banco
+        const idsColabs = [...new Set(alvo.map(a => a.colaborador_id))];
+        const { data: perfis, error } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsColabs);
+
+        if (error || !perfis) throw new Error("Erro ao buscar os telefones.");
+
+        // Loop de disparo
+        for (let oco of alvo) {
+            const perfil = perfis.find(p => p.id === oco.colaborador_id);
+            const fone = perfil?.dados_admissao?.telefone;
+
+            if (!fone) {
+                falhas++;
+                continue;
+            }
+
+            const primeiroNome = oco.nome.split(' ')[0];
+            const dataFormatada = formatarDataBR(oco.data_falha);
+            const motivoRH = oco.motivo_rh || 'Pendência no Ponto';
+            const parametrosDaURL = "?oc=" + oco.id;
+
+            // Dispara usando o template correto da Meta
+            const sucesso = await enviarMensagemGraphAPI(
+                fone, 
+                'alerta_ponto_doc', 
+                [primeiroNome, dataFormatada, motivoRH], 
+                oco.doc_rh, 
+                parametrosDaURL
+            );
+
+            if (sucesso) enviados++;
+            else falhas++;
+
+            // Pausa de 0.6 segundos entre as mensagens (Anti-Spam da Meta)
+            await new Promise(r => setTimeout(r, 600));
+        }
+
+        mostrarAlerta(`Cobrança em massa finalizada!<br>Enviados com sucesso: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        
+    } catch (err) {
+        mostrarAlerta("Erro durante o disparo: " + err.message, "erro");
+    } finally {
+        // Devolve o botão ao normal
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = `<i class="fa-brands fa-whatsapp fa-lg"></i> Reenviar para Aguardando Colaborador (${alvo.length})`;
+        }
     }
 };
     </script>
