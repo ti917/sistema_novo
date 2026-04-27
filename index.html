@@ -7993,15 +7993,19 @@ window.exportarPDFBI = function() {
     }
 }
 
+// =====================================
+// BOTÃO: MARCAR COMO LIDO (AGORA REORDENA A LISTA NA HORA)
+// =====================================
 window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
     if (event) event.stopPropagation();
 
     const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
 
-    // 1. Atualiza visualmente o botão clicado na hora para dar feedback
+    // 1. Efeito visual imediato de "Carregando"
     const btnClicado = document.getElementById(`btn-leitura-${idNotificacao}`) || document.getElementById(`btn-leitura-ferias-${idNotificacao}`);
     if(btnClicado) {
         btnClicado.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        btnClicado.style.opacity = '0.5';
     }
 
     // 2. Salva no banco de dados
@@ -8010,229 +8014,53 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
         .update({ lida: statusLida, lida_por: nomeQuemLeu })
         .eq('id', idNotificacao);
 
-    // 3. Atualiza a memória local
+    // 3. Força a reordenação (Sobe o Não Lido, Desce o Lido)
     const notifIndex = notificacoesGlobais.findIndex(n => n.id === idNotificacao);
     if (notifIndex !== -1) {
         notificacoesGlobais[notifIndex].lida = statusLida;
         notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
-        
-        // MÁGICA: Reordena tudo (Não lidas pro topo, lidas pro fundo)
-        notificacoesGlobais.sort((a, b) => {
-            if (a.lida === b.lida) return new Date(b.created_at) - new Date(a.created_at);
-            return a.lida ? 1 : -1;
-        });
     }
 
-    // 4. Refaz o HTML do Sininho para as notificações descerem/subirem!
-    await atualizarContador();
-
-    // 5. MÁGICA 2: Refaz a lista da tela que o Admin estiver olhando para os cards também se mexerem na hora!
-    const abaAtiva = document.querySelector('.view-section:not(.hidden)');
-    if (abaAtiva) {
-        const id = abaAtiva.id;
-        if (id === 'tela-solicitacoes') listarSolicitacoes(true);
-        else if (id === 'tela-admissoes') filtrarAdmissoes();
-        else if (id === 'tela-rescisoes-aprovadas') filtrarRescisoes();
-        else if (id === 'tela-ausencias-admin') filtrarAusenciasAdmin();
-        else if (id === 'tela-ft-admin') filtrarFTsAdmin();
-        else if (id === 'tela-trocas-admin') filtrarTrocasAdmin();
-        else if (id === 'tela-alteracoes-admin') filtrarAlteracoesAdmin();
-        else if (id === 'tela-ocorrencias-admin') filtrarOcorrenciasAdmin();
-        else if (id === 'tela-advertencias-admin') filtrarAdvAdmin();
-        else if (id === 'tela-ferias-admin') filtrarFeriasAdmin();
-        else if (id === 'tela-whatsapp') filtrarJustificativasZap();
-    }
+    // 4. O Maestro recarrega o HTML do Sino e das Abas Ativas ordenando tudo!
+    solicitarAtualizacaoGlobal(); 
 };
 
-     async function escutarTempoReal() {
+    // =====================================
+// OUVINTE EM TEMPO REAL CORRIGIDO
+// =====================================
+async function escutarTempoReal() {
     if (usuarioAtual.perfil === 'Admin') {
         supabaseClient
-            // Escuta Perfis (Admissão, Rescisão e Mudanças de Horário)
             .channel('escuta-admissoes')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'perfis' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
+                solicitarAtualizacaoGlobal();
                 let unid = payload.new ? payload.new.unidade : payload.old.unidade;
                 let nomeColab = payload.new ? payload.new.nome : (payload.old ? payload.old.nome : 'Um colaborador');
-                if (typeof avisarEscalaDesatualizada === 'function') {
-                    avisarEscalaDesatualizada(unid, `Os dados, horário ou status de <b>${nomeColab}</b> foram alterados.`);
-                }
-
-                if (payload.eventType === 'INSERT' && payload.new.status_aprovacao === 'Pendente') {
-                    mostrarAlerta(`Nova ficha enviada por um Gestor:<br><b>${payload.new.nome}</b> (${payload.new.unidade || '-'})`, 'sucesso', '🔔 Nova Admissão Recebida!');
-                }
-                if (payload.eventType === 'UPDATE' && payload.new.status_aprovacao === 'Rescisão Pendente') {
-                    mostrarAlerta(`Novo pedido de desligamento:<br><b>${payload.new.nome}</b> (${payload.new.unidade || '-'})`, 'erro', '🚨 Desligamento Recebido!');
-                }
+                if (typeof avisarEscalaDesatualizada === 'function') avisarEscalaDesatualizada(unid, `Os dados de <b>${nomeColab}</b> foram alterados.`);
             })
-            // Escuta Ausências
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'ausencias' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                let unid = payload.new ? payload.new.unidade : payload.old.unidade;
-                let nomeColab = payload.new ? payload.new.nome : 'um colaborador';
-                let siglaAus = payload.new ? payload.new.sigla : 'Atestado/Falta';
-                if (typeof avisarEscalaDesatualizada === 'function') {
-                    avisarEscalaDesatualizada(unid, `Um registro de <b>${siglaAus}</b> foi processado para <b>${nomeColab}</b>.`);
-                }
-
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Novo atestado/falta recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova Ausência Pendente!');
-                }
-            })
-            // Escuta FTs e Horas Extras
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'horas_extras_ft' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                let unid = payload.new ? payload.new.unidade : payload.old.unidade;
-                let nomeColab = payload.new ? payload.new.nome : 'um colaborador';
-                let siglaFT = payload.new ? payload.new.sigla : 'FT/Hora Extra';
-                if (typeof avisarEscalaDesatualizada === 'function') {
-                    avisarEscalaDesatualizada(unid, `Um registro de <b>${siglaFT}</b> foi processado para <b>${nomeColab}</b>.`);
-                }
-
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Novo registro de ${payload.new.sigla} recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova FT / Hora Extra!');
-                }
-            })
-            // Escuta Trocas de Turno
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'trocas_turno' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                let unid = payload.new ? payload.new.unidade_solicitante : payload.old.unidade_solicitante;
-                let nomeSol = payload.new ? payload.new.nome_solicitante : 'alguém';
-                let nomeSub = payload.new ? payload.new.nome_substituto : 'alguém';
-                if (typeof avisarEscalaDesatualizada === 'function') {
-                    avisarEscalaDesatualizada(unid, `Uma <b>Troca de Turno</b> entre <b>${nomeSol}</b> e <b>${nomeSub}</b> foi processada.`);
-                }
-
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Novo pedido de troca recebido de:<br><b>${payload.new.criado_por}</b>`, 'aviso', '⚠️ Nova Troca Pendente!');
-                }
-            })
-            // Escuta Justificativas de Ponto (ADMIN)
-            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ocorrencias_ponto' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                if (payload.new.status === 'Pendente' && payload.old.status === 'Aguardando Colaborador') {
-                    mostrarAlerta(`A justificativa de ponto de <b>${payload.new.nome}</b> (${payload.new.unidade}) foi recebida!`, 'aviso', '📝 Ponto Justificado!');
-                }
-            })
-            // Escuta Advertências
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'advertencias' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Nova Medida Disciplinar enviada:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Nova Ocorrência!');
-                } else if (payload.eventType === 'UPDATE' && payload.new.status === 'Concluído' && payload.old.status !== 'Concluído') {
-                    mostrarAlerta(`<b>${payload.new.nome}</b> (${payload.new.unidade}) teve a medida disciplinar assinada e arquivada pelo gestor.`, 'sucesso', '✅ Advertência Assinada!');
-                }
-            })
-            // Escuta Avaliações de Experiência
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'avaliacoes_experiencia' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                mostrarAlerta(`Nova Avaliação de Experiência recebida do Gestor:<br><b>${payload.new.nome_colaborador}</b> (${payload.new.unidade})`, 'aviso', '⭐ Nova Avaliação!');
-            })
-            // Escuta Férias
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitacoes_ferias' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Novo pedido de férias recebido de:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '🌴 Novas Férias Pendentes!');
-                }
-            })
-            // Escuta Alterações Cadastrais
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitacoes_alteracao' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                
-                let unid = payload.new ? payload.new.unidade_atual : payload.old.unidade_atual;
-                let nomeColab = payload.new ? payload.new.nome_colaborador : 'um colaborador';
-                if (typeof avisarEscalaDesatualizada === 'function') {
-                    avisarEscalaDesatualizada(unid, `Uma solicitação de ajuste cadastral para <b>${nomeColab}</b> foi processada.`);
-                }
-
-                if (payload.eventType === 'INSERT') {
-                    mostrarAlerta(`Nova solicitação de alteração recebida de:<br><b>${payload.new.nome_colaborador}</b>`, 'aviso', '⚠️ Alteração Cadastral!');
-                }
-            })
-            // Escuta Ocorrências Operacionais
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ocorrencias_plantao' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                mostrarAlerta(`Nova Ocorrência de Plantão lançada:<br><b>${payload.new.nome}</b> (${payload.new.unidade})`, 'aviso', '⚠️ Ocorrência Operacional!');
-            })
-            // Escuta Documentos do GED
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'envio_documentos' }, (payload) => {
-                solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                mostrarAlerta(`Novo documento recebido:<br><b>${payload.new.nome_documento}</b> (${payload.new.unidade})`, 'aviso', '📁 Arquivo Digital!');
-            })
-            // ESCUTA ATUALIZAÇÕES DIRETAS NA ESCALA MENSAL (Trancamento)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'ausencias' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'horas_extras_ft' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'trocas_turno' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'ocorrencias_ponto' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'advertencias' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'avaliacoes_experiencia' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitacoes_ferias' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitacoes_alteracao' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'ocorrencias_plantao' }, () => solicitarAtualizacaoGlobal())
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'envio_documentos' }, () => solicitarAtualizacaoGlobal())
             .on('postgres_changes', { event: '*', schema: 'public', table: 'escalas_mensais' }, (payload) => {
                 if(!document.getElementById('tela-escala').classList.contains('hidden')) {
                     const mesEscalaInput = document.getElementById('filtro-mes-escala').value;
                     const unidadeEscalaInput = document.getElementById('filtro-unidade-escala').value;
-                    
                     if(payload.new && payload.new.mes_ano === mesEscalaInput && payload.new.unidade === unidadeEscalaInput) {
-                        if (payload.new.fechada) {
-                            document.getElementById('texto-aviso-escala').innerHTML = `A escala deste mês acabou de ser <b>Trancada</b> e finalizada.`;
-                        } else {
-                            document.getElementById('texto-aviso-escala').innerHTML = `Ocorreram recálculos nesta escala que precisam ser renderizados.`;
-                        }
+                        document.getElementById('texto-aviso-escala').innerHTML = payload.new.fechada ? `A escala foi <b>Trancada</b>.` : `A escala sofreu recálculos.`;
                         document.getElementById('banner-escala-desatualizada').classList.remove('hidden');
                     }
                 }
             })
-            // Escuta Notificações em Tempo Real (O Cérebro da Mágica Multiplayer)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'notificacoes' }, async (payload) => {
-                
-                // 👇 TRAVA ANTI-PISCADAS: Só aciona o Maestro para recarregar as tabelas se for notificação nova ou excluída!
-                if (payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                }
-                
-                // 👇 MÁGICA MULTIPLAYER SILENCIOSA: Muda a cor do botão na tela sem recarregar a tabela inteira
-                if (payload.eventType === 'UPDATE' && payload.old && payload.new.lida !== payload.old.lida) {
-                    const idNotificacao = payload.new.id;
-                    const statusLida = payload.new.lida;
-                    const nomeQuemLeu = payload.new.lida_por;
-
-                    // Atualiza a memória local da tela de quem está olhando
-                    const notifIndex = notificacoesGlobais.findIndex(n => n.id === idNotificacao);
-                    if (notifIndex !== -1) {
-                        notificacoesGlobais[notifIndex].lida = statusLida;
-                        notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
-                    }
-
-                    // Procura o botão na tela de quem está olhando e atualiza a cor/texto suavemente
-                    const btnTela = document.getElementById(`btn-leitura-${idNotificacao}`) || document.getElementById(`btn-leitura-ferias-${idNotificacao}`);
-                    
-                    if (btnTela) {
-                        const containerLeitura = document.getElementById(`container-leitura-${idNotificacao}`) || btnTela.parentElement;
-                        
-                        // SEMPRE remove o nome antigo primeiro para evitar duplicidade de listas
-                        const existingSpan = containerLeitura.querySelector('.leitura-nome');
-                        if (existingSpan) existingSpan.remove();
-
-                        if (statusLida) {
-                            // Fica cinza (Não Lido)
-                            btnTela.className = 'btn-secondary';
-                            btnTela.style.opacity = '0.6';
-                            btnTela.innerHTML = '<i class="fa-solid fa-envelope-open-text"></i> Não Lido';
-                            btnTela.setAttribute('onclick', `alternarLeituraNotificacao('${idNotificacao}', false)`);
-                            
-                            // Se tem quem leu, injeta a mensagem bonita com o olhinho
-                            if (nomeQuemLeu) {
-                                const primeiroNome = nomeQuemLeu.split(' ')[0];
-                                containerLeitura.insertAdjacentHTML('beforeend', `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${primeiroNome}</b></span>`);
-                            }
-                        } else {
-                            // Volta pro verde (Lido)
-                            btnTela.className = 'btn-success';
-                            btnTela.style.opacity = '1';
-                            btnTela.innerHTML = '<i class="fa-solid fa-check-double"></i> Lido';
-                            btnTela.setAttribute('onclick', `alternarLeituraNotificacao('${idNotificacao}', true)`);
-                        }
-                    }
-                }
+            // 👇 A MÁGICA: QUALQUER MUDANÇA NAS NOTIFICAÇÕES FORÇA O RECARREGAMENTO DO SINO!
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'notificacoes' }, () => {
+                solicitarAtualizacaoGlobal();
             })
             .subscribe();
 
@@ -8241,148 +8069,31 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
 
         supabaseClient
             .channel('escuta-gestor')
-            // Escuta Justificativas de Ponto
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'ocorrencias_ponto' }, (payload) => {
-                const unidJust = payload.new.unidade ? payload.new.unidade.trim() : '';
-                if(unidadesGestor.includes(unidJust)) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    
-                    if (payload.new.status === 'Pendente' && payload.old.status === 'Aguardando Colaborador') {
-                        mostrarAlerta(`A justificativa de ponto de <b>${payload.new.nome}</b> foi recebida!`, 'aviso', '📝 Ponto Justificado!');
-                    }
-                }
+                if(payload.new.unidade && unidadesGestor.includes(payload.new.unidade.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta Advertências
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'advertencias' }, (payload) => {
-                const unidAdv = payload.new.unidade ? payload.new.unidade.trim() : '';
-                if(unidadesGestor.includes(unidAdv)) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                }
+                if(payload.new.unidade && unidadesGestor.includes(payload.new.unidade.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta Perfis
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'perfis' }, (payload) => {
-                const unidPerfil = payload.new.unidade ? payload.new.unidade.trim() : '';
-                if(unidadesGestor.includes(unidPerfil)) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    let nomeColab = payload.new.nome;
-                    if (typeof avisarEscalaDesatualizada === 'function') avisarEscalaDesatualizada(unidPerfil, `Dados ou horários de <b>${nomeColab}</b> foram atualizados.`);
-                }
+                if(payload.new.unidade && unidadesGestor.includes(payload.new.unidade.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta Ausencias
             .on('postgres_changes', { event: '*', schema: 'public', table: 'ausencias' }, (payload) => {
-                const unid = payload.new ? payload.new.unidade : payload.old.unidade;
-                let nomeColab = payload.new ? payload.new.nome : 'um colaborador';
-                let siglaAus = payload.new ? payload.new.sigla : 'Atestado/Falta';
-                if(unid && unidadesGestor.includes(unid.trim())) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    if (typeof avisarEscalaDesatualizada === 'function') avisarEscalaDesatualizada(unid, `O Admin aprovou o registro de <b>${siglaAus}</b> para <b>${nomeColab}</b>.`);
-                }
+                let unid = payload.new ? payload.new.unidade : payload.old.unidade;
+                if(unid && unidadesGestor.includes(unid.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta FT / Hora Extra
             .on('postgres_changes', { event: '*', schema: 'public', table: 'horas_extras_ft' }, (payload) => {
-                const unid = payload.new ? payload.new.unidade : payload.old.unidade;
-                let nomeColab = payload.new ? payload.new.nome : 'um colaborador';
-                let siglaFT = payload.new ? payload.new.sigla : 'FT/Hora Extra';
-                if(unid && unidadesGestor.includes(unid.trim())) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    if (typeof avisarEscalaDesatualizada === 'function') avisarEscalaDesatualizada(unid, `O Admin aprovou o registro de <b>${siglaFT}</b> para <b>${nomeColab}</b>.`);
-                }
+                let unid = payload.new ? payload.new.unidade : payload.old.unidade;
+                if(unid && unidadesGestor.includes(unid.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta Trocas de Turno
             .on('postgres_changes', { event: '*', schema: 'public', table: 'trocas_turno' }, (payload) => {
-                const unid = payload.new ? payload.new.unidade_solicitante : payload.old.unidade_solicitante;
-                let nomeSol = payload.new ? payload.new.nome_solicitante : 'alguém';
-                let nomeSub = payload.new ? payload.new.nome_substituto : 'alguém';
-                if(unid && unidadesGestor.includes(unid.trim())) {
-                    solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    if (typeof avisarEscalaDesatualizada === 'function') avisarEscalaDesatualizada(unid, `A Troca de Turno entre <b>${nomeSol}</b> e <b>${nomeSub}</b> foi processada.`);
-                }
+                let unid = payload.new ? payload.new.unidade_solicitante : payload.old.unidade_solicitante;
+                if(unid && unidadesGestor.includes(unid.trim())) solicitarAtualizacaoGlobal();
             })
-            // Escuta Escalas Mensais
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'escalas_mensais' }, (payload) => {
-                if(!document.getElementById('tela-escala').classList.contains('hidden')) {
-                    const mesEscalaInput = document.getElementById('filtro-mes-escala').value;
-                    const unidadeEscalaInput = document.getElementById('filtro-unidade-escala').value;
-                    
-                    if(payload.new && payload.new.mes_ano === mesEscalaInput && payload.new.unidade === unidadeEscalaInput) {
-                        if (payload.new.fechada) {
-                            document.getElementById('texto-aviso-escala').innerHTML = `O Admin <b>Trancou</b> a escala deste mês. As exportações estão liberadas.`;
-                        } else {
-                            document.getElementById('texto-aviso-escala').innerHTML = `A escala sofreu recálculos no servidor.`;
-                        }
-                        document.getElementById('banner-escala-desatualizada').classList.remove('hidden');
-                    }
-                }
-            })
-            // Escuta Notificações do Gestor (Incluindo Multiplayer)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'notificacoes' }, (payload) => {
                 const unidNotif = payload.new ? payload.new.unidade : (payload.old ? payload.old.unidade : '');
-                
                 if (unidNotif && unidadesGestor.includes(unidNotif.trim())) {
-                    
-                    // 👇 TRAVA ANTI-PISCADAS
-                    if (payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
-                        solicitarAtualizacaoGlobal(); // <--- MAESTRO
-                    }
-
-                    if (payload.eventType === 'INSERT') {
-                        const tipoN = payload.new.tipo || 'Admissão';
-                        
-                        if (tipoN === 'Rescisão') {
-                            mostrarAlerta(`O desligamento de <b>${payload.new.nome}</b> foi homologado pelo Admin!`, 'aviso', '🚨 Rescisão Concluída!');
-                        } else if (tipoN === 'Ausência') {
-                            mostrarAlerta(`A ausência de <b>${payload.new.nome}</b> foi Aprovada pelo Admin!`, 'aviso', '📋 Atestado Validado!');
-                        } else if (tipoN === 'FT') {
-                            mostrarAlerta(`A FT/Hora Extra de <b>${payload.new.nome}</b> foi aprovada na escala!`, 'sucesso', '💼 Hora Extra Aprovada');
-                        } else if (tipoN === 'Troca') {
-                            mostrarAlerta(`A troca de turno envolvendo <b>${payload.new.nome}</b> foi aprovada!`, 'sucesso', '🔄 Troca Aprovada');
-                        } else if (tipoN === 'Advertência_Gestor') {
-                            mostrarAlerta(`O RH gerou a carta disciplinar de <b>${payload.new.nome}</b>! Baixe e colete a assinatura.`, 'aviso', '⚖️ Carta Disciplinar Pronta!');
-                        } else if (tipoN === 'Admissão') {
-                            mostrarAlerta(`A ficha de <b>${payload.new.nome}</b> acabou de ser aprovada pelo Admin!`, 'sucesso', '🎉 Admissão Aprovada!');
-                        } else if (tipoN === 'Admissão_Devolvida') {
-                            mostrarAlerta(`A admissão de <b>${payload.new.nome}</b> foi devolvida pelo RH para correção!`, 'erro', '⚠️ Ficha Devolvida');
-                        }
-                    }
-
-                    // 👇 MÁGICA MULTIPLAYER SILENCIOSA (GESTOR)
-                    if (payload.eventType === 'UPDATE' && payload.old && payload.new.lida !== payload.old.lida) {
-                        const idNotificacao = payload.new.id;
-                        const statusLida = payload.new.lida;
-                        const nomeQuemLeu = payload.new.lida_por;
-
-                        const notifIndex = notificacoesGlobais.findIndex(n => n.id === idNotificacao);
-                        if (notifIndex !== -1) {
-                            notificacoesGlobais[notifIndex].lida = statusLida;
-                            notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
-                        }
-
-                        const btnTela = document.getElementById(`btn-leitura-${idNotificacao}`) || document.getElementById(`btn-leitura-ferias-${idNotificacao}`);
-                        
-                        if (btnTela) {
-                            const containerLeitura = document.getElementById(`container-leitura-${idNotificacao}`) || btnTela.parentElement;
-                            
-                            const existingSpan = containerLeitura.querySelector('.leitura-nome');
-                            if (existingSpan) existingSpan.remove();
-
-                            if (statusLida) {
-                                btnTela.className = 'btn-secondary';
-                                btnTela.style.opacity = '0.6';
-                                btnTela.innerHTML = '<i class="fa-solid fa-envelope-open-text"></i> Não Lido';
-                                btnTela.setAttribute('onclick', `alternarLeituraNotificacao('${idNotificacao}', false)`);
-                                
-                                if (nomeQuemLeu) {
-                                    const primeiroNome = nomeQuemLeu.split(' ')[0];
-                                    containerLeitura.insertAdjacentHTML('beforeend', `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${primeiroNome}</b></span>`);
-                                }
-                            } else {
-                                btnTela.className = 'btn-success';
-                                btnTela.style.opacity = '1';
-                                btnTela.innerHTML = '<i class="fa-solid fa-check-double"></i> Lido';
-                                btnTela.setAttribute('onclick', `alternarLeituraNotificacao('${idNotificacao}', true)`);
-                            }
-                        }
-                    }
+                    solicitarAtualizacaoGlobal(); // 👇 RECARREGA TUDO SE HOUVER MUDANÇA
                 }
             })
             .subscribe();
