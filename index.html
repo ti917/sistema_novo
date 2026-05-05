@@ -9084,6 +9084,7 @@ if (btnTela) {
             detalheCargosHtml = `<span style="font-size: 0.8rem; color: var(--cor-texto-secundario);">Limites por cargo não definidos.</span>`;
         }
 
+        // 👇 A MÁGICA DO BOTÃO DE OLHO AQUI DENTRO (Adicionamos o display: flex e o button) 👇
         tbody.innerHTML += `
         <tr class="linha-unidade-oficial" style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
             <td style="text-align: left; padding: 12px;">${u.empresa}</td>
@@ -9096,8 +9097,9 @@ if (btnTela) {
             
             <td style="text-align: left; padding: 12px;">
                 <div style="background: rgba(0,0,0,0.2); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05);">
-                    <div style="margin-bottom: 5px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 5px;">
+                    <div style="margin-bottom: 5px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 5px; display: flex; justify-content: space-between; align-items: center;">
                         <b style="color: ${corTotal}; font-size: 0.95rem;">TOTAL: ${totalAtivos} ativos / ${limiteGeral} limite</b>
+                        <button type="button" class="btn-secondary" style="padding: 2px 8px; font-size: 0.75rem; border-radius: 4px; border-color: #4fc3f7; color: #4fc3f7; background: transparent; cursor: pointer;" onclick="abrirModalLotacaoDetalhada('${u.nome.replace(/'/g, "\\'")}')" title="Ver nomes dos colaboradores"><i class="fa-solid fa-eye"></i></button>
                     </div>
                     ${detalheCargosHtml}
                 </div>
@@ -28040,6 +28042,121 @@ document.body.addEventListener('reset', function(e) {
         });
     }
 });
+
+        // ========================================================
+// MÁGICA: MODAL DE DETALHAMENTO DE LOTAÇÃO E AVISO PRÉVIO
+// ========================================================
+window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
+    mostrarAlerta("Buscando detalhes de lotação no banco...", "aviso");
+    
+    try {
+        // 1. Busca os limites dessa unidade no banco
+        const { data: uniData, error: errU } = await supabaseClient.from('unidades_oficiais').select('limites_cargos, capacidade_limite').eq('nome', nomeUnidade).single();
+        if (errU || !uniData) return mostrarAlerta("Unidade não encontrada.", "erro");
+        
+        let limites = {};
+        try { if (uniData.limites_cargos) limites = JSON.parse(uniData.limites_cargos); } catch(e){}
+        
+        // 2. Busca os colaboradores vinculados a essa unidade
+        const { data: colabsDB, error: errC } = await supabaseClient.from('perfis')
+            .select('nome, status, dados_admissao, dados_rescisao')
+            .eq('perfil', 'Colaborador')
+            .eq('unidade', nomeUnidade)
+            .order('nome');
+            
+        if (errC) return mostrarAlerta("Erro ao buscar colaboradores.", "erro");
+        
+        // Passa no nosso filtro inteligente para trazer só quem tá ativo OU cumprindo aviso!
+        const colabs = window.filtrarAtivosE_AvisoPrevio(colabsDB || []);
+        
+        let lotacaoPorCargo = {};
+        
+        // Preenche primeiro os cargos que têm limite definido (para aparecerem mesmo vazios)
+        Object.keys(limites).forEach(c => {
+            lotacaoPorCargo[c] = { limite: limites[c], ativos: [], aviso: [] };
+        });
+        
+        // Separa a galera
+        colabs.forEach(c => {
+            const cargo = c.dados_admissao?.cargo || 'Sem Cargo';
+            
+            // Se ele tiver um cargo que não tem limite cadastrado, cria a caixinha pra ele também
+            if (!lotacaoPorCargo[cargo]) lotacaoPorCargo[cargo] = { limite: '∞', ativos: [], aviso: [] };
+            
+            // Verifica se está 100% ativo ou se está cumprindo aviso
+            if (c.status === 'Ativo') {
+                lotacaoPorCargo[cargo].ativos.push(c.nome);
+            } else {
+                lotacaoPorCargo[cargo].aviso.push(c.nome);
+            }
+        });
+        
+        // 3. Montar o Visual
+        let htmlCargos = '';
+        
+        Object.keys(lotacaoPorCargo).sort().forEach(cargo => {
+            const data = lotacaoPorCargo[cargo];
+            const totalNoCargo = data.ativos.length + data.aviso.length;
+            
+            // Ignora se o cargo não tem limite e também não tem ninguém dentro
+            if (data.limite === '∞' && totalNoCargo === 0) return;
+            
+            // Controle de cor das bordas e bolinhas (Verde, Vermelho, Azul)
+            let corCargo = '#4fc3f7';
+            if (data.limite !== '∞') {
+                if (totalNoCargo > data.limite) corCargo = 'var(--cor-perigo)';
+                else if (totalNoCargo === data.limite) corCargo = 'var(--cor-sucesso)';
+            } else if (totalNoCargo > 0) {
+                corCargo = 'var(--cor-sucesso)'; 
+            }
+            
+            // HTML da listinha de quem tá Ativo
+            let listAtivos = data.ativos.length > 0 
+                ? `<div style="margin-top: 12px;"><small style="color: #4fc3f7; font-weight: bold; text-transform: uppercase;">Ativos Efetivos (${data.ativos.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.ativos.map(n => `<i class="fa-solid fa-check" style="color: #4fc3f7; font-size:0.75rem; margin-right:6px;"></i> ${n}`).join('<br>')}</div></div>`
+                : '';
+                
+            // HTML da listinha de quem tá de Aviso Prévio
+            let listAviso = data.aviso.length > 0
+                ? `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(255,255,255,0.1);"><small style="color: #ff9800; font-weight: bold; text-transform: uppercase;">Cumprindo Aviso / Rescisão (${data.aviso.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.aviso.map(n => `<i class="fa-solid fa-clock" style="color: #ff9800; font-size:0.75rem; margin-right:6px;"></i> ${n}`).join('<br>')}</div></div>`
+                : '';
+                
+            if(data.ativos.length === 0 && data.aviso.length === 0) {
+                listAtivos = `<div style="margin-top: 10px; font-size: 0.85rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado nesta função.</div>`;
+            }
+
+            htmlCargos += `
+                <div style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid ${corCargo}; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
+                        <strong style="color: #e2e8f0; font-size: 1.05rem;"><i class="fa-solid fa-user-tie" style="color: var(--cor-texto-secundario); margin-right: 5px;"></i> ${cargo}</strong>
+                        <span style="background: ${corCargo}22; color: ${corCargo}; padding: 4px 10px; border-radius: 12px; font-weight: bold; font-size: 0.85rem; border: 1px solid ${corCargo}55;">${totalNoCargo} / ${data.limite} vagas</span>
+                    </div>
+                    ${listAtivos}
+                    ${listAviso}
+                </div>
+            `;
+        });
+        
+        const modalHtml = `
+        <div id="modal-lotacao-detalhada" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+            <div class="glass-card" style="width: 100%; max-width: 600px; max-height: 90vh; overflow-y: auto; border: 1px solid #4fc3f7; position: relative;">
+                <button onclick="document.getElementById('modal-lotacao-detalhada').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index: 10;"><i class="fa-solid fa-xmark"></i></button>
+                
+                <h3 style="color: #4fc3f7; margin-bottom: 5px;"><i class="fa-solid fa-users-viewfinder"></i> Detalhamento de Lotação</h3>
+                <p style="color: var(--cor-texto-secundario); font-size: 0.95rem; margin-bottom: 20px;"><i class="fa-solid fa-building"></i> Unidade: <b style="color: #fff;">${nomeUnidade}</b></p>
+                
+                <div style="margin-bottom: 10px;">${htmlCargos}</div>
+                
+                <button class="btn-secondary" style="width: 100%; height: 50px; margin-top: 10px;" onclick="document.getElementById('modal-lotacao-detalhada').remove()">Fechar</button>
+            </div>
+        </div>`;
+        
+        document.getElementById('toast-container').innerHTML = ''; // Limpa o aviso de "Buscando..."
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        
+    } catch (e) {
+        mostrarAlerta("Erro ao carregar detalhes: " + e.message, "erro");
+    }
+}
 
         // Memória para saber se o número aumentou
 let ultimoContadorSino = 0; 
