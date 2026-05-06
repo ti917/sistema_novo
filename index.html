@@ -11106,6 +11106,14 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 </div>
             </div>
 
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+    <button class="btn-success" style="flex: 2; height: 50px; background-color: #28a745; color: #fff; border: none; font-weight: bold;" 
+        onclick="prepararRecontratacao('${colab.id}', '${colab.nome}')">
+        <i class="fa-solid fa-user-plus"></i> RECONTRATAR ESTE COLABORADOR
+    </button>
+    <button class="btn-primary" style="flex: 1; height: 50px;" onclick="document.getElementById('modal-resc-concluida').remove()">FECHAR</button>
+</div>
+
             <div style="margin-bottom: 20px;">
                 <h4 style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 10px;"><i class="fa-solid fa-paperclip"></i> Documentos do Arquivo Morto:</h4>
                 ${linksDocs}
@@ -13372,26 +13380,42 @@ if (temPis === 'Sim' && !document.getElementById('adm-pis').value) {
                 .eq('perfil', 'Colaborador');
 
             if (!errBusca && colabsExistentes) {
-                for (let c of colabsExistentes) {
-                    
-                    const admCheck = c.dados_admissao || {};
-                    const statusCheck = c.status || 'Ativo';
+               for (let c of colabsExistentes) {
+    const admCheck = c.dados_admissao || {};
+    const statusCheck = c.status || 'Ativo';
 
-                    // 👇 MÁGICA 2: Se a ficha antiga está Cancelada ou Excluída, o Radar IGNORA ela e libera o CPF/PIS! 👇
-                    if (statusCheck === 'Cancelado(a)' || statusCheck === 'Excluído') {
-                        continue; 
-                    }
-                    
-                    // Se o erro for com a PRÓPRIA PESSOA que estamos corrigindo, o Radar pula ela!
-                    if (idCorrecao && String(c.id) === String(idCorrecao)) {
-                        continue; 
-                    }
+    // 1. Se estiver Cancelado ou Excluído, o sistema ignora (libera o CPF para uso novo)
+    if (statusCheck === 'Cancelado(a)' || statusCheck === 'Excluído') {
+        continue; 
+    }
+    
+    // Pula a checagem se estivermos apenas corrigindo a própria ficha
+    if (idCorrecao && String(c.id) === String(idCorrecao)) {
+        continue; 
+    }
 
-                    // Valida CPF
-                    if (cpfInput && admCheck.cpf === cpfInput) {
-                        btn.disabled = false; msg.innerText = "";
-                        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Este CPF já pertence a <b>${c.nome}</b> (Status: ${statusCheck}).`, "erro", "⛔ CPF Duplicado");
-                    }
+    // 2. VERIFICAÇÃO DE DUPLICIDADE (CPF ou PIS)
+    if ((cpfInput && admCheck.cpf === cpfInput) || (pisInput && admCheck.pis === pisInput)) {
+        btn.disabled = false; msg.innerText = "";
+
+        // SE ESTIVER ATIVO: Bloqueio padrão
+        if (statusCheck === 'Ativo') {
+            return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Este colaborador já está <b>ATIVO</b> no sistema sob o nome de <b>${c.nome}</b>.`, "erro", "⛔ Já cadastrado");
+        }
+
+        // 👇 SE ESTIVER DESLIGADO: Bloqueio com instrução de Reativação 👇
+        if (statusCheck === 'Desligado') {
+            const avisoRecontratacao = `
+                <div style="text-align: left;">
+                    <b style="color: #ff9800;">Atenção: Ex-Colaborador Detectado!</b><br><br>
+                    O CPF/PIS informado pertence a <b>${c.nome}</b>, que consta como <b>DESLIGADO</b> no histórico.<br><br>
+                    Para manter o histórico e documentos antigos, <b>não crie uma ficha nova</b>. Peça ao Administrador para localizar este nome no "Histórico de Desligamentos" e clicar em <b>RECONTRATAR</b>.
+                </div>
+            `;
+            return mostrarAlerta(avisoRecontratacao, "aviso", "🔄 Recontratação Detectada");
+        }
+    }
+}
                     
                     // Valida PIS
                     if (pisInput && admCheck.pis === pisInput) {
@@ -26427,6 +26451,43 @@ window.carregarStatusEPI = async function() {
     if (btnMassa) {
         if (pendentes > 0) btnMassa.classList.remove('hidden');
         else btnMassa.classList.add('hidden');
+    }
+};
+
+        window.prepararRecontratacao = async function(idColab, nomeColab) {
+    const confirmado = await mostrarConfirmacao(`Deseja recontratar <b>${nomeColab}</b>?<br><br>O status voltará para <b>Ativo</b> e a rescisão anterior será movida para o Histórico Permanente.`, "Confirmar Recontratação");
+    if (!confirmado) return;
+
+    try {
+        const { data: colab } = await supabaseClient.from('perfis').select('*').eq('id', idColab).single();
+        
+        let adm = colab.dados_admissao || {};
+        let rescVelha = colab.dados_rescisao || {};
+
+        // 1. Cria ou atualiza um array de "Ciclos Anteriores" para não perder a rescisão velha
+        if (!adm.historico_ciclos) adm.historico_ciclos = [];
+        
+        adm.historico_ciclos.push({
+            data_admissao_original: adm.data_inicio,
+            rescisao_anterior: rescVelha
+        });
+
+        // 2. Limpa os dados de rescisão atuais para o novo ciclo começar
+        const { error } = await supabaseClient.from('perfis').update({
+            status: 'Ativo',
+            status_aprovacao: 'Aprovado',
+            dados_rescisao: null, // Limpa para a próxima
+            dados_admissao: adm    // Salva com o histórico guardado
+        }).eq('id', idColab);
+
+        if (error) throw error;
+
+        mostrarAlerta(`${nomeColab} foi reativado! Lembre-se de atualizar a nova Data de Início e o Cargo na ficha dele.`, "sucesso");
+        document.getElementById('modal-resc-concluida')?.remove();
+        carregarRescisoesParaAdmin(); // Atualiza a lista
+
+    } catch (e) {
+        mostrarAlerta("Erro ao recontratar: " + e.message, "erro");
     }
 };
 
