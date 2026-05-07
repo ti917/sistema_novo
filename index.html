@@ -29398,7 +29398,6 @@ window.dispararTermosImagemMassa = async function() {
     
     if(!empresa || !unidade) return mostrarAlerta("Selecione a Empresa e a Unidade!", "aviso");
 
-    // Muda a mensagem do alerta dependendo se é lote ou individual
     const txtConfirmacao = colabId !== 'Todos' 
         ? `Deseja gerar o Termo de Imagem e disparar no WhatsApp para o colaborador selecionado?` 
         : `Deseja gerar os Termos de Imagem e disparar no WhatsApp para TODOS os colaboradores ativos de <b>${unidade}</b> que ainda não assinaram?`;
@@ -29406,59 +29405,90 @@ window.dispararTermosImagemMassa = async function() {
     const confirmado = await mostrarConfirmacao(txtConfirmacao, "Disparar Termos");
     if(!confirmado) return;
 
-    mostrarAlerta("Iniciando processamento. Isso pode levar alguns segundos...", "aviso");
+    // Pega o botão para dar feedback visual
+    const btn = document.querySelector('[onclick="dispararTermosImagemMassa()"]');
+    const textoOriginalBtn = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando disparos (Modo Turbo)...';
 
-    let query = supabaseClient.from('perfis')
-        .select('id, nome, empresa, unidade, dados_admissao')
-        .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo')
-        .eq('empresa', empresa);
-    
-    if (unidade !== 'Todas') query = query.eq('unidade', unidade);
-    if (colabId !== 'Todos') query = query.eq('id', colabId); // 👇 O FILTRO ESPECÍFICO AQUI!
-    
-    const { data: colabs } = await query;
-    if (!colabs || colabs.length === 0) return mostrarAlerta("Nenhum colaborador apto encontrado.", "erro");
-
-    let sucessos = 0;
-
-    for (let c of colabs) {
-        const fone = c.dados_admissao?.telefone;
-        const cpf = c.dados_admissao?.cpf || '000.000.000-00';
+    try {
+        let query = supabaseClient.from('perfis')
+            .select('id, nome, empresa, unidade, dados_admissao')
+            .eq('perfil', 'Colaborador')
+            .eq('status', 'Ativo')
+            .eq('empresa', empresa);
         
-        if (fone) {
-            const { data: jaAssinou } = await supabaseClient.from('autorizacoes_imagem').select('id, status, token').eq('colaborador_id', c.id).maybeSingle();
-            
-            // Só manda se ele estiver Pendente, ou se a linha não existir ainda!
-            if (!jaAssinou || jaAssinou.status === 'Pendente') {
-                let tokenUnico = '';
-                
-                if (jaAssinou && jaAssinou.status === 'Pendente') {
-                    tokenUnico = jaAssinou.token || crypto.randomUUID();
-                } else {
-                    tokenUnico = crypto.randomUUID();
-                    await supabaseClient.from('autorizacoes_imagem').insert([{
-                        colaborador_id: c.id,
-                        nome: c.nome,
-                        cpf: cpf,
-                        unidade: c.unidade,
-                        empresa: c.empresa,
-                        token: tokenUnico
-                    }]);
-                }
+        if (unidade !== 'Todas') query = query.eq('unidade', unidade);
+        if (colabId !== 'Todos') query = query.eq('id', colabId); 
+        
+        const { data: colabs } = await query;
+        
+        if (!colabs || colabs.length === 0) {
+            btn.disabled = false;
+            btn.innerHTML = textoOriginalBtn;
+            return mostrarAlerta("Nenhum colaborador apto encontrado.", "erro");
+        }
 
-                const primeiroNome = c.nome.split(' ')[0];
-                const NOME_TEMPLATE_META = 'envio_termo_imagem'; 
+        let sucessos = 0;
+        const tamanhoLote = 10; // Motor Turbo: 10 disparos por vez
+
+        // Loop de Lotes
+        for (let i = 0; i < colabs.length; i += tamanhoLote) {
+            const loteAtual = colabs.slice(i, i + tamanhoLote);
+            
+            const promessasLote = loteAtual.map(async (c) => {
+                const fone = c.dados_admissao?.telefone;
+                const cpf = c.dados_admissao?.cpf || '000.000.000-00';
                 
-                await enviarMensagemGraphAPI(fone, NOME_TEMPLATE_META, [primeiroNome], null, tokenUnico);
-                sucessos++;
-                await new Promise(r => setTimeout(r, 500)); 
+                if (!fone) return false;
+
+                const { data: jaAssinou } = await supabaseClient.from('autorizacoes_imagem').select('id, status, token').eq('colaborador_id', c.id).maybeSingle();
+                
+                // Processa o banco e dispara se estiver Pendente ou não existir
+                if (!jaAssinou || jaAssinou.status === 'Pendente') {
+                    let tokenUnico = '';
+                    
+                    if (jaAssinou && jaAssinou.status === 'Pendente') {
+                        tokenUnico = jaAssinou.token || crypto.randomUUID();
+                    } else {
+                        tokenUnico = crypto.randomUUID();
+                        await supabaseClient.from('autorizacoes_imagem').insert([{
+                            colaborador_id: c.id,
+                            nome: c.nome,
+                            cpf: cpf,
+                            unidade: c.unidade,
+                            empresa: c.empresa,
+                            token: tokenUnico
+                        }]);
+                    }
+
+                    const primeiroNome = c.nome.split(' ')[0];
+                    const ok = await enviarMensagemGraphAPI(fone, 'envio_termo_imagem', [primeiroNome], null, tokenUnico);
+                    return ok;
+                }
+                return false; // Ignora quem já assinou
+            });
+
+            // Espera os 10 terminarem de criar no banco e enviar no WhatsApp
+            const resultados = await Promise.all(promessasLote);
+            sucessos += resultados.filter(r => r === true).length;
+
+            // Escudo Anti-Spam: Descansa 1 segundo antes do próximo lote de 10
+            if (i + tamanhoLote < colabs.length) {
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
-    }
 
-    mostrarAlerta(`Disparo concluído! ${sucessos} termos enviados.`, "sucesso");
-    carregarStatusImagem();
+        mostrarAlerta(`Disparo concluído! <b>${sucessos}</b> termos enviados na velocidade da luz.`, "sucesso");
+        carregarStatusImagem();
+
+    } catch (err) {
+        mostrarAlerta("Erro durante o processo: " + err.message, "erro");
+    } finally {
+        // Devolve o botão ao normal
+        btn.disabled = false;
+        btn.innerHTML = textoOriginalBtn;
+    }
 };
 
 window.carregarStatusImagem = async function() {
