@@ -21982,7 +21982,7 @@ window.dispararFilaPonto = async function() {
     if(!confirmado) return;
 
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Subindo arquivos e processando envios (Modo Turbo)...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Subindo arquivos e processando envios...';
 
     let sucessos = 0;
     let falhas = 0;
@@ -21997,7 +21997,11 @@ window.dispararFilaPonto = async function() {
                 const chks = document.querySelectorAll(`.chk-erro-${c.filaId}:checked`);
                 const file = document.getElementById(`doc-ponto-${c.filaId}`).files;
 
-                const { data: existe } = await supabaseClient.from('ocorrencias_ponto').select('id').eq('colaborador_id', c.id).eq('data_falha', dtFalha).maybeSingle();
+                // Proteção 2: Verifica no BANCO DE DADOS se essa pessoa já não tem pendência
+                const { data: existe, error: errSelect } = await supabaseClient.from('ocorrencias_ponto').select('id').eq('colaborador_id', c.id).eq('data_falha', dtFalha).maybeSingle();
+                
+                if (errSelect) throw new Error("Bloqueio de Leitura (RLS) no Banco: " + errSelect.message);
+
                 if (existe) {
                     console.warn(`O colaborador ${c.nome} já tem cobrança registrada no banco para o dia ${dtFalha}`);
                     return false; 
@@ -22006,37 +22010,41 @@ window.dispararFilaPonto = async function() {
                 let errosArr = Array.from(chks).map(el => el.value);
                 let motivoFormatado = `Faltou bater o ponto na: ${errosArr.join(', ')}. Por favor, justifique o ocorrido.`;
 
-                // 👇 A MÁGICA 2: Empresa Dinâmica (Evita erro de banco caso seja nulo)
-                const empresaColab = c.empresa && c.empresa !== 'null' ? c.empresa : usuarioAtual.empresa.split(',')[0].trim();
+                // Garante que o nome da empresa vai certinho (Ex: SOUL GESTÃO em vez de SOUL)
+                let empresaColab = c.empresa && c.empresa !== 'null' ? c.empresa : usuarioAtual.empresa.split(',')[0].trim();
+                if (empresaColab === 'SOUL') empresaColab = 'SOUL GESTÃO'; // Proteção contra divergência
 
                 const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(c.unidade)}/${formatarNomePasta(c.nome)}/Ocorrencias`;
+                
+                // 1. TENTA SUBIR O DOCUMENTO NO STORAGE
                 const urls = await subirDocumentos(caminhoBase, file);
+                if (!urls || urls.length === 0) throw new Error("O Storage bloqueou o upload do PDF.");
+                
                 const linkDocumento = urls[0];
 
                 const objPrevia = {
                     colaborador_id: c.id,
                     nome: c.nome,
-                    empresa: empresaColab, // 👈 LIBERA O RLS DO BANCO PRO ADMIN NORMAL
+                    empresa: empresaColab, 
                     unidade: c.unidade,
                     data_falha: dtFalha,
                     doc_rh: linkDocumento,
                     motivo_rh: motivoFormatado,
                     status: 'Aguardando Colaborador',
-                    criado_por: usuarioAtual.nome // 👈 CARIMBA QUEM FEZ
+                    criado_por: usuarioAtual.nome 
                 };
 
+                // 2. TENTA SALVAR NA TABELA DO SUPABASE
                 const { data: novaOcorrencia, error: errInsert } = await supabaseClient.from('ocorrencias_ponto').insert([objPrevia]).select('id').single();
                 
-                if (errInsert) {
-                    console.error("Erro no Banco (Possível bloqueio de permissão):", errInsert);
-                    throw errInsert;
-                }
+                if (errInsert) throw new Error("O Banco de Dados (RLS) bloqueou o Insert: " + errInsert.message);
 
                 const cleanId = String(novaOcorrencia.id).trim(); 
                 const parametrosDaURL = "?oc=" + cleanId;
                 const primeiroNome = c.nome.split(' ')[0];
                 const dataFormatada = formatarDataBR(dtFalha);
 
+                // 3. TENTA CHAMAR A EDGE FUNCTION PARA A META
                 const sucesso = await enviarMensagemGraphAPI(
                     c.fone, 
                     'alerta_ponto_doc', 
@@ -22045,10 +22053,14 @@ window.dispararFilaPonto = async function() {
                     parametrosDaURL                
                 );
 
-                return sucesso;
+                if (!sucesso) throw new Error("A API da Meta recusou a mensagem ou a Edge Function falhou.");
+
+                return true;
 
             } catch (e) {
-                console.error(`Erro ao enviar ponto para ${c.nome}:`, e);
+                console.error(`Erro detalhado para ${c.nome}:`, e);
+                // 👇 ISSO AQUI VAI TE MOSTRAR EXATAMENTE O QUE O SUPABASE RECUSOU 👇
+                mostrarAlerta(`Falha em ${c.nome}: <br><b>${e.message}</b>`, "erro");
                 return false;
             }
         });
@@ -22066,12 +22078,13 @@ window.dispararFilaPonto = async function() {
     }
 
     if (falhas > 0) {
-        mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Ignorados/Falhas: <b>${falhas}</b> (Verifique se não tentou lançar uma data duplicada).`, "aviso");
+        mostrarAlerta(`Disparo concluído com pendências!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b> (Leia os erros vermelhos na tela).`, "aviso");
     } else {
-        mostrarAlerta(`Sucesso total! <b>${sucessos}</b> notificações enviadas na velocidade da luz.`, "sucesso");
+        mostrarAlerta(`Sucesso total! <b>${sucessos}</b> notificações enviadas.`, "sucesso");
+        // Só limpa a fila se 100% deu certo
+        window.limparTodaFilaPonto();
     }
     
-    window.limparTodaFilaPonto();
     if(typeof carregarJustificativasZap === 'function') carregarJustificativasZap();
 
     btn.disabled = false;
