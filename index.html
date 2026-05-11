@@ -21954,6 +21954,7 @@ window.limparTodaFilaPonto = function() {
 window.dispararFilaPonto = async function() {
     const btn = document.getElementById('btn-enviar-zap-ponto-massa');
     
+    // 1. Validar se todos os cards estão preenchidos antes de subir tudo
     let filaValida = true;
     let combinacoesUnicas = new Set();
 
@@ -21966,6 +21967,7 @@ window.dispararFilaPonto = async function() {
         if(chks.length === 0) { mostrarAlerta(`Marque pelo menos UM ERRO na caixinha para: ${c.nome}`, "aviso"); filaValida = false; break; }
         if(file.length === 0) { mostrarAlerta(`Anexe o documento de Ponto para: ${c.nome}`, "aviso"); filaValida = false; break; }
 
+        // A Trava do mesmo dia na própria fila
         const chaveAntiDuplicidade = `${c.id}_${dt}`;
         if (combinacoesUnicas.has(chaveAntiDuplicidade)) {
             mostrarAlerta(`Atenção: Você adicionou <b>${c.nome}</b> duas vezes para o MESMO dia (${formatarDataBR(dt)}). Corrija as datas ou remova o card duplicado.`, "erro");
@@ -21981,81 +21983,104 @@ window.dispararFilaPonto = async function() {
     if(!confirmado) return;
 
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Subindo arquivos e processando envios...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Subindo arquivos e processando envios (Modo Turbo)...';
 
     let sucessos = 0;
     let falhas = 0;
 
-    for (let c of window.filaCobrancaPonto) {
-        try {
-            const dtFalha = document.getElementById(`data-ponto-${c.filaId}`).value;
-            const chks = document.querySelectorAll(`.chk-erro-${c.filaId}:checked`);
-            const file = document.getElementById(`doc-ponto-${c.filaId}`).files;
+    // 👇 O MOTOR TURBO: Lotes de 10 em 10 👇
+    const tamanhoLote = 10;
 
-            const { data: existe } = await supabaseClient.from('ocorrencias_ponto').select('id').eq('colaborador_id', c.id).eq('data_falha', dtFalha).maybeSingle();
-            if (existe) {
-                console.warn(`O colaborador ${c.nome} já tem cobrança para o dia ${dtFalha}`);
-                falhas++;
-                continue; 
+    for (let i = 0; i < window.filaCobrancaPonto.length; i += tamanhoLote) {
+        // Pega as 10 pessoas da rodada atual
+        const loteAtual = window.filaCobrancaPonto.slice(i, i + tamanhoLote);
+        
+        // Cria as tarefas para rodarem SIMULTANEAMENTE
+        const promessasLote = loteAtual.map(async (c) => {
+            try {
+                const dtFalha = document.getElementById(`data-ponto-${c.filaId}`).value;
+                const chks = document.querySelectorAll(`.chk-erro-${c.filaId}:checked`);
+                const file = document.getElementById(`doc-ponto-${c.filaId}`).files;
+
+                // Proteção 2: Verifica no BANCO DE DADOS se essa pessoa já não tem pendência
+                const { data: existe } = await supabaseClient.from('ocorrencias_ponto').select('id').eq('colaborador_id', c.id).eq('data_falha', dtFalha).maybeSingle();
+                if (existe) {
+                    console.warn(`O colaborador ${c.nome} já tem cobrança registrada no banco para o dia ${dtFalha}`);
+                    return false; // Retorna falha silenciosa para esse cara
+                }
+
+                // O Sistema escrevendo sozinho!
+                let errosArr = Array.from(chks).map(el => el.value);
+                let motivoFormatado = `Faltou bater o ponto na: ${errosArr.join(', ')}. Por favor, justifique o ocorrido.`;
+
+                // Subindo o espelho
+                const caminhoBase = `${formatarNomePasta(c.empresa)}/${formatarNomePasta(c.unidade)}/${formatarNomePasta(c.nome)}/Ocorrencias`;
+                const urls = await subirDocumentos(caminhoBase, file);
+                const linkDocumento = urls[0];
+
+                const objPrevia = {
+                    colaborador_id: c.id,
+                    nome: c.nome,
+                    unidade: c.unidade,
+                    data_falha: dtFalha,
+                    doc_rh: linkDocumento,
+                    motivo_rh: motivoFormatado,
+                    status: 'Aguardando Colaborador'
+                };
+
+                const { data: novaOcorrencia, error: errInsert } = await supabaseClient.from('ocorrencias_ponto').insert([objPrevia]).select('id').single();
+                if (errInsert) throw errInsert;
+
+                const cleanId = String(novaOcorrencia.id).trim(); 
+                const parametrosDaURL = "?oc=" + cleanId;
+                const primeiroNome = c.nome.split(' ')[0];
+                const dataFormatada = formatarDataBR(dtFalha);
+
+                // Dispara o WhatsApp
+                const sucesso = await enviarMensagemGraphAPI(
+                    c.fone, 
+                    'alerta_ponto_doc', 
+                    [primeiroNome, dataFormatada, motivoFormatado], 
+                    linkDocumento,                 
+                    parametrosDaURL                
+                );
+
+                return sucesso;
+
+            } catch (e) {
+                console.error(`Erro ao enviar ponto para ${c.nome}:`, e);
+                return false;
             }
+        });
 
-            let errosArr = Array.from(chks).map(el => el.value);
-            let motivoFormatado = `Faltou bater o ponto na: ${errosArr.join(', ')}. Por favor, justifique o ocorrido.`;
+        // Executa os 10 disparos JUNTOS e aguarda eles finalizarem
+        const resultados = await Promise.all(promessasLote);
 
-            const caminhoBase = `${formatarNomePasta(c.empresa)}/${formatarNomePasta(c.unidade)}/${formatarNomePasta(c.nome)}/Ocorrencias`;
-            const urls = await subirDocumentos(caminhoBase, file);
-            const linkDocumento = urls[0];
+        // Confere quem recebeu e quem falhou nesse lote
+        resultados.forEach(enviadoOk => {
+            if (enviadoOk) sucessos++;
+            else falhas++;
+        });
 
-            const objPrevia = {
-                colaborador_id: c.id,
-                nome: c.nome,
-                unidade: c.unidade,
-                data_falha: dtFalha,
-                doc_rh: linkDocumento,
-                motivo_rh: motivoFormatado,
-                status: 'Aguardando Colaborador'
-            };
-
-            const { data: novaOcorrencia, error: errInsert } = await supabaseClient.from('ocorrencias_ponto').insert([objPrevia]).select('id').single();
-            if (errInsert) throw errInsert;
-
-            const cleanId = String(novaOcorrencia.id).trim(); 
-            const parametrosDaURL = "?oc=" + cleanId;
-            const primeiroNome = c.nome.split(' ')[0];
-            const dataFormatada = formatarDataBR(dtFalha);
-
-            const sucesso = await enviarMensagemGraphAPI(
-                c.fone, 
-                'alerta_ponto_doc', 
-                [primeiroNome, dataFormatada, motivoFormatado], 
-                linkDocumento,                 
-                parametrosDaURL                
-            );
-
-            if (sucesso) sucessos++; else falhas++;
-
-            await new Promise(r => setTimeout(r, 600)); 
-
-        } catch (e) {
-            console.error(`Erro ao enviar ponto para ${c.nome}:`, e);
-            falhas++;
+        // Escudo Anti-Spam: Descansa 1 segundo ANTES do próximo lote de 10
+        if (i + tamanhoLote < window.filaCobrancaPonto.length) {
+            await new Promise(r => setTimeout(r, 1000));
         }
     }
 
     if (falhas > 0) {
         mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Ignorados/Falhas: <b>${falhas}</b> (Verifique se não tentou lançar uma data duplicada).`, "aviso");
     } else {
-        mostrarAlerta(`Sucesso total! <b>${sucessos}</b> notificações enviadas.`, "sucesso");
+        mostrarAlerta(`Sucesso total! <b>${sucessos}</b> notificações enviadas na velocidade da luz.`, "sucesso");
     }
     
     // Esvazia a fila por completo se rodou o envio
-    limparTodaFilaPonto();
+    window.limparTodaFilaPonto();
     if(typeof carregarJustificativasZap === 'function') carregarJustificativasZap();
 
     btn.disabled = false;
     btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Gerar Links e Disparar Alertas';
 };
-
         // ==========================================
 // MÓDULO DE OCORRÊNCIAS DE PLANTÃO
 // ==========================================
