@@ -21322,37 +21322,38 @@ window.confirmarSelecaoColabs = function() {
 };
 
 // =====================================
-// FUNÇÃO NÚCLEO: DISPARO SEGURO VIA EDGE FUNCTION (CORRIGIDA)
+// FUNÇÃO NÚCLEO: DISPARO SEGURO VIA EDGE FUNCTION
 // =====================================
-async function enviarMensagemGraphAPI(telefoneBruto, templateName, variaveisBody, linkDocumentoHeader, urlButtonParam) {
-    // 1. Formata o telefone
+window.enviarMensagemGraphAPI = async function(telefoneBruto, templateName, variaveisBody, linkDocumentoHeader, urlButtonParam) {
     let telefone = telefoneBruto.replace(/\D/g, '');
     if (!telefone) return false;
     if (!telefone.startsWith('55')) telefone = '55' + telefone;
 
-    // 2. Monta o payload básico
+    // Monta o payload base apenas com texto
     const payload = {
         telefone: telefone,
         templateName: templateName,
-        variaveisBody: variaveisBody,
-        urlButtonParam: urlButtonParam
+        variaveisBody: variaveisBody
     };
 
-    // 3. MÁGICA DA CORREÇÃO:
-    // Só adiciona o cabeçalho de mídia se o link existir e não for null.
-    // Isso evita que templates de texto puro (como o de recusa) sejam bloqueados pela Meta.
-    if (linkDocumentoHeader && linkDocumentoHeader !== null && linkDocumentoHeader !== "") {
+    // Adiciona o botão dinâmico se existir
+    if (urlButtonParam) {
+        payload.urlButtonParam = urlButtonParam;
+    }
+
+    // MÁGICA: Só envia a chave de mídia para a Edge Function se realmente for um Link!
+    // Se for null ou vazio, o payload ignora, evitando o erro "UNKNOWN" da Meta em templates de texto.
+    if (linkDocumentoHeader && typeof linkDocumentoHeader === 'string' && linkDocumentoHeader.startsWith('http')) {
         payload.linkDocumentoHeader = linkDocumentoHeader;
     }
 
     try {
-        // 4. Chama a Edge Function no Supabase
         const { data, error } = await supabaseClient.functions.invoke('enviar-whatsapp', {
             body: payload
         });
 
         if (error || !data.success) {
-            console.error("Erro no envio WhatsApp:", error || data.error);
+            console.error("Erro no envio WhatsApp:", error || data?.error);
             return false;
         }
         return true;
@@ -21360,7 +21361,7 @@ async function enviarMensagemGraphAPI(telefoneBruto, templateName, variaveisBody
         console.error("Erro de rede no disparo:", e);
         return false;
     }
-}
+};
 
 // =====================================
 // 2. ENVIAR BOAS VINDAS (Em Massa com Array do Modal)
@@ -21833,13 +21834,13 @@ window.pedirMotivoDevolucao = function(nomeColab) {
 };
 
 // =====================================
-// BOTÃO: DEVOLVER JUSTIFICATIVA VIA ZAP (CORRIGIDA)
+// BOTÃO: DEVOLVER JUSTIFICATIVA VIA ZAP
 // =====================================
 window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, dataFalha) {
     const motivoRecusa = await pedirMotivoDevolucao(nomeColab);
     if (!motivoRecusa) return; 
 
-    const confirmado = await mostrarConfirmacao(`Deseja devolver a justificativa para ${nomeColab} via WhatsApp para que ele refaça?`, "Devolver Justificativa");
+    const confirmado = await mostrarConfirmacao(`Deseja devolver a justificativa para ${nomeColab} via WhatsApp e limpar os dados preenchidos?`, "Devolver Justificativa");
     if (!confirmado) return;
 
     try {
@@ -21853,18 +21854,16 @@ window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, 
         const dataFormatada = formatarDataBR(dataFalha);
         const urlParams = "?oc=" + idOcorrencia;
 
-        // 👇 AQUI ESTÁ A CHAVE: Passamos NULL explicitamente no lugar da imagem/PDF
-        // Como o template 'ocorrencia_recusada' é só texto, ele agora passará sem erro.
+        // 👇 A MÁGICA: Passamos NULL no 4º parâmetro (Link do Anexo) para que a GraphAPI mande como TEXTO PURO.
         const sucessoZap = await enviarMensagemGraphAPI(
             fone, 
             'ocorrencia_recusada', 
             [primeiroNome, dataFormatada, motivoRecusa], 
-            null, // <--- SEM PDF E SEM IMAGEM (NULL)
+            null, 
             urlParams
         );
 
         if (sucessoZap) {
-            // Atualiza o status para o colaborador poder editar lá na ponta da Clara
             const { error: errUpdate } = await supabaseClient.from('ocorrencias_ponto')
                 .update({
                     status: 'Aguardando Colaborador',
@@ -21875,11 +21874,11 @@ window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, 
 
             await supabaseClient.from('notificacoes').delete().eq('referencia_id', idOcorrencia).in('tipo', ['Ocorrencia_Ponto', 'Ocorrencia_Ponto_Admin']);
 
-            mostrarAlerta("Justificativa devolvida com sucesso! O colaborador recebeu o aviso apenas com o texto da recusa.", "sucesso");
+            mostrarAlerta("Justificativa devolvida com sucesso! O colaborador foi notificado.", "sucesso");
             carregarJustificativasZap(true); 
             atualizarContador();
         } else {
-            mostrarAlerta("A Meta bloqueou o envio. Certifique-se de que o template 'ocorrencia_recusada' não exige imagem no cabeçalho.", "erro");
+            mostrarAlerta("Falha ao disparar o WhatsApp. Verifique se o template está aprovado na Meta.", "erro");
         }
 
     } catch (err) {
@@ -29222,7 +29221,7 @@ window.enviarContratoAssinadoGestor = async function(idColab, nomeColab, unidade
     }
 };
 
-        // =====================================
+       // =====================================
 // BOTÃO: REENVIAR COBRANÇA PARA O COLABORADOR
 // =====================================
 window.reenviarCobrancaPonto = async function(idOcorrencia) {
@@ -29243,16 +29242,17 @@ window.reenviarCobrancaPonto = async function(idOcorrencia) {
         const primeiroNome = oco.nome.split(' ')[0];
         const dataFormatada = formatarDataBR(oco.data_falha);
         const motivoRH = oco.motivo_rh || 'Pendência no Ponto'; 
-        
-        // Mantém a mesma estrutura de URL com o ID para a Clara reconhecer a assinatura dele
         const parametrosDaURL = "?oc=" + oco.id;
+
+        // MÁGICA ANTI-BLOQUEIO: Como o template 'alerta_ponto_doc' EXIGE uma imagem, se não tiver o espelho do RH (porque o bot gerou), manda a logo do RH Soul para a Meta aceitar.
+        const imagemParaEnvio = oco.doc_rh || 'https://gozgames.neocities.org/Si%CC%81mbolo%20-%20fundo%20azul.png';
 
         // Dispara usando a GraphAPI blindada
         const sucesso = await enviarMensagemGraphAPI(
             fone, 
-            'alerta_ponto_doc', // O mesmo template inicial da Meta
+            'alerta_ponto_doc', 
             [primeiroNome, dataFormatada, motivoRH], 
-            oco.doc_rh, 
+            imagemParaEnvio, 
             parametrosDaURL
         );
 
@@ -29266,11 +29266,10 @@ window.reenviarCobrancaPonto = async function(idOcorrencia) {
     }
 };
 
-       // =====================================
+     // =====================================
 // BOTÃO: COBRANÇA EM MASSA (PONTO) - MOTOR TURBO 🚀
 // =====================================
 window.reenviarParaTodosAguardando = async function() {
-    // Pega só quem tá na tela e está como 'Aguardando Colaborador'
     const termo = window.removerAcentos(document.getElementById('busca-zap-justificativas').value);
     const alvo = todasJustificativasZap.filter(j => j.status === 'Aguardando Colaborador' && window.removerAcentos(j.nome).includes(termo));
     
@@ -29291,15 +29290,13 @@ window.reenviarParaTodosAguardando = async function() {
     let falhas = 0;
 
     try {
-        // Puxa os telefones de todo mundo de uma vez para otimizar o banco
         const idsColabs = [...new Set(alvo.map(a => a.colaborador_id))];
         const { data: perfis, error } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsColabs);
 
         if (error || !perfis) throw new Error("Erro ao buscar os telefones.");
 
-        const tamanhoLote = 10; // Dispara de 10 em 10 simultaneamente
+        const tamanhoLote = 10;
 
-        // Loop de disparo em Lotes
         for (let i = 0; i < alvo.length; i += tamanhoLote) {
             const loteAtual = alvo.slice(i, i + tamanhoLote);
             
@@ -29307,7 +29304,6 @@ window.reenviarParaTodosAguardando = async function() {
                 const perfil = perfis.find(p => p.id === oco.colaborador_id);
                 const fone = perfil?.dados_admissao?.telefone;
 
-                // 🚨 MOSTRA O ERRO SE NÃO TIVER TELEFONE 🚨
                 if (!fone) {
                     mostrarAlerta(`Falha em <b>${oco.nome}</b>:<br>Colaborador sem telefone cadastrado.`, "erro", "Sem Contato");
                     return false;
@@ -29318,16 +29314,17 @@ window.reenviarParaTodosAguardando = async function() {
                 const motivoRH = oco.motivo_rh || 'Pendência no Ponto';
                 const parametrosDaURL = "?oc=" + oco.id;
 
-                // Dispara usando o template correto da Meta
+                // MÁGICA ANTI-BLOQUEIO (Para o template alerta_ponto_doc)
+                const imagemParaEnvio = oco.doc_rh || 'https://gozgames.neocities.org/Si%CC%81mbolo%20-%20fundo%20azul.png';
+
                 const sucesso = await enviarMensagemGraphAPI(
                     fone, 
                     'alerta_ponto_doc', 
                     [primeiroNome, dataFormatada, motivoRH], 
-                    oco.doc_rh, 
+                    imagemParaEnvio, 
                     parametrosDaURL
                 );
 
-                // 🚨 MOSTRA O ERRO SE A META (WHATSAPP) BARRAR O ENVIO 🚨
                 if (!sucesso) {
                     mostrarAlerta(`Falha em <b>${oco.nome}</b>:<br>Erro na conexão com o WhatsApp (Meta).`, "erro", "Falha de Envio");
                 }
@@ -29335,7 +29332,6 @@ window.reenviarParaTodosAguardando = async function() {
                 return sucesso;
             });
 
-            // Executa os 10 disparos JUNTOS e aguarda eles finalizarem
             const resultados = await Promise.all(promessasLote);
 
             resultados.forEach(enviadoOk => {
@@ -29343,7 +29339,6 @@ window.reenviarParaTodosAguardando = async function() {
                 else falhas++;
             });
 
-            // Pausa de 1 segundo ENTRE OS LOTES (Escudo Anti-Spam da Meta)
             if (i + tamanhoLote < alvo.length) {
                 await new Promise(r => setTimeout(r, 1000));
             }
@@ -29354,7 +29349,6 @@ window.reenviarParaTodosAguardando = async function() {
     } catch (err) {
         mostrarAlerta("Erro durante o disparo: " + err.message, "erro");
     } finally {
-        // Devolve o botão ao normal
         if (btn) {
             btn.disabled = false;
             btn.innerHTML = `<i class="fa-brands fa-whatsapp fa-lg"></i> Reenviar para Aguardando Colaborador (${alvo.length})`;
