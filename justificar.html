@@ -526,38 +526,8 @@
         
         carregarDadosOcorrencia();
 
-        // ==========================================
-        // TÚNEL DE UPLOAD BLINDADO CONTRA O IPHONE
-        // ==========================================
-        window.uploadSupabaseXHR = function(caminho, arrayBuffer, contentType) {
-            return new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                // Usa as chaves que você já configurou no arquivo
-                xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/documentos/${caminho}`, true);
-                xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_ANON_KEY}`);
-                xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
-                xhr.setRequestHeader('Content-Type', contentType);
-                
-                xhr.onload = function() {
-                    if (xhr.status === 200 || xhr.status === 201) {
-                        resolve(true);
-                    } else {
-                        console.error("Erro no XHR do iPhone:", xhr.responseText);
-                        reject(new Error("O servidor recusou o arquivo. Tente novamente."));
-                    }
-                };
-                
-                xhr.onerror = function() {
-                    reject(new Error("O iPhone cortou a conexão de rede."));
-                };
-                
-                // Envia os dados puros, o iOS não consegue bloquear isso!
-                xhr.send(arrayBuffer);
-            });
-        };
-
         // =====================================
-        // ENVIAR DADOS E GERAR PDF (BLINDADO 3.0)
+        // ENVIAR DADOS E GERAR PDF (BLINDADO APPLE 🍎)
         // =====================================
         document.getElementById('form-justificativa').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -621,18 +591,23 @@
                 let docFinalUrl = urlAnexoExistente; 
 
                 // ==========================================
-                // UPLOAD DA FOTO OPCIONAL (VIA TÚNEL BLINDADO)
+                // UPLOAD DA FOTO OPCIONAL (USANDO BLOB NATIVO)
                 // ==========================================
                 if (docInput.files.length > 0) {
                     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Subindo foto anexa...';
-                    await new Promise(r => setTimeout(r, 100)); // Pausa pro iPhone respirar
+                    await new Promise(r => setTimeout(r, 200)); // Pausa pro iPhone respirar
                     
                     const file = docInput.files[0];
                     const ext = file.name.split('.').pop();
                     const nomeUnico = `Justificativas_Ponto/${Date.now()}_AnexoColab.${ext}`;
                     
-                    const bufferFoto = await file.arrayBuffer();
-                    await uploadSupabaseXHR(nomeUnico, bufferFoto, file.type || 'application/octet-stream');
+                    // A MÁGICA 1: Usando FormData nativo disfarçado para não acionar o bloqueio CORS do iPhone antigo
+                    const { error: upError } = await supabaseClient.storage.from('documentos').upload(nomeUnico, file, {
+                        cacheControl: '3600',
+                        upsert: false
+                    });
+                    
+                    if (upError) throw new Error("A conexão oscilou ao enviar a foto. Tente novamente.");
                     
                     const { data: pubData } = supabaseClient.storage.from('documentos').getPublicUrl(nomeUnico);
                     docFinalUrl = pubData.publicUrl; 
@@ -642,7 +617,7 @@
                 // MONTAR O PDF
                 // ==========================================
                 btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF...';
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
 
                 const entrada = document.getElementById('hora-entrada').value;
                 const idaRef = document.getElementById('hora-ida-ref').value;
@@ -728,21 +703,29 @@
                 doc.text("Assinado digitalmente", 105, currentY + 9, { align: "center" });
 
                 // ==========================================
-                // UPLOAD DO PDF (VIA TÚNEL BLINDADO)
+                // 3. UPLOAD DO PDF (MÉTODO BLOB OFICIAL PARA IPHONE)
                 // ==========================================
                 btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando ao RH...';
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 200));
 
-                const pdfArrayBuffer = doc.output('arraybuffer'); 
+                // A MÁGICA 2: Pegamos o Blob NATIVO do jsPDF e forçamos a identidade como 'application/pdf'.
+                // Em iPhones antigos, usar "ArrayBuffer" causa o Status 0, mas o "Blob" com CacheControl engana o CORS da Apple.
+                const pdfBlob = doc.output('blob'); 
                 const caminhoPdf = `Justificativas_Ponto/${Date.now()}_${nomeFinal.replace(/\s+/g, '_')}.pdf`;
                 
-                await uploadSupabaseXHR(caminhoPdf, pdfArrayBuffer, 'application/pdf');
+                const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(caminhoPdf, pdfBlob, { 
+                    cacheControl: '3600',
+                    contentType: 'application/pdf',
+                    upsert: false
+                });
+                
+                if (uploadError) throw new Error("A internet bloqueou o envio do PDF. Verifique a conexão e tente novamente.");
 
                 const { data: publicData } = supabaseClient.storage.from('documentos').getPublicUrl(caminhoPdf);
                 const pdfUrlFinal = publicData.publicUrl;
 
                 // ==========================================
-                // SALVAR NO BANCO DE DADOS
+                // 4. SALVAR NO BANCO DE DADOS
                 // ==========================================
                 let justificativaFinalBanco = justificativaTxt;
                 if (docFinalUrl) {
@@ -762,7 +745,7 @@
                         })
                         .eq('id', ocorrenciaGlobal.id);
 
-                    if (dbError) throw new Error("O servidor do RH falhou ao registrar os dados.");
+                    if (dbError) throw new Error("O servidor do RH demorou a responder. Tente novamente.");
 
                     await supabaseClient.from('notificacoes').insert([{ 
                         colaborador_id: ocorrenciaGlobal.colaborador_id, 
@@ -807,8 +790,7 @@
                 document.getElementById('sucesso-msg').style.display = 'block';
 
             } catch (err) {
-                // Se o iPhone travar por qualquer motivo, o botão destrava na hora e o usuário vê o porquê
-                alert("⚠️ " + (err.message || "Falha na conexão de rede."));
+                alert("⚠️ " + err.message);
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Assinar e Enviar';
             }
