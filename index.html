@@ -32656,48 +32656,92 @@ window.obterFeriadosNacionais = function(ano) {
     return f;
 };
 
-        // ==========================================
+      // ==========================================
 // MÓDULO: ASO E EXAMES MÉDICOS ADMISSIONAIS
 // ==========================================
 let todosColabsAso = [];
 let configsAsoGlobais = [];
+window.colabsAsoFiltrados = []; // Variável global para guardar a lista que vai pro Excel
 
 window.carregarAsoAdmin = async function() {
     const container = document.getElementById('lista-aso-container-admin');
-    container.innerHTML = '<div style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br>Buscando histórico de ASO...</div>';
+    if (!container) return; // Trava de segurança
+    
+    container.innerHTML = '<div style="text-align: center; padding: 40px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #00bcd4;"></i><br><br>Buscando controle de ASO...</div>';
 
-    // 👇 A MÁGICA: Agora busca os ATIVOS também para montar o histórico 👇
-    let query = supabaseClient.from('perfis')
-        .select('*')
-        .eq('perfil', 'Colaborador')
-        .in('status', ['Ativo', 'Aguardando ASO'])
-        .order('nome');
+    try {
+        // Busca os colaboradores
+        let query = supabaseClient.from('perfis')
+            .select('*')
+            .eq('perfil', 'Colaborador')
+            .in('status', ['Ativo', 'Aguardando ASO']);
 
-    if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
-        query = query.eq('empresa', empresaSelecionadaFiltro);
+        if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+            query = query.eq('empresa', empresaSelecionadaFiltro);
+        }
+        
+        const { data: colabs, error: errColabs } = await query;
+        if (errColabs) throw errColabs;
+        
+        todosColabsAso = colabs || [];
+
+        // Busca as regras de clínica
+        const { data: configs, error: errConfigs } = await supabaseClient.from('config_aso').select('*');
+        if (errConfigs) throw errConfigs;
+        
+        configsAsoGlobais = configs || [];
+
+        // Chama o filtro para renderizar os cards na tela
+        window.filtrarAsoAdmin();
+    } catch (e) {
+        console.error("Erro ao carregar ASO:", e);
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar os dados de ASO.</p>';
     }
-    const { data: colabs } = await query;
-    todosColabsAso = colabs || [];
-
-    const { data: configs } = await supabaseClient.from('config_aso').select('*');
-    configsAsoGlobais = configs || [];
-
-    filtrarAsoAdmin();
 };
 
-window.colabsAsoFiltrados = []; // Variável global para guardar a lista que vai pro Excel
-
 window.filtrarAsoAdmin = function() {
-    const termo = window.removerAcentos(document.getElementById('busca-aso-admin').value);
+    const termoInput = document.getElementById('busca-aso-admin');
+    const mesInput = document.getElementById('filtro-mes-aso');
+    const statusInput = document.getElementById('filtro-status-aso');
     const container = document.getElementById('lista-aso-container-admin');
+    
+    if (!container) return;
+    
+    const termo = termoInput ? window.removerAcentos(termoInput.value.toLowerCase()) : '';
+    const mesFiltro = mesInput ? mesInput.value : '';
+    const statusFiltro = statusInput ? statusInput.value : 'Todos';
+
     container.innerHTML = '';
 
-    const filtrados = todosColabsAso.filter(c => 
-        window.removerAcentos(c.nome).includes(termo) || 
-        window.removerAcentos(c.unidade).includes(termo)
-    );
+    const filtrados = todosColabsAso.filter(c => {
+        const adm = c.dados_admissao || {};
+        
+        // 1. Filtro de Nome ou Unidade
+        const nomeStr = c.nome ? window.removerAcentos(c.nome.toLowerCase()) : '';
+        const uniStr = c.unidade ? window.removerAcentos(c.unidade.toLowerCase()) : '';
+        const matchTexto = nomeStr.includes(termo) || uniStr.includes(termo);
+        
+        // 2. Filtro de Mês da Admissão (Opcional)
+        let matchData = true;
+        if (mesFiltro) {
+            const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
+            if (!dataInicioColab.startsWith(mesFiltro)) {
+                matchData = false;
+            }
+        }
 
-    // 👇 ORDENAÇÃO: Quem está pendente fica sempre no topo da tela 👇
+        // 3. Filtro de Status
+        let matchStatus = true;
+        if (statusFiltro !== 'Todos') {
+            matchStatus = (c.status === statusFiltro);
+        }
+
+        return matchTexto && matchData && matchStatus;
+    });
+
+    window.colabsAsoFiltrados = filtrados;
+
+    // ORDENAÇÃO: Quem está pendente ('Aguardando ASO') fica no topo
     filtrados.sort((a, b) => {
         if (a.status === 'Aguardando ASO' && b.status !== 'Aguardando ASO') return -1;
         if (a.status !== 'Aguardando ASO' && b.status === 'Aguardando ASO') return 1;
@@ -32705,25 +32749,28 @@ window.filtrarAsoAdmin = function() {
     });
 
     if (filtrados.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum registro encontrado na busca.</p>';
+        container.innerHTML = '<div style="text-align: center; color: var(--cor-texto-secundario); padding: 40px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px dashed var(--cor-borda);"><i class="fa-solid fa-notes-medical fa-2x" style="margin-bottom:15px; opacity:0.5;"></i><br>Nenhum registro encontrado para este filtro.</div>';
         return;
     }
+
+    let html = '';
 
     filtrados.forEach(c => {
         const adm = c.dados_admissao || {};
         const cargo = adm.cargo || 'Sem cargo';
-        const isAtivo = (c.status === 'Ativo'); // Se tá Ativo, já mandou o ASO
+        const isAtivo = (c.status === 'Ativo'); 
         
+        // Puxa a regra financeira configurada
         const regra = configsAsoGlobais.find(r => r.unidade === c.unidade && r.cargo === cargo);
         
         let infoClinica = regra 
             ? `<span style="color: #00bcd4; font-size: 0.85rem;"><i class="fa-solid fa-hospital"></i> <b>${regra.clinica}</b> (R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')})</span>`
-            : `<span style="color: var(--cor-perigo); font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> Clínica não configurada</span>`;
+            : `<span style="color: var(--cor-perigo); font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> Clínica não configurada para este cargo/unidade</span>`;
 
         let areaAcao = '';
 
         if (isAtivo) {
-            // 👇 SE JÁ FOR ATIVO: Traz o PDF do ASO da pasta de admissão dele 👇
+            // SE JÁ FOI APROVADO: Traz o botão de ver o PDF do ASO, se existir
             let linkAso = null;
             if (adm.documentos_extras && adm.documentos_extras['Admissão']) {
                 const docFound = adm.documentos_extras['Admissão'].find(d => d.nome === 'Exame ASO Admissional');
@@ -32731,44 +32778,327 @@ window.filtrarAsoAdmin = function() {
             }
 
             areaAcao = `
-                <div style="background: rgba(40, 167, 69, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(40, 167, 69, 0.3); display: flex; align-items: center; justify-content: space-between; width: 100%;">
-                    <span style="color: #28a745; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-circle-check"></i> ASO ANEXADO / COLABORADOR ATIVO</span>
-                    ${linkAso ? `<a href="${linkAso}" target="_blank" class="btn-secondary" style="border-color: #28a745; color: #28a745; padding: 5px 12px; font-size: 0.8rem; text-decoration: none;"><i class="fa-solid fa-file-pdf"></i> Visualizar ASO</a>` : '<span style="color: var(--cor-perigo); font-size: 0.8rem;">Arquivo não encontrado</span>'}
+                <div style="background: rgba(40, 167, 69, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(40, 167, 69, 0.3); display: flex; align-items: center; justify-content: space-between; width: 100%; flex-wrap: wrap; gap: 10px;">
+                    <span style="color: #28a745; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-circle-check"></i> ASO ANEXADO / COLABORADOR ATIVO NA ESCALA</span>
+                    ${linkAso 
+                        ? `<a href="${linkAso}" target="_blank" class="btn-secondary" style="border-color: #28a745; color: #28a745; padding: 5px 12px; font-size: 0.8rem; text-decoration: none;"><i class="fa-solid fa-file-pdf"></i> Visualizar ASO Anexado</a>` 
+                        : '<span style="color: var(--cor-perigo); font-size: 0.8rem; font-style: italic;"><i class="fa-solid fa-ban"></i> Arquivo do exame não encontrado</span>'
+                    }
                 </div>
             `;
         } else {
-            // 👇 SE ESTIVER AGUARDANDO: Mostra o campo de Upload 👇
+            // SE ESTIVER PENDENTE ('Aguardando ASO'): Exibe botão de anexar para ativar
             areaAcao = `
                 <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #00bcd4; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 15px; width: 100%;">
                     <div style="flex: 1; min-width: 200px;">
-                        <label style="color: #00bcd4; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; display: block;"><i class="fa-solid fa-file-pdf"></i> Anexar ASO (Ativar Colaborador)</label>
+                        <label style="color: #00bcd4; font-size: 0.85rem; font-weight: bold; margin-bottom: 8px; display: block;"><i class="fa-solid fa-file-pdf"></i> Anexar ASO para Ativar o Colaborador <span style="color: var(--cor-perigo);">*</span></label>
                         <input type="file" id="upload-aso-${c.id}" accept="image/*,.pdf" style="width: 100%;">
                     </div>
                     <button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; height: 45px;" onclick="anexarEAtivarAso('${c.id}', '${c.nome.replace(/'/g, "\\'")}', '${c.unidade}', '${c.empresa}')">
-                        <i class="fa-solid fa-check-double"></i> Enviar e Ativar
+                        <i class="fa-solid fa-check-double"></i> Finalizar Admissão
                     </button>
                 </div>
             `;
         }
 
-        container.innerHTML += `
-            <div class="admissao-card" style="border-left: 4px solid ${isAtivo ? '#28a745' : '#00bcd4'}; flex-direction: column; align-items: stretch; padding: 15px;">
+        const corStatusCard = isAtivo ? '#28a745' : '#00bcd4';
+        const bgBadge = isAtivo ? 'rgba(40,167,69,0.1)' : 'rgba(0,188,212,0.1)';
+
+        html += `
+            <div class="admissao-card" style="border-left: 4px solid ${corStatusCard}; flex-direction: column; align-items: stretch; padding: 15px; transition: 0.2s;">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <strong style="font-size: 1.15rem; color: ${isAtivo ? '#28a745' : '#00bcd4'};"><i class="fa-solid fa-notes-medical"></i> ${c.nome}</strong><br>
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${c.unidade} | ${cargo}</span><br>
+                        <strong style="font-size: 1.15rem; color: ${corStatusCard};"><i class="fa-solid fa-notes-medical"></i> ${c.nome}</strong><br>
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${c.unidade} | <i class="fa-solid fa-user-tie"></i> ${cargo}</span><br>
                         ${infoClinica}
                     </div>
-                    <span class="badge" style="background: ${isAtivo ? 'rgba(40,167,69,0.1)' : 'rgba(0,188,212,0.1)'}; color: ${isAtivo ? '#28a745' : '#00bcd4'}; border: 1px solid ${isAtivo ? '#28a745' : '#00bcd4'};">${c.status}</span>
+                    <span class="badge" style="background: ${bgBadge}; color: ${corStatusCard}; border: 1px solid ${corStatusCard};">${c.status.toUpperCase()}</span>
                 </div>
                 ${areaAcao}
             </div>
         `;
     });
+
+    container.innerHTML = html;
+};
+
+// ==========================================
+// FUNÇÕES AUXILIARES DA TELA DE ASO
+// ==========================================
+
+window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empresaColab) {
+    const fileInput = document.getElementById(`upload-aso-${idColab}`);
+    if (fileInput.files.length === 0) return mostrarAlerta("Por favor, anexe o arquivo do exame ASO!", "aviso");
+
+    const confirmado = await mostrarConfirmacao(`Deseja anexar o ASO e ativar <b>${nomeColab}</b> definitivamente na escala e no sistema?`, "Ativar Colaborador");
+    if (!confirmado) return;
+
+    mostrarAlerta("Processando ativação...", "aviso");
+
+    try {
+        // Puxa o JSON de admissão atual
+        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let adm = perfil.dados_admissao || {};
+
+        // 1. Faz o Upload do ASO para o Storage da Empresa/Unidade
+        const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidadeColab)}/${formatarNomePasta(nomeColab)}/Admissoes`;
+        const urls = await subirDocumentos(caminhoBase, fileInput.files, 'Exame_ASO_Admissional');
+
+        // 2. Salva o link do documento dentro da pasta "Admissão" do Arquivo Digital do colaborador
+        if (!adm.documentos_extras) adm.documentos_extras = {};
+        if (!adm.documentos_extras['Admissão']) adm.documentos_extras['Admissão'] = [];
+        adm.documentos_extras['Admissão'].push({ url: urls[0], nome: 'Exame ASO Admissional' });
+
+        // 3. Atualiza o banco mudando o status para 'Ativo'
+        const { error } = await supabaseClient.from('perfis').update({ 
+            status: 'Ativo', 
+            dados_admissao: adm 
+        }).eq('id', idColab);
+
+        if (error) throw error;
+
+        mostrarAlerta("Sucesso! Colaborador Ativo e liberado na escala.", "sucesso");
+        
+        // Recarrega a tela de ASO pra atualizar os botões
+        window.carregarAsoAdmin();
+        atualizarContador();
+
+        // Se a tela de escala estiver aberta lá atrás, manda atualizar pra incluir o cara
+        if(!document.getElementById('tela-escala').classList.contains('hidden')) {
+            if(typeof processarEscala === 'function') processarEscala();
+        }
+
+    } catch (err) {
+        mostrarAlerta("Erro ao ativar colaborador: " + err.message, "erro");
+    }
+};
+
+// ==========================================
+// CONFIGURAÇÃO DO ASO (CLÍNICAS E VALORES)
+// ==========================================
+
+window.abrirModalConfigAso = async function() {
+    const modal = document.getElementById('modal-config-aso');
+    if (!modal) return;
+    
+    document.getElementById('form-config-aso').reset();
+    document.getElementById('config-aso-id').value = '';
+    
+    // Clona as opções do select de unidades principal da tela
+    const selectUnidade = document.getElementById('config-aso-unidade');
+    const filtroEscala = document.getElementById('filtro-unidade-escala');
+    if (filtroEscala) selectUnidade.innerHTML = filtroEscala.innerHTML;
+
+    // Reseta o select de cargo
+    document.getElementById('config-aso-cargo').innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
+    document.getElementById('config-aso-cargo').disabled = true;
+
+    // Garante que o botão de salvar tem o texto correto de criação
+    document.getElementById('btn-salvar-config-aso').innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Regra';
+
+    modal.classList.remove('hidden');
+    window.renderizarListaConfigAso();
+};
+
+window.carregarCargosAsoPorUnidade = async function() {
+    const unidade = document.getElementById('config-aso-unidade').value;
+    const selectCargo = document.getElementById('config-aso-cargo');
+    
+    if (!unidade) {
+        selectCargo.innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
+        selectCargo.disabled = true;
+        return;
+    }
+
+    selectCargo.innerHTML = '<option value="">Buscando cargos ocupados...</option>';
+    selectCargo.disabled = true;
+
+    try {
+        // Mapeia na tabela de perfis quais cargos existem nesta unidade
+        const { data, error } = await supabaseClient
+            .from('perfis')
+            .select('dados_admissao')
+            .eq('unidade', unidade)
+            .eq('perfil', 'Colaborador');
+
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+            selectCargo.innerHTML = '<option value="">Nenhum colaborador nesta unidade</option>';
+            return;
+        }
+
+        const cargosUnicos = new Set();
+        data.forEach(p => {
+            const cargo = p.dados_admissao?.cargo;
+            if (cargo) cargosUnicos.add(cargo.trim().toUpperCase());
+        });
+
+        if (cargosUnicos.size === 0) {
+            selectCargo.innerHTML = '<option value="">Nenhum cargo definido nos perfis</option>';
+            return;
+        }
+
+        let options = '<option value="">Selecione o Cargo...</option>';
+        Array.from(cargosUnicos).sort().forEach(cargo => {
+            options += `<option value="${cargo}">${cargo}</option>`;
+        });
+
+        selectCargo.innerHTML = options;
+        selectCargo.disabled = false;
+
+    } catch (e) {
+        console.error("Erro ao mapear cargos da unidade:", e);
+        selectCargo.innerHTML = '<option value="">Erro ao carregar cargos</option>';
+    }
+};
+
+document.getElementById('form-config-aso')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('btn-salvar-config-aso');
+    btn.disabled = true; 
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+
+    const id = document.getElementById('config-aso-id').value;
+    const obj = {
+        unidade: document.getElementById('config-aso-unidade').value,
+        cargo: document.getElementById('config-aso-cargo').value,
+        clinica: document.getElementById('config-aso-clinica').value.trim(),
+        valor: parseFloat(document.getElementById('config-aso-valor').value) || 0
+    };
+
+    try {
+        if (id) {
+            // Edição
+            await supabaseClient.from('config_aso').update(obj).eq('id', id);
+            mostrarAlerta("Configuração atualizada com sucesso!", "sucesso");
+        } else {
+            // Trava de segurança para não duplicar regra de Unidade + Cargo
+            const { data: existe } = await supabaseClient.from('config_aso')
+                .select('id')
+                .eq('unidade', obj.unidade)
+                .eq('cargo', obj.cargo)
+                .maybeSingle();
+                
+            if (existe) throw new Error("Atenção: Já existe uma regra de clínica configurada para este Cargo nesta mesma Unidade. Edite a regra existente ou exclua-a primeiro.");
+            
+            // Inserção
+            await supabaseClient.from('config_aso').insert([obj]);
+            mostrarAlerta("Nova configuração de ASO salva!", "sucesso");
+        }
+
+        // Limpa formulário após sucesso
+        document.getElementById('form-config-aso').reset();
+        document.getElementById('config-aso-id').value = '';
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Regra';
+        
+        // Recarrega as regras no modal e na tela de trás
+        await window.renderizarListaConfigAso();
+        window.filtrarAsoAdmin();
+
+    } catch (err) {
+        mostrarAlerta(err.message, "erro");
+        btn.innerHTML = id ? '<i class="fa-solid fa-floppy-disk"></i> Atualizar Regra' : '<i class="fa-solid fa-floppy-disk"></i> Salvar Regra';
+    } finally {
+        btn.disabled = false;
+    }
+});
+
+window.renderizarListaConfigAso = async function() {
+    const container = document.getElementById('lista-regras-aso');
+    if (!container) return;
+    
+    container.innerHTML = '<p style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando regras...</p>';
+
+    const { data, error } = await supabaseClient
+        .from('config_aso')
+        .select('*')
+        .order('unidade', { ascending: true });
+
+    if (error) return container.innerHTML = '<p style="color: var(--cor-perigo);">Erro ao carregar banco de dados de regras.</p>';
+    
+    // Atualiza a memória global
+    configsAsoGlobais = data || [];
+
+    if (configsAsoGlobais.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 15px;">Nenhuma clínica configurada ainda.</p>';
+        return;
+    }
+
+    let html = '';
+    configsAsoGlobais.forEach(regra => {
+        html += `
+            <div class="item-regra-aso" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid #00bcd4;">
+                <div style="flex: 1;">
+                    <strong style="color: #fff; font-size: 0.9rem;">${regra.unidade}</strong><br>
+                    <span style="color: #00bcd4; font-size: 0.8rem;"><i class="fa-solid fa-user-tie"></i> ${regra.cargo}</span><br>
+                    <small style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-hospital"></i> ${regra.clinica} &nbsp;|&nbsp; <b>R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')}</b></small>
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <button type="button" class="btn-secondary" style="padding: 5px 8px;" onclick="editarRegraAso('${regra.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                    <button type="button" class="btn-danger-mini" style="padding: 5px 8px;" onclick="excluirRegraAso('${regra.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
+                </div>
+            </div>
+        `;
+    });
+    
+    container.innerHTML = html;
+    
+    // Mantém o filtro aplicado, se existir
+    if (document.getElementById('busca-regras-aso')) {
+        window.filtrarRegrasAsoVisuais();
+    }
+};
+
+window.filtrarRegrasAsoVisuais = function() {
+    const termoInput = document.getElementById('busca-regras-aso');
+    if (!termoInput) return;
+    
+    const termo = window.removerAcentos(termoInput.value.toLowerCase());
+    const itens = document.querySelectorAll('.item-regra-aso');
+    
+    itens.forEach(item => {
+        const texto = window.removerAcentos(item.innerText.toLowerCase());
+        item.style.display = texto.includes(termo) ? 'flex' : 'none';
+    });
+};
+
+window.editarRegraAso = async function(id) {
+    const regra = configsAsoGlobais.find(r => r.id === id);
+    if (!regra) return mostrarAlerta("Regra não encontrada na memória.", "erro");
+
+    document.getElementById('config-aso-id').value = regra.id;
+    document.getElementById('config-aso-unidade').value = regra.unidade;
+    
+    // Força carregar os cargos da unidade selecionada para poder "marcar" a option certa
+    await window.carregarCargosAsoPorUnidade();
+    
+    document.getElementById('config-aso-cargo').value = regra.cargo;
+    document.getElementById('config-aso-clinica').value = regra.clinica;
+    document.getElementById('config-aso-valor').value = regra.valor;
+    
+    document.getElementById('btn-salvar-config-aso').innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Atualizar Regra';
+};
+
+window.excluirRegraAso = async function(id) {
+    const confirmado = await mostrarConfirmacao("Tem certeza que deseja apagar esta regra de ASO?", "Excluir Regra");
+    if (!confirmado) return;
+
+    try {
+        const { error } = await supabaseClient.from('config_aso').delete().eq('id', id);
+        if (error) throw error;
+        
+        mostrarAlerta("Regra de ASO excluída com sucesso.", "sucesso");
+        
+        await window.renderizarListaConfigAso();
+        window.filtrarAsoAdmin(); // Atualiza a tela atrás do modal
+    } catch (err) {
+        mostrarAlerta("Erro ao excluir regra: " + err.message, "erro");
+    }
 };
 
 // ========================================================
-// GERADOR DO EXCEL DE CUSTOS DE ASO
+// GERADOR DO EXCEL DE CUSTOS DE ASO (RELATÓRIO FINANCEIRO)
 // ========================================================
 window.exportarRelatorioAso = async function() {
     if (!window.colabsAsoFiltrados || window.colabsAsoFiltrados.length === 0) {
@@ -32786,10 +33116,9 @@ window.exportarRelatorioAso = async function() {
         const periodoTxt = mesAnoSelecionado ? mesAnoSelecionado.split('-').reverse().join('/') : 'Todos os meses';
         const dataHoje = new Date().toLocaleDateString('pt-BR');
 
-        // --- CABEÇALHO ---
         sheet.mergeCells('A1:G1');
         const titulo = sheet.getCell('A1');
-        titulo.value = 'RELATÓRIO DE EXAMES ADMISSIONAIS (ASO)';
+        titulo.value = 'RELATÓRIO DE CUSTOS DE EXAMES ADMISSIONAIS (ASO)';
         titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
         titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
         titulo.alignment = { vertical: 'middle', horizontal: 'center' };
@@ -32801,39 +33130,30 @@ window.exportarRelatorioAso = async function() {
         subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
         subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
 
-        sheet.addRow([]); // Espaço
+        sheet.addRow([]);
 
-        // --- CABEÇALHO DA TABELA ---
         const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "CARGO", "STATUS", "CLÍNICA / EMPRESA", "CUSTO (R$)"]);
         headerRow.font = { bold: true, color: { argb: 'FF000000' } };
         headerRow.height = 25;
         headerRow.eachCell((cell) => {
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF00BCD4' } }; // Ciano
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF00BCD4' } };
             cell.alignment = { vertical: 'middle', horizontal: 'center' };
             cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
         });
 
-        // Larguras
         sheet.columns = [
-            { width: 40 }, // Nome
-            { width: 16 }, // CPF
-            { width: 25 }, // Unidade
-            { width: 25 }, // Cargo
-            { width: 18 }, // Status
-            { width: 35 }, // Clinica
-            { width: 18 }  // Valor
+            { width: 40 }, { width: 16 }, { width: 25 }, { width: 25 }, 
+            { width: 18 }, { width: 35 }, { width: 18 }
         ];
 
         let currentRow = 5;
         let somaTotal = 0;
 
-        // Ordena por Unidade, depois por Nome
         window.colabsAsoFiltrados.sort((a, b) => {
             if(a.unidade !== b.unidade) return a.unidade.localeCompare(b.unidade);
             return a.nome.localeCompare(b.nome);
         });
 
-        // --- PREENCHE OS DADOS ---
         window.colabsAsoFiltrados.forEach(c => {
             const adm = c.dados_admissao || {};
             const cargo = adm.cargo || 'Sem Cargo';
@@ -32845,24 +33165,15 @@ window.exportarRelatorioAso = async function() {
 
             somaTotal += valor;
 
-            const row = sheet.addRow([
-                c.nome, 
-                cpf, 
-                c.unidade, 
-                cargo, 
-                c.status,
-                clinica,
-                valor
-            ]);
+            const row = sheet.addRow([c.nome, cpf, c.unidade, cargo, c.status, clinica, valor]);
 
-            // Formatação Visual
             row.getCell(7).numFmt = '"R$ "#,##0.00';
-            row.getCell(7).font = { bold: true, color: { argb: 'FFDC3545' } }; // Valor vermelho (Custo)
+            row.getCell(7).font = { bold: true, color: { argb: 'FFDC3545' } }; 
             
             if (c.status === 'Ativo') {
-                row.getCell(5).font = { color: { argb: 'FF28A745' }, bold: true }; // Verde
+                row.getCell(5).font = { color: { argb: 'FF28A745' }, bold: true }; 
             } else {
-                row.getCell(5).font = { color: { argb: 'FF00BCD4' }, bold: true }; // Ciano
+                row.getCell(5).font = { color: { argb: 'FF00BCD4' }, bold: true }; 
             }
 
             row.eachCell((cell, colNumber) => {
@@ -32876,9 +33187,8 @@ window.exportarRelatorioAso = async function() {
             currentRow++;
         });
 
-        // --- LINHA DE SOMA TOTAL ---
         sheet.addRow([]);
-        const totalRow = sheet.addRow(["", "", "", "", "", "CUSTO TOTAL:", { formula: `SUM(G5:G${currentRow-1})`, result: somaTotal }]);
+        const totalRow = sheet.addRow(["", "", "", "", "", "CUSTO TOTAL DE EXAMES:", { formula: `SUM(G5:G${currentRow-1})`, result: somaTotal }]);
         
         totalRow.getCell(6).font = { bold: true, size: 12, color: { argb: 'FF00BCD4' } };
         totalRow.getCell(6).alignment = { horizontal: 'right' };
@@ -32887,7 +33197,6 @@ window.exportarRelatorioAso = async function() {
         totalRow.getCell(7).numFmt = '"R$ "#,##0.00';
         totalRow.getCell(7).alignment = { horizontal: 'center' };
 
-        // --- DOWNLOAD ---
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         
@@ -32902,270 +33211,7 @@ window.exportarRelatorioAso = async function() {
         console.error(err);
         mostrarAlerta("Erro ao gerar Excel: " + err.message, "erro");
     }
-};
-// Faz o Upload do ASO, salva no arquivo digital e ativa o funcionário
-window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empresaColab) {
-    const fileInput = document.getElementById(`upload-aso-${idColab}`);
-    if (fileInput.files.length === 0) return mostrarAlerta("Anexe o arquivo do ASO primeiro!", "aviso");
-
-    const confirmado = await mostrarConfirmacao(`Deseja anexar o ASO e ativar <b>${nomeColab}</b> definitivamente na escala?`, "Ativar Colaborador");
-    if (!confirmado) return;
-
-    mostrarAlerta("Processando ativação...", "aviso");
-
-    try {
-        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
-        let adm = perfil.dados_admissao || {};
-
-        // Sobe o PDF
-        const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidadeColab)}/${formatarNomePasta(nomeColab)}/ASO`;
-        const urls = await subirDocumentos(caminhoBase, fileInput.files, 'Exame_ASO_Admissional');
-
-        // Salva na pasta do Arquivo Digital (GED)
-        if (!adm.documentos_extras) adm.documentos_extras = {};
-        if (!adm.documentos_extras['Admissão']) adm.documentos_extras['Admissão'] = [];
-        adm.documentos_extras['Admissão'].push({ url: urls[0], nome: 'Exame ASO Admissional' });
-
-        // Muda para Ativo!
-        const { error } = await supabaseClient.from('perfis').update({ 
-            status: 'Ativo', 
-            dados_admissao: adm 
-        }).eq('id', idColab);
-
-        if (error) throw error;
-
-        mostrarAlerta("Sucesso! Colaborador Ativo e liberado na escala.", "sucesso");
-        carregarAsoAdmin(); // Atualiza a lista
-        atualizarContador();
-    } catch (err) {
-        mostrarAlerta("Erro ao ativar: " + err.message, "erro");
-    }
-};
-
-// --- CONFIGURAÇÃO DO ASO ---
-window.abrirModalConfigAso = async function() {
-    const modal = document.getElementById('modal-config-aso');
-    document.getElementById('form-config-aso').reset();
-    document.getElementById('config-aso-id').value = '';
-    
-    const selectUnidade = document.getElementById('config-aso-unidade');
-    selectUnidade.innerHTML = document.getElementById('filtro-unidade-escala').innerHTML; // Aproveita o menu existente
-
-    modal.classList.remove('hidden');
-    renderizarListaConfigAso();
-};
-
-window.carregarCargosAsoPorUnidade = async function() {
-    const unidade = document.getElementById('config-aso-unidade').value;
-    const selectCargo = document.getElementById('config-aso-cargo');
-    
-    if (!unidade) {
-        selectCargo.innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
-        selectCargo.disabled = true;
-        return;
-    }
-
-    selectCargo.innerHTML = '<option value="">Buscando cargos ocupados...</option>';
-    selectCargo.disabled = true;
-
-    try {
-        // Busca na tabela PERFIS todos os colaboradores que pertencem a esta unidade
-        // Filtramos por perfil 'Colaborador' para pegar os cargos operacionais
-        const { data, error } = await supabaseClient
-            .from('perfis')
-            .select('dados_admissao')
-            .eq('unidade', unidade)
-            .eq('perfil', 'Colaborador');
-
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-            selectCargo.innerHTML = '<option value="">Nenhum colaborador nesta unidade</option>';
-            return;
-        }
-
-        // Criamos um Set para garantir que o cargo não se repita na lista
-        const cargosUnicos = new Set();
-
-        data.forEach(p => {
-            // Acessa o cargo dentro do JSON dados_admissao
-            const cargo = p.dados_admissao?.cargo;
-            if (cargo) {
-                cargosUnicos.add(cargo.trim().toUpperCase());
-            }
-        });
-
-        if (cargosUnicos.size === 0) {
-            selectCargo.innerHTML = '<option value="">Nenhum cargo definido nos perfis</option>';
-            return;
-        }
-
-        // Monta o HTML com os cargos encontrados na unidade
-        let options = '<option value="">Selecione o Cargo...</option>';
-        Array.from(cargosUnicos).sort().forEach(cargo => {
-            options += `<option value="${cargo}">${cargo}</option>`;
-        });
-
-        selectCargo.innerHTML = options;
-        selectCargo.disabled = false;
-
-    } catch (e) {
-        console.error("Erro ao mapear cargos da unidade:", e);
-        selectCargo.innerHTML = '<option value="">Erro ao carregar cargos</option>';
-    }
-};
-
-document.getElementById('form-config-aso').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const btn = document.getElementById('btn-salvar-config-aso');
-    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
-
-    const id = document.getElementById('config-aso-id').value;
-    const obj = {
-        unidade: document.getElementById('config-aso-unidade').value,
-        cargo: document.getElementById('config-aso-cargo').value,
-        clinica: document.getElementById('config-aso-clinica').value.trim(),
-        valor: parseFloat(document.getElementById('config-aso-valor').value)
-    };
-
-    try {
-        if (id) {
-            await supabaseClient.from('config_aso').update(obj).eq('id', id);
-        } else {
-            // Trava para não duplicar
-            const { data: existe } = await supabaseClient.from('config_aso').select('id').eq('unidade', obj.unidade).eq('cargo', obj.cargo).maybeSingle();
-            if (existe) throw new Error("Já existe uma configuração para este cargo nesta unidade.");
-            
-            await supabaseClient.from('config_aso').insert([obj]);
-        }
-
-        mostrarAlerta("Configuração salva com sucesso!", "sucesso");
-        document.getElementById('form-config-aso').reset();
-        document.getElementById('config-aso-id').value = '';
-        
-        // Recarrega os dados globais pra atualizar a tela de pendências na hora
-        const { data } = await supabaseClient.from('config_aso').select('*');
-        configsAsoGlobais = data || [];
-        
-        renderizarListaConfigAso();
-        filtrarAsoAdmin(); // Atualiza a tela de trás
-    } catch (err) {
-        mostrarAlerta(err.message, "erro");
-    } finally {
-        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Regra';
-    }
-});
-
-window.renderizarListaConfigAso = async function() {
-    const container = document.getElementById('lista-regras-aso');
-    container.innerHTML = '<p style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i></p>';
-
-    const { data, error } = await supabaseClient
-        .from('config_aso')
-        .select('*')
-        .order('unidade', { ascending: true });
-
-    if (error) return container.innerHTML = '<p>Erro ao carregar regras.</p>';
-    
-    // Atualiza a memória global para garantir que o filtro funcione rápido
-    configsAsoGlobais = data || [];
-
-    if (configsAsoGlobais.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhuma clínica configurada ainda.</p>';
-        return;
-    }
-
-    let html = '';
-    configsAsoGlobais.forEach(regra => {
-        // Adicionada a classe 'item-regra-aso' para o filtro funcionar
-        html += `
-            <div class="item-regra-aso" style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid #00bcd4;">
-                <div style="flex: 1;">
-                    <strong style="color: #fff; font-size: 0.9rem;">${regra.unidade}</strong><br>
-                    <span style="color: #00bcd4; font-size: 0.8rem;">${regra.cargo}</span><br>
-                    <small style="color: var(--cor-texto-secundario);">${regra.clinica} - R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')}</small>
-                </div>
-                <div style="display: flex; gap: 5px;">
-                    <button type="button" class="btn-secondary" style="padding: 5px 8px;" onclick="editarRegraAso('${regra.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
-                    <button type="button" class="btn-danger-mini" style="padding: 5px 8px;" onclick="excluirRegraAso('${regra.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
-                </div>
-            </div>
-        `;
-    });
-    
-    container.innerHTML = html;
-    
-    // Caso o usuário já tenha digitado algo na busca e excluído uma regra, isso mantém o filtro ativado
-    if (document.getElementById('busca-regras-aso')) {
-        window.filtrarRegrasAsoVisuais();
-    }
-};
-
-// 👇 NOVA MÁGICA: Filtra as regras na hora que digita, sem precisar de banco de dados
-window.filtrarRegrasAsoVisuais = function() {
-    const termoInput = document.getElementById('busca-regras-aso');
-    if (!termoInput) return;
-    
-    const termo = window.removerAcentos(termoInput.value.toLowerCase());
-    const itens = document.querySelectorAll('.item-regra-aso');
-    
-    itens.forEach(item => {
-        // Pega o texto do card (contém a unidade, cargo e clínica)
-        const texto = window.removerAcentos(item.innerText.toLowerCase());
-        
-        if (texto.includes(termo)) {
-            item.style.display = 'flex'; // Exibe o card (mantém a formatação flex)
-        } else {
-            item.style.display = 'none'; // Esconde
-        }
-    });
-};
-
-// ==========================================
-// FUNÇÕES DE EDIÇÃO E EXCLUSÃO DA REGRA DE ASO
-// ==========================================
-
-window.editarRegraAso = async function(id) {
-    const regra = configsAsoGlobais.find(r => r.id === id);
-    if (!regra) return mostrarAlerta("Regra não encontrada na memória.", "erro");
-
-    // Preenche o ID oculto para o sistema saber que é uma edição
-    document.getElementById('config-aso-id').value = regra.id;
-    document.getElementById('config-aso-unidade').value = regra.unidade;
-    
-    // 👇 A MÁGICA: Força carregar os cargos ocupados DESSA unidade antes de setar o valor
-    await window.carregarCargosAsoPorUnidade();
-    
-    // Agora que o <select> de cargos tem as options corretas, a gente seta o valor
-    document.getElementById('config-aso-cargo').value = regra.cargo;
-    document.getElementById('config-aso-clinica').value = regra.clinica;
-    document.getElementById('config-aso-valor').value = regra.valor;
-    
-    // Muda o texto do botão para ficar claro que é uma edição
-    const btn = document.getElementById('btn-salvar-config-aso');
-    btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Atualizar Regra';
-};
-
-window.excluirRegraAso = async function(id) {
-    const confirmado = await mostrarConfirmacao("Tem certeza que deseja apagar esta regra de ASO?", "Excluir Regra");
-    if (!confirmado) return;
-
-    try {
-        const { error } = await supabaseClient.from('config_aso').delete().eq('id', id);
-        
-        if (error) throw error;
-        
-        mostrarAlerta("Regra de ASO excluída com sucesso.", "sucesso");
-        
-        // Recarrega a lista do modal e a tela de trás (pra atualizar os cards)
-        await window.renderizarListaConfigAso();
-        if (typeof filtrarAsoAdmin === 'function') {
-            filtrarAsoAdmin(); 
-        }
-    } catch (err) {
-        mostrarAlerta("Erro ao excluir regra: " + err.message, "erro");
-    }
-};        
+};    
 
         // Memória para saber se o número aumentou
 let ultimoContadorSino = 0; 
