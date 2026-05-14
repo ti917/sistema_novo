@@ -12224,12 +12224,19 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 const pertenceAUnidade = (c.unidade === unidade) || (adm.historico_transferencias && adm.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade));
                 
                 return pertenceAUnidade;
-            }).sort((a, b) => a.nome.localeCompare(b.nome));
+           }).sort((a, b) => a.nome.localeCompare(b.nome));
 
+            // Mantenha essa variável porque FTs, Férias e Ponto ainda precisam dela!
             const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(new Date(anoSelecionado, mesSelecionado, 0).getDate()).padStart(2, '0')}`;
 
-            const { data: ausenciasAprovadas } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
+            // 👇 MUDANÇA: Buscando 65 dias para trás para calcular o CID corretamente
+            const dataBuscaRetroativa = new Date(anoSelecionado, mesSelecionado - 1, 1);
+            dataBuscaRetroativa.setDate(dataBuscaRetroativa.getDate() - 65);
+            const dataBuscaStr = dataBuscaRetroativa.toISOString().split('T')[0];
+
+            // Puxa as ausências desde 65 dias atrás (dataBuscaStr), e o resto continua normal (dataInicioMes)
+            const { data: ausenciasAprovadas } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataBuscaStr);
             const { data: ftsAprovadas } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
             const { data: feriasAprovadas } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
             const { data: ocorrenciasPonto } = await supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes);
@@ -12281,6 +12288,68 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     colaboradores.forEach(colab => {
         const adm = colab.dados_admissao || {}; 
         const jor = adm.jornada || {};
+        
+        // 👇 NOVO CÉREBRO DO INSS (SOMATÓRIA DE CID EM 60 DIAS) 👇
+        let ausenciasDoColab = (listaAusencias || []).filter(a => String(a.colaborador_id) === String(colab.id) && a.sigla === 'ATM');
+        let mapaInssCID = {}; // Guardará: { '2026-05-10': 'ATM', '2026-05-20': 'AF' }
+
+        if (ausenciasDoColab.length > 0) {
+            // Agrupa por CID
+            let cidsUnicos = [...new Set(ausenciasDoColab.map(a => a.cid).filter(Boolean))];
+
+            cidsUnicos.forEach(cid => {
+                // Ordena os atestados desse CID cronologicamente
+                let atestadosCid = ausenciasDoColab.filter(a => a.cid === cid).sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+
+                let diasAcumulados = 0;
+                let ultimaDataFim = null;
+
+                atestadosCid.forEach(atestado => {
+                    let dIni = new Date(atestado.data_inicio + 'T00:00:00');
+                    let dFim = new Date(atestado.data_fim + 'T00:00:00');
+
+                    // Regra dos 60 dias: Se passou 60 dias desde o FIM do último atestado desse CID, a contagem zera
+                    if (ultimaDataFim) {
+                        let diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                        if (diffParaUltimo > 60) {
+                            diasAcumulados = 0;
+                        }
+                    }
+
+                    // Somatória diária
+                    let tempD = new Date(dIni);
+                    while (tempD <= dFim) {
+                        diasAcumulados++;
+                        let isoStr = `${tempD.getFullYear()}-${String(tempD.getMonth() + 1).padStart(2, '0')}-${String(tempD.getDate()).padStart(2, '0')}`;
+
+                        // Se passou de 15 dias somados nesse CID na janela de 60 dias, vira AF
+                        if (diasAcumulados > 15) {
+                            mapaInssCID[isoStr] = 'AF';
+                        } else {
+                            mapaInssCID[isoStr] = 'ATM';
+                        }
+                        tempD.setDate(tempD.getDate() + 1);
+                    }
+                    ultimaDataFim = new Date(dFim);
+                });
+            });
+
+            // ATMs SEM CID (Para os sem CID, a contagem é contínua apenas por atestado)
+            let atestadosSemCid = ausenciasDoColab.filter(a => !a.cid).sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+            atestadosSemCid.forEach(atestado => {
+                 let dIni = new Date(atestado.data_inicio + 'T00:00:00');
+                 let dFim = new Date(atestado.data_fim + 'T00:00:00');
+                 let diasAcumulados = 0;
+                 let tempD = new Date(dIni);
+                 while (tempD <= dFim) {
+                     diasAcumulados++;
+                     let isoStr = `${tempD.getFullYear()}-${String(tempD.getMonth() + 1).padStart(2, '0')}-${String(tempD.getDate()).padStart(2, '0')}`;
+                     mapaInssCID[isoStr] = diasAcumulados > 15 ? 'AF' : 'ATM';
+                     tempD.setDate(tempD.getDate() + 1);
+                 }
+            });
+        }
+        // 👆 FIM DO CÉREBRO DO INSS 👆
         
         const dataInicioStr = jor.data_inicio || adm.data_inicio;
         let dataInicioObj = null;
@@ -12695,8 +12764,19 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                         const diffTempo = dataAtual.getTime() - dataInicioAtestado.getTime();
                         const diaDoAtestado = Math.floor(diffTempo / (1000 * 3600 * 24)) + 1; 
 
-                        if (atestadoHoje.sigla === 'ATM' && diaDoAtestado > 15) {
-                            sigla = 'AF'; cssTipo = 'celula-ausencia'; hora = 'Afastamento (INSS)'; 
+                       if (atestadoHoje.sigla === 'ATM') {
+                            // 👇 Consulta o cérebro que geramos acima 👇
+                            let statusInss = mapaInssCID[dataIsoStr] || 'ATM'; 
+                            
+                            if (statusInss === 'AF') {
+                                sigla = 'AF'; 
+                                cssTipo = 'celula-ausencia'; 
+                                hora = 'Afastamento INSS (Soma CID > 15d)'; 
+                            } else {
+                                sigla = 'ATM'; 
+                                cssTipo = 'celula-ausencia'; 
+                                hora = atestadoHoje.motivo; 
+                            }
                         } else if (atestadoHoje.sigla === 'FA') {
                             sigla = 'FA'; cssTipo = 'celula-falta'; hora = atestadoHoje.motivo; 
                         } else {
