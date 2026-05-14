@@ -12264,6 +12264,7 @@ if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Agu
     let novaEscala = [];
 
     colaboradores.forEach(colab => {
+        if (colab.status !== 'Ativo') return;
         const adm = colab.dados_admissao || {}; 
         const jor = adm.jornada || {};
         
@@ -32778,7 +32779,6 @@ window.abrirModalConfigAso = async function() {
     renderizarListaConfigAso();
 };
 
-// A INTELIGÊNCIA: Busca apenas cargos que realmente existem na unidade selecionada!
 window.carregarCargosAsoPorUnidade = async function() {
     const unidade = document.getElementById('config-aso-unidade').value;
     const selectCargo = document.getElementById('config-aso-cargo');
@@ -32789,32 +32789,54 @@ window.carregarCargosAsoPorUnidade = async function() {
         return;
     }
 
-    selectCargo.innerHTML = '<option value="">Buscando cargos ativos...</option>';
+    selectCargo.innerHTML = '<option value="">Buscando cargos ocupados...</option>';
     selectCargo.disabled = true;
 
-    // Busca funcionários (Ativos e Aguardando ASO) dessa unidade
-    const { data } = await supabaseClient.from('perfis')
-        .select('dados_admissao')
-        .eq('perfil', 'Colaborador')
-        .eq('unidade', unidade)
-        .in('status', ['Ativo', 'Aguardando ASO']);
+    try {
+        // Busca na tabela PERFIS todos os colaboradores que pertencem a esta unidade
+        // Filtramos por perfil 'Colaborador' para pegar os cargos operacionais
+        const { data, error } = await supabaseClient
+            .from('perfis')
+            .select('dados_admissao')
+            .eq('unidade', unidade)
+            .eq('perfil', 'Colaborador');
 
-    if (!data || data.length === 0) {
-        selectCargo.innerHTML = '<option value="">Nenhum cargo encontrado nesta unidade</option>';
-        return;
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+            selectCargo.innerHTML = '<option value="">Nenhum colaborador nesta unidade</option>';
+            return;
+        }
+
+        // Criamos um Set para garantir que o cargo não se repita na lista
+        const cargosUnicos = new Set();
+
+        data.forEach(p => {
+            // Acessa o cargo dentro do JSON dados_admissao
+            const cargo = p.dados_admissao?.cargo;
+            if (cargo) {
+                cargosUnicos.add(cargo.trim().toUpperCase());
+            }
+        });
+
+        if (cargosUnicos.size === 0) {
+            selectCargo.innerHTML = '<option value="">Nenhum cargo definido nos perfis</option>';
+            return;
+        }
+
+        // Monta o HTML com os cargos encontrados na unidade
+        let options = '<option value="">Selecione o Cargo...</option>';
+        Array.from(cargosUnicos).sort().forEach(cargo => {
+            options += `<option value="${cargo}">${cargo}</option>`;
+        });
+
+        selectCargo.innerHTML = options;
+        selectCargo.disabled = false;
+
+    } catch (e) {
+        console.error("Erro ao mapear cargos da unidade:", e);
+        selectCargo.innerHTML = '<option value="">Erro ao carregar cargos</option>';
     }
-
-    // Isola os cargos únicos
-    const cargosSet = new Set();
-    data.forEach(c => {
-        if (c.dados_admissao && c.dados_admissao.cargo) cargosSet.add(c.dados_admissao.cargo);
-    });
-
-    let options = '<option value="">Selecione o Cargo...</option>';
-    [...cargosSet].sort().forEach(c => options += `<option value="${c}">${c}</option>`);
-    
-    selectCargo.innerHTML = options;
-    selectCargo.disabled = false;
 };
 
 document.getElementById('form-config-aso').addEventListener('submit', async (e) => {
@@ -32858,29 +32880,35 @@ document.getElementById('form-config-aso').addEventListener('submit', async (e) 
     }
 });
 
+// Função para renderizar a lista de configurações já feitas (dentro do modal)
 window.renderizarListaConfigAso = async function() {
     const container = document.getElementById('lista-regras-aso');
     container.innerHTML = '<p style="text-align: center;"><i class="fa-solid fa-spinner fa-spin"></i></p>';
 
-    const { data } = await supabaseClient.from('config_aso').select('*').order('unidade');
-    configsAsoGlobais = data || [];
+    const { data, error } = await supabaseClient
+        .from('config_aso')
+        .select('*')
+        .order('unidade', { ascending: true });
 
-    if (configsAsoGlobais.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario);">Nenhuma regra configurada.</p>';
+    if (error) return container.innerHTML = '<p>Erro ao carregar regras.</p>';
+
+    if (data.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhuma clínica configurada ainda.</p>';
         return;
     }
 
     let html = '';
-    configsAsoGlobais.forEach(r => {
+    data.forEach(regra => {
         html += `
-            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px 15px; border-radius: 8px; border: 1px solid rgba(0, 188, 212, 0.3); border-left: 4px solid #00bcd4;">
-                <div>
-                    <strong style="color: #fff; font-size: 0.95rem;">${r.unidade} - ${r.cargo}</strong><br>
-                    <span style="color: #00bcd4; font-size: 0.85rem;"><i class="fa-solid fa-hospital"></i> ${r.clinica} (R$ ${r.valor.toFixed(2).replace('.', ',')})</span>
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; margin-bottom: 8px; border-left: 4px solid #00bcd4;">
+                <div style="flex: 1;">
+                    <strong style="color: #fff; font-size: 0.9rem;">${regra.unidade}</strong><br>
+                    <span style="color: #00bcd4; font-size: 0.8rem;">${regra.cargo}</span><br>
+                    <small style="color: var(--cor-texto-secundario);">${regra.clinica} - R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')}</small>
                 </div>
-                <div style="display: flex; gap: 8px;">
-                    <button type="button" class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-color: #ff9800; color: #ff9800;" onclick="editarConfigAso('${r.id}')"><i class="fa-solid fa-pen"></i></button>
-                    <button type="button" class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem;" onclick="excluirConfigAso('${r.id}')"><i class="fa-solid fa-trash"></i></button>
+                <div style="display: flex; gap: 5px;">
+                    <button class="btn-secondary" style="padding: 5px 8px;" onclick="editarRegraAso('${regra.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                    <button class="btn-danger-mini" style="padding: 5px 8px;" onclick="excluirRegraAso('${regra.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
                 </div>
             </div>
         `;
