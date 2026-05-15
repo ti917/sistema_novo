@@ -11644,38 +11644,41 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 }
 
        window.aprovarAdmissaoDefinitiva = async function(idColab, nomeColab, unidadeColab) {
-    const btn = document.querySelector('#modal-ficha .btn-success');
-    btn.innerText = "Aprovando..."; btn.disabled = true;
-    
-    // Puxa os dados atuais para inserir o nome de quem aprovou
-    const { data: colabData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
-    const adm = colabData.dados_admissao || {};
-    adm.aprovado_por = usuarioAtual.nome;
+    const btn = document.querySelector('#modal-ficha .btn-success');
+    btn.innerText = "Aprovando..."; btn.disabled = true;
+    
+    // Puxa os dados atuais para inserir o nome de quem aprovou
+    const { data: colabData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    const adm = colabData.dados_admissao || {};
+    adm.aprovado_por = usuarioAtual.nome;
 
-    // 👇 MUDANÇA AQUI: O status vai para 'Aguardando ASO' e não para 'Ativo'
-    const { error } = await supabaseClient.from('perfis').update({ 
-        status: 'Aguardando ASO',
-        status_aprovacao: 'Aprovado',
-        dados_admissao: adm 
-    }).eq('id', idColab);
-    
-    if(error) {
-        await mostrarAlerta("Erro ao aprovar: " + error.message, "erro");
-        btn.innerHTML = `<i class="fa-solid fa-thumbs-up"></i> APROVAR`; btn.disabled = false;
-    } else {
-        await supabaseClient.from('notificacoes').insert([
-            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Admissão' },
-            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Admissão_Admin' }
-        ]);
+    // O status vai para 'Aguardando ASO'
+    const { error } = await supabaseClient.from('perfis').update({ 
+        status: 'Aguardando ASO',
+        status_aprovacao: 'Aprovado',
+        dados_admissao: adm 
+    }).eq('id', idColab);
+    
+    if(error) {
+        await mostrarAlerta("Erro ao aprovar: " + error.message, "erro");
+        btn.innerHTML = `<i class="fa-solid fa-thumbs-up"></i> APROVAR`; btn.disabled = false;
+    } else {
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Admissão' },
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Admissão_Admin' }
+        ]);
 
-        document.getElementById('modal-ficha').remove();
-        listarSolicitacoes(); 
-        await atualizarContador(); 
+        document.getElementById('modal-ficha').remove();
+        listarSolicitacoes(); 
+        await atualizarContador(); 
+        
+        // Redireciona o Admin para a tela de ASO
+        document.querySelector('[data-aba="aba-aso-admin"]').click();
+        await mostrarAlerta("Documentos aprovados! O colaborador agora aguarda o anexo do ASO para entrar na escala.", "sucesso");
         
-        // Redireciona o Admin para a tela de ASO
-        document.querySelector('[data-aba="aba-aso-admin"]').click();
-        await mostrarAlerta("Documentos aprovados! O colaborador agora aguarda o anexo do ASO para entrar na escala.", "sucesso");
-    }
+        // 👇 GATILHO DA CLARA (PRIMEIRA CHECAGEM) 👇
+        verificarEDispararAlertaLotacao(unidadeColab);
+    }
 };
 
        // 1. ADMIN REPROVANDO E DEVOLVENDO A FICHA COM MOTIVO
@@ -11966,6 +11969,78 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 mostrarAlerta("Enviado para o Gestor colher assinatura com sucesso!", "sucesso");
             }
         };
+
+        window.verificarEDispararAlertaLotacao = async function(nomeUnidade) {
+    try {
+        // 1. Busca os limites dessa unidade no banco
+        const { data: uniData } = await supabaseClient.from('unidades_oficiais').select('limites_cargos').eq('nome', nomeUnidade).single();
+        if (!uniData || !uniData.limites_cargos) return; // Se não tem limite, não tem o que estourar
+        
+        let limites = {};
+        try { limites = JSON.parse(uniData.limites_cargos); } catch(e){ return; }
+
+        // 2. Busca quantos ativos e de aviso tem lá
+        const { data: colabsDB } = await supabaseClient.from('perfis')
+            .select('nome, status, dados_admissao, dados_rescisao')
+            .eq('perfil', 'Colaborador')
+            .eq('unidade', nomeUnidade);
+            
+        const colabsReais = window.filtrarAtivosE_AvisoPrevio(colabsDB || []);
+
+        // 3. Faz a contagem
+        let lotacaoAtual = {};
+        colabsReais.forEach(c => {
+            const cargo = c.dados_admissao?.cargo;
+            if (cargo) {
+                lotacaoAtual[cargo] = (lotacaoAtual[cargo] || 0) + 1;
+            }
+        });
+
+        // 4. Verifica se algum cargo estourou
+        let cargosEstourados = [];
+        for (const [cargo, qtdAtual] of Object.entries(lotacaoAtual)) {
+            const limite = limites[cargo];
+            if (limite && qtdAtual >= limite) {
+                cargosEstourados.push({ cargo, atual: qtdAtual, limite });
+            }
+        }
+
+        if (cargosEstourados.length === 0) return; // Ninguém estourou, segue o jogo
+
+        // 5. Se estourou, busca os Admins/Gestores que têm a chave "lotacao_excedida" ligada E que tenham telefone cadastrado
+        const { data: lideres } = await supabaseClient.from('perfis').select('nome, dados_admissao, permissoes, perfil, unidade').in('perfil', ['Admin', 'Gestor']);
+        
+        for (let lider of lideres) {
+            const permissoes = lider.permissoes || {};
+            const alertas = permissoes.alertas_clara || {};
+            
+            if (alertas.lotacao_excedida === true && lider.dados_admissao?.telefone) {
+                
+                // Se for gestor, só manda se a unidade que estourou pertencer a ele!
+                if (lider.perfil === 'Gestor') {
+                    const unidsGestor = lider.unidade ? lider.unidade.split(',').map(u => u.trim()) : [];
+                    if (!unidsGestor.includes(nomeUnidade)) continue;
+                }
+
+                const primeiroNome = lider.nome.split(' ')[0];
+                const telefone = lider.dados_admissao.telefone;
+
+                // Dispara uma mensagem pra cada cargo que estourou
+                for (let estourado of cargosEstourados) {
+                    await enviarMensagemGraphAPI(
+                        telefone, 
+                        'alerta_lotacao_unidade', 
+                        [primeiroNome, nomeUnidade, estourado.cargo, String(estourado.atual), String(estourado.limite)], 
+                        null, null
+                    );
+                }
+            }
+        }
+
+    } catch (e) {
+        console.error("Falha ao checar e disparar alertas de lotação da Clara:", e);
+    }
+};
         
         window.aprovarRescisaoAdmin = async function(idColab, nomeColab, unidadeColab) {
             const btn = document.querySelector('#modal-ficha-rescisao .btn-success');
@@ -15428,6 +15503,9 @@ window.abrirModalHubUsuario = function(idUser) {
             </button>
             <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalEditarUnidadesUsuario('${u.id}')">
                 <i class="fa-solid fa-map-location-dot" style="width: 30px;"></i> Gerenciar Unidades Permitidas
+            </button>
+            <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #25D366; color: #25D366; font-size: 1rem; transition: 0.2s;" onmouseover="this.style.background='#25D366'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#25D366'" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalConfigClara('${u.id}')">
+                <i class="fa-brands fa-whatsapp" style="width: 30px; font-size: 1.2rem;"></i> Alertas da Clara (WhatsApp)
             </button>
         `;
     }
@@ -33417,16 +33495,16 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
         const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
         let adm = perfil.dados_admissao || {};
 
-        // 1. Faz o Upload do ASO para o Storage da Empresa/Unidade
+        // Faz o Upload do ASO para o Storage da Empresa/Unidade
         const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidadeColab)}/${formatarNomePasta(nomeColab)}/Admissoes`;
         const urls = await subirDocumentos(caminhoBase, fileInput.files, 'Exame_ASO_Admissional');
 
-        // 2. Salva o link do documento dentro da pasta "Admissão" do Arquivo Digital do colaborador
+        // Salva o link do documento dentro da pasta "Admissão" do Arquivo Digital do colaborador
         if (!adm.documentos_extras) adm.documentos_extras = {};
         if (!adm.documentos_extras['Admissão']) adm.documentos_extras['Admissão'] = [];
         adm.documentos_extras['Admissão'].push({ url: urls[0], nome: 'Exame ASO Admissional' });
 
-        // 3. Atualiza o banco mudando o status para 'Ativo'
+        // Atualiza o banco mudando o status para 'Ativo'
         const { error } = await supabaseClient.from('perfis').update({ 
             status: 'Ativo', 
             dados_admissao: adm 
@@ -33444,6 +33522,9 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
         if(!document.getElementById('tela-escala').classList.contains('hidden')) {
             if(typeof processarEscala === 'function') processarEscala();
         }
+
+        // 👇 GATILHO DA CLARA (SEGUNDA CHECAGEM - DEFINITIVA) 👇
+        verificarEDispararAlertaLotacao(unidadeColab);
 
     } catch (err) {
         mostrarAlerta("Erro ao ativar colaborador: " + err.message, "erro");
@@ -34338,6 +34419,77 @@ function atualizarBadgeChat(numero) {
         badge.classList.add('hidden');
     }
 }
+
+        window.abrirModalConfigClara = async function(idUser) {
+    // 1. Busca os dados atuais do usuário para saber se a chave já tá ligada
+    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, permissoes').eq('id', idUser).single();
+    if (error || !u) return mostrarAlerta("Erro ao buscar configurações.", "erro");
+
+    const permissoes = u.permissoes || {};
+    const alertas = permissoes.alertas_clara || {};
+    
+    // Verifica se já está ativo (Se nunca configurou, vem desligado por padrão)
+    const alertaLotacaoAtivo = alertas.lotacao_excedida === true;
+
+    // 2. Monta o Modal
+    const modalHtml = `
+    <div id="modal-config-clara" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid #25D366; position: relative;">
+            <button onclick="document.getElementById('modal-config-clara').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #25D366; margin-bottom: 5px;"><i class="fa-brands fa-whatsapp"></i> Notificações da Clara</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 25px;">Defina quais alertas automáticos <b>${u.nome}</b> receberá diretamente no WhatsApp.</p>
+            
+            <form id="form-salvar-alertas-clara">
+                <input type="hidden" id="clara-user-id" value="${u.id}">
+                
+                <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #25D366; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <strong style="color: #fff; font-size: 0.95rem;"><i class="fa-solid fa-users-viewfinder" style="color: #4fc3f7; margin-right: 5px;"></i> Lotação de Unidade Excedida</strong>
+                        <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 3px; line-height: 1.4;">A Clara enviará uma mensagem se as admissões ultrapassarem o limite de vagas definido para os cargos das unidades.</span>
+                    </div>
+                    <label style="display: flex; align-items: center; cursor: pointer; margin-left: 15px;">
+                        <input type="checkbox" id="chk-alerta-lotacao" style="width: 22px; height: 22px; accent-color: #25D366;" ${alertaLotacaoAtivo ? 'checked' : ''}>
+                    </label>
+                </div>
+
+                <button type="submit" id="btn-salvar-alertas" class="btn-success" style="width: 100%; height: 50px; background-color: #25D366; color: #fff; border: none; font-weight: bold; margin-top: 15px;">
+                    <i class="fa-solid fa-floppy-disk"></i> Salvar Preferências
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // 3. Evento de Salvar
+    document.getElementById('form-salvar-alertas-clara').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('btn-salvar-alertas');
+        btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+
+        const userId = document.getElementById('clara-user-id').value;
+        const querAlertaLotacao = document.getElementById('chk-alerta-lotacao').checked;
+
+        // Mantém as permissões de menu intactas e só atualiza o bloco da Clara
+        permissoes.alertas_clara = {
+            ...alertas,
+            lotacao_excedida: querAlertaLotacao
+        };
+
+        const { error: errUpdate } = await supabaseClient.from('perfis').update({ permissoes: permissoes }).eq('id', userId);
+
+        if (errUpdate) {
+            mostrarAlerta("Erro ao salvar preferências.", "erro");
+            btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Preferências';
+        } else {
+            mostrarAlerta("Preferências da Clara atualizadas com sucesso!", "sucesso");
+            document.getElementById('modal-config-clara').remove();
+            
+            // Recarrega a lista de usuários no fundo se o Admin estiver olhando
+            if(typeof listarUsuarios === 'function') listarUsuarios(true);
+        }
+    });
+};
 
         // Memória para saber se o número aumentou
 let ultimoContadorSino = 0; 
