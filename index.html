@@ -11974,7 +11974,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     try {
         // 1. Busca os limites dessa unidade no banco
         const { data: uniData } = await supabaseClient.from('unidades_oficiais').select('limites_cargos').eq('nome', nomeUnidade).single();
-        if (!uniData || !uniData.limites_cargos) return; // Se não tem limite, não tem o que estourar
+        if (!uniData || !uniData.limites_cargos) return; 
         
         let limites = {};
         try { limites = JSON.parse(uniData.limites_cargos); } catch(e){ return; }
@@ -12005,30 +12005,33 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
         }
 
-        if (cargosEstourados.length === 0) return; // Ninguém estourou, segue o jogo
+        if (cargosEstourados.length === 0) return; 
 
-        // 5. Se estourou, busca os Admins/Gestores que têm a chave "lotacao_excedida" ligada E que tenham telefone cadastrado
+        // 5. Se estourou, busca a galera que tem que ser notificada
         const { data: lideres } = await supabaseClient.from('perfis').select('nome, dados_admissao, permissoes, perfil, unidade').in('perfil', ['Admin', 'Gestor']);
         
         for (let lider of lideres) {
             const permissoes = lider.permissoes || {};
             const alertas = permissoes.alertas_clara || {};
             
-            if (alertas.lotacao_excedida === true && lider.dados_admissao?.telefone) {
+            // 👇 A MÁGICA DE LEITURA DO ZAP: Pega o da Clara. Se não achar, tenta o do cadastro. 👇
+            const telefoneAlvo = alertas.telefone || (lider.dados_admissao ? lider.dados_admissao.telefone : null);
+
+            // Só processa se a pessoa marcou que quer receber O ALERTA ESPECÍFICO DE LOTAÇÃO e tem telefone
+            if (alertas.lotacao_excedida === true && telefoneAlvo) {
                 
-                // Se for gestor, só manda se a unidade que estourou pertencer a ele!
+                // Se for gestor, só manda se a unidade pertencer a ele
                 if (lider.perfil === 'Gestor') {
                     const unidsGestor = lider.unidade ? lider.unidade.split(',').map(u => u.trim()) : [];
-                    if (!unidsGestor.includes(nomeUnidade)) continue;
+                    if (!unidsGestor.includes(nomeUnidade)) continue; // Pula se ele não for o gestor dessa unidade
                 }
 
                 const primeiroNome = lider.nome.split(' ')[0];
-                const telefone = lider.dados_admissao.telefone;
 
-                // Dispara uma mensagem pra cada cargo que estourou
+                // Dispara uma mensagem pra CADA CARGO que estourou naquela unidade
                 for (let estourado of cargosEstourados) {
                     await enviarMensagemGraphAPI(
-                        telefone, 
+                        telefoneAlvo, // Envia para o telefone correto!
                         'alerta_lotacao_unidade', 
                         [primeiroNome, nomeUnidade, estourado.cargo, String(estourado.atual), String(estourado.limite)], 
                         null, null
@@ -34420,16 +34423,19 @@ function atualizarBadgeChat(numero) {
     }
 }
 
-        window.abrirModalConfigClara = async function(idUser) {
-    // 1. Busca os dados atuais do usuário para saber se a chave já tá ligada
-    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, permissoes').eq('id', idUser).single();
+       window.abrirModalConfigClara = async function(idUser) {
+    // 1. Busca os dados atuais do usuário (traz o dados_admissao como fallback caso ele já tenha telefone)
+    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, permissoes, dados_admissao').eq('id', idUser).single();
     if (error || !u) return mostrarAlerta("Erro ao buscar configurações.", "erro");
 
     const permissoes = u.permissoes || {};
     const alertas = permissoes.alertas_clara || {};
     
-    // Verifica se já está ativo (Se nunca configurou, vem desligado por padrão)
+    // Verifica se já está ativo
     const alertaLotacaoAtivo = alertas.lotacao_excedida === true;
+    
+    // Puxa o telefone que já foi salvo na Clara, ou tenta aproveitar o do cadastro se existir
+    const telefoneAtual = alertas.telefone || (u.dados_admissao ? u.dados_admissao.telefone : '');
 
     // 2. Monta o Modal
     const modalHtml = `
@@ -34437,15 +34443,23 @@ function atualizarBadgeChat(numero) {
         <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid #25D366; position: relative;">
             <button onclick="document.getElementById('modal-config-clara').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
             <h3 style="color: #25D366; margin-bottom: 5px;"><i class="fa-brands fa-whatsapp"></i> Notificações da Clara</h3>
-            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 25px;">Defina quais alertas automáticos <b>${u.nome}</b> receberá diretamente no WhatsApp.</p>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 25px;">Defina como a Clara deve entrar em contato com <b>${u.nome}</b>.</p>
             
             <form id="form-salvar-alertas-clara">
                 <input type="hidden" id="clara-user-id" value="${u.id}">
                 
-                <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #25D366; margin-bottom: 15px;">
+                <div class="form-group" style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda); margin-bottom: 15px;">
+                    <label style="color: var(--cor-texto-principal); font-weight: bold;">WhatsApp para receber os alertas <span style="color: var(--cor-perigo);">*</span></label>
+                    <div class="input-wrapper" style="margin-top: 8px;">
+                        <i class="fa-brands fa-whatsapp" style="color: #25D366;"></i>
+                        <input type="text" id="clara-telefone" value="${telefoneAtual || ''}" placeholder="+55 (11) 99999-9999" required oninput="this.value = mascaraTelefone(this.value)" style="border-color: #25D366;">
+                    </div>
+                </div>
+
+                <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(37, 211, 102, 0.05); padding: 15px; border-radius: 8px; border: 1px dashed #25D366; margin-bottom: 15px;">
                     <div style="flex: 1;">
                         <strong style="color: #fff; font-size: 0.95rem;"><i class="fa-solid fa-users-viewfinder" style="color: #4fc3f7; margin-right: 5px;"></i> Lotação de Unidade Excedida</strong>
-                        <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 3px; line-height: 1.4;">A Clara enviará uma mensagem se as admissões ultrapassarem o limite de vagas definido para os cargos das unidades.</span>
+                        <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 3px; line-height: 1.4;">A Clara enviará um alerta imediato se as admissões ultrapassarem o limite de vagas.</span>
                     </div>
                     <label style="display: flex; align-items: center; cursor: pointer; margin-left: 15px;">
                         <input type="checkbox" id="chk-alerta-lotacao" style="width: 22px; height: 22px; accent-color: #25D366;" ${alertaLotacaoAtivo ? 'checked' : ''}>
@@ -34469,11 +34483,13 @@ function atualizarBadgeChat(numero) {
 
         const userId = document.getElementById('clara-user-id').value;
         const querAlertaLotacao = document.getElementById('chk-alerta-lotacao').checked;
+        const telefoneClara = document.getElementById('clara-telefone').value; // Pega o ZAP
 
-        // Mantém as permissões de menu intactas e só atualiza o bloco da Clara
+        // Atualiza a permissão incluindo o telefone
         permissoes.alertas_clara = {
             ...alertas,
-            lotacao_excedida: querAlertaLotacao
+            lotacao_excedida: querAlertaLotacao,
+            telefone: telefoneClara // Salva aqui!
         };
 
         const { error: errUpdate } = await supabaseClient.from('perfis').update({ permissoes: permissoes }).eq('id', userId);
@@ -34482,10 +34498,10 @@ function atualizarBadgeChat(numero) {
             mostrarAlerta("Erro ao salvar preferências.", "erro");
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Preferências';
         } else {
-            mostrarAlerta("Preferências da Clara atualizadas com sucesso!", "sucesso");
+            mostrarAlerta("Configurações da Clara atualizadas com sucesso!", "sucesso");
             document.getElementById('modal-config-clara').remove();
             
-            // Recarrega a lista de usuários no fundo se o Admin estiver olhando
+            // Recarrega a tela de trás
             if(typeof listarUsuarios === 'function') listarUsuarios(true);
         }
     });
