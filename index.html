@@ -8945,12 +8945,18 @@ window.exportarPDFBI = function() {
             await carregarTabelaSalarios();
             await carregarCargosOficiais();
 
-            // 👇 PODE COLOCAR A TRAVA DO CHAT EXATAMENTE AQUI 👇
-            if (usuarioAtual.perfil !== 'Super Admin') {
-                const btnCfgChat = document.getElementById('btn-menu-config-chamados');
-                if (btnCfgChat) btnCfgChat.style.display = 'none';
-            }
-            // 👆 =========================================== 👆
+            // Dentro do if(sucesso) na função inicializar()
+const perfilFormatado = usuarioAtual.perfil.trim().toUpperCase();
+
+if (perfilFormatado === 'SUPER ADMIN') {
+    // Se for Super Admin, garante que o botão ESTEJA visível
+    const btnCfgChat = document.getElementById('btn-menu-config-chamados');
+    if (btnCfgChat) btnCfgChat.style.display = 'flex'; 
+} else {
+    // Se não for, esconde
+    const btnCfgChat = document.getElementById('btn-menu-config-chamados');
+    if (btnCfgChat) btnCfgChat.style.display = 'none';
+}
             
             const dataAtual = new Date();
             const mesAtualStr = `${dataAtual.getFullYear()}-${String(dataAtual.getMonth() + 1).padStart(2, '0')}`;
@@ -33760,28 +33766,126 @@ function voltarParaListaChamados() {
     carregarListaChamados();
 }
 
+// ==========================================
+// 1. ABRIR NOVA CONVERSA (BUSCANDO NOMES REAIS)
+// ==========================================
 async function abrirNovaConversa() {
     document.getElementById('tela-lista-chamados').classList.add('hidden');
     document.getElementById('tela-novo-chamado').classList.remove('hidden');
     
-    // Carrega a regra de quem pode falar com quem
-    const { data: config } = await supabaseClient.from('config_chamados').select('*').limit(1).maybeSingle();
     const select = document.getElementById('novo-chamado-destino');
-    select.innerHTML = '';
+    select.innerHTML = '<option value="">Carregando pessoas...</option>';
 
-    let destinos = [];
-    if (!config) {
-        // Padrão se o SuperAdmin não configurou ainda
-        destinos = ['Admin', 'Gestor'];
-    } else {
-        if (config.perfil_destino === 'Ambos') destinos = ['Admin', 'Gestor'];
-        else destinos = [config.perfil_destino];
+    try {
+        // 1. Busca qual perfil este usuário pode contatar
+        const { data: config } = await supabaseClient
+            .from('config_chamados')
+            .select('perfil_destino')
+            .eq('perfil_origem', usuarioAtual.perfil)
+            .maybeSingle();
+
+        if (!config) {
+            select.innerHTML = '<option value="">Nenhuma regra configurada para seu perfil.</option>';
+            return;
+        }
+
+        // 2. Busca na tabela 'perfis' as pessoas que têm esse perfil destino
+        // Se a config for 'Ambos', buscamos Admin e Gestor
+        let profilesToFetch = config.perfil_destino === 'Ambos' ? ['Admin', 'Gestor'] : [config.perfil_destino];
+        
+        const { data: pessoas, error } = await supabaseClient
+            .from('perfis')
+            .select('id, nome, perfil')
+            .in('perfil', profilesToFetch)
+            .neq('id', usuarioAtual.id) // Não listar eu mesmo
+            .order('nome', { ascending: true });
+
+        if (error || !pessoas || pessoas.length === 0) {
+            select.innerHTML = '<option value="">Nenhum atendente disponível.</option>';
+            return;
+        }
+
+        // 3. Popula o select com os nomes reais (Italo, Bruno, etc)
+        select.innerHTML = '<option value="">Selecione o Atendente...</option>';
+        pessoas.forEach(p => {
+            select.innerHTML += `<option value="${p.id}" data-nome="${p.nome}">${p.nome} (${p.perfil})</option>`;
+        });
+
+    } catch (err) {
+        select.innerHTML = '<option value="">Erro ao carregar lista.</option>';
     }
-
-    destinos.forEach(d => {
-        select.innerHTML += `<option value="${d}">Equipe: ${d}</option>`;
-    });
 }
+
+// ==========================================
+// 2. CONFIGURAÇÃO (SUPER ADMIN)
+// ==========================================
+async function abrirModalConfigChamados() {
+    // Garante que só o Super Admin abre
+    if (usuarioAtual.perfil !== 'Super Admin') {
+        mostrarAlerta("Acesso Restrito ao Super Admin", "erro");
+        return;
+    }
+    
+    document.getElementById('modal-config-chamados').classList.remove('hidden');
+    
+    const { data } = await supabaseClient.from('config_chamados').select('*');
+    // Se você quiser configurar múltiplas regras, podemos fazer um loop aqui, 
+    // mas vamos focar em carregar a primeira para teste
+    if (data && data.length > 0) {
+        document.getElementById('cfg-chamado-origem').value = data[0].perfil_origem;
+        document.getElementById('cfg-chamado-destino').value = data[0].perfil_destino;
+    }
+}
+
+// ==========================================
+// 3. ENVIO DO NOVO CHAMADO (SALVANDO DESTINO REAL)
+// ==========================================
+document.getElementById('form-criar-chamado').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('btn-iniciar-chamado');
+    const selectDestino = document.getElementById('novo-chamado-destino');
+    const destinoId = selectDestino.value;
+    const destinoNome = selectDestino.options[selectDestino.selectedIndex].dataset.nome;
+
+    if(!destinoId) return mostrarAlerta("Selecione um atendente!", "aviso");
+
+    btn.disabled = true; 
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Iniciando...';
+
+    try {
+        const assunto = document.getElementById('novo-chamado-assunto').value.trim();
+        const prioridade = document.getElementById('novo-chamado-prioridade').value;
+        const mensagemInicial = document.getElementById('novo-chamado-msg').value.trim();
+
+        // 1. Cria a Sala salvando quem é a pessoa destino
+        const { data: novoChamado, error: errChamado } = await supabaseClient.from('chamados').insert([{
+            assunto: assunto, 
+            prioridade: prioridade, 
+            criado_por_id: usuarioAtual.id, 
+            criado_por_nome: usuarioAtual.nome, 
+            destino_perfil: 'Variavel', // Apenas informativo agora
+            destino_id: destinoId,
+            destino_nome: destinoNome
+        }]).select('id').single();
+
+        if (errChamado) throw errChamado;
+
+        // 2. Envia a primeira mensagem
+        await supabaseClient.from('mensagens_chamado').insert([{
+            chamado_id: novoChamado.id, 
+            remetente_nome: usuarioAtual.nome, 
+            mensagem: mensagemInicial
+        }]);
+
+        voltarParaListaChamados();
+        mostrarAlerta("Chamado aberto com sucesso!", "sucesso");
+
+    } catch (err) {
+        mostrarAlerta("Erro: " + err.message, "erro");
+    } finally {
+        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Iniciar Conversa';
+    }
+});
 
 // ==========================================
 // 2. LISTAGEM DE CHAMADOS
@@ -34035,32 +34139,6 @@ async function marcarChamadoResolvido() {
     mostrarAlerta("Chamado resolvido e fechado!", "sucesso");
     abrirChatAtivo(chamadoAtivoId, document.getElementById('chat-ativo-nome').innerText, 'Resolvido');
 }
-
-// Essa função você chama no seu menu da engrenagem (onclick="abrirModalConfigChamados()")
-async function abrirModalConfigChamados() {
-    if (usuarioAtual.perfil !== 'Super Admin') return mostrarAlerta("Acesso Negado.", "erro");
-    
-    document.getElementById('modal-config-chamados').classList.remove('hidden');
-    
-    // Puxa as configs atuais pra mostrar no select
-    const { data } = await supabaseClient.from('config_chamados').select('*').limit(1).maybeSingle();
-    if (data) {
-        document.getElementById('cfg-chamado-origem').value = data.perfil_origem;
-        document.getElementById('cfg-chamado-destino').value = data.perfil_destino;
-    }
-}
-
-document.getElementById('form-config-chamados').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const origem = document.getElementById('cfg-chamado-origem').value;
-    const destino = document.getElementById('cfg-chamado-destino').value;
-
-    const { error } = await supabaseClient.from('config_chamados').upsert({ id: 1, perfil_origem: origem, perfil_destino: destino });
-    
-    if (error) return mostrarAlerta("Falha ao salvar regra.", "erro");
-    mostrarAlerta("Regras do Help Desk atualizadas!", "sucesso");
-    document.getElementById('modal-config-chamados').classList.add('hidden');
-});
 
         // Memória para saber se o número aumentou
 let ultimoContadorSino = 0; 
