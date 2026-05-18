@@ -22592,11 +22592,10 @@ window.buscarColabsZap = async function(tipo) {
 
         selectColab.innerHTML = '<option value="">Selecione o colaborador...</option>';
         ativosReais.forEach(c => {
-            const fone = c.dados_admissao?.telefone || '';
-            // 👇 PEGA A DATA DE INÍCIO DELE
-            const dataInicio = c.dados_admissao?.jornada?.data_inicio || c.dados_admissao?.data_inicio || '';
-            
-            // 👇 GUARDA A DATA NO DATA-INICIO
+            let adm = c.dados_admissao || {};
+            if (typeof adm === 'string') { try { adm = JSON.parse(adm); } catch(e){} }
+            const fone = adm.telefone || '';
+            const dataInicio = adm.jornada?.data_inicio || adm.data_inicio || '';
             selectColab.innerHTML += `<option value="${c.id}" data-nome="${c.nome}" data-empresa="${c.empresa}" data-telefone="${fone}" data-inicio="${dataInicio}">${c.nome}</option>`;
         });
         selectColab.disabled = false;
@@ -22608,33 +22607,79 @@ window.buscarColabsZap = async function(tipo) {
         const preview = document.getElementById('preview-colabs-selecionados');
         
         window.colabsSelecionadosBoasVindas = [];
-        preview.style.display = 'none';
+        if (preview) preview.style.display = 'none';
         
         if (!unidade) { 
-            btnAbrirModal.disabled = true; 
-            btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+            if (btnAbrirModal) {
+                btnAbrirModal.disabled = true; 
+                btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+            }
             return; 
         }
 
-        btnAbrirModal.disabled = true;
-        btnAbrirModal.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Carregando lista...';
-        listaModal.innerHTML = '<p style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Buscando banco de dados...</p>';
+        if (btnAbrirModal) {
+            btnAbrirModal.disabled = true;
+            btnAbrirModal.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Carregando lista...';
+        }
+        if (listaModal) listaModal.innerHTML = '<p style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Buscando banco de dados...</p>';
 
-        let query = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
-        if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') query = query.eq('empresa', empresaSelecionadaFiltro);
+        // Query base buscando os colaboradores
+        let query = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, dados_rescisao').eq('perfil', 'Colaborador').order('nome');
         
-        const { data } = await query;
-        const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+        if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
+            query = query.eq('empresa', empresaSelecionadaFiltro);
+        } else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
+            const unidsGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
+            query = query.in('unidade', unidsGestor);
+        }
 
+        // Se NÃO for a opção geral do mês, filtra pela unidade específica clicada
+        if (unidade !== 'ADMISSOES_MES') {
+            query = query.eq('unidade', unidade);
+        }
+        
+        const { data, error } = await query;
+        if (error) {
+            console.error("Erro na busca do Supabase:", error);
+            if (btnAbrirModal) {
+                btnAbrirModal.disabled = true;
+                btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+            }
+            if (listaModal) listaModal.innerHTML = '<p style="text-align:center; color:var(--cor-perigo);">Erro ao conectar com o banco.</p>';
+            return;
+        }
+
+        let ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
+        // 👇 FILTRA SE FOR A OPÇÃO DE ADMISSÕES DO MÊS ATUAL 👇
+        if (unidade === 'ADMISSOES_MES') {
+            const dataAtual = new Date();
+            const mesAtualStr = `${dataAtual.getFullYear()}-${String(dataAtual.getMonth() + 1).padStart(2, '0')}`; // "2026-05"
+            
+            ativosReais = ativosReais.filter(c => {
+                let adm = c.dados_admissao || {};
+                if (typeof adm === 'string') { try { adm = JSON.parse(adm); } catch(e){} }
+                const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
+                return dataInicioColab.startsWith(mesAtualStr);
+            });
+        }
+
+        // 👇 CASO A LISTA VENHA VAZIA: Destrava o botão com aviso pro usuário saber o motivo 👇
         if (ativosReais.length === 0) {
-            listaModal.innerHTML = '<p style="text-align:center; padding:20px; color:var(--cor-perigo);">Nenhum colaborador encontrado na unidade.</p>';
-            btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+            if (listaModal) listaModal.innerHTML = `<p style="text-align:center; padding:20px; color:var(--cor-perigo);">${unidade === 'ADMISSOES_MES' ? 'Nenhuma admissão registrada neste mês.' : 'Nenhum colaborador encontrado na unidade.'}</p>`;
+            if (btnAbrirModal) {
+                btnAbrirModal.disabled = true; // Deixa travado porque não há ninguém para selecionar
+                btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+            }
+            window.mostrarAlerta(unidade === 'ADMISSOES_MES' ? "Nenhum colaborador com data de início neste mês (Maio/2026) foi encontrado na base de dados!" : "Nenhum colaborador ativo encontrado nesta unidade.", "aviso", "Fila Vazia");
             return;
         }
 
         let htmlLista = '';
         ativosReais.forEach(c => {
-            const fone = c.dados_admissao?.telefone || '';
+            let adm = c.dados_admissao || {};
+            if (typeof adm === 'string') { try { adm = JSON.parse(adm); } catch(e){} }
+            const fone = adm.telefone || '';
             const temFone = fone.trim() !== '';
             const corFone = temFone ? 'var(--cor-texto-secundario)' : 'var(--cor-perigo)';
             const iconeFone = temFone ? '<i class="fa-brands fa-whatsapp" style="color: #25D366;"></i>' : '<i class="fa-solid fa-triangle-exclamation"></i> Sem N°';
@@ -22657,10 +22702,14 @@ window.buscarColabsZap = async function(tipo) {
             `;
         });
 
-        listaModal.innerHTML = htmlLista;
-        btnAbrirModal.disabled = false;
-        btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Escolher Colaboradores';
-        atualizarContadorModalColabs();
+        if (listaModal) listaModal.innerHTML = htmlLista;
+        if (btnAbrirModal) {
+            btnAbrirModal.disabled = false; // 🔓 DESBLOQUEIA O BOTÃO CASO TENHA GENTE!
+            btnAbrirModal.innerHTML = '<i class="fa-solid fa-users"></i> Selecionar Colaboradores';
+        }
+        if (typeof atualizarContadorModalColabs === 'function') {
+            atualizarContadorModalColabs();
+        }
     }
 };
 
