@@ -35032,25 +35032,26 @@ function atualizarBadgeChat(numero) {
 };
 
     window.lerAtestadoComIA = async function(tipoTela) {
-    // Define os prefixos dos IDs dependendo de qual tela chamou a função
+    // Define os prefixos dos IDs dependendo de qual tela chamou a função (Gestor ou Admin)
     const prefixo = tipoTela === 'admin' ? 'aus-admin' : 'aus';
     
     const fileInput = document.getElementById(`doc-ia-atestado-${tipoTela}`);
     const btn = document.getElementById(`btn-ler-atestado-${tipoTela}`);
     const selectUnidade = document.getElementById(`${prefixo}-unidade`);
 
+    // Validações Iniciais
     if (!selectUnidade.value) {
         return mostrarAlerta("Por favor, selecione a Unidade primeiro para carregar a lista de colaboradores!", "aviso");
     }
 
     if (!fileInput.files || fileInput.files.length === 0) {
-        return mostrarAlerta("Anexe a foto ou PDF do atestado!", "aviso");
+        return mostrarAlerta("Anexe a foto ou PDF do atestado/laudo médico!", "aviso");
     }
 
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando atestado...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo documento...';
 
-    // Reaproveita o seu compressor de imagem ninja
+    // Função de compressão de imagem para acelerar o upload
     const converterParaBase64 = (file) => {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -35066,6 +35067,7 @@ function atualizarBadgeChat(numero) {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let width = img.width, height = img.height;
+                    // Limita imagens muito grandes a 1200px de largura mantendo a proporção
                     if (width > 1200) { height *= 1200 / width; width = 1200; }
                     canvas.width = width; canvas.height = height;
                     const ctx = canvas.getContext('2d');
@@ -35079,13 +35081,18 @@ function atualizarBadgeChat(numero) {
         });
     };
 
-    const criarTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Tempo limite esgotado!")), ms));
+    // Timeout de 90 segundos para PDFs pesados
+    const criarTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Tempo limite estourado. A rede está muito lenta ou o arquivo é muito grande.")), ms));
 
+    // Trava e colore os campos preenchidos pela IA (Suporte a Dark Mode)
     const travarCampo = (id) => {
         const elemento = document.getElementById(id);
         if (elemento) {
             elemento.style.backgroundColor = 'rgba(40, 167, 69, 0.05)'; 
             elemento.style.borderColor = '#28a745'; 
+            elemento.style.color = ''; // Mantém a cor nativa do tema
+            elemento.style.opacity = '1';
+            elemento.style.webkitTextFillColor = 'currentcolor';
             elemento.style.fontWeight = 'bold'; 
         }
     };
@@ -35096,15 +35103,15 @@ function atualizarBadgeChat(numero) {
 
         const response = await Promise.race([
             supabaseClient.functions.invoke('gemini-ocr-atestado', { body: { arquivos: listaArquivosBase64 } }),
-            criarTimeout(60000)
+            criarTimeout(90000)
         ]);
 
-        if (response.error) throw new Error("Erro na IA ao ler atestado.");
+        if (response.error) throw new Error("Erro na IA ao tentar ler o documento médico.");
 
         const data = response.data;
         console.log("Dados do Atestado lidos:", data);
 
-        // 1. Preenche o Motivo
+        // 1. PREENCHE O MOTIVO
         if (data.tipo_motivo) {
             const selectMotivo = document.getElementById(`${prefixo}-motivo`);
             selectMotivo.value = data.tipo_motivo;
@@ -35112,23 +35119,28 @@ function atualizarBadgeChat(numero) {
             travarCampo(`${prefixo}-motivo`);
         }
 
-        // 2. Preenche as Datas
+        // 2. PREENCHE AS DATAS E PROTEGE LAUDOS DE INVALIDEZ
         if (data.data_inicio) {
             document.getElementById(`${prefixo}-data-inicio`).value = data.data_inicio;
             travarCampo(`${prefixo}-data-inicio`);
         }
+        
         if (data.data_fim) {
             const inputFim = document.getElementById(`${prefixo}-data-fim`);
             inputFim.value = data.data_fim;
             inputFim.dispatchEvent(new Event('change')); // Dispara gatilho para calcular dias
             travarCampo(`${prefixo}-data-fim`);
+        } else if (data.parecer_medico) {
+            // Documento é um laudo sem data final (permanente)
+            document.getElementById(`${prefixo}-data-fim`).value = ""; 
+            mostrarAlerta("⚠️ Atestado sem Data Fim! O documento parece ser um Laudo Indeterminado. Verifique a necessidade de encaminhamento ao INSS.", "aviso");
         }
 
-        // 3. Preenche o CID Inteligente
+        // 3. PREENCHE O CID (Abre a caixa sozinho e injeta múltiplos CIDs com vírgula)
         if (data.cid && data.cid.trim() !== "") {
             const selectCid = document.getElementById(`${prefixo}-possui-cid`);
             selectCid.value = "Sim";
-            selectCid.dispatchEvent(new Event('change')); // Abre a caixinha do CID
+            selectCid.dispatchEvent(new Event('change')); 
             travarCampo(`${prefixo}-possui-cid`);
 
             const inputCid = document.getElementById(`${prefixo}-cid`);
@@ -35136,11 +35148,24 @@ function atualizarBadgeChat(numero) {
             travarCampo(`${prefixo}-cid`);
         }
 
-        // 4. Encontrar o Colaborador na Lista Dinâmica (BLINDADO)
+        // 4. PREENCHE OBSERVAÇÕES E HORAS (Declarações e Laudos)
+        const obsBox = document.getElementById(`${prefixo}-observacao`);
+        let obsTexto = obsBox.value;
+        if (data.horas && data.tipo_motivo === "DECL|Declaração de Horas") {
+            obsTexto = `Horário da Declaração: ${data.horas}\n` + obsTexto;
+        }
+        if (data.parecer_medico) {
+            obsTexto = `PARECER DA IA: ${data.parecer_medico}\n` + obsTexto;
+        }
+        if (obsTexto) {
+            obsBox.value = obsTexto.trim();
+            travarCampo(`${prefixo}-observacao`);
+        }
+
+        // 5. ENCONTRAR O COLABORADOR NA LISTA DINÂMICA (Sistema Blindado Anti-Acentos)
         if (data.nome_paciente) {
             const selectColaborador = document.getElementById(`${prefixo}-colaborador`);
             
-            // Função interna para remover acentos e deixar tudo em maiúsculo (ajuda a bater os nomes perfeitamente)
             const normalizarTexto = (texto) => {
                 return texto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
             };
@@ -35165,34 +35190,25 @@ function atualizarBadgeChat(numero) {
             }
 
             if (optionEncontrada) {
-                // Injeta o valor no HTML nativo
                 selectColaborador.value = optionEncontrada.value;
                 selectColaborador.dispatchEvent(new Event('change'));
 
-                // O SEGREDO: Se você usa o plugin Select2 para busca, força a tela a atualizar!
                 if (typeof $ !== 'undefined' && $(selectColaborador).data('select2')) {
                     $(selectColaborador).val(optionEncontrada.value).trigger('change');
                 }
 
                 travarCampo(`${prefixo}-colaborador`);
             } else {
-                mostrarAlerta(`A IA leu o nome "${data.nome_paciente}" no atestado, mas não achou esse colaborador na unidade selecionada.`, "aviso");
+                mostrarAlerta(`A IA leu o nome "${data.nome_paciente}" no atestado, mas não achou esse colaborador na unidade selecionada. Selecione manualmente.`, "aviso");
             }
         }
 
-        // 5. Tratamento para Declaração de Horas
-        if (data.horas && data.tipo_motivo === "DECL|Declaração de Horas") {
-            const obs = document.getElementById(`${prefixo}-observacao`);
-            obs.value = `Horário no atestado: ${data.horas}\n` + obs.value;
-            travarCampo(`${prefixo}-observacao`);
-        }
-
-        // Puxa o anexo do campo da IA para o campo oficial do formulário para salvar no banco
+        // 6. TRANSFERE A FOTO/PDF DA IA PARA O CAMPO DE ENVIO OFICIAL DO BANCO DE DADOS
         const dataTransfer = new DataTransfer();
         Array.from(fileInput.files).forEach(file => dataTransfer.items.add(file));
         document.getElementById(`${prefixo}-documento`).files = dataTransfer.files;
 
-        mostrarAlerta("Atestado lido e preenchido com sucesso!", "sucesso");
+        mostrarAlerta("Documento médico processado com sucesso!", "sucesso");
 
     } catch (err) {
         console.error("Erro ao ler atestado:", err);
