@@ -3865,7 +3865,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <input type="file" id="doc-ia-leitura" accept="image/jpeg, image/png, application/pdf" multiple style="margin-bottom: 12px; width: 100%;">
         
         <button type="button" id="btn-ler-doc-ia" class="btn-secondary" style="width: 100%; border-color: #4fc3f7; color: #4fc3f7; font-weight: bold; background: transparent; transition: 0.2s;" onmouseover="this.style.background='rgba(79, 195, 247, 0.15)'" onmouseout="this.style.background='transparent'" onclick="lerDocumentoComIA()">
-            <i class="fa-solid fa-microchip"></i> Extrair Dados com Gemini IA
+            <i class="fa-solid fa-microchip"></i> Extrair Dados com a Clara IA
         </button>
     </div>
     <div class="form-row-3">
@@ -34755,42 +34755,101 @@ function atualizarBadgeChat(numero) {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparando arquivos...';
 
-    // Função interna para converter cada arquivo em lote para Base64 puro
+    // 👇 COMPRESSOR NINJA: Reduz arquivos pesados antes de enviar pro servidor
     const converterParaBase64 = (file) => {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.readAsDataURL(file);
-            reader.onload = () => {
-                const base64Completo = reader.result;
-                const indexBase64 = base64Completo.indexOf(';base64,');
-                resolve({
-                    base64Puro: base64Completo.substring(indexBase64 + 8),
-                    mimeType: file.type
-                });
+            reader.onload = (event) => {
+                
+                // Se for PDF, o navegador não sabe comprimir nativamente, manda do jeito que está
+                if (file.type === 'application/pdf') {
+                    const base64Completo = reader.result;
+                    const indexBase64 = base64Completo.indexOf(';base64,');
+                    resolve({
+                        base64Puro: base64Completo.substring(indexBase64 + 8),
+                        mimeType: file.type
+                    });
+                    return;
+                }
+
+                // Se for IMAGEM (foto do celular, escaneada), a mágica acontece aqui!
+                const img = new Image();
+                img.src = event.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const MAX_WIDTH = 1200; // Trava a largura máxima para não enviar fotos 4K
+                    const MAX_HEIGHT = 1200;
+                    let width = img.width;
+                    let height = img.height;
+
+                    // Mantém a proporção da imagem
+                    if (width > height) {
+                        if (width > MAX_WIDTH) {
+                            height *= MAX_WIDTH / width;
+                            width = MAX_WIDTH;
+                        }
+                    } else {
+                        if (height > MAX_HEIGHT) {
+                            width *= MAX_HEIGHT / height;
+                            height = MAX_HEIGHT;
+                        }
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    // Converte para JPEG com 70% de qualidade (Fica levíssimo e a IA lê perfeitamente)
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                    
+                    resolve({
+                        base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8),
+                        mimeType: 'image/jpeg'
+                    });
+                };
+                img.onerror = error => reject(error);
             };
             reader.onerror = error => reject(error);
         });
     };
 
-    // Função interna para disparar o cronômetro de estouro de tempo (Evita carregamento infinito)
     const criarTimeout = (ms) => {
         return new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Tempo limite esgotado! O arquivo pode estar pesado demais ou a rede instável, faça manualmente.")), ms)
+            setTimeout(() => reject(new Error("Tempo limite esgotado! O arquivo pode estar pesado demais ou a rede instável.")), ms)
         );
+    };
+
+   // 👇 FUNÇÃO ATUALIZADA: Compatível com Tema Claro e Escuro
+    const travarCampoPreenchido = (id) => {
+        const elemento = document.getElementById(id);
+        if (elemento) {
+            elemento.disabled = true; 
+            elemento.style.backgroundColor = 'rgba(40, 167, 69, 0.05)'; 
+            elemento.style.borderColor = '#28a745'; 
+            
+            // Removemos a cor fixa. Agora ele pega a cor do texto do seu CSS (preto no claro, branco no escuro)
+            elemento.style.color = ''; 
+            
+            // Tira a transparência que os navegadores botam em campos bloqueados
+            elemento.style.opacity = '1'; 
+            elemento.style.webkitTextFillColor = 'currentcolor'; 
+            elemento.style.fontWeight = 'bold'; 
+        }
     };
 
     try {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
         const listaArquivosBase64 = await Promise.all(promessas);
 
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando documentos com a Clara IA...';
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando documentos com IA...';
 
-        // Executa a requisição disputando corrida contra a trava de 45 segundos
         const response = await Promise.race([
             supabaseClient.functions.invoke('gemini-ocr-admissao', {
                 body: { arquivos: listaArquivosBase64 }
             }),
-            criarTimeout(45000) // 45000ms = 45 segundos de tolerância máxima
+            criarTimeout(90000)
         ]);
 
         if (response.error) {
@@ -34806,102 +34865,149 @@ function atualizarBadgeChat(numero) {
 
         const data = response.data;
 
-        // 1. DADOS BÁSICOS DE TEXTO
-        if (data.nome) document.getElementById('novo-nome').value = data.nome.toUpperCase();
-        if (data.cpf) document.getElementById('adm-cpf').value = mascaraCPF(data.cpf);
-        if (data.data_nascimento) document.getElementById('adm-nasc').value = data.data_nascimento;
-        if (data.nome_mae) document.getElementById('adm-mae').value = data.nome_mae.toUpperCase();
-        if (data.nome_pai) document.getElementById('adm-pai').value = data.nome_pai.toUpperCase();
+        // 1. DADOS BÁSICOS DE TEXTO (Preenche e Trava)
+        if (data.nome) { 
+            document.getElementById('novo-nome').value = data.nome.toUpperCase(); 
+            travarCampoPreenchido('novo-nome'); 
+        }
+        if (data.cpf) { 
+            document.getElementById('adm-cpf').value = mascaraCPF(data.cpf); 
+            travarCampoPreenchido('adm-cpf'); 
+        }
+        if (data.data_nascimento) { 
+            document.getElementById('adm-nasc').value = data.data_nascimento; 
+            travarCampoPreenchido('adm-nasc'); 
+        }
+        if (data.nome_mae) { 
+            document.getElementById('adm-mae').value = data.nome_mae.toUpperCase(); 
+            travarCampoPreenchido('adm-mae'); 
+        }
+        if (data.nome_pai) { 
+            document.getElementById('adm-pai').value = data.nome_pai.toUpperCase(); 
+            travarCampoPreenchido('adm-pai'); 
+        }
 
-        // 2. CONTROLE DO PIS (Se localizado, ativa a caixa visualmente e preenche)
+        // 2. CONTROLE DO PIS
         if (data.pis && data.pis.replace(/\D/g, '').length >= 10) {
             document.getElementById('adm-tem-pis').value = 'Sim';
+            travarCampoPreenchido('adm-tem-pis');
             document.getElementById('box-pis').classList.remove('hidden');
             document.getElementById('adm-pis').value = mascaraPIS(data.pis);
+            travarCampoPreenchido('adm-pis');
         }
 
-        // 3. CONTROLE DO RG E SEU CALENDÁRIO NATIVO
+        // 3. CONTROLE DO RG
         if (data.rg) {
             document.getElementById('adm-tem-rg').value = 'Sim';
+            travarCampoPreenchido('adm-tem-rg');
             document.getElementById('box-rg').classList.remove('hidden');
+            
             document.getElementById('adm-rg').value = mascaraRG(data.rg);
-            if (data.rg_expedicao) document.getElementById('adm-rg-data').value = data.rg_expedicao;
+            travarCampoPreenchido('adm-rg');
+            
+            if (data.rg_expedicao) {
+                document.getElementById('adm-rg-data').value = data.rg_expedicao;
+                travarCampoPreenchido('adm-rg-data');
+            }
         }
 
-        // 4. MAPEAMENTO DE ACESSO DE SELEÇÕES (SELECTS)
-        if (data.estado_civil) document.getElementById('adm-estadocivil').value = data.estado_civil;
-        if (data.sexo) document.getElementById('adm-sexo').value = data.sexo;
-        if (data.cor_raca) document.getElementById('adm-raca').value = data.cor_raca;
-        if (data.escolaridade) document.getElementById('adm-escolaridade').value = data.escolaridade;
+        // 4. MAPEAMENTO DE SELECTS
+        if (data.estado_civil) { 
+            document.getElementById('adm-estadocivil').value = data.estado_civil; 
+            travarCampoPreenchido('adm-estadocivil'); 
+        }
+        if (data.sexo) { 
+            document.getElementById('adm-sexo').value = data.sexo; 
+            travarCampoPreenchido('adm-sexo'); 
+        }
+        if (data.cor_raca) { 
+            document.getElementById('adm-raca').value = data.cor_raca; 
+            travarCampoPreenchido('adm-raca'); 
+        }
+        if (data.escolaridade) { 
+            document.getElementById('adm-escolaridade').value = data.escolaridade; 
+            travarCampoPreenchido('adm-escolaridade'); 
+        }
 
-        // 5. PROCESSAMENTO BLINDADO DA CIDADE DE NASCIMENTO (NATURALIDADE)
-        console.log("--- DEBUG IA ---");
-        console.log("Cidade encontrada pelo Gemini:", data.cidade_uf);
-        
+        // 5. PROCESSAMENTO BLINDADO DA CIDADE DE NASCIMENTO
         if (data.cidade_uf) {
             const cidadeFormatada = data.cidade_uf.toUpperCase().trim();
             const selectCidade = document.getElementById('adm-cidade-nasc');
             const inputCidadeExt = document.getElementById('adm-cidade-nasc-ext');
             const selectPais = document.getElementById('adm-pais-nasc');
 
-            // Garante que o país está como Brasil para não bloquear as cidades
             if (selectPais) {
                 selectPais.value = "Brasil";
                 selectPais.dispatchEvent(new Event('change'));
+                travarCampoPreenchido('adm-pais-nasc');
             }
             
             if (selectCidade) {
-                // Verifica se a opção da cidade já existe nas tags HTML
                 let optionExiste = Array.from(selectCidade.options).some(opt => 
                     opt.value.toUpperCase().trim() === cidadeFormatada || 
                     opt.text.toUpperCase().trim() === cidadeFormatada
                 );
                 
-                // Se não existir, injeta dinamicamente para não quebrar a sincronia
                 if (!optionExiste) {
                     const novaOpt = new Option(cidadeFormatada, data.cidade_uf);
                     selectCidade.add(novaOpt);
                 }
                 
-                // Força o valor e roda o gatilho nativo de alteração
                 selectCidade.value = data.cidade_uf;
                 selectCidade.dispatchEvent(new Event('change'));
+                travarCampoPreenchido('adm-cidade-nasc');
 
-                // Compatibilidade obrigatória caso use bibliotecas visuais como Select2/jQuery
                 if (typeof $ !== 'undefined' && $(selectCidade).data('select2')) {
                     $(selectCidade).val(data.cidade_uf).trigger('change');
+                    // Trava visualmente o Select2 (se estiver usando)
+                    $(selectCidade).prop('disabled', true);
                 }
             }
             
-            // Injeta por segurança e retira o ocultamento do campo de texto manual se necessário
             if (inputCidadeExt) {
                 inputCidadeExt.value = cidadeFormatada;
                 inputCidadeExt.classList.remove('hidden'); 
+                travarCampoPreenchido('adm-cidade-nasc-ext');
             }
         }
 
-        // 6. GATILHO INTELIGENTE DO ENDEREÇO (Acessa o CEP e roda a sua função ViaCEP)
+        // 6. GATILHO DO ENDEREÇO
         if (data.cep && data.cep.replace(/\D/g, '').length === 8) {
             const cepLimpo = data.cep.replace(/\D/g, '');
             document.getElementById('adm-cep').value = cepLimpo.replace(/^(\d{5})(\d)/, '$1-$2');
+            travarCampoPreenchido('adm-cep');
             
             if (typeof buscarCEP === 'function') {
                 await buscarCEP(cepLimpo);
+                // Aguarda um pequeno delay para a API ViaCEP preencher os campos antes de travarmos
+                setTimeout(() => {
+                    if(document.getElementById('adm-rua').value) travarCampoPreenchido('adm-rua');
+                    if(document.getElementById('adm-bairro').value) travarCampoPreenchido('adm-bairro');
+                    if(document.getElementById('adm-cidade').value) travarCampoPreenchido('adm-cidade');
+                }, 1000);
             }
         }
 
-        if (data.numero) document.getElementById('adm-numero').value = data.numero;
-        if (data.complemento) document.getElementById('adm-complemento').value = data.complemento.toUpperCase();
+        if (data.numero) {
+            document.getElementById('adm-numero').value = data.numero;
+            travarCampoPreenchido('adm-numero');
+        }
+        
+        // O complemento geralmente é melhor não travar para o RH poder adicionar "Apto 32" se quiser,
+        // mas se a IA trouxer cravado, a gente trava.
+        if (data.complemento) {
+            document.getElementById('adm-complemento').value = data.complemento.toUpperCase();
+            travarCampoPreenchido('adm-complemento');
+        }
 
-        mostrarAlerta("Formulário completo preenchido via IA com sucesso!", "sucesso");
+        mostrarAlerta("Formulário preenchido e travado via IA com sucesso!", "sucesso");
 
     } catch (err) {
         console.error("Erro no front durante o preenchimento:", err);
         mostrarAlerta(err.message, "erro");
     } finally {
-        // Bloco de destrave obrigatório: executa em 100% dos casos de sucesso ou de erro
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados dos Documentos';
+        btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados com Clara IA';
     }
 };
         // Memória para saber se o número aumentou
