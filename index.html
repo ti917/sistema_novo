@@ -29647,60 +29647,98 @@ window.dispararLoteEPIManual = async function() {
     const { data: cfg } = await supabaseClient.from('config_automacao_epi').select('*').eq('empresa', empresa).single();
     if(!cfg) return mostrarAlerta("Nenhuma configuração encontrada para esta empresa.", "erro");
 
-    mostrarAlerta("Iniciando processamento. Isso pode levar alguns segundos...", "aviso");
+    // Trava o botão para não dar duplo clique
+    const btn = document.querySelector('button[onclick="dispararLoteEPIManual()"]');
+    const txtOriginalBtn = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparando disparo (Modo Turbo)...';
 
-    // 1. Busca os colaboradores que entram na regra
-    let queryColabs = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo').eq('empresa', empresa);
-    const { data: colabs } = await queryColabs;
+    try {
+        // 1. Busca todos os colaboradores ativos da empresa
+        let queryColabs = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo').eq('empresa', empresa);
+        const { data: colabs } = await queryColabs;
 
-    const dataAtual = new Date();
-    const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
-    const mesAnoFormatado = `${String(dataAtual.getMonth() + 1).padStart(2,'0')}/${dataAtual.getFullYear()}`;
-    const mesNome = mesesExtenso[dataAtual.getMonth()];
+        const dataAtual = new Date();
+        const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+        const mesAnoFormatado = `${String(dataAtual.getMonth() + 1).padStart(2,'0')}/${dataAtual.getFullYear()}`;
+        const mesNome = mesesExtenso[dataAtual.getMonth()];
 
-    let sucessos = 0;
+        // 2. Busca quem JÁ RECEBEU neste mês (Busca em massa pra não sobrecarregar o banco)
+        const { data: jaEnviados } = await supabaseClient.from('recibos_epi').select('colaborador_id').eq('empresa', empresa).eq('mes_ano', mesAnoFormatado);
+        const idsJaEnviados = jaEnviados ? jaEnviados.map(r => r.colaborador_id) : [];
 
-    for (let c of colabs) {
-        const adm = c.dados_admissao || {};
-        const cargo = adm.cargo || '';
-        
-        // Verifica se a Unidade e Cargo batem com a config
-        let passaUnidade = cfg.unidades.includes('Todas') || cfg.unidades.includes(c.unidade);
-        let passaCargo = cfg.cargos.includes('Todos') || cfg.cargos.includes(cargo);
-
-        if (passaUnidade && passaCargo && adm.telefone) {
-            // 2. Checa se já não mandou esse mês pra ele
-            const { data: jaMandou } = await supabaseClient.from('recibos_epi').select('id').eq('colaborador_id', c.id).eq('mes_ano', mesAnoFormatado).maybeSingle();
+        // 3. Filtra apenas quem DEVE receber e AINDA NÃO RECEBEU
+        const colabsParaDisparo = (colabs || []).filter(c => {
+            const adm = c.dados_admissao || {};
+            const cargo = adm.cargo || '';
             
-            if (!jaMandou) {
-                // 3. Gera um Token único e cria o registro no banco
-                const tokenUnico = crypto.randomUUID();
-                
-                await supabaseClient.from('recibos_epi').insert([{
-                    colaborador_id: c.id,
-                    nome: c.nome,
-                    cpf: adm.cpf,
-                    unidade: c.unidade,
-                    cargo: cargo,
-                    empresa: c.empresa,
-                    mes_ano: mesAnoFormatado,
-                    token: tokenUnico
-                }]);
+            let passaUnidade = cfg.unidades.includes('Todas') || cfg.unidades.includes(c.unidade);
+            let passaCargo = cfg.cargos.includes('Todos') || cfg.cargos.includes(cargo);
+            
+            return passaUnidade && passaCargo && adm.telefone && !idsJaEnviados.includes(c.id);
+        });
 
-                // 4. Dispara a mensagem via Meta
-                const primeiroNome = c.nome.split(' ')[0];
-                const urlLink = `${window.location.origin}${window.location.pathname.replace('index.html', '')}assinar-epi.html?token=${tokenUnico}`;
-                
-                // Manda usando sua função GraphAPI passando o token como urlButtonParam
-                await enviarMensagemGraphAPI(adm.telefone, 'envio_recibo_epi', [primeiroNome, mesNome], null, tokenUnico);
-                sucessos++;
-                await new Promise(r => setTimeout(r, 400)); // Delay da API
+        if (colabsParaDisparo.length === 0) {
+            btn.disabled = false; btn.innerHTML = txtOriginalBtn;
+            return mostrarAlerta("Todos os colaboradores válidos desta regra já receberam o EPI neste mês!", "aviso");
+        }
+
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando no Zap (Modo Turbo)...';
+
+        let sucessos = 0;
+        let falhas = 0;
+        const tamanhoLote = 10;
+
+        // 4. MOTOR TURBO: Loop de Lotes (10 em 10)
+        for (let i = 0; i < colabsParaDisparo.length; i += tamanhoLote) {
+            const loteAtual = colabsParaDisparo.slice(i, i + tamanhoLote);
+            
+            const promessasLote = loteAtual.map(async (c) => {
+                try {
+                    const adm = c.dados_admissao || {};
+                    const cargo = adm.cargo || '';
+                    const tokenUnico = crypto.randomUUID();
+                    const primeiroNome = c.nome.split(' ')[0];
+
+                    // 1º: Salva a pendência no banco de dados
+                    const { error } = await supabaseClient.from('recibos_epi').insert([{
+                        colaborador_id: c.id,
+                        nome: c.nome,
+                        cpf: adm.cpf || 'Não Informado',
+                        unidade: c.unidade,
+                        cargo: cargo,
+                        empresa: c.empresa,
+                        mes_ano: mesAnoFormatado,
+                        token: tokenUnico
+                    }]);
+
+                    if (error) return false;
+
+                    // 2º: Dispara WhatsApp
+                    const ok = await enviarMensagemGraphAPI(adm.telefone, 'envio_recibo_epi', [primeiroNome, mesNome], null, tokenUnico);
+                    return ok;
+                } catch (e) {
+                    return false;
+                }
+            });
+
+            const resultados = await Promise.all(promessasLote);
+            resultados.forEach(ok => { if (ok) sucessos++; else falhas++; });
+
+            // Descansa 1 segundo anti-spam da Meta
+            if (i + tamanhoLote < colabsParaDisparo.length) {
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
-    }
 
-    mostrarAlerta(`Disparo concluído! ${sucessos} novos links enviados.`, "sucesso");
-    carregarStatusEPI();
+        mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        carregarStatusEPI();
+
+    } catch(err) {
+        mostrarAlerta("Erro durante o processo: " + err.message, "erro");
+    } finally {
+        btn.disabled = false; btn.innerHTML = txtOriginalBtn;
+    }
 };
 
 window.carregarStatusEPI = async function() {
@@ -29887,14 +29925,10 @@ window.reenviarReciboEpi = async function(idColaborador, nome, token, mesAnoForm
     }
 };
 
-        // =====================================
-// BOTÃO: REENVIAR EM MASSA (TODOS OS PENDENTES DO MÊS)
-// =====================================
+        // BOTÃO: REENVIAR EM MASSA (TODOS OS PENDENTES DO MÊS)
 window.reenviarPendentesMassa = async function() {
-    // 1. Verifica se tem dados carregados na tela
     if (!window.dadosEpiAtuais || window.dadosEpiAtuais.length === 0) return;
 
-    // 2. Filtra quem ainda não assinou
     const pendentes = window.dadosEpiAtuais.filter(r => r.status === 'Pendente');
     
     if (pendentes.length === 0) {
@@ -29904,51 +29938,62 @@ window.reenviarPendentesMassa = async function() {
     const confirmado = await mostrarConfirmacao(`Deseja reenviar a mensagem da Clara no WhatsApp para todos os <b>${pendentes.length}</b> colaboradores que ainda não assinaram o EPI deste mês?`, "Reenviar em Massa");
     if (!confirmado) return;
 
-    mostrarAlerta("Iniciando o disparo em massa. Aguarde...", "aviso");
+    mostrarAlerta("Iniciando o disparo em massa (Modo Turbo). Aguarde...", "aviso");
+
+    const btnMassa = document.getElementById('btn-reenviar-epi-massa');
+    if (btnMassa) {
+        btnMassa.disabled = true;
+        btnMassa.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cobrando...';
+    }
 
     let sucessos = 0;
     let falhas = 0;
 
     try {
-        // 3. Puxa os telefones de todo mundo de uma vez (para o sistema não travar)
         const idsColabs = pendentes.map(p => p.colaborador_id);
         const { data: perfis, error } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsColabs);
 
-        if (error || !perfis) {
-            return mostrarAlerta("Erro ao buscar dados dos colaboradores.", "erro");
-        }
+        if (error || !perfis) throw new Error("Erro ao buscar dados dos colaboradores.");
 
-        // 4. Pega o nome do mês (ex: "04/2026" vira "Abril")
         const mesAno = pendentes[0].mes_ano; 
         const partesMesAno = mesAno.split('/');
         const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
         const mesNome = mesesExtenso[parseInt(partesMesAno[0]) - 1];
 
-        // 5. Loop de Disparo da Meta
-        for (let p of pendentes) {
-            const perfil = perfis.find(x => x.id === p.colaborador_id);
-            const telefone = perfil?.dados_admissao?.telefone;
+        // MOTOR TURBO: Lotes de 10
+        const tamanhoLote = 10;
 
-            if (!telefone) {
-                falhas++;
-                continue; // Se não tem telefone, pula pro próximo
+        for (let i = 0; i < pendentes.length; i += tamanhoLote) {
+            const loteAtual = pendentes.slice(i, i + tamanhoLote);
+
+            const promessasLote = loteAtual.map(async (p) => {
+                const perfil = perfis.find(x => x.id === p.colaborador_id);
+                const telefone = perfil?.dados_admissao?.telefone;
+
+                if (!telefone) return false;
+
+                const primeiroNome = p.nome.split(' ')[0];
+                const ok = await enviarMensagemGraphAPI(telefone, 'envio_recibo_epi', [primeiroNome, mesNome], null, p.token);
+                return ok;
+            });
+
+            const resultados = await Promise.all(promessasLote);
+            resultados.forEach(ok => { if (ok) sucessos++; else falhas++; });
+
+            if (i + tamanhoLote < pendentes.length) {
+                await new Promise(r => setTimeout(r, 1000)); // Anti-spam da Meta
             }
-
-            const primeiroNome = p.nome.split(' ')[0];
-            
-            // Dispara via GraphAPI da Clara usando o token único de cada um
-            const enviadoOk = await enviarMensagemGraphAPI(telefone, 'envio_recibo_epi', [primeiroNome, mesNome], null, p.token);
-            
-            if (enviadoOk) sucessos++; else falhas++;
-            
-            // Pausa de segurança de meio segundo pra Meta não bloquear sua conta por Spam
-            await new Promise(r => setTimeout(r, 500)); 
         }
 
-        mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Falhas (Sem telefone ou Erro API): <b>${falhas}</b>`, "sucesso");
+        mostrarAlerta(`Cobrança concluída!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
         
     } catch (err) {
         mostrarAlerta("Erro durante o processo em massa: " + err.message, "erro");
+    } finally {
+        if (btnMassa) {
+            btnMassa.disabled = false;
+            btnMassa.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar`;
+        }
     }
 };
 
