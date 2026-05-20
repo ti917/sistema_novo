@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assinatura de Documento</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <style>
+        body { font-family: 'Arial', sans-serif; background: #f0f2f5; margin: 0; padding: 20px; color: #333; display: flex; flex-direction: column; align-items: center; }
+        .doc-container { background: #fff; width: 100%; max-width: 800px; padding: 40px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-top: 5px solid #002347; }
+        .header-logo { text-align: center; margin-bottom: 30px; }
+        .header-logo img { max-width: 150px; }
+        .doc-title { text-align: center; font-size: 20px; text-transform: uppercase; font-weight: bold; margin-bottom: 30px; }
+        .doc-body { font-size: 14px; line-height: 1.6; text-align: justify; margin-bottom: 50px; white-space: pre-wrap; }
+        
+        /* O Canvas fica dentro de uma área estilizada, mas não aparece na impressão final com bordas */
+        .signature-area { margin-top: 50px; text-align: center; }
+        canvas { border: 2px dashed #ccc; background: #f9f9f9; border-radius: 8px; touch-action: none; width: 100%; max-width: 400px; height: 150px; }
+        .linha-assinatura { border-top: 1px solid #000; width: 300px; margin: 5px auto; }
+        
+        .btn-box { text-align: center; margin-top: 30px; }
+        button { padding: 15px 30px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; }
+        .btn-clear { background: #e0e0e0; color: #333; margin-right: 10px; }
+        .btn-save { background: #28a745; color: #fff; }
+        
+        #loading { text-align: center; margin-top: 50px; font-size: 18px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="loading">Buscando documento no servidor...</div>
+
+    <div class="doc-container" id="documento-final" style="display: none;">
+        <div class="header-logo">
+            <img src="https://gozgames.neocities.org/Si%CC%81mbolo%20-%20fundo%20azul.png" alt="Logo Empresa">
+        </div>
+        
+        <div class="doc-title" id="titulo-doc">TÍTULO AQUI</div>
+        
+        <div class="doc-body" id="conteudo-doc"></div>
+
+        <div class="signature-area">
+            <canvas id="canvas-ass"></canvas>
+            <div class="linha-assinatura"></div>
+            <b style="font-size: 14px;" id="nome-assinatura">NOME DO COLABORADOR</b><br>
+            <span style="font-size: 12px; color: #555;" id="cpf-assinatura">CPF: 000.000.000-00</span>
+        </div>
+    </div>
+
+    <div class="btn-box" id="botoes-acao" style="display: none;">
+        <button class="btn-clear" onclick="limparCanvas()">Limpar</button>
+        <button class="btn-save" id="btn-finalizar" onclick="salvarEGerarPDF()">Assinar e Concluir</button>
+    </div>
+
+    <script>
+        const SUPABASE_URL = 'https://kefvwdxebzgedugqeimz.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let dadosDoc = null;
+        let canvas = document.getElementById('canvas-ass');
+        let ctx = canvas.getContext('2d');
+        let desenhando = false;
+
+        // Pega o ?t= (Token) da URL (O mesmo que veio do botão do WhatsApp)
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('t');
+
+        // Configuração do Canvas (Lousa de assinar)
+        function iniciarCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#002347'; // Cor da tinta (Caneta Azul Escura)
+            
+            const getPos = (e) => {
+                let rect = canvas.getBoundingClientRect();
+                let x = (e.clientX || e.touches[0].clientX) - rect.left;
+                let y = (e.clientY || e.touches[0].clientY) - rect.top;
+                return { x, y };
+            };
+
+            const start = (e) => { e.preventDefault(); desenhando = true; ctx.beginPath(); ctx.moveTo(getPos(e).x, getPos(e).y); };
+            const draw = (e) => { e.preventDefault(); if (desenhando) { ctx.lineTo(getPos(e).x, getPos(e).y); ctx.stroke(); } };
+            const stop = () => { desenhando = false; };
+
+            canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', draw); canvas.addEventListener('mouseup', stop);
+            canvas.addEventListener('touchstart', start, {passive:false}); canvas.addEventListener('touchmove', draw, {passive:false}); canvas.addEventListener('touchend', stop);
+        }
+
+        function limparCanvas() { ctx.clearRect(0, 0, canvas.width, canvas.height); }
+
+        async function carregarDocumento() {
+            if (!token) return document.getElementById('loading').innerText = "Link inválido ou expirado.";
+
+            const { data, error } = await supabase.from('documentos_avulsos').select('*').eq('token', token).single();
+
+            if (error || !data) {
+                return document.getElementById('loading').innerText = "Documento não encontrado.";
+            }
+
+            if (data.status === 'Assinado') {
+                return document.getElementById('loading').innerHTML = "<h2 style='color:green'>Este documento já foi assinado! ✔️</h2>";
+            }
+
+            dadosDoc = data;
+
+            // Preenche o HTML com o que o banco devolveu
+            document.getElementById('titulo-doc').innerText = data.titulo_documento;
+            document.getElementById('conteudo-doc').innerText = data.conteudo_texto; // O innerText respeita as quebras de linha
+            document.getElementById('nome-assinatura').innerText = data.nome_colaborador;
+            document.getElementById('cpf-assinatura').innerText = `CPF: ${data.cpf || 'Não informado'}`;
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('documento-final').style.display = 'block';
+            document.getElementById('botoes-acao').style.display = 'block';
+
+            iniciarCanvas();
+        }
+
+        async function salvarEGerarPDF() {
+            const btn = document.getElementById('btn-finalizar');
+            const blank = document.createElement('canvas');
+            blank.width = canvas.width; blank.height = canvas.height;
+            if (canvas.toDataURL() === blank.toDataURL()) {
+                alert("Você precisa assinar no quadro antes de concluir.");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "Processando arquivo...";
+
+            // 1. Transforma o desenho do Canvas em uma Imagem fixada na tela para o PDF capturar perfeito
+            const imgBase64 = canvas.toDataURL('image/png');
+            const imgNode = document.createElement('img');
+            imgNode.src = imgBase64;
+            imgNode.style.width = '100%';
+            imgNode.style.maxWidth = '400px';
+            canvas.parentNode.replaceChild(imgNode, canvas); // Troca a lousa pela foto
+
+            // 2. Tira foto do HTML inteiro e converte para PDF
+            const elemento = document.getElementById('documento-final');
+            const opt = {
+                margin: 15, 
+                filename: `Documento_${dadosDoc.nome_colaborador}.pdf`,
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { scale: 2, useCORS: true },
+                jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+            };
+
+            const pdfBlob = await html2pdf().set(opt).from(elemento).outputPdf('blob');
+
+            // 3. Sobe o PDF pro Supabase
+            const caminho = `Arquivos_Avulsos/${dadosDoc.empresa}/${dadosDoc.unidade}/${dadosDoc.nome_colaborador}/${Date.now()}_Assinado.pdf`;
+            
+            const { error: errUpload } = await supabase.storage.from('documentos').upload(caminho, pdfBlob);
+            
+            if (errUpload) {
+                alert("Erro ao salvar o arquivo.");
+                return;
+            }
+
+            const { data: urlData } = supabase.storage.from('documentos').getPublicUrl(caminho);
+
+            // 4. Atualiza a Tabela do Banco para 'Assinado'
+            await supabase.from('documentos_avulsos').update({
+                status: 'Assinado',
+                url_pdf_final: urlData.publicUrl,
+                assinado_em: new Date().toISOString()
+            }).eq('id', dadosDoc.id);
+
+            // 5. Sucesso na Tela do Funcionário
+            document.getElementById('botoes-acao').style.display = 'none';
+            document.getElementById('documento-final').innerHTML = `
+                <div style="text-align: center; padding: 40px;">
+                    <h1 style="color: #28a745;">Documento Assinado com Sucesso! ✅</h1>
+                    <p>Obrigado. Você já pode fechar esta página.</p>
+                </div>
+            `;
+        }
+
+        // Chama a inicialização
+        carregarDocumento();
+    </script>
+</body>
+</html>
