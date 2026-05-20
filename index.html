@@ -9839,6 +9839,7 @@ if (usuarioAtual.id === meuIDOficial) {
         popularUnidades();
         checarAvisosDeLogin();
         checarTravaExperiencia();
+        window.checarLembretesProrrogacaoAoLogar();
         window.carregarDashboardInicio(); // <---- ADICIONE ESTA LINHA AQUI
     }
     
@@ -10203,7 +10204,7 @@ if (usuarioAtual.id === meuIDOficial) {
         }
     } else if (usuarioAtual.unidade) {
         const unidadesGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
-        queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Contrato_Gestor', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Admissão_Devolvida']);
+queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Contrato_Gestor', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Admissão_Devolvida', 'Lembrete_Prorrogacao']);
     }
 
     const { data: notifsAprovadasDb } = await queryNotifs;
@@ -10412,6 +10413,12 @@ ultimoContadorSino = totalNotifsNoSino;
     corTema = '#4fc3f7'; /* Muda para o Azul da FT */
     bgCor = 'rgba(79, 195, 247, 0.1)'; 
     icone = 'fa-business-time'; /* Muda para a maletinha com relógio */
+                } else if (item.tipo === 'Lembrete_Prorrogacao') {
+                    textoTitulo = 'Prorrogação de Contrato Pendente!'; 
+                    textoAcao = 'atingiu a marca de 45 dias de empresa. Colete a assinatura da prorrogação.'; 
+                    corTema = '#9c27b0'; // Roxo combinando com a aba de prorrogação
+                    bgCor = 'rgba(156, 39, 176, 0.05)'; 
+                    icone = 'fa-file-contract';
                 } else if (item.tipo.includes('Troca')) { 
                     textoTitulo = 'Troca de Turno Aprovada!'; textoAcao = 'teve a solicitação lançada e ajustada na escala.'; corTema = '#4dabf7'; bgCor = 'rgba(77, 171, 247, 0.05)'; icone = 'fa-people-arrows';
                 } else if (item.tipo === 'Advertência_Concluída' && usuarioAtual.perfil === 'Admin') {
@@ -17169,6 +17176,10 @@ window.rotearNotificacao = async function(idColab, tipoNotificacao, referenciaId
         document.querySelector('[data-aba="aba-processo-resc-admin"]')?.click();
     } else if (tipoNotificacao.includes('Ausência')) {
         abrirAusenciaDestacada(referenciaId);
+      // Adicione esta condição dentro do rotearNotificacao
+    } else if (tipoNotificacao === 'Lembrete_Prorrogacao') {
+        document.querySelector('[data-target="tela-usuarios"]')?.click();
+        document.querySelector('[data-aba="aba-contratos-trabalho"]')?.click();
     } else if (tipoNotificacao.includes('FT')) { 
         abrirFTDestacada(referenciaId);
     } else if (tipoNotificacao.includes('Troca')) {
@@ -36665,6 +36676,69 @@ window.atualizarBotaoSom = function() {
 document.addEventListener('DOMContentLoaded', () => {
     atualizarBotaoSom();
 });
+
+     // =========================================================================
+// MÓDULO: LEMBRETE AUTOMÁTICO DE PRORROGAÇÃO (45 DIAS) NO SINO
+// =========================================================================
+window.checarLembretesProrrogacaoAoLogar = async function() {
+    if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
+
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    const hoje = new Date();
+    hoje.setHours(0,0,0,0);
+
+    try {
+        // 1. Busca todos os colaboradores ativos das unidades desse gestor
+        const { data: colabs } = await supabaseClient.from('perfis')
+            .select('id, nome, unidade, empresa, dados_admissao')
+            .eq('perfil', 'Colaborador')
+            .eq('status', 'Ativo')
+            .in('unidade', unids);
+
+        if (!colabs || colabs.length === 0) return;
+
+        for (let c of colabs) {
+            const adm = c.dados_admissao || {};
+            const ctr = adm.contrato || {};
+            const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
+            
+            if (!dataInicioStr) continue;
+
+            const dIni = new Date(dataInicioStr + 'T00:00:00');
+            const diffDias = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
+
+            // 👇 A MÁGICA DA TRAVA AQUI 👇
+            // >= 45 (Atingiu o prazo) E <= 105 (Máximo de 2 meses de atraso tolerado)
+            if (diffDias >= 45 && diffDias <= 105 && ctr.status === 'Aguardando Prorrogação') {
+                
+                // 3. Verifica no banco se já não criamos esse lembrete antes
+                const { data: jaExiste } = await supabaseClient.from('notificacoes')
+                    .select('id')
+                    .eq('colaborador_id', c.id)
+                    .eq('tipo', 'Lembrete_Prorrogacao')
+                    .maybeSingle();
+
+                // 4. Se não existe, injeta o alerta
+                if (!jaExiste) {
+                    await supabaseClient.from('notificacoes').insert([{
+                        colaborador_id: c.id,
+                        nome: c.nome,
+                        unidade: c.unidade,
+                        lida: false,
+                        tipo: 'Lembrete_Prorrogacao',
+                        referencia_id: c.id
+                    }]);
+                }
+            }
+        }
+
+        // 5. Atualiza o sininho na tela do gestor
+        atualizarContador();
+
+    } catch (e) {
+        console.error("Erro ao processar lembretes de prorrogação:", e);
+    }
+};
       
         // Memória para saber se o número aumentou
 let ultimoContadorSino = 0; 
