@@ -38232,9 +38232,7 @@ window.abrirFormularioDesempenho = function(indexCache) {
     });
 };
 
-// =========================================================================
-// MÓDULO: ABA DE AVALIAÇÕES CONCLUÍDAS (HÍBRIDO: PAPEL + DIGITAL)
-// =========================================================================
+window.avaliacoesAndamentoGlobais = []; // 👈 Variável Global que vai guardar os dados para o modal ler
 
 window.carregarDesempenhosAndamento = async function() {
     const container = document.getElementById('lista-desempenho-andamento');
@@ -38242,7 +38240,6 @@ window.carregarDesempenhosAndamento = async function() {
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     
-    // Busca só o que tá pendente com o gestor ou aguardando o RH aprovar
     const { data, error } = await supabaseClient.from('avaliacoes_desempenho')
         .select('*')
         .in('unidade', unids)
@@ -38254,6 +38251,20 @@ window.carregarDesempenhosAndamento = async function() {
         return;
     }
 
+    // 👇 A MÁGICA 1: Salva os dados na memória do navegador 👇
+    window.avaliacoesAndamentoGlobais = data;
+
+    // Organização de prioridades
+    data.sort((a, b) => {
+        const peso = (st) => {
+            if (st === 'Aguardando Assinatura') return 1;
+            if (st === 'Aguardando Feedback') return 2;
+            if (st === 'Pendente') return 3;
+            return 4;
+        };
+        return peso(a.status) - peso(b.status);
+    });
+
     let html = '';
     data.forEach(d => {
         const dataEnvio = new Date(d.created_at).toLocaleDateString('pt-BR');
@@ -38262,7 +38273,7 @@ window.carregarDesempenhosAndamento = async function() {
         let iconeTopo = 'fa-signature';
 
         if (d.status === 'Aguardando Feedback') { corCard = '#4fc3f7'; iconeTopo = 'fa-comments'; }
-        else if (d.status === 'Pendente') { corCard = '#8b5cf6'; badgeTxt = 'Aguardando RH'; iconeTopo = 'fa-hourglass-half'; }
+        else if (d.status === 'Pendente') { corCard = '#8b5cf6'; badgeTxt = 'Aguardando Validação do RH'; iconeTopo = 'fa-hourglass-half'; }
 
         let hashAutenticacao = 'NÃO IDENTIFICADO';
         if (d.pontos_melhorar && d.pontos_melhorar.includes('[AUTENTICAÇÃO:')) {
@@ -38272,16 +38283,19 @@ window.carregarDesempenhosAndamento = async function() {
 
         let botoesHtml = '';
         if (d.status === 'Pendente') {
-            botoesHtml = `<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;"><i class="fa-solid fa-lock"></i> Aguardando o RH auditar.</span>`;
+            botoesHtml = `<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;"><i class="fa-solid fa-lock"></i> Aguardando o RH auditar a papelada.</span>`;
         } else if (d.status === 'Aguardando Assinatura') {
+            // Removi o botão de "Baixar PDF" daqui e deixei só o de Assinar na tela, 
+            // já que agora ele vê tudo dentro do próprio sistema!
             botoesHtml = `
-                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                    <a href="${d.documento}" target="_blank" class="btn-secondary" style="padding: 8px 12px; font-size: 0.8rem; text-decoration: none; border-color:#64748b; color:#64748b;"><i class="fa-solid fa-print"></i> Ver Notas</a>
-                    <button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 8px 12px; font-size: 0.8rem;" onclick="abrirModalAssinarNaTelaDesempenho('${d.id}', '${d.nome_colaborador.replace(/'/g, "\\'")}', '${d.unidade}', '${d.empresa}')"><i class="fa-solid fa-signature"></i> 1. Assinar na Tela</button>
-                </div>`;
+                <button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 8px 12px; font-size: 0.8rem;" onclick="abrirModalAssinarNaTelaDesempenho('${d.id}', '${d.nome_colaborador.replace(/'/g, "\\'")}', '${d.unidade}', '${d.empresa}')">
+                    <i class="fa-solid fa-signature"></i> 1. Assinar na Tela
+                </button>`;
         } else if (d.status === 'Aguardando Feedback') {
             botoesHtml = `
-                <button class="btn-success" style="background: #20c997; color: #000; border: none; font-weight: bold; padding: 8px 12px; font-size: 0.8rem;" onclick="abrirModalFeedbackFinal('${d.id}', '${d.nome_colaborador.replace(/'/g, "\\'")}', '${d.unidade}', '${d.empresa}', '${hashAutenticacao}', '${dataEnvio}')"><i class="fa-solid fa-comments"></i> 2. Dar Feedback Final</button>
+                <button class="btn-success" style="background: #20c997; color: #000; border: none; font-weight: bold; padding: 8px 12px; font-size: 0.8rem;" onclick="abrirModalFeedbackFinal('${d.id}', '${d.nome_colaborador.replace(/'/g, "\\'")}', '${d.unidade}', '${d.empresa}', '${hashAutenticacao}', '${dataEnvio}')">
+                    <i class="fa-solid fa-comments"></i> 2. Dar Feedback Final
+                </button>
             `;
         }
 
@@ -38397,16 +38411,64 @@ window.salvarPapelDesempenho = async function(idAval, nome, unidade, empresa) {
     }
 };
 
-// =========================================================================
-// ETAPA 1: APENAS ASSINATURA DO FUNCIONÁRIO (fresh INSERT anti-bloqueio)
-// =========================================================================
 window.abrirModalAssinarNaTelaDesempenho = function(idAval, nome, unidade, empresa) {
+    // 👇 A MÁGICA 2: Busca os dados que salvamos na memória 👇
+    const aval = window.avaliacoesAndamentoGlobais.find(x => x.id === idAval);
+    
+    let tabelaNotasHtml = '';
+    let pontosMelhorarTexto = aval?.pontos_melhorar || '';
+    let classificacao = 'Não definida';
+    
+    // Extrai a classificação e limpa as tags do sistema
+    if (pontosMelhorarTexto.includes('[CLASSIFICAÇÃO:')) {
+        const matchClass = pontosMelhorarTexto.match(/\[CLASSIFICAÇÃO:\s*([^\]]+)\]/);
+        if (matchClass) { classificacao = matchClass[1]; pontosMelhorarTexto = pontosMelhorarTexto.replace(matchClass[0], '').trim(); }
+    }
+    if (pontosMelhorarTexto.includes('[AUTENTICAÇÃO:')) pontosMelhorarTexto = pontosMelhorarTexto.replace(/\[AUTENTICAÇÃO:\s*([^\]]+)\]/, '').trim();
+    if (pontosMelhorarTexto.includes('[ASSINATURA_GESTOR:')) pontosMelhorarTexto = pontosMelhorarTexto.replace(/\[ASSINATURA_GESTOR:\s*([^\]]+)\]/, '').trim();
+
+    // Constrói a tabela visual das notas para a tela
+    if (aval && aval.notas && Array.isArray(aval.notas)) {
+        tabelaNotasHtml = `<table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 15px;"><tbody>`;
+        aval.notas.forEach(n => {
+            let textNota = n.nota === "3" ? "Bom" : (n.nota === "2" ? "Satisfatório" : "Insatisfatório");
+            let corNota = n.nota === "3" ? "#28a745" : (n.nota === "2" ? "#ffc107" : "#dc3545");
+            tabelaNotasHtml += `<tr>
+                <td style="padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.05); color: var(--cor-texto-secundario);">${n.criterio}</td>
+                <td style="padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.05); color: ${corNota}; font-weight: bold; text-align: right;">${textNota}</td>
+            </tr>`;
+        });
+        tabelaNotasHtml += `</tbody></table>`;
+    }
+
+    let corClass = classificacao === 'BOM' ? '#28a745' : (classificacao === 'SATISFATÓRIO' ? '#ffc107' : '#dc3545');
+
     const modalHtml = `
     <div id="modal-assinar-tela-des" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid #00bcd4; position: relative;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; border: 1px solid #00bcd4; position: relative; max-height: 95vh; overflow-y: auto;">
             <button onclick="document.getElementById('modal-assinar-tela-des').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
             <h3 style="color: #00bcd4; margin-bottom: 5px;"><i class="fa-solid fa-signature"></i> Assinatura do Colaborador</h3>
-            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Colete a assinatura de <b>${nome}</b>.</p>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Colete a assinatura de <b>${nome}</b>.</p>
+            
+            <div style="background: rgba(0, 188, 212, 0.05); border: 1px dashed #00bcd4; border-radius: 8px; margin-bottom: 20px; padding: 10px;">
+                <button class="btn-secondary" style="width: 100%; justify-content: center; border-color: #00bcd4; color: #00bcd4; font-weight: bold;" onclick="document.getElementById('box-resumo-notas-${idAval}').classList.toggle('hidden')">
+                    <i class="fa-solid fa-eye"></i> Visualizar Notas da Avaliação na Tela
+                </button>
+                
+                <div id="box-resumo-notas-${idAval}" class="hidden" style="margin-top: 15px; border-top: 1px solid rgba(0, 188, 212, 0.2); padding-top: 15px;">
+                    <div style="text-align: center; margin-bottom: 15px;">
+                        <span style="color: var(--cor-texto-secundario); font-size: 0.8rem; text-transform: uppercase;">Classificação Final</span><br>
+                        <strong style="font-size: 1.4rem; color: ${corClass};">${classificacao}</strong>
+                    </div>
+                    
+                    <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda);">
+                        <small style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-triangle-exclamation"></i> Pontos a Melhorar (Indicados pelo Gestor):</small>
+                        <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 5px; line-height: 1.4;">${pontosMelhorarTexto || 'Sem observações.'}</span>
+                    </div>
+                    
+                    ${tabelaNotasHtml}
+                </div>
+            </div>
             
             <div class="form-group" style="text-align: center;">
                 <canvas id="canvas-colab-des" class="signature-pad" style="border-color: #00bcd4; height: 160px; width: 100%; max-width: 450px; background: #fff;"></canvas>
@@ -38421,6 +38483,7 @@ window.abrirModalAssinarNaTelaDesempenho = function(idAval, nome, unidade, empre
 
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
+    // O código do Canvas contínua igual abaixo
     const cDesColab = document.getElementById('canvas-colab-des');
     const cxDesColab = cDesColab.getContext('2d');
     let desenhandoColab = false;
