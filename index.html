@@ -38288,74 +38288,81 @@ window.aprovarAvaliacaoDesempenho = async function(idAvaliacao, idColab, nomeCol
 };
 
       // =========================================================
-// PAINEL DE AUDITORIA DE AVALIAÇÃO DE DESEMPENHO (ADMIN)
+// APROVAÇÃO POR DENTRO DO MODAL DE DESEMPENHO (ADMIN)
 // =========================================================
-window.verFichaDesempenhoPendente = function(idStr) {
-    // Verificação de segurança caso a lista global falte
-    if (!window.listaDesempenhoPendentes) window.listaDesempenhoPendentes = [];
+window.aprovarDesempenhoPeloModal = async function(idAvaliacao, idColab, nomeColab) {
+    const btn = document.querySelector('#modal-ficha-desempenho .btn-success');
+    if (btn) {
+        btn.innerText = "Processando liberação...";
+        btn.disabled = true;
+    }
     
-    const des = window.listaDesempenhoPendentes.find(d => String(d.id) === String(idStr));
-    if (!des) {
-        mostrarAlerta("Lançamento não encontrado na memória temporária. Recarregue a página.", "aviso");
-        return;
-    }
-
-    let pontosTexto = des.pontos_melhorar || '';
-    let classificacaoBadge = '';
-
-    // Extrai a classificação do texto se estiver embutida lá
-    if (pontosTexto.includes('[CLASSIFICAÇÃO:')) {
-        const partes = pontosTexto.split('] \n\n');
-        const classeNome = partes[0].replace('[CLASSIFICAÇÃO: ', '');
-        pontosTexto = partes[1] || '';
+    try {
+        await supabaseClient.from('avaliacoes_desempenho').update({ status: 'Aprovado' }).eq('id', idAvaliacao);
+        const { data: aval } = await supabaseClient.from('avaliacoes_desempenho').select('unidade').eq('id', idAvaliacao).single();
         
-        let corBadge = '#28a745';
-        if (classeNome === 'SATISFATÓRIO') corBadge = '#ff9800';
-        if (classeNome === 'INSATISFATÓRIO') corBadge = '#dc3545';
-        
-        classificacaoBadge = `
-            <div style="background: ${corBadge}15; padding: 12px; border-radius: 8px; border: 1px dashed ${corBadge}; margin-top: 10px;">
-                <small style="color:var(--cor-texto-secundario); font-weight:bold;">CLASSIFICAÇÃO FINAL AUTOMÁTICA:</small><br>
-                <strong style="color: ${corBadge}; font-size: 1.15rem; text-transform:uppercase;">${classeNome}</strong>
-            </div>`;
+        // Notifica o Gestor que a ficha foi liberada no painel dele para impressão física
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: `Avaliação de Desempenho Liberada: ${nomeColab}`, unidade: aval.unidade,
+            lida: false, tipo: 'Avaliacao_Desempenho_Aprovada', referencia_id: idAvaliacao
+        }]);
+
+        await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome }).eq('referencia_id', idAvaliacao).eq('tipo', 'Avaliacao_Desempenho_Admin');
+
+        const modal = document.getElementById('modal-ficha-desempenho');
+        if (modal) modal.remove();
+
+        mostrarAlerta("Avaliação homologada com sucesso! O Gestor já pode efetuar a impressão.", "sucesso");
+        listarSolicitacoes();
+        atualizarContador();
+    } catch(e) {
+        console.error(e);
+        mostrarAlerta("Erro ao aprovar a solicitação.", "erro");
+        if (btn) {
+            btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR E LIBERAR IMPRESSÃO`; 
+            btn.disabled = false;
+        }
     }
+};
 
-    const modalHtml = `
-    <div id="modal-ficha-desempenho" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 550px; border: 1px solid #00bcd4; position: relative;">
-            <button onclick="document.getElementById('modal-ficha-desempenho').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+// =========================================================
+// RECUSA/REPROVAÇÃO POR DENTRO DO MODAL DE DESEMPENHO (ADMIN)
+// =========================================================
+window.reprovarDesempenhoPeloModal = async function(idAvaliacao, idColab, urlDocumento) {
+    const confirmado = await mostrarConfirmacao("Deseja reprovar este lançamento? O arquivo de PDF antigo será deletado e o ciclo voltará a constar pendente para o Gestor refazer.", "Recusar Lançamento");
+    if (!confirmado) return;
 
-            <h3 style="color: #00bcd4; margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
-                <i class="fa-solid fa-chart-line"></i> Analisar Avaliação Trimestral
-            </h3>
+    try {
+        // 1. Apaga a trava do ciclo no perfil do colaborador para re-viger a pendência
+        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        if (perfil) {
+            let adm = perfil.dados_admissao || {};
+            delete adm.ultima_aval_desempenho; // Remove o carimbo de data
+            await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+        }
 
-            <div style="background: rgba(0, 188, 212, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #00bcd4; margin-bottom: 15px;">
-                <small style="color:var(--cor-texto-secundario)">COLABORADOR:</small><br>
-                <b style="font-size:1.15rem; color:#fff">${des.nome_colaborador}</b><br>
-                <span style="color: var(--cor-texto-secundario); font-size:0.85rem;">Unidade: <b>${des.unidade}</b> | Cargo: <b>${des.cargo || '-'}</b></span>
-                ${classificacaoBadge}
-            </div>
+        // 2. Remove o PDF do Storage da nuvem de forma limpa
+        if (urlDocumento) {
+            const partes = urlDocumento.split('/storage/v1/object/public/documentos/');
+            if (partes.length > 1) {
+                await supabaseClient.storage.from('documentos').remove([decodeURIComponent(partes[1])]);
+            }
+        }
 
-            <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda); margin-bottom: 20px;">
-                <small style="color:var(--cor-texto-secundario)">PONTOS A MELHORAR OBSERVADOS:</small><br>
-                <span style="font-size: 0.95rem; color: var(--cor-texto-principal); white-space: pre-wrap; font-style: italic;">"${pontosTexto || 'Nenhum ponto relatado.'}"</span>
-            </div>
+        // 3. Limpa os históricos das tabelas de auditoria
+        await supabaseClient.from('notificacoes').delete().eq('referencia_id', idAvaliacao);
+        await supabaseClient.from('avaliacoes_desempenho').delete().eq('id', idAvaliacao);
 
-            <div style="text-align: center; margin-bottom: 25px;">
-                <a href="${des.documento}" target="_blank" class="btn-secondary" style="width: 100%; justify-content: center; border-color: #00bcd4; color: #00bcd4; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; height: 45px;"><i class="fa-solid fa-file-pdf"></i> Visualizar Documento PDF Prontuário</a>
-            </div>
+        const modal = document.getElementById('modal-ficha-desempenho');
+        if (modal) modal.remove();
 
-            <div style="display: flex; gap: 10px;">
-                <button class="btn-success" style="flex: 2; height: 50px; font-weight: bold; background-color: #00bcd4; color: #000; border: none;" onclick="aprovarDesempenhoPeloModal('${des.id}', '${des.colaborador_id}', '${des.nome_colaborador.replace(/'/g, "\\'")}')">
-                    <i class="fa-solid fa-check"></i> APROVAR E LIBERAR IMPRESSÃO
-                </button>
-                <button class="btn-danger-mini" style="flex: 1; height: 50px; color: white; border: 1px solid var(--cor-borda);" onclick="reprovarDesempenhoPeloModal('${des.id}', '${des.colaborador_id}', '${des.documento}')">
-                    <i class="fa-solid fa-arrow-rotate-left"></i> RECUSAR
-                </button>
-            </div>
-        </div>
-    </div>`;
-    document.body.insertAdjacentHTML('beforeend', modalHtml);
+        mostrarAlerta("Lançamento cancelado! O processo retornou para o Gestor.", "sucesso");
+        listarSolicitacoes();
+        atualizarContador();
+    } catch(e) {
+        console.error(e);
+        mostrarAlerta("Erro ao cancelar o lançamento: " + e.message, "erro");
+    }
 };
       
         // Memória para saber se o número aumentou
