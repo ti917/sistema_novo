@@ -2588,6 +2588,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <h2 style="margin: 0; color: #002347; font-size: 14px; text-transform: uppercase;">AVALIAÇÃO DE DESEMPENHO DO COLABORADOR</h2>
         </div>
         <div style="width: 140px; text-align: center; font-size: 10px; color: #333;">
+            <b>Autenticação (Hash):</b><br><span id="pdf-des-codigo-auth" style="font-size: 11px; font-weight: bold; color: #00bcd4;"></span><br>
             <b>Data da Avaliação:</b><br><span id="pdf-des-data-hoje" style="font-size: 11px; font-weight: bold;"></span>
         </div>
     </div>
@@ -38099,10 +38100,13 @@ window.abrirFormularioDesempenho = function(indexCache) {
 
         document.getElementById('pdf-des-criterios-body').innerHTML = tbodyPdf;
         document.getElementById('pdf-des-data-hoje').innerText = new Date().toLocaleDateString('pt-BR');
-      // 👇 A MÁGICA DA EMPRESA DINÂMICA ENTRA AQUI 👇
+        
+        // 👇 MÁGICA: GERA UM CÓDIGO ÚNICO DE AUTENTICAÇÃO PARA AMARRAR OS DOCUMENTOS
+        const hashAvaliacao = 'AVAL-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+        document.getElementById('pdf-des-codigo-auth').innerText = hashAvaliacao;
+
         let nomeEmpresaTopo = empresa === 'VILLAC' ? 'RH VILLAC' : (empresa === 'SOUL GESTÃO' || empresa === 'SOUL' ? 'RH SOUL' : empresa);
         document.getElementById('pdf-des-nome-empresa-topo').innerText = nomeEmpresaTopo.toUpperCase();
-        // 👆 FIM DA MÁGICA 👆
         document.getElementById('pdf-des-nome').innerText = nomeColab;
         document.getElementById('pdf-des-cargo').innerText = cargo;
         document.getElementById('pdf-des-setor').innerText = unidade;
@@ -38113,7 +38117,7 @@ window.abrirFormularioDesempenho = function(indexCache) {
         document.getElementById('pdf-des-nome-colab-ass').innerText = nomeColab;
 
         try {
-            await new Promise(resolve => setTimeout(resolve, 300)); // Respiro pro layout
+            await new Promise(resolve => setTimeout(resolve, 300));
             const element = document.getElementById('template-pdf-desempenho');
             const scrollAnterior = window.scrollY; window.scrollTo(0, 0);
             
@@ -38131,10 +38135,8 @@ window.abrirFormularioDesempenho = function(indexCache) {
             };
 
             const pdfWorker = await html2pdf().set(opt).from(cloneParaPDF).outputPdf('blob');
-
             document.body.removeChild(containerInvisivel); window.scrollTo(0, scrollAnterior);
 
-            // Sobe o PDF pro Storage
             const caminhoBase = `${formatarNomePasta(empresa)}/${formatarNomePasta(unidade)}/${formatarNomePasta(nomeColab)}/Desempenho`;
             const fileName = `${Date.now()}_Avaliacao_Desempenho.pdf`;
             const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(`${caminhoBase}/${fileName}`, pdfWorker);
@@ -38142,16 +38144,15 @@ window.abrirFormularioDesempenho = function(indexCache) {
             const { data: publicUrlData } = supabaseClient.storage.from('documentos').getPublicUrl(`${caminhoBase}/${fileName}`);
             const urlPdf = publicUrlData.publicUrl;
 
-           // Modifique o insert no banco para incluir a classificação! Ache a tabela avaliacoes_desempenho
+            // 👇 SALVANDO O CÓDIGO NO BANCO PARA PUXAR NO TERMO DEPOIS
+            const pontos_melhorar_db = `[AUTENTICAÇÃO: ${hashAvaliacao}] \n[CLASSIFICAÇÃO: ${classificacaoFinal}] \n\n` + pontosMelhorar;
+
             const { data: avaliacaoCriada, error: dbError } = await supabaseClient.from('avaliacoes_desempenho').insert([{
                 colaborador_id: idColab, nome_colaborador: nomeColab, unidade: unidade, empresa: empresa,
                 notas: notasArr, 
-                pontos_melhorar: pontosMelhorar,
+                pontos_melhorar: pontos_melhorar_db,
                 status: 'Pendente', 
                 criado_por: usuarioAtual.nome,
-                // 👇 Enviando a nota pra coluna documento (que antes pegava só o link). Podemos guardar um JSON maroto nela se não criamos a coluna específica pra isso:
-                // Como não criamos uma coluna 'classificacao', vamos injetar ela DENTRO do pontos_melhorar para não precisarmos alterar o SQL do banco!
-                pontos_melhorar: `[CLASSIFICAÇÃO: ${classificacaoFinal}] \n\n` + pontosMelhorar,
                 documento: urlPdf
             }]).select('id').single();
 
@@ -38310,44 +38311,40 @@ window.salvarPapelDesempenho = async function(idAval, nome, unidade, empresa) {
     }
 };
 
-// =========================================================================
-// MODO 2: ASSINATURA DIRETA NA TELA (PAPERLESS)
-// =========================================================================
-window.abrirModalAssinarNaTelaDesempenho = function(idAval, nome, unidade, empresa) {
+window.abrirModalAssinarNaTelaDesempenho = async function(idAval, nome, unidade, empresa) {
     const dataHoje = new Date().toLocaleDateString('pt-BR');
+
+    // Busca os dados da avaliação para pegar o Código Hash e a Data Original
+    const { data: aval } = await supabaseClient.from('avaliacoes_desempenho').select('pontos_melhorar, created_at').eq('id', idAval).single();
+    
+    let authCode = "NÃO IDENTIFICADO";
+    if (aval && aval.pontos_melhorar && aval.pontos_melhorar.includes('[AUTENTICAÇÃO:')) {
+        const match = aval.pontos_melhorar.match(/\[AUTENTICAÇÃO:\s*([^\]]+)\]/);
+        if (match) authCode = match[1];
+    }
+    const dataAvaliacao = aval ? new Date(aval.created_at).toLocaleDateString('pt-BR') : dataHoje;
 
     const modalHtml = `
     <div id="modal-assinar-tela-des" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 550px; border: 1px solid #00bcd4; max-height: 90vh; overflow-y: auto; position: relative;">
+        <div class="glass-card" style="width: 100%; max-width: 600px; border: 1px solid #00bcd4; max-height: 90vh; overflow-y: auto; position: relative;">
             <button onclick="document.getElementById('modal-assinar-tela-des').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
             
-            <h3 style="color: #00bcd4; margin-bottom: 5px;"><i class="fa-solid fa-signature"></i> Assinatura Digital</h3>
-            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Termo de ciência da Avaliação de Desempenho Trimestral.</p>
+            <h3 style="color: #00bcd4; margin-bottom: 5px;"><i class="fa-solid fa-signature"></i> Assinatura Digital do Feedback</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Vinculado à Avaliação: <b style="color: #fff;">${authCode}</b> (${dataAvaliacao})</p>
             
-            <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #00bcd4; margin-bottom: 20px;">
-                <p style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; text-align: justify; margin: 0;">
-                    Eu, <b>${nome}</b>, confirmo que recebi e compreendi o feedback referente à minha Avaliação de Desempenho. Declaro estar ciente dos pontos discutidos com a liderança para o meu desenvolvimento profissional na unidade <b>${unidade}</b>.
-                </p>
+            <div class="form-group" style="background: rgba(0, 188, 212, 0.1); padding: 15px; border-radius: 8px; border: 1px solid rgba(0, 188, 212, 0.3);">
+                <label style="color: #00bcd4;"><i class="fa-solid fa-comments"></i> Considerações Finais do Gestor <span style="color: var(--cor-perigo);">*</span></label>
+                <textarea id="termo-consideracoes" required placeholder="Preencha este campo durante o feedback com o colaborador. Escreva aqui o resumo da conversa e os combinados firmados..." style="width: 100%; min-height: 80px; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.3); color: #fff; margin-top: 8px;"></textarea>
+                <small style="color: var(--cor-texto-secundario); display: block; margin-top: 5px;">Este texto será impresso no Termo de Ciência oficial.</small>
             </div>
 
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Local (Unidade)</label>
-                    <input type="text" value="${unidade}" readonly style="background: rgba(0,0,0,0.3); color: #fff; font-weight: bold;">
-                </div>
-                <div class="form-group">
-                    <label>Data</label>
-                    <input type="text" value="${dataHoje}" readonly style="background: rgba(0,0,0,0.3); color: #fff; text-align: center; font-weight: bold;">
-                </div>
-            </div>
-
-            <div class="form-group" style="text-align: center; margin-top: 10px;">
-                <label style="color: #00bcd4;">Assinatura do Colaborador <span style="color: var(--cor-perigo);">*</span></label>
-                <canvas id="canvas-colab-des" class="signature-pad" style="border-color: #00bcd4; height: 160px; width: 100%; background: #fff;"></canvas>
+            <div class="form-group" style="text-align: center; margin-top: 20px;">
+                <label style="color: #00bcd4;">Assinatura do Colaborador: <b>${nome}</b> <span style="color: var(--cor-perigo);">*</span></label>
+                <canvas id="canvas-colab-des" class="signature-pad" style="border-color: #00bcd4; height: 160px; width: 100%; max-width: 500px; background: #fff;"></canvas>
                 <button type="button" class="btn-secondary" style="margin-top: 10px; font-size: 0.75rem;" onclick="limparCanvasColabDes()"><i class="fa-solid fa-eraser"></i> Refazer Assinatura</button>
             </div>
 
-            <button class="btn-success" id="btn-salvar-tela-des" style="background: #00bcd4; color: #000; border: none; width: 100%; font-weight: bold; height: 50px; margin-top: 10px;" onclick="salvarAssinaturaDigitalDesempenho('${idAval}', '${nome}', '${unidade}', '${empresa}', '${dataHoje}')">
+            <button class="btn-success" id="btn-salvar-tela-des" style="background: #00bcd4; color: #000; border: none; width: 100%; font-weight: bold; height: 50px; margin-top: 10px;" onclick="salvarAssinaturaDigitalDesempenho('${idAval}', '${nome.replace(/'/g, "\\'")}', '${unidade}', '${empresa}', '${dataHoje}', '${authCode}', '${dataAvaliacao}')">
                 <i class="fa-solid fa-check-double"></i> Assinar e Concluir
             </button>
         </div>
@@ -38355,7 +38352,6 @@ window.abrirModalAssinarNaTelaDesempenho = function(idAval, nome, unidade, empre
 
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-    // Inicia o Canvas do Colaborador
     const cDesColab = document.getElementById('canvas-colab-des');
     const cxDesColab = cDesColab.getContext('2d');
     let desenhandoColab = false;
@@ -38381,9 +38377,14 @@ window.abrirModalAssinarNaTelaDesempenho = function(idAval, nome, unidade, empre
     window.limparCanvasColabDes = function() { cxDesColab.clearRect(0, 0, cDesColab.width, cDesColab.height); };
 };
 
-// Gera o Termo Dinâmico via html2pdf e anexa no banco
-window.salvarAssinaturaDigitalDesempenho = async function(idAval, nome, unidade, empresa, dataHoje) {
+window.salvarAssinaturaDigitalDesempenho = async function(idAval, nome, unidade, empresa, dataHoje, authCode, dataAvaliacao) {
     const cDesColab = document.getElementById('canvas-colab-des');
+    const txtConsideracoes = document.getElementById('termo-consideracoes').value.trim();
+
+    if (!txtConsideracoes) {
+        return mostrarAlerta("Você deve preencher as Considerações Finais do Gestor antes de concluir!", "aviso");
+    }
+
     const blank = document.createElement('canvas');
     blank.width = cDesColab.width; blank.height = cDesColab.height;
     
@@ -38397,50 +38398,67 @@ window.salvarAssinaturaDigitalDesempenho = async function(idAval, nome, unidade,
     try {
         const assinaturaBase64 = cDesColab.toDataURL('image/png');
 
-        // Cria um HTML invisível que será transformado em PDF
+        // 👇 TEMPLATE OFICIAL COM CÓDIGO E CONSIDERAÇÕES DO GESTOR 👇
         const templateTermoHtml = `
             <div id="template-termo-assinatura-des" style="width: 700px; padding: 40px; background: #ffffff; color: #111; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; box-sizing: border-box;">
-                <div style="border-bottom: 2px solid #002347; padding-bottom: 10px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="border-bottom: 2px solid #002347; padding-bottom: 10px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center;">
                     <div style="background-color: #002347; color: #fff; padding: 10px 15px; font-size: 18px; font-weight: bold; border-radius: 6px;">RH SOUL</div>
                     <div style="text-align: right;">
-                        <h2 style="margin: 0; color: #002347; font-size: 16px; text-transform: uppercase;">Termo de Ciência</h2>
-                        <h3 style="margin: 5px 0 0 0; color: #555; font-size: 12px; font-weight: 500;">Avaliação de Desempenho</h3>
+                        <h2 style="margin: 0; color: #002347; font-size: 16px; text-transform: uppercase;">Termo de Ciência de Feedback</h2>
+                        <h3 style="margin: 5px 0 0 0; color: #555; font-size: 12px; font-weight: 500;">Avaliação Trimestral de Desempenho</h3>
                     </div>
                 </div>
 
-                <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 20px; border-radius: 8px; margin-bottom: 40px; font-size: 14px; line-height: 1.8; text-align: justify;">
-                    Eu, <b>${nome}</b>, confirmo que recebi e compreendi o feedback referente à minha Avaliação de Desempenho Trimestral. <br><br>
-                    Declaro estar ciente dos pontos discutidos com a liderança para o meu desenvolvimento profissional na unidade <b>${unidade}</b>, estando de acordo com as orientações passadas.
+                <div style="margin-bottom: 20px; font-size: 12px; border: 1px solid #cbd5e1; padding: 10px; border-radius: 6px; background: #f8fafc; display: flex; justify-content: space-between;">
+                    <div><b>Colaborador:</b> ${nome}</div>
+                    <div><b>Data da Avaliação Oficial:</b> ${dataAvaliacao}</div>
+                    <div><b>Protocolo/Hash:</b> <span style="color: #00bcd4; font-weight: bold;">${authCode}</span></div>
                 </div>
 
-                <div style="margin-bottom: 60px; font-size: 14px;">
-                    <p><b>Local:</b> ${unidade}</p>
+                <div style="background: #ffffff; border: 1px solid #cbd5e1; padding: 20px; border-radius: 8px; margin-bottom: 25px; font-size: 14px; line-height: 1.6; text-align: justify;">
+                    Eu, <b>${nome}</b>, confirmo que recebi e compreendi o feedback referente à Avaliação de Desempenho identificada pelo protocolo <b>${authCode}</b>. <br><br>
+                    Declaro estar ciente das pontuações recebidas e dos pontos discutidos com a liderança para o meu desenvolvimento profissional na unidade <b>${unidade}</b>, estando de acordo com as orientações abaixo:
+                </div>
+
+                <div style="background: #f1f5f9; border-left: 4px solid #00bcd4; padding: 15px; border-radius: 4px; margin-bottom: 40px;">
+                    <b style="font-size: 12px; color: #002347; display: block; margin-bottom: 8px; text-transform: uppercase;">Considerações Finais e Acordos (Gestor):</b>
+                    <div style="font-size: 13px; color: #333; white-space: pre-wrap;">${txtConsideracoes}</div>
+                </div>
+
+                <div style="margin-bottom: 60px; font-size: 13px;">
+                    <p><b>Local do Aceite:</b> ${unidade}</p>
                     <p><b>Data do Aceite:</b> ${dataHoje}</p>
                 </div>
 
-                <div style="text-align: center; width: 100%; max-width: 400px; margin: 0 auto;">
-                    <img src="${assinaturaBase64}" style="height: 80px; max-width: 100%; border-bottom: 1px solid #333; padding-bottom: 5px; display: block; margin: 0 auto;">
-                    <p style="margin: 10px 0 0 0; font-size: 14px; font-weight: bold; color: #111;">${nome}</p>
-                    <p style="margin: 0; font-size: 12px; color: #666;">Assinatura Eletrônica do Colaborador</p>
+                <div style="display: flex; justify-content: space-between; align-items: flex-end;">
+                    <div style="text-align: center; width: 45%;">
+                        <div style="height: 60px; border-bottom: 1px solid #333; padding-bottom: 5px; width: 100%; display: flex; align-items: flex-end; justify-content: center; font-family: cursive; font-size: 16px; color: #002347;">Assinatura Eletrônica Registrada</div>
+                        <p style="margin: 10px 0 0 0; font-size: 13px; font-weight: bold; color: #111;">${usuarioAtual.nome}</p>
+                        <p style="margin: 0; font-size: 11px; color: #666;">Gestor Responsável</p>
+                    </div>
+                    <div style="text-align: center; width: 45%;">
+                        <img src="${assinaturaBase64}" style="height: 60px; max-width: 100%; border-bottom: 1px solid #333; padding-bottom: 5px; display: block; margin: 0 auto;">
+                        <p style="margin: 10px 0 0 0; font-size: 13px; font-weight: bold; color: #111;">${nome}</p>
+                        <p style="margin: 0; font-size: 11px; color: #666;">Assinatura do Colaborador</p>
+                    </div>
                 </div>
                 
-                <div style="margin-top: 80px; text-align: center; font-size: 10px; color: #999; border-top: 1px dashed #ccc; padding-top: 10px;">
-                    Documento gerado e assinado digitalmente através do sistema RH Soul Gestão Inteligente.
+                <div style="margin-top: 60px; text-align: center; font-size: 10px; color: #999; border-top: 1px dashed #ccc; padding-top: 10px;">
+                    Documento gerado e assinado digitalmente através do sistema RH Soul Gestão Inteligente. Vínculo garantido pelo Hash de Autenticação.
                 </div>
             </div>
         `;
 
-        // Joga pro DOM temporariamente
         const containerInvisivel = document.createElement('div');
         containerInvisivel.style.position = 'absolute'; containerInvisivel.style.top = '0'; containerInvisivel.style.left = '0'; containerInvisivel.style.zIndex = '-9999';
         containerInvisivel.innerHTML = templateTermoHtml;
         document.body.appendChild(containerInvisivel);
 
-        await new Promise(resolve => setTimeout(resolve, 300)); // Respiro de renderização
+        await new Promise(resolve => setTimeout(resolve, 300)); 
 
         const opt = {
             margin: [10, 10, 10, 10], 
-            filename: `Termo_Ciencia_${nome.replace(/ /g, '_')}.pdf`,
+            filename: `Termo_Feedback_${nome.replace(/ /g, '_')}.pdf`,
             image: { type: 'jpeg', quality: 0.98 },
             html2canvas: { scale: 2, logging: false, useCORS: true },
             jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
@@ -38449,24 +38467,22 @@ window.salvarAssinaturaDigitalDesempenho = async function(idAval, nome, unidade,
         const pdfWorker = await html2pdf().set(opt).from(document.getElementById('template-termo-assinatura-des')).outputPdf('blob');
         document.body.removeChild(containerInvisivel);
 
-        // Sobe para o Supabase
         const caminhoBase = `${formatarNomePasta(empresa)}/${formatarNomePasta(unidade)}/${formatarNomePasta(nome)}/Desempenho`;
-        const fileName = `${Date.now()}_Termo_Assinatura.pdf`;
+        const fileName = `${Date.now()}_Termo_Feedback_Assinado.pdf`;
         const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(`${caminhoBase}/${fileName}`, pdfWorker);
         
         if (uploadError) throw uploadError;
         const { data: publicUrlData } = supabaseClient.storage.from('documentos').getPublicUrl(`${caminhoBase}/${fileName}`);
 
-        // Atualiza a tabela pra Concluído
         await supabaseClient.from('avaliacoes_desempenho').update({
             status: 'Concluído',
             documento_assinado: publicUrlData.publicUrl
         }).eq('id', idAval);
 
-        mostrarAlerta("Assinatura coletada e certificado gerado com sucesso!", "sucesso");
+        mostrarAlerta("Feedback registrado e certificado gerado com sucesso!", "sucesso");
         document.getElementById('modal-assinar-tela-des').remove();
         
-        carregarDesempenhosConcluidos(); // Atualiza a tela
+        carregarDesempenhosConcluidos(); 
 
     } catch (e) {
         mostrarAlerta("Erro ao processar assinatura: " + e.message, "erro");
