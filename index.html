@@ -10468,21 +10468,28 @@ async function atualizarContador() {
     let countPendentes = 0; let countAusencias = 0; let countFTs = 0; let countTrocas = 0; let countAdv = 0; let countOco = 0; let countExp = 0; let countDoc = 0; let countFerias = 0; let countDes = 0;
     let pendentesData = null; let ausenciasPendentesData = null; let ftPendentesData = null; let trocasPendentesData = null; let advPendentesData = null; let ocoPendentesData = null; let expPendentesData = null; let docPendentesData = null; let feriasPendentesData = null; let desPendentesData = null;
 
-    // 👇 IDENTIFICA SE O PERFIL ATUAL TEM PODER DE APROVAÇÃO PELA CENTRAL 👇
+    // Identifica se o perfil atual tem permissão de acesso à Central
     const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.['tela-solicitacoes']?.visivel);
 
-    // Definição ÚNICA e segura da array de unidades permitidas para evitar erros de SyntaxError
+    // 👇 MÁGICA DA VISÃO GLOBAL REGIONAL: Calcula as unidades permitidas dinamicamente 👇
     let unidsFiltro = null;
     if (isAdmin) {
         unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
-    } else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        unidsFiltro = usuarioAtual.unidade.split(',').map(u => u.trim());
+    } else if (usuarioAtual.perfil === 'Gestor') {
+        if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
+            // 🌍 Super Gestor (Regional): Pega todas as unidades da(s) empresa(s) dele!
+            const empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
+            const { data: unisDoc } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor);
+            if (unisDoc) unidsFiltro = unisDoc.map(u => u.nome);
+        } else if (usuarioAtual.unidade) {
+            // Gestor Padrão: Restrito às suas unidades locais
+            unidsFiltro = usuarioAtual.unidade.split(',').map(u => u.trim());
+        }
     }
 
     if (podeAprovar) {
         if (notifFooter) notifFooter.style.display = isAdmin ? 'block' : 'none';
 
-        // Mapeia o array de filtros salvos nas configurações do usuário
         const p = usuarioAtual.permissoes?.recebe_solicitacoes || ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'OcorrenciaPlantao', 'AvaliacaoExp', 'ArquivoDigital', 'Ferias', 'AvaliacaoDesempenho'];
 
         let qP = p.includes('Admissao') || p.includes('Rescisao') 
@@ -10499,12 +10506,10 @@ async function atualizarContador() {
         let qFer = p.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('id, nome, unidade, data_inicio_ferias', { count: 'exact' }).eq('status', 'Pendente') : null;
         let qDes = p.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('id, nome_colaborador, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
 
-        // Filtro de segurança corporativo por empresa (Apenas para Administradores de fato)
         if (isAdmin && empresaSelecionadaFiltro !== 'Todas' && qP) {
             qP = qP.eq('empresa', empresaSelecionadaFiltro);
         }
 
-        // Aplica as travas de unidade de forma cruzada para Admin ou Gestor Autorizado
         if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
             if (qP && usuarioAtual.perfil === 'Gestor') qP = qP.in('unidade', unidsFiltro);
             if (qA) qA = qA.in('unidade', unidsFiltro);
@@ -10543,7 +10548,7 @@ async function atualizarContador() {
     }
 
     const dataLimite = new Date();
-    dataLimite.setDate(dataLimite.getDate() - 60); // 📅 JANELA DE 60 DIAS CONFIGURADA
+    dataLimite.setDate(dataLimite.getDate() - 60); 
     
     let queryNotifs = supabaseClient
         .from('notificacoes')
@@ -10570,7 +10575,6 @@ async function atualizarContador() {
             if(p_notif.includes('ArquivoDigital')) tiposPermitidos.push('Envio_Documento_Admin');
             if(p_notif.includes('AvaliacaoDesempenho')) tiposPermitidos.push('Avaliacao_Desempenho_Admin');
         } else {
-            // Roteamento inteligente de notificações na tela do Gestor com acesso à Central
             if(p_notif.includes('Admissao')) tiposPermitidos.push('Admissão', 'Contrato_Gestor', 'Admissão_Devolvida');
             if(p_notif.includes('Rescisao')) tiposPermitidos.push('Rescisão', 'Rescisão_Para_Assinar');
             if(p_notif.includes('Ausencia')) tiposPermitidos.push('Ausência');
@@ -10588,10 +10592,9 @@ async function atualizarContador() {
         if (unidsFiltro) {
             queryNotifs = queryNotifs.in('unidade', unidsFiltro);
         }
-    } else if (usuarioAtual.unidade) {
-        // Gestor padrão (Sem acesso à Central de Solicitações)
-        const unidadesGestor = usuarioAtual.unidade.split(',').map(u => u.trim());
-        queryNotifs = queryNotifs.in('unidade', unidadesGestor).in('tipo', ['Admissão', 'Contrato_Gestor', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Admissão_Devolvida', 'Lembrete_Prorrogacao', 'Avaliacao_Desempenho_Aprovada']);
+    } else if (unidsFiltro || usuarioAtual.unidade) {
+        const deOndeFiltrar = unidsFiltro || usuarioAtual.unidade.split(',').map(u => u.trim());
+        queryNotifs = queryNotifs.in('unidade', deOndeFiltrar).in('tipo', ['Admissão', 'Contrato_Gestor', 'Rescisão', 'Ausência', 'Rescisão_Para_Assinar', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Admissão_Devolvida', 'Lembrete_Prorrogacao', 'Avaliacao_Desempenho_Aprovada']);
     }
 
     const { data: notifsAprovadasDb } = await queryNotifs;
@@ -10605,10 +10608,8 @@ async function atualizarContador() {
     notificacoesGlobais = notifsAprovadas; 
     const naoLidas = notifsAprovadas.filter(n => !n.lida).length;
     
-    // 👇 CONTADOR GERAL ATUALIZADO COM OS NOVOS MÓDULOS
     totalNotifsNoSino = countPendentes + countAusencias + countFTs + countTrocas + countAdv + countExp + countOco + countDoc + countFerias + countDes + naoLidas;
     
-    // 👇 MOTOR DE SOM DE NOTIFICAÇÃO DO SISTEMA 👇
     if (totalNotifsNoSino > ultimoContadorSino && ultimoContadorSino !== 0) {
         try {
             if (window.somAtivo) {
@@ -10633,7 +10634,6 @@ async function atualizarContador() {
         badgeHeader.style.display = totalNotifsNoSino > 0 ? 'block' : 'none'; 
     }
 
-    // A LISTA DROPDOWN DO SINO
     if (totalNotifsNoSino > 0 || notifsAprovadas.length > 0 || (countPendentes + countAusencias + countFTs + countTrocas + countAdv + countExp + countDoc + countDes) > 0) {
         
         if (podeAprovar && (countPendentes > 0 || countAusencias > 0 || countFTs > 0 || countTrocas > 0 || countAdv > 0 || countFerias > 0 || countExp > 0 || countOco > 0 || countDoc > 0 || countDes > 0)) {
