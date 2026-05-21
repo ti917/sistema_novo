@@ -12464,17 +12464,19 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
     const { data: advData } = qAdv ? await qAdv : respVazia;
     const { data: expData } = qExp ? await qExp : respVazia;
     const { data: docData } = qDoc ? await qDoc : respVazia;
-    const { data: ferData } = qFer ? await qFer : respVazia;
+    const { data: ferData } = qFer ? await qFer : respVazia; 
     const { data: desData } = qDes ? await qDes : respVazia;
 
-    // Cole este trecho exatamente onde as listas de pendências são alimentadas (abaixo das outras checagens):
+    // 👇 A SOLUÇÃO DO BUG AQUI: Faz o mapeamento para os dois nomes funcionarem! 👇
+    const feriasData = ferData; 
+
     listaAdmissoesPendentes = perfisData || [];
     listaAusenciasPendentes = ausenciasData || []; 
     listaFTPendentes = ftData || []; 
     listaTrocasPendentes = trocasData || [];
     window.listaDocsPendentes = docData || [];
     window.listaFeriasPendentes = feriasData || []; 
-    window.listaDesempenhoPendentes = desData || []; // 👈 ADICIONADO: Guarda os dados na memória global
+    window.listaDesempenhoPendentes = desData || [];
     
     tbody.innerHTML = "";
 
@@ -12610,8 +12612,7 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
     if (desData && desData.length > 0) {
         desData.forEach(des => {
             const infoEnvio = formatarEnvio(des.criado_por, des.created_at);
-            // 🔄 ALTERADO: Agora chama a função 'verFichaDesempenhoPendente' para abrir o modal!
-            tbody.innerHTML += desenharLinha(des.nome_colaborador, 'fa-chart-line', '#00bcd4', 'Avaliação de Desempenho', 'Ciclo Trimestral Concluído', des.empresa, des.unidade, `verFichaDesempenhoPendente('${des.id}')`, infoEnvio);
+            tbody.innerHTML += desenharLinha(des.nome_colaborador, 'fa-chart-line', '#00bcd4', 'Avaliação de Desempenho', 'Ciclo Trimestral Concluído', des.empresa, des.unidade, `aprovarAvaliacaoDesempenho('${des.id}', '${des.colaborador_id}', '${des.nome_colaborador.replace(/'/g, "\\'")}')`, infoEnvio, 'fa-check', 'Aprovar e Liberar Impressão');
         });
     }
 
@@ -38197,6 +38198,36 @@ window.carregarDesempenhosConcluidos = async function() {
     container.innerHTML = html;
 };
 
+// ==========================================
+// APROVAÇÃO PELA CENTRAL DE SOLICITAÇÕES
+// ==========================================
+// A função de Aprovar do Admin que está na Central
+window.aprovarAvaliacaoDesempenho = async function(idAvaliacao, idColab, nomeColab) {
+    const confirmado = await mostrarConfirmacao("Deseja aprovar e liberar esta Avaliação de Desempenho para o Gestor imprimir?", "Aprovar Avaliação");
+    if (!confirmado) return;
+
+    try {
+        await supabaseClient.from('avaliacoes_desempenho').update({ status: 'Aprovado' }).eq('id', idAvaliacao);
+        
+        // Notifica o Gestor que a ficha dele tá pronta para imprimir
+        const { data: aval } = await supabaseClient.from('avaliacoes_desempenho').select('unidade').eq('id', idAvaliacao).single();
+        
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: `Avaliação de Desempenho Liberada: ${nomeColab}`, unidade: aval.unidade,
+            lida: false, tipo: 'Avaliacao_Desempenho_Aprovada', referencia_id: idAvaliacao
+        }]);
+
+        // Limpa Notificação da Central
+        await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome }).eq('referencia_id', idAvaliacao).eq('tipo', 'Avaliacao_Desempenho_Admin');
+
+        mostrarAlerta("Avaliação aprovada e liberada para o Gestor!", "sucesso");
+        listarSolicitacoes();
+        atualizarContador();
+    } catch(e) {
+        mostrarAlerta("Erro ao aprovar.", "erro");
+    }
+};
+
       window.calcularClassificacaoDesempenho = function() {
     const radios = document.querySelectorAll('#form-salvar-desempenho input[type="radio"]:checked');
     if (radios.length === 0) return;
@@ -38240,133 +38271,6 @@ window.carregarDesempenhosConcluidos = async function() {
     } else {
         display.innerHTML = '<span style="color: #dc3545;"><i class="fa-solid fa-face-frown"></i> INSATISFATÓRIO</span>';
         inputHidden.value = 'INSATISFATÓRIO';
-    }
-};
-
-      // =========================================================
-// PANEL DE AUDITORIA DE AVALIAÇÃO DE DESEMPENHO (ADMIN)
-// =========================================================
-window.verFichaDesempenhoPendente = function(idStr) {
-    const des = window.listaDesempenhoPendentes.find(d => String(d.id) === String(idStr));
-    if(!des) return;
-
-    let pontosTexto = des.pontos_melhorar || '';
-    let classificacaoBadge = '';
-
-    // Detetive: Extrai a classificação do texto se estiver embutida lá
-    if (pontosTexto.includes('[CLASSIFICAÇÃO:')) {
-        const partes = pontosTexto.split('] \n\n');
-        const classeNome = partes[0].replace('[CLASSIFICAÇÃO: ', '');
-        pontosTexto = partes[1] || '';
-        
-        let corBadge = '#28a745';
-        if (classeNome === 'SATISFATÓRIO') corBadge = '#ff9800';
-        if (classeNome === 'INSATISFATÓRIO') corBadge = '#dc3545';
-        
-        classificacaoBadge = `
-            <div style="background: ${corBadge}15; padding: 12px; border-radius: 8px; border: 1px dashed ${corBadge}; margin-top: 10px;">
-                <small style="color:var(--cor-texto-secundario); font-weight:bold;">CLASSIFICAÇÃO DO GESTOR:</small><br>
-                <strong style="color: ${corBadge}; font-size: 1.15rem; text-transform:uppercase;">${classeNome}</strong>
-            </div>`;
-    }
-
-    const modalHtml = `
-    <div id="modal-ficha-desempenho" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 550px; border: 1px solid #00bcd4; position: relative;">
-            <button onclick="document.getElementById('modal-ficha-desempenho').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
-
-            <h3 style="color: #00bcd4; margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;">
-                <i class="fa-solid fa-chart-line"></i> Analisar Avaliação Trimestral
-            </h3>
-
-            <div style="background: rgba(0, 188, 212, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #00bcd4; margin-bottom: 15px;">
-                <small style="color:var(--cor-texto-secundario)">COLABORADOR:</small><br>
-                <b style="font-size:1.15rem; color:#fff">${des.nome_colaborador}</b><br>
-                <span style="color: var(--cor-texto-secundario); font-size:0.85rem;">Unidade: <b>${des.unidade}</b> | Cargo: <b>${des.cargo || '-'}</b></span>
-                ${classificacaoBadge}
-            </div>
-
-            <div style="background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda); margin-bottom: 20px;">
-                <small style="color:var(--cor-texto-secundario)">PONTOS A MELHORAR OBSERVADOS:</small><br>
-                <span style="font-size: 0.95rem; color: var(--cor-texto-principal); white-space: pre-wrap; font-style: italic;">"${pontosTexto || 'Nenhum ponto relatado.'}"</span>
-            </div>
-
-            <div style="text-align: center; margin-bottom: 25px;">
-                <a href="${des.documento}" target="_blank" class="btn-secondary" style="width: 100%; justify-content: center; border-color: #00bcd4; color: #00bcd4; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; height: 45px;"><i class="fa-solid fa-file-pdf"></i> Visualizar Documento PDF Prontuário</a>
-            </div>
-
-            <div style="display: flex; gap: 10px;">
-                <button class="btn-success" style="flex: 2; height: 50px; font-weight: bold; background-color: #00bcd4; color: #000; border: none;" onclick="aprovarDesempenhoPeloModal('${des.id}', '${des.colaborador_id}', '${des.nome_colaborador.replace(/'/g, "\\'")}')">
-                    <i class="fa-solid fa-check"></i> APROVAR E LIBERAR IMPRESSÃO
-                </button>
-                <button class="btn-danger-mini" style="flex: 1; height: 50px; color: white; border: 1px solid var(--cor-borda);" onclick="reprovarDesempenhoPeloModal('${des.id}', '${des.colaborador_id}', '${des.documento}')">
-                    <i class="fa-solid fa-arrow-rotate-left"></i> RECUSAR
-                </button>
-            </div>
-        </div>
-    </div>`;
-    document.body.insertAdjacentHTML('beforeend', modalHtml);
-};
-
-// APROVAÇÃO POR DENTRO DO MODAL
-window.aprovarDesempenhoPeloModal = async function(idAvaliacao, idColab, nomeColab) {
-    const btn = document.querySelector('#modal-ficha-desempenho .btn-success');
-    btn.innerText = "Processando liberação..."; btn.disabled = true;
-    
-    try {
-        await supabaseClient.from('avaliacoes_desempenho').update({ status: 'Aprovado' }).eq('id', idAvaliacao);
-        const { data: aval } = await supabaseClient.from('avaliacoes_desempenho').select('unidade').eq('id', idAvaliacao).single();
-        
-        // Notifica o Gestor que a ficha foi liberada no painel dele para impressão física
-        await supabaseClient.from('notificacoes').insert([{
-            colaborador_id: idColab, nome: `Avaliação de Desempenho Liberada: ${nomeColab}`, unidade: aval.unidade,
-            lida: false, tipo: 'Avaliacao_Desempenho_Aprovada', referencia_id: idAvaliacao
-        }]);
-
-        await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome }).eq('referencia_id', idAvaliacao).eq('tipo', 'Avaliacao_Desempenho_Admin');
-
-        document.getElementById('modal-ficha-desempenho').remove();
-        mostrarAlerta("Avaliação homologada com sucesso! O Gestor já pode efetuar a impressão.", "sucesso");
-        listarSolicitacoes();
-        atualizarContador();
-    } catch(e) {
-        mostrarAlerta("Erro ao aprovar.", "erro");
-        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR E LIBERAR IMPRESSÃO`; btn.disabled = false;
-    }
-};
-
-// RECUSA POR DENTRO DO MODAL (Limpa tudo para o Gestor refazer do zero)
-window.reprovarDesempenhoPeloModal = async function(idAvaliacao, idColab, urlDocumento) {
-    const confirmado = await mostrarConfirmacao("Deseja reprovar este lançamento? O arquivo de PDF antigo será deletado e o ciclo voltará a constar pendente para o Gestor refazer.", "Recusar Lançamento");
-    if (!confirmado) return;
-
-    try {
-        // 1. Apaga a trava do ciclo no perfil do colaborador para re-viger a pendência
-        const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
-        if (perfil) {
-            let adm = perfil.dados_admissao || {};
-            delete adm.ultima_aval_desempenho; // Remove o carimbo de data
-            await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
-        }
-
-        // 2. Remove o PDF do Storage da nuvem
-        if (urlDocumento) {
-            const partes = urlDocumento.split('/storage/v1/object/public/documentos/');
-            if (partes.length > 1) {
-                await supabaseClient.storage.from('documentos').remove([decodeURIComponent(partes[1])]);
-            }
-        }
-
-        // 3. Limpa as tabelas
-        await supabaseClient.from('notificacoes').delete().eq('referencia_id', idAvaliacao);
-        await supabaseClient.from('avaliacoes_desempenho').delete().eq('id', idAvaliacao);
-
-        document.getElementById('modal-ficha-desempenho').remove();
-        mostrarAlerta("Lançamento cancelado! O processo retornou para o Gestor.", "sucesso");
-        listarSolicitacoes();
-        atualizarContador();
-    } catch(e) {
-        mostrarAlerta("Erro ao cancelar: " + e.message, "erro");
     }
 };
       
