@@ -38083,41 +38083,162 @@ window.visualizarDocumentoAvulsoMontado = function(idDocumento) {
 };
 
 // =========================================================
-// O EXPORTADOR DO PDF (COM REGRAS EXTRAS PARA O MOTOR DE RENDERIZAÇÃO)
+// O EXPORTADOR DO PDF (BLINDADO COM ESCRITA NATIVA JSPDF)
 // =========================================================
 window.baixarPdfDocumentoAvulso = async function(id, nome) {
     const btn = document.getElementById('btn-baixar-pdf-avulso');
     const textoOriginal = btn.innerHTML;
     
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF Seguro...';
     btn.disabled = true;
 
-    const elementoParaImprimir = document.getElementById(`folha-a4-avulso-${id}`);
-    
-    // 👇 VACINA 3: Parâmetros extras no html2canvas para forçar a leitura correta das letras 👇
-    const opt = {
-        margin: [15, 15, 15, 15], 
-        filename: `Documento_Assinado_${nome.replace(/ /g, '_')}.pdf`,
-        image: { type: 'jpeg', quality: 1 },
-        html2canvas: { 
-            scale: 2, 
-            logging: false, 
-            useCORS: true, 
-            allowTaint: true,
-            letterRendering: true, // Força um cálculo letra por letra, evitando sobreposição
-            windowWidth: 794 // Trava a resolução em tamanho A4 exato
-        },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-    };
-
     try {
-        // Rola a tela pro topo para garantir que o html2canvas não corte a página no meio
-        const scrollAnterior = window.scrollY;
-        window.scrollTo(0, 0);
+        // 1. Puxa o documento da memória
+        const doc = window.dadosAvulsosAtuais.find(d => d.id === id);
+        if (!doc) throw new Error("Documento não encontrado na memória.");
 
-        await html2pdf().set(opt).from(elementoParaImprimir).save();
+        // 2. Extrai os dados
+        const titulo = (doc.titulo_documento || doc.titulo).toUpperCase();
+        const nomeColab = doc.nome_colaborador || doc.nome;
+        const cpf = doc.cpf || 'Não informado';
+        const dataAssinatura = doc.assinado_em 
+            ? new Date(doc.assinado_em).toLocaleDateString('pt-BR') + ' às ' + new Date(doc.assinado_em).toLocaleTimeString('pt-BR', {hour: '2-digit', minute:'2-digit'}) 
+            : 'Data não registrada';
+        const token = doc.token || 'Sem token';
+        const imgAssinaturaBase64 = doc.documento_pdf; // O Canvas do colaborador salva aqui!
 
-        window.scrollTo(0, scrollAnterior);
+        // URL da Logo
+        let urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/logo%20soul.png'; 
+        if (doc.empresa && doc.empresa.trim().toUpperCase().includes('VILLAC')) {
+            urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
+        }
+
+        // 3. Inicializa o jsPDF (Modo Retrato, Milímetros, A4)
+        const { jsPDF } = window.jspdf;
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        
+        let cursorY = 20; // Posição vertical inicial no PDF
+        const margemEsq = 20;
+        const larguraMaxima = 170; // 210mm (A4) - 40mm de margens
+
+        // --- FUNÇÃO AUXILIAR PARA ADICIONAR IMAGEM ---
+        const addImageToPdf = async (url, x, y, width, height) => {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                img.onload = function() {
+                    pdf.addImage(img, 'PNG', x, y, width, height);
+                    resolve();
+                };
+                img.onerror = function() { resolve(); }; // Se der erro na imagem, continua o PDF
+                img.src = url;
+            });
+        };
+
+        // 4. Injeta a Logo Centralizada
+        const logoWidth = 35;
+        const logoHeight = 15;
+        const xLogo = (210 - logoWidth) / 2; // Centraliza a logo no A4
+        await addImageToPdf(urlLogoReal, xLogo, cursorY, logoWidth, logoHeight);
+        cursorY += logoHeight + 10;
+
+        // 5. Injeta o Título
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(14);
+        pdf.setTextColor(0, 35, 71); // Cor #002347
+        
+        // Quebra o título se for muito grande para ficar no meio
+        const linhasTitulo = pdf.splitTextToSize(titulo, larguraMaxima);
+        linhasTitulo.forEach(linha => {
+            const xTitulo = (210 - pdf.getStringUnitWidth(linha) * pdf.internal.getFontSize() / pdf.internal.scaleFactor) / 2;
+            pdf.text(linha, xTitulo, cursorY);
+            cursorY += 8;
+        });
+        
+        cursorY += 10; // Espaço após o título
+
+        // 6. Injeta o Texto Principal (Parágrafo por Parágrafo)
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(11);
+        pdf.setTextColor(0, 0, 0);
+
+        const paragrafos = doc.conteudo_texto.replace(/\r\n/g, '\n').split('\n');
+
+        paragrafos.forEach(paragrafo => {
+            if (paragrafo.trim() === '') {
+                cursorY += 5; // Pulo de linha (Enter)
+            } else {
+                // A MÁGICA: O splitTextToSize quebra a string no limite da margem perfeitamente
+                const linhasTexto = pdf.splitTextToSize(paragrafo, larguraMaxima);
+                
+                // Se o texto for vazar a página, cria uma nova
+                if (cursorY + (linhasTexto.length * 6) > 280) {
+                    pdf.addPage();
+                    cursorY = 20;
+                }
+
+                pdf.text(linhasTexto, margemEsq, cursorY, { align: 'justify', maxWidth: larguraMaxima });
+                cursorY += (linhasTexto.length * 6) + 4; // Avança o cursor Y de acordo com a qtd de linhas geradas
+            }
+        });
+
+        cursorY += 20; // Espaço antes da assinatura
+
+        // 7. Se a assinatura não couber nesta página, joga pra próxima
+        if (cursorY + 60 > 280) {
+            pdf.addPage();
+            cursorY = 30;
+        }
+
+        // 8. Bloco de Assinatura
+        const centroPagina = 210 / 2;
+
+        if (imgAssinaturaBase64) {
+            const assWidth = 50;
+            const assHeight = 20;
+            await addImageToPdf(imgAssinaturaBase64, centroPagina - (assWidth / 2), cursorY, assWidth, assHeight);
+            cursorY += assHeight + 2;
+        } else {
+            cursorY += 15;
+        }
+
+        // Linha da Assinatura
+        pdf.setDrawColor(0);
+        pdf.setLineWidth(0.5);
+        pdf.line(centroPagina - 35, cursorY, centroPagina + 35, cursorY);
+        cursorY += 5;
+
+        // Nome e CPF
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(11);
+        let xNome = (210 - pdf.getStringUnitWidth(nomeColab) * pdf.internal.getFontSize() / pdf.internal.scaleFactor) / 2;
+        pdf.text(nomeColab, xNome, cursorY);
+        
+        cursorY += 5;
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(9);
+        pdf.setTextColor(85, 85, 85);
+        const txtCPF = `CPF: ${cpf}`;
+        let xCpf = (210 - pdf.getStringUnitWidth(txtCPF) * pdf.internal.getFontSize() / pdf.internal.scaleFactor) / 2;
+        pdf.text(txtCPF, xCpf, cursorY);
+
+        // Data e Token
+        cursorY += 8;
+        pdf.setFontSize(8);
+        pdf.setTextColor(136, 136, 136); // #888
+        
+        const txtData = `Assinado digitalmente em: ${dataAssinatura}`;
+        let xData = (210 - pdf.getStringUnitWidth(txtData) * pdf.internal.getFontSize() / pdf.internal.scaleFactor) / 2;
+        pdf.text(txtData, xData, cursorY);
+        
+        cursorY += 4;
+        const txtToken = `Hash/Token de Validação: ${token}`;
+        let xToken = (210 - pdf.getStringUnitWidth(txtToken) * pdf.internal.getFontSize() / pdf.internal.scaleFactor) / 2;
+        pdf.text(txtToken, xToken, cursorY);
+
+        // 9. Salva o Arquivo!
+        pdf.save(`Documento_Assinado_${nome.replace(/ /g, '_')}.pdf`);
+
     } catch (e) {
         mostrarAlerta("Erro ao gerar o PDF: " + e.message, "erro");
     } finally {
