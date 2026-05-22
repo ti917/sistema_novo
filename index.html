@@ -37705,8 +37705,6 @@ window.atualizarStatusOrcamento = async function(id, novoStatus) {
 // MÁGICAS DO ACOMPANHAMENTO DE DOCUMENTOS AVULSOS
 // =========================================================
 
-window.dadosAvulsosAtuais = [];
-
 window.toggleGeradorAvulso = function() {
     const container = document.getElementById('container-gerador-avulso');
     const btn = document.getElementById('btn-toggle-gerador-avulso');
@@ -37727,33 +37725,57 @@ window.toggleGeradorAvulso = function() {
     }
 };
 
+// =========================================================
+// MÁGICAS DO ACOMPANHAMENTO DE DOCUMENTOS AVULSOS (CORRIGIDO)
+// =========================================================
+
+window.dadosAvulsosAtuais = [];
+
 window.carregarStatusAvulsos = async function() {
     const empresa = document.getElementById('zap-avulso-empresa').value;
     const lista = document.getElementById('lista-status-avulsos');
     const selectUniFiltro = document.getElementById('filtro-unidade-avulso');
-    
+
     if(!empresa) return;
 
     lista.innerHTML = '<p style="text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Buscando documentos...</p>';
     window.dadosAvulsosAtuais = [];
 
-    const { data } = await supabaseClient.from('documentos_avulsos')
+    // MÁGICA 1: Se a empresa for "SOUL GESTÃO", buscamos também por "SOUL" para evitar que divergências sumam com as linhas!
+    let listaEmpresasBusca = [empresa];
+    if (empresa === 'SOUL GESTÃO') listaEmpresasBusca.push('SOUL');
+    if (empresa === 'SOUL') listaEmpresasBusca.push('SOUL GESTÃO');
+
+    const { data, error } = await supabaseClient.from('documentos_avulsos')
         .select('*')
-        .eq('empresa', empresa)
+        .in('empresa', listaEmpresasBusca)
         .order('created_at', { ascending: false });
+
+    if (error) {
+        console.error("Erro ao carregar avulsos:", error);
+        lista.innerHTML = '<p style="text-align:center; color:var(--cor-perigo);">Erro ao carregar os dados.</p>';
+        return;
+    }
 
     window.dadosAvulsosAtuais = data || [];
 
     // Preenche o Select de filtro de unidades dinamicamente baseado nos dados que voltaram
-    if (selectUniFiltro && data) {
-        const unidadesUnicas = [...new Set(data.map(d => d.unidade))].filter(Boolean).sort();
-        let optUni = '<option value="Todas">Todas as Unidades</option>';
-        unidadesUnicas.forEach(u => optUni += `<option value="${u}">${u}</option>`);
-        selectUniFiltro.innerHTML = optUni;
+    if (selectUniFiltro) {
+        const unidadesUnicas = [...new Set(window.dadosAvulsosAtuais.map(d => d.unidade))].filter(Boolean).sort();
+        let GlenOptions = '<option value="Todas">Todas as Unidades</option>';
+        unidadesUnicas.forEach(u => GlenOptions += `<option value="${u}">${u}</option>`);
+        selectUniFiltro.innerHTML = GlenOptions;
+        selectUniFiltro.value = "Todas"; // Cravado para não bugar o estado do componente
     }
+
+    // Limpa o campo de texto de busca para alinhar com o estado limpo
+    const buscaInput = document.getElementById('busca-avulso-status');
+    if (buscaInput) buscaInput.value = '';
     
-    document.getElementById('busca-avulso-status').value = '';
-    filtrarStatusAvulsosVisual();
+    const statusInput = document.getElementById('filtro-status-avulso');
+    if (statusInput) statusInput.value = 'Todos';
+
+    window.filtrarStatusAvulsosVisual();
 };
 
 window.filtrarStatusAvulsosVisual = function() {
@@ -37772,14 +37794,32 @@ window.filtrarStatusAvulsosVisual = function() {
 
     // Filtra cruzado: Título/Nome, Status e Unidade
     const filtrados = window.dadosAvulsosAtuais.filter(r => {
-        const matchTexto = window.removerAcentos(r.nome_colaborador).includes(termo) || 
-                           window.removerAcentos(r.titulo_documento || '').includes(termo);
+        // Redundância defensiva para o motor de busca (aceita colunas novas e antigas)
+        const nomeColab = r.nome_colaborador || r.nome || '';
+        const tituloDoc = r.titulo_documento || r.titulo || '';
+
+        const matchTexto = window.removerAcentos(nomeColab).includes(termo) || 
+                           window.removerAcentos(tituloDoc).includes(termo);
                            
         const matchStatus = statusFiltro === 'Todos' || (r.status || 'Pendente') === statusFiltro;
         const matchUnidade = uniFiltro === 'Todas' || r.unidade === uniFiltro;
         
         return matchTexto && matchStatus && matchUnidade;
     });
+
+    // Atualiza os contadores baseados na lista filtrada real da tela
+    const total = filtrados.length;
+    const assinados = filtrados.filter(r => (r.status || 'Pendente') === 'Assinado').length;
+    const pendentes = total - assinados;
+
+    document.getElementById('count-avulso-total').innerText = total;
+    document.getElementById('count-avulso-assinados').innerText = assinados;
+    document.getElementById('count-avulso-pendentes').innerText = pendentes;
+
+    if (filtrados.length === 0) {
+        lista.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">Nenhum documento encontrado com esses filtros.</p>';
+        return;
+    }
 
     let html = '';
     filtrados.forEach(r => {
@@ -37790,26 +37830,34 @@ window.filtrarStatusAvulsosVisual = function() {
         let corFundoCard = isAssinado ? 'rgba(40, 167, 69, 0.05)' : 'rgba(255, 152, 0, 0.05)';
         let iconeStatus = isAssinado ? 'fa-check-double' : 'fa-clock';
         
+        // Tratamento de segurança para renderizar os textos (evita travar como undefined se a coluna for antiga)
+        const nomeFinal = r.nome_colaborador || r.nome || 'Não Identificado';
+        const tituloFinal = r.titulo_documento || r.titulo || 'Documento Avulso';
+        
         // Formata a data de envio
         let dataEnvio = r.created_at ? new Date(r.created_at).toLocaleDateString('pt-BR') : '-';
         
         let pdfBtn = r.documento_pdf ? `<a href="${r.documento_pdf}" target="_blank" class="badge" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration:none; padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#28a745'; this.style.color='#fff'" onmouseout="this.style.background='rgba(40,167,69,0.1)'; this.style.color='#28a745'"><i class="fa-solid fa-file-signature"></i> Ver Documento Assinado</a>` : '';
         
-        let btnReenviar = statusAtual === 'Pendente' ? `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-color: #25D366; color: #25D366; border-radius: 6px;" onclick="reenviarUnicoAvulso('${r.colaborador_id}', '${r.nome_colaborador}', '${r.titulo_documento}', '${r.token}')"><i class="fa-brands fa-whatsapp"></i> Reenviar Cobrança</button>` : '';
+        // Sanitização de aspas simples para os parâmetros do clique do botão de cobrança
+        const nomeEscape = nomeFinal.replace(/'/g, "\\'");
+        const tituloEscape = tituloFinal.replace(/'/g, "\\'");
+
+        let btnReenviar = statusAtual === 'Pendente' ? `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-color: #25D366; color: #25D366; border-radius: 6px;" onclick="reenviarUnicoAvulso('${r.colaborador_id}', '${nomeEscape}', '${tituloEscape}', '${r.token}')"><i class="fa-brands fa-whatsapp"></i> Reenviar Cobrança</button>` : '';
         
         let btnLixeira = `<button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; margin-left: 5px;" onclick="excluirDocumentoAvulso('${r.id}')" title="Apagar Histórico"><i class="fa-solid fa-trash"></i></button>`;
 
         html += `
             <div class="admissao-card" style="background: ${corFundoCard}; border-left: 4px solid ${corStatus}; border-top: 1px solid var(--cor-borda); border-right: 1px solid var(--cor-borda); border-bottom: 1px solid var(--cor-borda); padding: 15px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; transition: all 0.2s ease-in-out; margin-bottom: 5px; flex-wrap: wrap; gap: 10px;">
                 <div style="flex: 1; min-width: 250px;">
-                    <strong style="color: #4fc3f7; display: block; font-size: 1.1rem; margin-bottom: 5px;"><i class="fa-solid fa-file-contract" style="margin-right: 5px;"></i> ${r.titulo_documento}</strong>
+                    <strong style="color: #4fc3f7; display: block; font-size: 1.1rem; margin-bottom: 5px;"><i class="fa-solid fa-file-contract" style="margin-right: 5px;"></i> ${tituloFinal}</strong>
                     
                     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                         <span style="color: var(--cor-texto-principal); font-size: 0.9rem; font-weight: bold;">
-                            <i class="fa-solid fa-user" style="color: var(--cor-texto-secundario);"></i> ${r.nome_colaborador}
+                            <i class="fa-solid fa-user" style="color: var(--cor-texto-secundario);"></i> ${nomeFinal}
                         </span>
                         <span style="color: var(--cor-texto-secundario); font-size: 0.8rem; background: rgba(0,0,0,0.3); padding: 3px 8px; border-radius: 4px;">
-                            <i class="fa-solid fa-building"></i> ${r.unidade}
+                            <i class="fa-solid fa-building"></i> ${r.unidade || '-'}
                         </span>
                         <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">
                             Enviado dia: ${dataEnvio}
@@ -37830,16 +37878,7 @@ window.filtrarStatusAvulsosVisual = function() {
         `;
     });
 
-    lista.innerHTML = html || '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">Nenhum documento encontrado com esses filtros.</p>';
-
-    // Atualiza os contadores baseados apenas no que o usuário está vendo na tela
-    const total = filtrados.length;
-    const assinados = filtrados.filter(r => (r.status || 'Pendente') === 'Assinado').length;
-    const pendentes = total - assinados;
-
-    document.getElementById('count-avulso-total').innerText = total;
-    document.getElementById('count-avulso-assinados').innerText = assinados;
-    document.getElementById('count-avulso-pendentes').innerText = pendentes;
+    lista.innerHTML = html;
 };
 
 // Função para reenviar o alerta
