@@ -32326,10 +32326,7 @@ window.filtrarTabelaDocs = function() {
     }
 }
 
-        // ==========================================
-// FUNÇÃO: COBRANÇA EM MASSA NO WHATSAPP
-// ==========================================
-window.reenviarParaTodosPendentes = async function() {
+        window.reenviarParaTodosPendentes = async function() {
     if (!pendentesAtuaisFiltro || pendentesAtuaisFiltro.length === 0) return;
 
     const confirmado = await mostrarConfirmacao(`Atenção: Você vai disparar mensagens no WhatsApp para <b>${pendentesAtuaisFiltro.length}</b> pessoas cobrando a assinatura. Deseja continuar?`, "Cobrança em Massa");
@@ -32337,45 +32334,86 @@ window.reenviarParaTodosPendentes = async function() {
 
     const btn = document.getElementById('btn-reenviar-todos');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando cobranças...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando cobranças (Modo Turbo)...';
 
-    mostrarAlerta("Iniciando envios em massa. Por favor, aguarde...", "aviso");
+    mostrarAlerta("Iniciando envios em massa (Modo Turbo). Por favor, abra o painel e aguarde...", "aviso");
 
     let enviados = 0;
+    let falhas = 0;
+    const tamanhoLote = 10; // 👇 MOTOR TURBO: Processa de 10 em 10 simultaneamente
 
-    for (let doc of pendentesAtuaisFiltro) {
-        try {
-            // Busca o telefone do cara no banco na hora
-            const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', doc.colaborador_id).single();
-            const fone = perfil?.dados_admissao?.telefone;
+    try {
+        // Otimização: Coleta os IDs únicos e busca os telefones de uma vez só no banco
+        const idsColabs = [...new Set(pendentesAtuaisFiltro.map(p => p.colaborador_id))];
+        const { data: perfis, error } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsColabs);
 
-            if (fone) {
-                const primeiroNome = doc.nome.split(' ')[0];
-                
-                // Dispara usando a API (com o Token e o PDF corretos)
-                const sucesso = await enviarMensagemGraphAPI(
-                    fone, 
-                    'envio_de_holerite_sistema_novo', 
-                    [primeiroNome, doc.tipo_documento, doc.mes_ano], 
-                    doc.documento_pdf,                  
-                    doc.token                        
-                );
-                
-                if (sucesso) enviados++;
-                
-                // Trava de 1 segundo entre envios para a Meta não dar block de Spam!
-                await new Promise(r => setTimeout(r, 1000)); 
+        if (error || !perfis) throw new Error("Erro ao buscar dados dos colaboradores.");
+
+        // Loop em lotes paralelos de 10
+        for (let i = 0; i < pendentesAtuaisFiltro.length; i += tamanhoLote) {
+            const loteAtual = pendentesAtuaisFiltro.slice(i, i + tamanhoLote);
+
+            const promessasLote = loteAtual.map(async (doc) => {
+                try {
+                    const perfil = perfis.find(x => x.id === doc.colaborador_id);
+                    const fone = perfil?.dados_admissao?.telefone || doc.telefone;
+
+                    if (!fone) return false;
+
+                    const primeiroNome = doc.nome.split(' ')[0];
+                    let sucesso = false;
+
+                    if (doc.tipo_documento === 'Informe de Rendimentos') {
+                        const anoRef = doc.mes_ano.split('/')[1] || doc.mes_ano;
+                        sucesso = await enviarMensagemGraphAPI(
+                            fone, 
+                            'informe_rendimentos_entregue', 
+                            [primeiroNome, anoRef], 
+                            doc.documento_pdf, 
+                            null
+                        );
+                    } else {
+                        // Converte o mês numérico para extenso (Ex: "05/2026" -> "Maio de 2026")
+                        const partes = doc.mes_ano.split('/');
+                        const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'DEZEMBRO'];
+                        const mesNomeAno = partes.length === 2 ? `${mesesExtenso[parseInt(partes[0]) - 1]} de ${partes[1]}` : doc.mes_ano;
+
+                        sucesso = await enviarMensagemGraphAPI(
+                            fone, 
+                            'envio_de_holerite_sistema_novo', 
+                            [primeiroNome, doc.tipo_documento, mesNomeAno], 
+                            doc.documento_pdf,                  
+                            doc.token                        
+                        );
+                    }
+                    return sucesso;
+                } catch (e) {
+                    return false;
+                }
+            });
+
+            // Executa os 10 disparos do lote ao mesmo tempo!
+            const resultados = await Promise.all(promessasLote);
+            resultados.forEach(ok => { if (ok) enviados++; else falhas++; });
+
+            // Descansa 1 segundo entre os lotes (Escudo Anti-Spam exigido pela Meta)
+            if (i + tamanhoLote < pendentesAtuaisFiltro.length) {
+                await new Promise(r => setTimeout(r, 1000));
             }
-        } catch (err) {
-            console.error(`Erro ao reenviar para ${doc.nome}:`, err);
         }
-    }
 
-    mostrarAlerta(`Cobrança em massa concluída!<br><b>${enviados}</b> mensagens enviadas com sucesso.`, "sucesso");
-    
-    // Devolve o botão ao normal
-    btn.disabled = false;
-    btn.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar ${pendentesAtuaisFiltro.length} Pendente(s) no Zap`;
+        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        
+        // Recarrega o status do dashboard
+        if (typeof carregarStatusHolerites === 'function') carregarStatusHolerites();
+
+    } catch (err) {
+        mostrarAlerta("Erro durante o processo em massa: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-brands fa-whatsapp fa-lg"></i> Cobrar Todos no Zap`;
+        if (typeof filtrarTabelaDocs === 'function') filtrarTabelaDocs();
+    }
 };
 
         window.excluirDocumento = async function(idDocumento, urlPdfOriginal, urlPdfAssinado) {
