@@ -14052,6 +14052,8 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const { data: ftsAprovadas } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
             const { data: feriasAprovadas } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
             const { data: ocorrenciasPonto } = await supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes);
+            // 👇 A MÁGICA: Busca as Ocorrências Operacionais (Atrasos, Postura, etc) 👇
+            const { data: ocorrenciasPlantao } = await supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes);
 
             if(!colaboradores || colaboradores.length === 0){
                 containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador encontrado para este mês.</p>';
@@ -14059,7 +14061,8 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
 
             const ocorrenciasMescladas = [...(ausenciasAprovadas || []), ...(ftsAprovadas || [])];
-            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || []);
+            // 👇 Adiciona o novo array no final dos parâmetros da função 👇
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || [], ocorrenciasPlantao || []);
 
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
             
@@ -14087,13 +14090,16 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     }
 };
         
-     function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = [], listaFerias = []) {
+    // ==========================================
+// CÉREBRO GERADOR DA ESCALA (ALGORITMO)
+// ==========================================
+function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = [], listaFerias = [], listaOcorrenciasPlantao = []) {
     const partes = mesAno.split('-');
     const ano = parseInt(partes[0]);
     const mes = parseInt(partes[1]) - 1; 
     const diasNoMes = new Date(ano, mes + 1, 0).getDate();
     const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
-         const feriadosNacionais = window.obterFeriadosNacionais(ano);
+    const feriadosNacionais = window.obterFeriadosNacionais(ano);
 
     let novaEscala = [];
 
@@ -14106,11 +14112,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
         let mapaInssCID = {}; // Guardará: { '2026-05-10': 'ATM', '2026-05-20': 'AF' }
 
         if (ausenciasDoColab.length > 0) {
-            // Agrupa por CID
             let cidsUnicos = [...new Set(ausenciasDoColab.map(a => a.cid).filter(Boolean))];
 
             cidsUnicos.forEach(cid => {
-                // Ordena os atestados desse CID cronologicamente
                 let atestadosCid = ausenciasDoColab.filter(a => a.cid === cid).sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
 
                 let diasAcumulados = 0;
@@ -14120,7 +14124,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     let dIni = new Date(atestado.data_inicio + 'T00:00:00');
                     let dFim = new Date(atestado.data_fim + 'T00:00:00');
 
-                    // Regra dos 60 dias: Se passou 60 dias desde o FIM do último atestado desse CID, a contagem zera
                     if (ultimaDataFim) {
                         let diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
                         if (diffParaUltimo > 60) {
@@ -14128,13 +14131,11 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                         }
                     }
 
-                    // Somatória diária
                     let tempD = new Date(dIni);
                     while (tempD <= dFim) {
                         diasAcumulados++;
                         let isoStr = `${tempD.getFullYear()}-${String(tempD.getMonth() + 1).padStart(2, '0')}-${String(tempD.getDate()).padStart(2, '0')}`;
 
-                        // Se passou de 15 dias somados nesse CID na janela de 60 dias, vira AF
                         if (diasAcumulados > 15) {
                             mapaInssCID[isoStr] = 'AF';
                         } else {
@@ -14146,7 +14147,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 });
             });
 
-            // ATMs SEM CID (Para os sem CID, a contagem é contínua apenas por atestado)
             let atestadosSemCid = ausenciasDoColab.filter(a => !a.cid).sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
             atestadosSemCid.forEach(atestado => {
                  let dIni = new Date(atestado.data_inicio + 'T00:00:00');
@@ -14161,7 +14161,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                  }
             });
         }
-        // 👆 FIM DO CÉREBRO DO INSS 👆
         
         const dataInicioStr = jor.data_inicio || adm.data_inicio;
         let dataInicioObj = null;
@@ -14202,7 +14201,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
         let cargoNestaUnidade = adm.cargo || '-';
         let dataEntradaNestaUnidade = new Date('1970-01-01');
         
-        // 👇 A MÁGICA 1 COMEÇA AQUI: Filtra o histórico para ignorar mudanças no dia da admissão 👇
         const transferenciasValidas = (adm.historico_transferencias || []).filter(h => h.data_mudanca > dataInicioStr);
         
         if (transferenciasValidas.length > 0) {
@@ -14220,7 +14218,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 }
             }
         }
-        // 👆 FIM DA MÁGICA 1 👆
 
         let linhaColab = { id_colaborador: colab.id, nome: colab.nome, cargo: cargoNestaUnidade, dias: {}, is_folguista: adm.is_folguista || false };
         let teveUmDiaNestaEscala = false; 
@@ -14235,9 +14232,8 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             let temDecl = false;
             let obsDecl = '';
             
-            let nomeFeriadoParaModal = ''; // 👇 NOVO: Guarda o nome do feriado
+            let nomeFeriadoParaModal = '';
 
-            // 👇 MÁGICA: Verifica se o dia atual da repetição é um feriado nacional
             const nomeFeriadoDoDia = feriadosNacionais[dataIsoStr]; 
             
             let statusOcorrenciaPonto = null; 
@@ -14245,6 +14241,16 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             let docColabPonto = null;
             let justificativaPonto = null;
 
+            // 👇 MÁGICA: Encontra se teve Ocorrência Operacional neste dia 👇
+            let ocoPlantaoAtual = null;
+            if (listaOcorrenciasPlantao && listaOcorrenciasPlantao.length > 0) {
+                const ocoPlan = listaOcorrenciasPlantao.find(o => String(o.colaborador_id) === String(colab.id) && o.data_ocorrencia === dataIsoStr);
+                if (ocoPlan) {
+                    ocoPlantaoAtual = ocoPlan;
+                }
+            }
+
+            // 👇 MÁGICA: Encontra se teve Ocorrência de Ponto neste dia 👇
             if (listaOcorrenciasPonto && listaOcorrenciasPonto.length > 0) {
                 const ocoPonto = listaOcorrenciasPonto.find(o => String(o.colaborador_id) === String(colab.id) && o.data_falha === dataIsoStr);
                 if (ocoPonto) {
@@ -14275,7 +14281,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 } else {
                     sigla = 'TR'; cssTipo = 'celula-inativo'; hora = `Transferido para a unidade: ${unidadeNesteDia}`;
                 }
-                linhaColab.dias[d] = { sigla: sigla, cssClass: cssTipo, horario: hora, statusOcoPonto: statusOcorrenciaPonto, docRh: docRhPonto, docColab: docColabPonto, justificativa: justificativaPonto };
+                linhaColab.dias[d] = { sigla: sigla, cssClass: cssTipo, horario: hora, statusOcoPonto: statusOcorrenciaPonto, docRh: docRhPonto, docColab: docColabPonto, justificativa: justificativaPonto, ocoPlantao: ocoPlantaoAtual };
                 continue; 
             }
             
@@ -14287,10 +14293,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             else if (dataSaidaPraticaObj && dataAtual > dataSaidaPraticaObj && resc.opcao_aviso === 'Redução de 7 Dias') {
                 sigla = 'AD'; cssTipo = 'celula-ausencia'; hora = 'Antecipação de Demissão (Folga dos 7 dias)';
             }
-            // 👇 A MÁGICA ESTÁ AQUI: Bloqueia os dias anteriores ao início 👇
-        else if (dataInicioObj && dataAtual < dataInicioObj) {
-            sigla = ''; cssTipo = 'celula-inativo'; hora = 'Pré-Admissão (Ainda não estava na empresa)';
-        }
+            else if (dataInicioObj && dataAtual < dataInicioObj) {
+                sigla = ''; cssTipo = 'celula-inativo'; hora = 'Pré-Admissão (Ainda não estava na empresa)';
+            }
             else {
                 let jornadaVigente = jor;
                 if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
@@ -14321,11 +14326,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     const diaEscala = jornadaVigente.escala[diaNome]; 
 
                     if (diaEscala) {
-                        // 👇 MÁGICA AQUI: Se o dia for um feriado, ele vira FRD, não importa se era domingo de folga ou dia de trabalho!
                         if (nomeFeriadoDoDia) {
                             sigla = 'FRD'; cssTipo = 'celula-frd'; hora = 'Feriado Oficial'; nomeFeriadoParaModal = nomeFeriadoDoDia;
                         } 
-                        // Se não for feriado, segue a vida normal
                         else {
                             let trabalhaHoje = false;
                             if (diaEscala.status === 'Trabalho') trabalhaHoje = true;
@@ -14386,7 +14389,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     } else if (exc === 'Folga') {
                         sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga (Exceção)';
                     } else if (exc === 'Feriado') {
-                        // 👇 MÁGICA: O Gestor lançou feriado manual na Exceção Pontual!
                         sigla = 'FRD'; cssTipo = 'celula-frd'; hora = 'Feriado (Lançado pelo Gestor)';
                         nomeFeriadoParaModal = nomeFeriadoDoDia || 'Feriado Regional / Concedido pelo Gestor';
                     } else {
@@ -14397,7 +14399,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 }
             }
 
-            // 👇 LÓGICA DE FÉRIAS NA ESCALA 👇
             if (listaFerias && listaFerias.length > 0) {
                 const feriasHoje = listaFerias.find(f => {
                     if (String(f.colaborador_id).trim() !== String(colab.id).trim()) return false;
@@ -14428,9 +14429,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
 
             if (listaAusencias && listaAusencias.length > 0) {
-                // 1. ACHA SE TEM H+ OU HE LANÇADA EXATAMENTE NESTE DIA
                 const hPlusRec = listaAusencias.find(a => (a.sigla === 'H+' || a.sigla === 'HE') && String(a.colaborador_id) === String(colab.id) && a.data_inicio === dataIsoStr);
-                
                 const declRec = listaAusencias.find(a => a.sigla === 'DECL' && String(a.colaborador_id) === String(colab.id) && a.data_inicio === dataIsoStr);
                 
                 if (declRec) {
@@ -14496,7 +14495,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     }
                 }
 
-                // 3. AGORA BUSCAMOS AS AUSÊNCIAS TOTAIS
                 const atestadoHoje = listaAusencias.find(a => {
                     if (a.sigla === 'H+' || a.sigla === 'HE' || a.sigla === 'DECL') return false; 
                     if (String(a.colaborador_id).trim() !== String(colab.id).trim()) return false;
@@ -14577,7 +14575,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                         const diaDoAtestado = Math.floor(diffTempo / (1000 * 3600 * 24)) + 1; 
 
                        if (atestadoHoje.sigla === 'ATM') {
-                            // 👇 Consulta o cérebro que geramos acima 👇
                             let statusInss = mapaInssCID[dataIsoStr] || 'ATM'; 
                             
                             if (statusInss === 'AF') {
@@ -14598,7 +14595,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 }
             }
 
-            // 👇 EMPACOTA PARA O HTML DA CÉLULA (INCLUINDO O FERIADO) 👇
             linhaColab.dias[d] = { 
                 sigla: sigla, 
                 cssClass: cssTipo, 
@@ -14608,11 +14604,12 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 obsHPlus: obsHPlus, 
                 temDecl: temDecl,    
                 obsDecl: obsDecl,
-                nomeFeriado: nomeFeriadoParaModal, // <--- ADICIONADO AQUI!
+                nomeFeriado: nomeFeriadoParaModal,
                 statusOcoPonto: statusOcorrenciaPonto,
                 docRh: docRhPonto,
                 docColab: docColabPonto,
-                justificativa: justificativaPonto
+                justificativa: justificativaPonto,
+                ocoPlantao: ocoPlantaoAtual
             };
         }
         
@@ -15486,9 +15483,9 @@ window.destacarLinhaEscala = function(celulaNome) {
     linhaAtivadaAnteriormente = linhaClicada;
 };
 
-// ==========================================
-// RENDERIZADOR DA TABELA (COM FILTRO E EFEITO RISCADO)
-// ==========================================
+// =========================================================================
+// RENDERIZADOR DA TABELA HTML NA TELA (INJETANDO OS ÍCONES CORRETAMENTE)
+// =========================================================================
 window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
     const containerTabela = document.getElementById('container-tabela-escala');
     const partes = mesAnoStr.split('-');
@@ -15497,8 +15494,6 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
     const diasNoMes = new Date(ano, mes + 1, 0).getDate();
     const diasSemanaCurtos = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 
-        // 👇 ADICIONE ESTE BLOCO ANTES DE INICIAR O HTML DA TABELA 👇
-    // Vamos calcular os dias, finais de semana e strings 1 VEZ SÓ para o mês todo!
     const cacheDiasDoMes = {};
     for (let d = 1; d <= diasNoMes; d++) {
         const dataAtualTemp = new Date(ano, mes, d);
@@ -15512,76 +15507,101 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
     let html = '<table class="tabela-escala"><thead><tr><th style="min-width: 150px; max-width: 180px; text-align: left;">Colaborador</th><th style="min-width: 80px; max-width: 140px;">Cargo</th>';
     
     for (let d = 1; d <= diasNoMes; d++) { 
-        const dataAtual = new Date(ano, mes, d);
-        const diaSemana = dataAtual.getDay();
-        const isFds = (diaSemana === 0 || diaSemana === 6);
-        const classFds = isFds ? 'coluna-fds' : '';
+        const diaSemana = new Date(ano, mes, d).getDay();
+        const classFds = cacheDiasDoMes[d].isFds ? 'coluna-fds' : '';
         const diaFormatado = String(d).padStart(2, '0') + '/' + String(mes + 1).padStart(2, '0');
         
         html += `<th class="${classFds}"><div style="font-size: 0.9rem;">${diaFormatado}</div><div style="font-size: 0.65rem; font-weight: 400; color: var(--cor-texto-secundario);">${diasSemanaCurtos[diaSemana]}</div></th>`;
     }
     html += '</tr></thead><tbody>';
 
-   dadosArray.forEach(colab => {
-    const nomeSeguro = (colab.nome || '').replace(/'/g, "\\'");
-    
-    // 👇 MÁGICA DO LÁPIS DO FOLGUISTA 👇
-    let iconeFolguista = colab.is_folguista ? `
-        <button class="btn-secondary" style="padding: 2px 6px; font-size: 0.75rem; border-radius: 4px; border-color: var(--cor-acento); color: var(--cor-acento); flex-shrink: 0;" 
-        onclick="event.stopPropagation(); abrirEdicaoFolguista('${colab.id_colaborador}', '${nomeSeguro}')" title="Editar Escala do Folguista">
-            <i class="fa-solid fa-pen"></i>
-        </button>` : '';
+    dadosArray.forEach(colab => {
+        const nomeSeguro = (colab.nome || '').replace(/'/g, "\\'");
+        
+        let iconeFolguista = colab.is_folguista ? `
+            <button class="btn-secondary" style="padding: 2px 6px; font-size: 0.75rem; border-radius: 4px; border-color: var(--cor-acento); color: var(--cor-acento); flex-shrink: 0;" 
+            onclick="event.stopPropagation(); abrirEdicaoFolguista('${colab.id_colaborador}', '${nomeSeguro}')" title="Editar Escala do Folguista">
+                <i class="fa-solid fa-pen"></i>
+            </button>` : '';
 
-    html += `<tr>
-        <td style="text-align: left; padding: 0; cursor: pointer; transition: background 0.2s;" onclick="destacarLinhaEscala(this)" title="Clique para destacar a linha de ${nomeSeguro}">
-            <div class="celula-scroll" style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-                <strong style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${colab.nome}</strong>
-                ${iconeFolguista}
-            </div>
-        </td>
+        html += `<tr>
+            <td style="text-align: left; padding: 0; cursor: pointer; transition: background 0.2s;" onclick="destacarLinhaEscala(this)" title="Clique para destacar a linha de ${nomeSeguro}">
+                <div class="celula-scroll" style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <strong style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${colab.nome}</strong>
+                    ${iconeFolguista}
+                </div>
+            </td>
             <td style="padding: 0;">
                 <div class="celula-scroll cargo">
                     ${colab.cargo}
                 </div>
             </td>`;
-        
-        // DEIXE ASSIM, CONSULTANDO A MEMÓRIA:
+            
         for (let d = 1; d <= diasNoMes; d++) {
-            // Puxamos tudo mastigadinho e super rápido da memória
             const classFds = cacheDiasDoMes[d].isFds ? 'coluna-fds' : '';
             const dataIsoParaModal = cacheDiasDoMes[d].dataIsoStr;
-
             const diaData = colab.dias[d];
             
-            // 👇 MÁGICA 1: Evita que o sistema pule o dia de Pré-Admissão só porque a sigla está vazia ("") 👇
             if(!diaData || typeof diaData.sigla === 'undefined') { 
                 html += `<td class="${classFds}" style="position: relative;"><span class="dia-num-badge">${d}</span></td>`; 
                 continue; 
             }
 
-            let iconeOcoHtml = '';
-            let leftHplus = '4px';
+            let posLeftDynamic = 4;
+            let iconesSuperioresHtml = '';
+
+            // 👇 MÁGICA: PRANCHETA ROSA 👇
+            if (diaData.ocoPlantao) {
+                let corIconeOcoP = diaData.ocoPlantao.status === 'Ciente' ? '#28a745' : '#e91e63';
+                iconesSuperioresHtml += `<i class="fa-solid fa-clipboard-list" style="position: absolute; top: 3px; left: ${posLeftDynamic}px; font-size: 0.8rem; color: ${corIconeOcoP};" title="Ocorrência Operacional"></i>`;
+                posLeftDynamic += 18;
+            }
 
             if (diaData.statusOcoPonto) {
                 let corOco = '#a6b0cf'; 
                 if (diaData.statusOcoPonto === 'Pendente') corOco = '#ffc107'; 
                 if (diaData.statusOcoPonto === 'Concluído') corOco = '#28a745'; 
 
-                iconeOcoHtml = `<i class="fa-solid fa-triangle-exclamation" style="position: absolute; top: 3px; left: 4px; font-size: 0.8rem; color: ${corOco};" title="Ocorrência de Ponto"></i>`;
-                leftHplus = '22px'; 
+                iconesSuperioresHtml += `<i class="fa-solid fa-triangle-exclamation" style="position: absolute; top: 3px; left: ${posLeftDynamic}px; font-size: 0.8rem; color: ${corOco};" title="Ocorrência de Ponto"></i>`;
+                posLeftDynamic += 18;
             }
 
-            const tagHPlus = diaData.temHPlus ? `<span style="position: absolute; top: 2px; left: ${leftHplus}; font-size: 0.65rem; color: #ff9800; font-weight: 900;">${diaData.siglaTag}</span>` : '';
+            if (diaData.temDecl) {
+                iconesSuperioresHtml += `<i class="fa-solid fa-file-lines" style="position: absolute; top: 3px; left: ${posLeftDynamic}px; font-size: 0.8rem; color: #4fc3f7;" title="Declaração de Horas"></i>`;
+                posLeftDynamic += 18;
+            }
 
-            // 👇 ADICIONE ESTE BLOCO PARA DESENHAR O PAPELZINHO 👇
-            let margemLeftIcons = 4;
-            if (diaData.statusOcoPonto) margemLeftIcons += 18;
-            if (diaData.temHPlus) margemLeftIcons += 22;
-            const tagDecl = diaData.temDecl ? `<i class="fa-solid fa-file-lines" style="position: absolute; top: 3px; left: ${margemLeftIcons}px; font-size: 0.8rem; color: #4fc3f7;" title="Declaração de Horas"></i>` : '';
-            // 👆 ========================================== 👆
+            let tagHPlus = '';
+            if (diaData.temHPlus) {
+                tagHPlus = `<span style="position: absolute; top: 2px; left: ${posLeftDynamic}px; font-size: 0.65rem; color: #ff9800; font-weight: 900;">${diaData.siglaTag}</span>`;
+            }
 
             let obsFinal = diaData.obsHPlus || '';
             obsFinal += diaData.obsDecl || '';
+
+            // 👇 MÁGICA: POPUP DA OCORRÊNCIA OPERACIONAL 👇
+            if (diaData.ocoPlantao) {
+                let txtTipo = diaData.ocoPlantao.tipo;
+                let txtObs = diaData.ocoPlantao.observacao;
+                let txtStatus = diaData.ocoPlantao.status;
+                let corStatusOcoP = txtStatus === 'Ciente' ? '#28a745' : '#e91e63';
+
+                obsFinal += (obsFinal ? '<div style="height: 1px; background: var(--cor-borda); margin: 15px 0;"></div>' : '') + 
+                `<div style="background: rgba(233, 30, 99, 0.05); border: 1px solid rgba(233, 30, 99, 0.2); border-left: 4px solid #e91e63; padding: 12px 15px; border-radius: 8px; margin-top: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(233, 30, 99, 0.2); padding-bottom: 8px;">
+                        <span style="color: #e91e63; font-size: 0.9rem; font-weight: bold;"><i class="fa-solid fa-clipboard-list"></i> Ocorrência Operacional</span>
+                        <span class="badge" style="background: ${corStatusOcoP}22; color: ${corStatusOcoP}; border: 1px solid ${corStatusOcoP}; padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;">${txtStatus}</span>
+                    </div>
+                    <div style="margin-top: 8px; margin-bottom: 8px;">
+                        <span style="color: #e91e63; font-size: 0.85rem; font-weight: bold;">${txtTipo}</span>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.1); padding: 10px 12px; border-radius: 6px; border: 1px solid var(--cor-borda);">
+                        <small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 4px;">Relato do Gestor</small>
+                        <span style="font-size: 0.85rem; font-style: italic; color: var(--cor-texto-principal);">"${txtObs}"</span>
+                    </div>
+                </div>`;
+            }
+
             if (diaData.statusOcoPonto) {
                 let txtStatus = diaData.statusOcoPonto === 'Pendente' ? 'Respondido pelo Colab. (Aguardando RH)' : diaData.statusOcoPonto;
                 let corStatusOco = diaData.statusOcoPonto === 'Concluído' ? '#28a745' : '#ff9800';
@@ -15614,30 +15634,24 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
             const obsSegura = encodeURIComponent(obsFinal).replace(/'/g, "%27");
             const horaSegura = (diaData.horario || '').replace(/'/g, "\\'");
 
-            // 👇 1. PREPARAÇÃO DA PÍLULA
             const visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}" style="padding: 4px 10px; border-radius: 12px; font-weight: 800; display: inline-block; border-bottom: none !important; line-height: 1;">${diaData.sigla}</span>`);
-            
             const feriadoSeguro = (diaData.nomeFeriado || '').replace(/'/g, "\\'");
             let paramsModal = `'${colab.id_colaborador}', '${nomeSeguro}', '${dataIsoParaModal}', '${horaSegura}', '${diaData.sigla}', decodeURIComponent('${obsSegura}'), '${feriadoSeguro}'`;
 
-            // Se for Pré-Admissão, nós trocamos os parâmetros do modal
             if (diaData.sigla === '' || diaData.horario === 'Pré-Admissão (Ainda não estava na empresa)') {
-                // MÁGICA: Manda a sigla pro Modal tratar o visual perfeitamente lá dentro!
                 paramsModal = `'${colab.id_colaborador}', '${nomeSeguro}', '${dataIsoParaModal}', 'Bloqueado', 'PRÉ-ADMISSÃO', ''`;
             }
 
-            // 👇 MÁGICA 2: Pinta a CÉLULA INTEIRA com o zebrado se for Pré-Admissão 👇
             let classesTd = classFds;
             if (diaData.cssClass === 'celula-inativo' || (diaData.cssClass && diaData.cssClass.includes('bg-hachurado'))) {
                 classesTd += ' bg-hachurado celula-inativo';
             }
 
-            // 👇 3. MONTAGEM DO HTML DA CÉLULA
             html += `<td class="${classesTd}" style="position: relative; cursor: pointer; transition: background 0.2s;" 
             onclick="mostrarInfoPlantao(${paramsModal})">
-                ${iconeOcoHtml}
+                ${iconesSuperioresHtml}
                 ${tagHPlus}
-                ${tagDecl} <span class="dia-num-badge">${d}</span>
+                <span class="dia-num-badge">${d}</span>
                 <div style="margin-top: 8px;">${visualPilula}</div>
              </td>`;
         }
@@ -15652,13 +15666,11 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
         </div>` + html;
     }
 
-   containerTabela.innerHTML = html;
+    containerTabela.innerHTML = html;
 
-    // 👇 REAPLICA O ZOOM ATUAL (Se a pessoa já tiver diminuído) 👇
     const zoomAtual = document.getElementById('controle-zoom-escala')?.value || 1;
     containerTabela.style.zoom = zoomAtual;
 
-    // 👇 O SEGREDO PRO FILTRO NÃO SE PERDER 👇
     if (typeof filtrarTabelaEscala === 'function') {
         filtrarTabelaEscala();
     }
@@ -25618,19 +25630,26 @@ window.filtrarOcorrenciasAdmin = function() {
     }
 
     filtrados.forEach(oco => {
-        let corStatus = oco.status === 'Ciente' ? 'var(--cor-sucesso)' : '#e91e63';
-        
-       let detalhesExtas = '';
-        if(oco.tipo === 'Atraso / Falha de Batida') {
+        let isCiente = oco.status === 'Ciente';
+        let corStatus = isCiente ? 'var(--cor-sucesso)' : '#e91e63';
+        let corFundoCard = isCiente ? 'rgba(40, 167, 69, 0.05)' : 'rgba(233, 30, 99, 0.05)';
+        let iconeStatus = isCiente ? 'fa-check-double' : 'fa-clock';
+
+        // Estilização do Tipo de Ocorrência com Ícones Dinâmicos
+        let iconeTipo = 'fa-circle-exclamation';
+        if (oco.tipo === 'Atraso / Falha de Batida') iconeTipo = 'fa-user-clock';
+        else if (oco.tipo === 'Abandono de Plantão') iconeTipo = 'fa-person-running';
+        else if (oco.tipo === 'Postura / Comportamental') iconeTipo = 'fa-users-rays';
+
+        let detalhesExtas = '';
+        if(oco.tipo === 'Atraso / Falha de Batida' && oco.batida_afetada) {
             let formatoBatidas = '';
-            if (oco.batida_afetada) {
-                const bArr = String(oco.batida_afetada).split(' || ');
-                const hArr = String(oco.horario_batida || '').split(' || ');
-                bArr.forEach((b, i) => {
-                    formatoBatidas += `<div style="margin-top: 4px;"><i class="fa-solid fa-clock" style="color: #ff9800; font-size: 0.75rem;"></i> <b>${b}:</b> ${hArr[i] || 'Não informado'}</div>`;
-                });
-            }
-            detalhesExtas = `<div style="margin-top: 8px; font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; border-left: 2px solid #ff9800;">${formatoBatidas}</div>`;
+            const bArr = String(oco.batida_afetada).split(' || ');
+            const hArr = String(oco.horario_batida || '').split(' || ');
+            bArr.forEach((b, i) => {
+                formatoBatidas += `<span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.3); padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; margin-right: 5px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> <b>${b}:</b> ${hArr[i] || 'Não informado'}</span>`;
+            });
+            detalhesExtas = `<div style="margin-top: 8px;">${formatoBatidas}</div>`;
         }
 
         const notifDestaOco = notifsBanco.find(n => String(n.referencia_id) === String(oco.id) && n.tipo === 'Ocorrencia_Plantao_Admin');
@@ -25639,7 +25658,7 @@ window.filtrarOcorrenciasAdmin = function() {
         if (notifDestaOco) {
             const isLida = notifDestaOco.lida;
             const classeBotao = isLida ? 'btn-secondary' : 'btn-success';
-           const icone = isLida ? 'fa-check-double' : 'fa-envelope';
+            const icone = isLida ? 'fa-check-double' : 'fa-envelope';
             const texto = isLida ? 'Lido' : 'Marcar como Lido';
             const quemLeu = (isLida && notifDestaOco.lida_por) ? `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${notifDestaOco.lida_por.split(' ')[0]}</b></span>` : '';
 
@@ -25653,43 +25672,51 @@ window.filtrarOcorrenciasAdmin = function() {
 
         let botaoCiencia = '';
         if (oco.status === 'Pendente') {
-            botaoCiencia = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background-color: #e91e63; border: none;" onclick="darCienciaOcorrencia('${oco.id}')"><i class="fa-solid fa-check-double"></i> Dar Ciência</button>`;
+            // 👇 A CORREÇÃO DA COR: O "color: #fff" cravado aqui na linha mata qualquer herança do CSS!
+            botaoCiencia = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background-color: #e91e63; color: #fff; border: none; font-weight: bold; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'" onclick="darCienciaOcorrencia('${oco.id}')"><i class="fa-solid fa-check-double"></i> Dar Ciência</button>`;
         }
 
-        // 👇 GERA O BOTÃO DO ANEXO SE ELE EXISTIR NO BANCO 👇
         let linkAnexoHtml = oco.anexo 
-            ? `<div style="margin-top: 10px;"><a href="${oco.anexo}" target="_blank" class="btn-secondary" style="background: rgba(233, 30, 99, 0.1); color: #e91e63; border: 1px solid #e91e63; text-decoration: none; padding: 6px 12px; border-radius: 6px;"><i class="fa-solid fa-paperclip"></i> Visualizar Anexo do Gestor</a></div>` 
+            ? `<a href="${oco.anexo}" target="_blank" class="btn-secondary" style="background: rgba(233, 30, 99, 0.1); color: #e91e63; border: 1px solid #e91e63; text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 5px;"><i class="fa-solid fa-paperclip"></i> Visualizar Anexo do Gestor</a>` 
             : '';
 
         container.innerHTML += `
-            <div class="admissao-card" id="card-oco-${oco.id}" style="border-left: 4px solid ${corStatus}; display: flex; flex-direction: column; align-items: stretch; gap: 10px;">
+            <div class="admissao-card" id="card-oco-${oco.id}" style="background: ${corFundoCard}; border-left: 4px solid ${corStatus}; border-top: 1px solid var(--cor-borda); border-right: 1px solid var(--cor-borda); border-bottom: 1px solid var(--cor-borda); display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 15px; border-radius: 12px; transition: all 0.2s ease-in-out; margin-bottom: 8px;">
                 
-                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div>
-                        <strong style="font-size: 1.15rem; color: #e91e63;"><i class="fa-solid fa-clipboard-list"></i> ${oco.nome}</strong><br>
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${oco.unidade} | Data Ocorrido: <b>${formatarDataBR(oco.data_ocorrencia)}</b></span>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px;">
+                    <div style="flex: 1; min-width: 250px;">
+                        <strong style="font-size: 1.15rem; color: #e91e63;"><i class="fa-solid fa-clipboard-user" style="color: ${corStatus}; margin-right: 5px;"></i> ${oco.nome}</strong>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 6px;">
+                            <span style="font-size: 0.8rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);"><i class="fa-solid fa-building" style="color: var(--cor-texto-secundario);"></i> ${oco.unidade}</span>
+                            <span style="font-size: 0.8rem; color: #fff; background: rgba(233, 30, 99, 0.2); padding: 4px 8px; border-radius: 4px; border: 1px solid rgba(233, 30, 99, 0.4);"><i class="fa-regular fa-calendar-xmark" style="color: #e91e63;"></i> Data do Ocorrido: <b>${formatarDataBR(oco.data_ocorrencia)}</b></span>
+                        </div>
                     </div>
-                    <span class="badge" style="background: ${corStatus}33; color: ${corStatus}; border: 1px solid ${corStatus};">${oco.status}</span>
+                    
+                    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+                        <span style="color: ${corStatus}; font-size: 0.85rem; font-weight: 800; background: ${corStatus}22; padding: 4px 10px; border-radius: 20px; border: 1px solid ${corStatus}55;">
+                            <i class="fa-solid ${iconeStatus}"></i> ${oco.status.toUpperCase()}
+                        </span>
+                    </div>
                 </div>
                 
-                <div style="padding: 10px; background: rgba(233, 30, 99, 0.05); border: 1px solid rgba(233, 30, 99, 0.2); border-radius: 8px;">
-                    <strong style="font-size: 0.9rem; color: #e91e63;">${oco.tipo}</strong>
+                <div style="padding: 12px; background: rgba(233, 30, 99, 0.05); border: 1px solid rgba(233, 30, 99, 0.2); border-radius: 8px; border-left: 3px solid #e91e63;">
+                    <strong style="font-size: 0.95rem; color: #e91e63; display: flex; align-items: center; gap: 6px;"><i class="fa-solid ${iconeTipo}"></i> ${oco.tipo}</strong>
                     ${detalhesExtas}
                 </div>
                 
-                <div style="font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; max-height: 80px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05);">
-                    <b style="color: var(--cor-texto-secundario);">Relato do Gestor (${oco.criado_por}):</b><br>${oco.observacao}
+                <div style="font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.2); padding: 12px; border-radius: 6px; max-height: 80px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05);">
+                    <b style="color: var(--cor-texto-secundario); font-size: 0.75rem; text-transform: uppercase;">Relato do Gestor (${oco.criado_por}):</b><br>
+                    <span style="display: block; margin-top: 4px; font-style: italic; line-height: 1.4;">"${oco.observacao}"</span>
                 </div>
                 
-                ${linkAnexoHtml}
-                
-                <div style="display: flex; justify-content: space-between; margin-top: 5px; align-items: flex-start;">
-                    <div style="display: flex; gap: 6px; align-items: flex-start;">
+                <div style="display: flex; justify-content: space-between; margin-top: 5px; align-items: center; flex-wrap: wrap; gap: 10px; border-top: 1px dashed var(--cor-borda); padding-top: 15px;">
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        ${linkAnexoHtml}
                         ${btnNotifHtml}
                     </div>
-                    <div style="display: flex; gap: 6px;">
+                    <div style="display: flex; gap: 6px; flex-wrap: wrap;">
                         ${botaoCiencia}
-                        <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800;" onclick="editarOcorrenciaAdmin('${oco.id}')" title="Editar"><i class="fa-solid fa-pen"></i> Editar</button>
+                        <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800;" onclick="editarOcorrenciaAdmin('${oco.id}')" title="Editar Informações"><i class="fa-solid fa-pen"></i> Editar</button>
                         <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirOcorrencia('${oco.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i> Excluir</button>
                     </div>
                 </div>
