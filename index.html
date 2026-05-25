@@ -16947,7 +16947,7 @@ nascimento: document.getElementById('adm-nasc').value,
 
         let todosUsuariosCadastrados = [];
 
-async function listarUsuarios(silencioso = false) {
+window.listarUsuarios = async function(silencioso = false) {
     if(usuarioAtual.perfil !== 'Admin') return; 
     const scrollAnterior = window.scrollY;
 
@@ -16979,16 +16979,51 @@ async function listarUsuarios(silencioso = false) {
         query = query.or(`empresa.eq.${empresaSelecionadaFiltro},perfil.eq.Admin`);
     }
 
-    const { data, error } = await query;
-    if (error) return;
+    // 👇 MÁGICA DO AFASTAMENTO: Busca ausências e férias ativas no dia de hoje! 👇
+    const hojeIso = new Date().toISOString().split('T')[0];
     
-    todosUsuariosCadastrados = data;
+    const queryAusencias = supabaseClient.from('ausencias')
+        .select('colaborador_id, sigla, data_fim')
+        .eq('status', 'Aprovado')
+        .lte('data_inicio', hojeIso)
+        .gte('data_fim', hojeIso);
+
+    const queryFerias = supabaseClient.from('solicitacoes_ferias')
+        .select('colaborador_id, data_fim_ferias')
+        .eq('status', 'Aprovado')
+        .lte('data_inicio_ferias', hojeIso)
+        .gte('data_fim_ferias', hojeIso);
+
+    const [resPerfis, resAusencias, resFerias] = await Promise.all([query, queryAusencias, queryFerias]);
+    
+    if (resPerfis.error) return;
+    
+    // Mapeia quem está ausente hoje
+    const mapaAfastamentos = {};
+    if (resAusencias.data) {
+        resAusencias.data.forEach(a => {
+            mapaAfastamentos[a.colaborador_id] = { tipo: a.sigla, retorno: a.data_fim };
+        });
+    }
+    if (resFerias.data) {
+        resFerias.data.forEach(f => {
+            mapaAfastamentos[f.colaborador_id] = { tipo: 'FER', retorno: f.data_fim_ferias };
+        });
+    }
+    
+    todosUsuariosCadastrados = resPerfis.data.map(u => {
+        if (mapaAfastamentos[u.id]) {
+            u.ausencia_atual = mapaAfastamentos[u.id]; // Injeta o status de ausência no perfil do cara
+        }
+        return u;
+    });
+
     filtrarUsuariosCadastrados();
 
     if (silencioso) {
         setTimeout(() => window.scrollTo(0, scrollAnterior), 10);
     }
-}
+};
 
 window.filtrarUsuariosCadastrados = function() {
     const termo = window.removerAcentos(document.getElementById('busca-usuarios-cadastrados').value);
@@ -17001,7 +17036,6 @@ window.filtrarUsuariosCadastrados = function() {
         return;
     }
 
-    // 👇 A MÁGICA: Variável que vai acumular o HTML na memória RAM (super rápido) 👇
     let htmlAcumulado = '';
 
     filtrados.forEach(u => {
@@ -17014,16 +17048,16 @@ window.filtrarUsuariosCadastrados = function() {
         
         let statusTexto = u.status || 'Ativo';
         let statusBadge = 'badge ativo';
-        let dataDesligamentoHtml = ''; // 👈 Variável nova para a data
+        let dataDesligamentoHtml = ''; 
+        let estiloExtraBadge = '';
 
-        // Lógica de Datas para Desligados e Aviso Prévio
+        // 1. Lógica de Datas para Desligados e Aviso Prévio
         if (statusTexto === 'Desligado' || statusTexto === 'Cancelado(a)' || statusTexto === 'Excluído') {
             const hoje = new Date();
             hoje.setHours(0,0,0,0);
             
             if (u.dados_rescisao && u.dados_rescisao.ultimo_dia) {
                 const udRegex = u.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                // Extrai a data limpa (ex: 15/04/2026) ignorando os textos extras
                 let udLimpo = udRegex ? `${udRegex[1]}/${udRegex[2]}/${udRegex[3]}` : u.dados_rescisao.ultimo_dia.split(' ')[0];
 
                 if (udRegex) {
@@ -17033,11 +17067,9 @@ window.filtrarUsuariosCadastrados = function() {
                     if (hoje <= ud) {
                         statusTexto = 'Cumprindo Aviso';
                         statusBadge = 'badge pendente'; 
-                        // 👇 MÁGICA: Mostra até quando ele fica na empresa 👇
                         dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #ff9800; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-clock"></i> Até: ${udLimpo}</span>`;
                     } else {
                         statusBadge = 'badge desligado';
-                        // 👇 MÁGICA: Mostra quando ele saiu da empresa 👇
                         dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: var(--cor-perigo); margin-top: 5px;"><i class="fa-solid fa-calendar-xmark"></i> Saiu em: ${udLimpo}</span>`;
                     }
                 } else {
@@ -17046,7 +17078,32 @@ window.filtrarUsuariosCadastrados = function() {
             } else {
                 statusBadge = 'badge desligado';
             }
-        } else if (statusTexto !== 'Ativo') {
+        } 
+        // 👇 2. A MÁGICA NOVA: Lógica Dinâmica para quem está Afastado/Férias 👇
+        else if (statusTexto === 'Ativo' && u.ausencia_atual) {
+            const tipoAus = u.ausencia_atual.tipo;
+            const dataRetorno = formatarDataBR(u.ausencia_atual.retorno);
+            
+            if (tipoAus === 'FER') {
+                statusTexto = 'Em Férias';
+                statusBadge = 'badge'; 
+                estiloExtraBadge = 'background: rgba(255, 213, 79, 0.2); color: #ffd54f; border: 1px solid #ffd54f;';
+                dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #ffd54f; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-plane-departure"></i> Retorno: ${dataRetorno}</span>`;
+            } else if (tipoAus === 'AF') {
+                statusTexto = 'Afastado INSS';
+                statusBadge = 'badge advertencia'; // Roxo
+                dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #c4b5fd; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-notes-medical"></i> Retorno: ${dataRetorno}</span>`;
+            } else if (tipoAus === 'LDM' || tipoAus === 'LDP') {
+                statusTexto = 'Licença Maternidade';
+                statusBadge = 'badge tipo-solicitacao'; // Azul claro
+                dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #4fc3f7; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-baby"></i> Retorno: ${dataRetorno}</span>`;
+            } else {
+                statusTexto = `Afastado (${tipoAus})`;
+                statusBadge = 'badge pendente'; // Laranja
+                dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #ff9800; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-briefcase-medical"></i> Retorno: ${dataRetorno}</span>`;
+            }
+        }
+        else if (statusTexto !== 'Ativo') {
             statusBadge = 'badge desligado';
         }
         
@@ -17076,13 +17133,10 @@ window.filtrarUsuariosCadastrados = function() {
             btnExcluir = `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirAdmissaoAdmin('${u.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>`;
         }
 
-        // Puxa o cargo se existir para embelezar o nome
         const cargoDisplay = u.dados_admissao?.cargo ? `<span style="font-size: 0.75rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">${u.dados_admissao.cargo}</span>` : '';
-
-        // Formata as unidades (Se for Gestor com muitas unidades, quebra a linha para ficar elegante)
         const unidadesFormatadas = u.unidade ? u.unidade.replace(/,/g, '<br>') : 'Todas (Admin)';
 
-        // Monta a Linha da Tabela (Agora com Hover Effect e Design Premium)
+        // Monta a Linha da Tabela
         htmlAcumulado += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); transition: 0.2s;" onmouseover="this.style.background='rgba(0,0,0,0.2)'" onmouseout="this.style.background='transparent'">
             <td style="padding: 15px 15px; vertical-align: top;">
                 <strong style="color: var(--cor-acento); font-size: 1.05rem;"><i class="fa-solid ${iconePerfil}" style="margin-right: 6px; color: var(--cor-texto-secundario);"></i> ${u.nome}</strong>
@@ -17092,7 +17146,7 @@ window.filtrarUsuariosCadastrados = function() {
                 <span class="badge ${badgeClass}" style="font-size: 0.75rem;">${u.perfil}</span>
             </td>
             <td style="padding: 15px; vertical-align: top;">
-                <span class="${statusBadge}" style="font-size: 0.75rem;">${statusTexto}</span>
+                <span class="${statusBadge}" style="${estiloExtraBadge} font-size: 0.75rem;">${statusTexto}</span>
                 ${dataDesligamentoHtml}
             </td>
             <td style="padding: 15px; vertical-align: top;">
@@ -17111,7 +17165,6 @@ window.filtrarUsuariosCadastrados = function() {
         </tr>`;
     });
 
-    // 👇 PINTA A TELA UMA ÚNICA VEZ! 👇
     tbody.innerHTML = htmlAcumulado;
 };
 
