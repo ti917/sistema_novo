@@ -9231,7 +9231,7 @@ window.gerarDadosBI = async function() {
         });
 
        // ========================================================
-        // 🏢 NOVO DESIGN: LOTAÇÃO E AVISO PRÉVIO (BLINDADO E PREMIUM)
+        // 🏢 NOVO DESIGN: LOTAÇÃO, AVISO PRÉVIO E AFASTAMENTOS (INSS)
         // ========================================================
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
@@ -9248,16 +9248,42 @@ window.gerarDadosBI = async function() {
                 unidadesLimit.forEach(u => {
                     let limitesCargosObj = {};
                     try { if (u.limites_cargos) limitesCargosObj = JSON.parse(u.limites_cargos); } catch(e){}
-                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
+                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, ativosPorCargo: {} };
+                });
+            }
+
+            // 👇 MÁGICA: Busca quem tá afastado hoje (INSS, Maternidade, Atestados) 👇
+            const hojeIso = new Date().toISOString().split('T')[0];
+            const { data: ausenciasLotacao } = await supabaseClient.from('ausencias')
+                .select('colaborador_id, sigla, data_fim')
+                .eq('status', 'Aprovado')
+                .lte('data_inicio', hojeIso)
+                .gte('data_fim', hojeIso);
+
+            let mapaAfastamentos = {};
+            if (ausenciasLotacao) {
+                ausenciasLotacao.forEach(a => {
+                    // Mapeia quem está ausente a longo prazo
+                    if (a.sigla === 'AF' || a.sigla === 'ATM' || a.sigla === 'LDM' || a.sigla === 'LDP') {
+                        mapaAfastamentos[a.colaborador_id] = { sigla: a.sigla, retorno: a.data_fim };
+                    }
                 });
             }
 
             perfis.forEach(p => {
-                if (!dadosLotacao[p.unidade]) dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
+                if (!dadosLotacao[p.unidade]) dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, ativosPorCargo: {} };
                 const cargo = (p.dados_admissao && p.dados_admissao.cargo) ? p.dados_admissao.cargo : 'Sem Cargo';
-                let isAtivo = false; let isAviso = false;
+                
+                let isAtivo = false; let isAviso = false; let isInss = false; let dadosInss = null;
 
-                if (p.status === 'Ativo') isAtivo = true;
+                if (p.status === 'Ativo') {
+                    if (mapaAfastamentos[p.id]) {
+                        isInss = true;
+                        dadosInss = mapaAfastamentos[p.id];
+                    } else {
+                        isAtivo = true;
+                    }
+                }
                 else if (p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia) {
                     const udRegex = p.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
@@ -9267,18 +9293,23 @@ window.gerarDadosBI = async function() {
                     }
                 }
 
-                if (isAtivo || isAviso) {
-                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
+                if (isAtivo || isAviso || isInss) {
+                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
                     
                     if (isAtivo) {
                         dadosLotacao[p.unidade].ativosTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAtivos++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAtivos.push(p.nome);
-                    } else {
+                    } else if (isAviso) {
                         dadosLotacao[p.unidade].avisoTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAviso++;
                         let dataSaida = p.dados_rescisao?.ultimo_dia ? p.dados_rescisao.ultimo_dia.split(' ')[0] : 'A definir';
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAviso.push({ nome: p.nome, data: dataSaida });
+                    } else if (isInss) {
+                        dadosLotacao[p.unidade].inssTotal++;
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdInss++;
+                        let dataRetorno = formatarDataBR(dadosInss.retorno);
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesInss.push({ nome: p.nome, data: dataRetorno, sigla: dadosInss.sigla });
                     }
                 }
             });
@@ -9299,8 +9330,10 @@ window.gerarDadosBI = async function() {
             let htmlCartoesLotacao = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; padding-bottom: 20px; margin-top: 15px;">';
 
             Object.entries(dadosLotacao).forEach(([unidade, dados]) => {
-                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
-                const totalPessoas = dados.ativosTotal + dados.avisoTotal;
+                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && dados.inssTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
+                
+                // O cara no INSS também ocupa vaga!
+                const totalPessoas = dados.ativosTotal + dados.avisoTotal + dados.inssTotal;
                 const limiteGeral = dados.limiteTotal || '∞';
                 
                 let pctTotalReal = 0; let pctTotalBarra = 0; let corTotal = '#4fc3f7'; let statusTotalTxt = 'Ilimitado';
@@ -9317,9 +9350,9 @@ window.gerarDadosBI = async function() {
                 let cargosUnicos = new Set([...Object.keys(dados.limitesCargos), ...Object.keys(dados.ativosPorCargo)]);
 
                 cargosUnicos.forEach(cargo => {
-                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
+                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
-                    const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAviso;
+                    const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAviso + infoCargo.qtdInss;
                     let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
 
                     if (limiteCargo !== '∞') {
@@ -9342,24 +9375,42 @@ window.gerarDadosBI = async function() {
                                </div>
                            </div>`
                         : '';
-                        
-                    let listAviso = infoCargo.nomesAviso.length > 0
+
+                    // 👇 A MÁGICA DOS AFASTAMENTOS (INSS) EM LARANJA 👇
+                    let listInss = infoCargo.nomesInss.length > 0
                         ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
                                <small style="color: #ff9800; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
+                                   <i class="fa-solid fa-briefcase-medical"></i> Afastamentos (${infoCargo.nomesInss.length})
+                               </small>
+                               <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
+                                   ${infoCargo.nomesInss.map(av => `
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
+                                           <span style="color: #ff9800; font-size: 0.8rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title="${av.nome}">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
+                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;" title="Retorno previsto">Volta: ${av.data}</span>
+                                       </div>
+                                   `).join('')}
+                               </div>
+                           </div>`
+                        : '';
+
+                    // 👇 AVISO PRÉVIO AGORA É VERMELHO PRA NÃO CONFUNDIR COM INSS 👇
+                    let listAviso = infoCargo.nomesAviso.length > 0
+                        ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
+                               <small style="color: #dc3545; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
                                    <i class="fa-solid fa-user-clock"></i> Cumprindo Aviso (${infoCargo.nomesAviso.length})
                                </small>
                                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
                                    ${infoCargo.nomesAviso.map(av => `
-                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
-                                           <span style="color: #a6b0cf; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
-                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Até ${av.data}</span>
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(220, 53, 69, 0.08); border-left: 2px solid #dc3545; padding: 4px 8px; border-radius: 4px;">
+                                           <span style="color: #ffc107; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
+                                           <span style="background: rgba(220, 53, 69, 0.15); color: #dc3545; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Até ${av.data}</span>
                                        </div>
                                    `).join('')}
                                </div>
                            </div>`
                         : '';
                         
-                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0) {
+                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0 && infoCargo.nomesInss.length === 0) {
                         listAtivos = `<div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado.</div>`;
                     }
 
@@ -9373,6 +9424,7 @@ window.gerarDadosBI = async function() {
                                 <div style="width: ${pctCargoBarra}%; height: 100%; background: ${corCargo}; border-radius: 4px; transition: width 1s ease-in-out;"></div>
                             </div>
                             ${listAtivos}
+                            ${listInss}
                             ${listAviso}
                         </div>
                     `;
@@ -9380,7 +9432,6 @@ window.gerarDadosBI = async function() {
 
                 if (!detalhesCargos) detalhesCargos = '<p style="color: var(--cor-texto-secundario); font-size: 0.85rem; text-align: center; padding: 15px;">Nenhum colaborador alocado nesta unidade.</p>';
 
-                // 👇 A MÁGICA FINAL: Card com tamanho travado e scroll interno apenas para os cargos 👇
                 htmlCartoesLotacao += `
                     <div class="glass-card card-lotacao-bi" data-unidade="${unidade}" style="padding: 0; display: flex; flex-direction: column; height: 480px; overflow: hidden; border-radius: 12px; border: 1px solid var(--cor-borda); border-top: 5px solid ${corTotal}; box-shadow: 0 8px 20px rgba(0,0,0,0.2); transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='none'">
                         
