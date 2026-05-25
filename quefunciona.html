@@ -3880,6 +3880,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <option value="Pendente">Respondidas (Pendente RH)</option>
             <option value="Concluído">Arquivadas / Concluídas</option>
         </select>
+
+        <button type="button" class="btn-secondary" style="border-color: #4fc3f7; color: #4fc3f7; font-size: 0.95rem; padding: 10px 20px; font-weight: bold; border-radius: 8px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" onclick="exportarRelatorioPontoPDF()">
+            <i class="fa-solid fa-file-pdf"></i> Gerar PDF das Ocorrências
+        </button>
     </div>
 </div>
             
@@ -9227,7 +9231,7 @@ window.gerarDadosBI = async function() {
         });
 
        // ========================================================
-        // 🏢 NOVO DESIGN: LOTAÇÃO E AVISO PRÉVIO (BLINDADO E PREMIUM)
+        // 🏢 NOVO DESIGN: LOTAÇÃO, AVISO PRÉVIO E AFASTAMENTOS (INSS)
         // ========================================================
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
@@ -9244,16 +9248,42 @@ window.gerarDadosBI = async function() {
                 unidadesLimit.forEach(u => {
                     let limitesCargosObj = {};
                     try { if (u.limites_cargos) limitesCargosObj = JSON.parse(u.limites_cargos); } catch(e){}
-                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
+                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, ativosPorCargo: {} };
+                });
+            }
+
+            // 👇 MÁGICA: Busca quem tá afastado hoje (INSS, Maternidade, Atestados) 👇
+            const hojeIso = new Date().toISOString().split('T')[0];
+            const { data: ausenciasLotacao } = await supabaseClient.from('ausencias')
+                .select('colaborador_id, sigla, data_fim')
+                .eq('status', 'Aprovado')
+                .lte('data_inicio', hojeIso)
+                .gte('data_fim', hojeIso);
+
+            let mapaAfastamentos = {};
+            if (ausenciasLotacao) {
+                ausenciasLotacao.forEach(a => {
+                    // Mapeia quem está ausente a longo prazo
+                    if (a.sigla === 'AF' || a.sigla === 'ATM' || a.sigla === 'LDM' || a.sigla === 'LDP') {
+                        mapaAfastamentos[a.colaborador_id] = { sigla: a.sigla, retorno: a.data_fim };
+                    }
                 });
             }
 
             perfis.forEach(p => {
-                if (!dadosLotacao[p.unidade]) dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, ativosPorCargo: {} };
+                if (!dadosLotacao[p.unidade]) dadosLotacao[p.unidade] = { limiteTotal: null, limitesCargos: {}, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, ativosPorCargo: {} };
                 const cargo = (p.dados_admissao && p.dados_admissao.cargo) ? p.dados_admissao.cargo : 'Sem Cargo';
-                let isAtivo = false; let isAviso = false;
+                
+                let isAtivo = false; let isAviso = false; let isInss = false; let dadosInss = null;
 
-                if (p.status === 'Ativo') isAtivo = true;
+                if (p.status === 'Ativo') {
+                    if (mapaAfastamentos[p.id]) {
+                        isInss = true;
+                        dadosInss = mapaAfastamentos[p.id];
+                    } else {
+                        isAtivo = true;
+                    }
+                }
                 else if (p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia) {
                     const udRegex = p.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
@@ -9263,18 +9293,23 @@ window.gerarDadosBI = async function() {
                     }
                 }
 
-                if (isAtivo || isAviso) {
-                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
+                if (isAtivo || isAviso || isInss) {
+                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
                     
                     if (isAtivo) {
                         dadosLotacao[p.unidade].ativosTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAtivos++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAtivos.push(p.nome);
-                    } else {
+                    } else if (isAviso) {
                         dadosLotacao[p.unidade].avisoTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAviso++;
                         let dataSaida = p.dados_rescisao?.ultimo_dia ? p.dados_rescisao.ultimo_dia.split(' ')[0] : 'A definir';
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAviso.push({ nome: p.nome, data: dataSaida });
+                    } else if (isInss) {
+                        dadosLotacao[p.unidade].inssTotal++;
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdInss++;
+                        let dataRetorno = formatarDataBR(dadosInss.retorno);
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesInss.push({ nome: p.nome, data: dataRetorno, sigla: dadosInss.sigla });
                     }
                 }
             });
@@ -9295,8 +9330,10 @@ window.gerarDadosBI = async function() {
             let htmlCartoesLotacao = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; padding-bottom: 20px; margin-top: 15px;">';
 
             Object.entries(dadosLotacao).forEach(([unidade, dados]) => {
-                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
-                const totalPessoas = dados.ativosTotal + dados.avisoTotal;
+                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && dados.inssTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
+                
+                // O cara no INSS também ocupa vaga!
+                const totalPessoas = dados.ativosTotal + dados.avisoTotal + dados.inssTotal;
                 const limiteGeral = dados.limiteTotal || '∞';
                 
                 let pctTotalReal = 0; let pctTotalBarra = 0; let corTotal = '#4fc3f7'; let statusTotalTxt = 'Ilimitado';
@@ -9313,9 +9350,9 @@ window.gerarDadosBI = async function() {
                 let cargosUnicos = new Set([...Object.keys(dados.limitesCargos), ...Object.keys(dados.ativosPorCargo)]);
 
                 cargosUnicos.forEach(cargo => {
-                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, nomesAtivos: [], nomesAviso: [] };
+                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
-                    const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAviso;
+                    const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAviso + infoCargo.qtdInss;
                     let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
 
                     if (limiteCargo !== '∞') {
@@ -9338,24 +9375,42 @@ window.gerarDadosBI = async function() {
                                </div>
                            </div>`
                         : '';
-                        
-                    let listAviso = infoCargo.nomesAviso.length > 0
+
+                    // 👇 A MÁGICA DOS AFASTAMENTOS (INSS) EM LARANJA 👇
+                    let listInss = infoCargo.nomesInss.length > 0
                         ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
                                <small style="color: #ff9800; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
+                                   <i class="fa-solid fa-briefcase-medical"></i> Afastamentos (${infoCargo.nomesInss.length})
+                               </small>
+                               <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
+                                   ${infoCargo.nomesInss.map(av => `
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
+                                           <span style="color: #ff9800; font-size: 0.8rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title="${av.nome}">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
+                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;" title="Retorno previsto">Volta: ${av.data}</span>
+                                       </div>
+                                   `).join('')}
+                               </div>
+                           </div>`
+                        : '';
+
+                    // 👇 AVISO PRÉVIO AGORA É VERMELHO PRA NÃO CONFUNDIR COM INSS 👇
+                    let listAviso = infoCargo.nomesAviso.length > 0
+                        ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
+                               <small style="color: #dc3545; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
                                    <i class="fa-solid fa-user-clock"></i> Cumprindo Aviso (${infoCargo.nomesAviso.length})
                                </small>
                                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
                                    ${infoCargo.nomesAviso.map(av => `
-                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
-                                           <span style="color: #a6b0cf; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
-                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Até ${av.data}</span>
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(220, 53, 69, 0.08); border-left: 2px solid #dc3545; padding: 4px 8px; border-radius: 4px;">
+                                           <span style="color: #ffc107; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
+                                           <span style="background: rgba(220, 53, 69, 0.15); color: #dc3545; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Até ${av.data}</span>
                                        </div>
                                    `).join('')}
                                </div>
                            </div>`
                         : '';
                         
-                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0) {
+                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0 && infoCargo.nomesInss.length === 0) {
                         listAtivos = `<div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado.</div>`;
                     }
 
@@ -9369,6 +9424,7 @@ window.gerarDadosBI = async function() {
                                 <div style="width: ${pctCargoBarra}%; height: 100%; background: ${corCargo}; border-radius: 4px; transition: width 1s ease-in-out;"></div>
                             </div>
                             ${listAtivos}
+                            ${listInss}
                             ${listAviso}
                         </div>
                     `;
@@ -9376,7 +9432,6 @@ window.gerarDadosBI = async function() {
 
                 if (!detalhesCargos) detalhesCargos = '<p style="color: var(--cor-texto-secundario); font-size: 0.85rem; text-align: center; padding: 15px;">Nenhum colaborador alocado nesta unidade.</p>';
 
-                // 👇 A MÁGICA FINAL: Card com tamanho travado e scroll interno apenas para os cargos 👇
                 htmlCartoesLotacao += `
                     <div class="glass-card card-lotacao-bi" data-unidade="${unidade}" style="padding: 0; display: flex; flex-direction: column; height: 480px; overflow: hidden; border-radius: 12px; border: 1px solid var(--cor-borda); border-top: 5px solid ${corTotal}; box-shadow: 0 8px 20px rgba(0,0,0,0.2); transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='none'">
                         
@@ -12370,12 +12425,14 @@ if((a.status || 'Ativo') === 'Ativo') {
 }
 
 let btnAdminAcoes = '';
-if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
-    btnAdminAcoes = `
-        <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarAdmissaoAdmin('${a.id}')" title="Editar Ficha de Admissão"><i class="fa-solid fa-pen"></i></button>
-        <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirAdmissaoAdmin('${a.id}')" title="Excluir Colaborador"><i class="fa-solid fa-trash"></i></button>
-    `;
-}
+        if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
+            btnAdminAcoes = `
+                <button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background-color: #28a745; color: white; border: none; font-weight: bold;" onclick="exportarExcelAdmissaoR6('${a.id}')" title="Gerar Excel R6 do Colaborador"><i class="fa-solid fa-file-excel"></i> R6</button>
+                
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarAdmissaoAdmin('${a.id}')" title="Editar Ficha de Admissão"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirAdmissaoAdmin('${a.id}')" title="Excluir Colaborador"><i class="fa-solid fa-trash"></i></button>
+            `;
+        }
 
 let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: var(--cor-sucesso); display: block; margin-top: 4px; font-weight: bold;"><i class="fa-solid fa-user-check"></i> Aprovado por: ${adm.aprovado_por}</span>` : '';
 
@@ -17029,7 +17086,12 @@ window.filtrarUsuariosCadastrados = function() {
     const termo = window.removerAcentos(document.getElementById('busca-usuarios-cadastrados').value);
     const tbody = document.getElementById('lista-usuarios-body');
     
-    const filtrados = todosUsuariosCadastrados.filter(u => window.removerAcentos(u.nome).includes(termo));
+    // 👇 A MÁGICA DA BUSCA DUPLA: Agora valida Nome OU Unidade! 👇
+    const filtrados = todosUsuariosCadastrados.filter(u => {
+        const matchNome = window.removerAcentos(u.nome).includes(termo);
+        const matchUnidade = window.removerAcentos(u.unidade || '').includes(termo);
+        return matchNome || matchUnidade; // Retorna o usuário se bater qualquer um dos dois
+    });
 
     if (filtrados.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 30px;">Nenhum usuário encontrado na busca.</td></tr>';
@@ -17051,7 +17113,7 @@ window.filtrarUsuariosCadastrados = function() {
         let dataDesligamentoHtml = ''; 
         let estiloExtraBadge = '';
 
-        // 1. Lógica de Datas para Desligados e Aviso Prévio
+        // Lógica de Datas para Desligados e Aviso Prévio
         if (statusTexto === 'Desligado' || statusTexto === 'Cancelado(a)' || statusTexto === 'Excluído') {
             const hoje = new Date();
             hoje.setHours(0,0,0,0);
@@ -17079,7 +17141,7 @@ window.filtrarUsuariosCadastrados = function() {
                 statusBadge = 'badge desligado';
             }
         } 
-        // 👇 2. A MÁGICA NOVA: Lógica Dinâmica para quem está Afastado/Férias 👇
+        // Lógica Dinâmica para quem está Afastado/Férias
         else if (statusTexto === 'Ativo' && u.ausencia_atual) {
             const tipoAus = u.ausencia_atual.tipo;
             const dataRetorno = formatarDataBR(u.ausencia_atual.retorno);
@@ -17091,15 +17153,15 @@ window.filtrarUsuariosCadastrados = function() {
                 dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #ffd54f; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-plane-departure"></i> Retorno: ${dataRetorno}</span>`;
             } else if (tipoAus === 'AF') {
                 statusTexto = 'Afastado INSS';
-                statusBadge = 'badge advertencia'; // Roxo
+                statusBadge = 'badge advertencia'; 
                 dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #c4b5fd; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-notes-medical"></i> Retorno: ${dataRetorno}</span>`;
             } else if (tipoAus === 'LDM' || tipoAus === 'LDP') {
                 statusTexto = 'Licença Maternidade';
-                statusBadge = 'badge tipo-solicitacao'; // Azul claro
+                statusBadge = 'badge tipo-solicitacao'; 
                 dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #4fc3f7; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-baby"></i> Retorno: ${dataRetorno}</span>`;
             } else {
                 statusTexto = `Afastado (${tipoAus})`;
-                statusBadge = 'badge pendente'; // Laranja
+                statusBadge = 'badge pendente'; 
                 dataDesligamentoHtml = `<span style="display: block; font-size: 0.75rem; color: #ff9800; margin-top: 5px; font-weight: bold;"><i class="fa-solid fa-briefcase-medical"></i> Retorno: ${dataRetorno}</span>`;
             }
         }
@@ -24724,11 +24786,14 @@ window.filtrarJustificativasZap = function() {
         return matchNome && matchStatus && matchData;
     });
 
+     // 👇 A MÁGICA: Guarda os dados filtrados na memória para o gerador de PDF ler! 👇
+    window.justificativasFiltradasAtual = filtrados;
+
     if (filtrados.length === 0) {
-        container.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding: 20px;">Nenhuma justificativa encontrada com estes filtros.</p>';
+        container.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding: 20px;">Nenhum documento encontrado com estes filtros.</p>';
         return;
     }
-
+  
     // 2. Ordenação (Não lidos e mais recentes no topo)
     filtrados.sort((a, b) => {
         const nA = notifsBanco.find(n => n.referencia_id === a.id && n.tipo === tipoNotifBusca);
@@ -32314,10 +32379,7 @@ window.filtrarTabelaDocs = function() {
     }
 }
 
-        // ==========================================
-// FUNÇÃO: COBRANÇA EM MASSA NO WHATSAPP
-// ==========================================
-window.reenviarParaTodosPendentes = async function() {
+        window.reenviarParaTodosPendentes = async function() {
     if (!pendentesAtuaisFiltro || pendentesAtuaisFiltro.length === 0) return;
 
     const confirmado = await mostrarConfirmacao(`Atenção: Você vai disparar mensagens no WhatsApp para <b>${pendentesAtuaisFiltro.length}</b> pessoas cobrando a assinatura. Deseja continuar?`, "Cobrança em Massa");
@@ -32325,45 +32387,86 @@ window.reenviarParaTodosPendentes = async function() {
 
     const btn = document.getElementById('btn-reenviar-todos');
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando cobranças...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando cobranças (Modo Turbo)...';
 
-    mostrarAlerta("Iniciando envios em massa. Por favor, aguarde...", "aviso");
+    mostrarAlerta("Iniciando envios em massa (Modo Turbo). Por favor, abra o painel e aguarde...", "aviso");
 
     let enviados = 0;
+    let falhas = 0;
+    const tamanhoLote = 10; // 👇 MOTOR TURBO: Processa de 10 em 10 simultaneamente
 
-    for (let doc of pendentesAtuaisFiltro) {
-        try {
-            // Busca o telefone do cara no banco na hora
-            const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', doc.colaborador_id).single();
-            const fone = perfil?.dados_admissao?.telefone;
+    try {
+        // Otimização: Coleta os IDs únicos e busca os telefones de uma vez só no banco
+        const idsColabs = [...new Set(pendentesAtuaisFiltro.map(p => p.colaborador_id))];
+        const { data: perfis, error } = await supabaseClient.from('perfis').select('id, dados_admissao').in('id', idsColabs);
 
-            if (fone) {
-                const primeiroNome = doc.nome.split(' ')[0];
-                
-                // Dispara usando a API (com o Token e o PDF corretos)
-                const sucesso = await enviarMensagemGraphAPI(
-                    fone, 
-                    'envio_de_holerite_sistema_novo', 
-                    [primeiroNome, doc.tipo_documento, doc.mes_ano], 
-                    doc.documento_pdf,                  
-                    doc.token                        
-                );
-                
-                if (sucesso) enviados++;
-                
-                // Trava de 1 segundo entre envios para a Meta não dar block de Spam!
-                await new Promise(r => setTimeout(r, 1000)); 
+        if (error || !perfis) throw new Error("Erro ao buscar dados dos colaboradores.");
+
+        // Loop em lotes paralelos de 10
+        for (let i = 0; i < pendentesAtuaisFiltro.length; i += tamanhoLote) {
+            const loteAtual = pendentesAtuaisFiltro.slice(i, i + tamanhoLote);
+
+            const promessasLote = loteAtual.map(async (doc) => {
+                try {
+                    const perfil = perfis.find(x => x.id === doc.colaborador_id);
+                    const fone = perfil?.dados_admissao?.telefone || doc.telefone;
+
+                    if (!fone) return false;
+
+                    const primeiroNome = doc.nome.split(' ')[0];
+                    let sucesso = false;
+
+                    if (doc.tipo_documento === 'Informe de Rendimentos') {
+                        const anoRef = doc.mes_ano.split('/')[1] || doc.mes_ano;
+                        sucesso = await enviarMensagemGraphAPI(
+                            fone, 
+                            'informe_rendimentos_entregue', 
+                            [primeiroNome, anoRef], 
+                            doc.documento_pdf, 
+                            null
+                        );
+                    } else {
+                        // Converte o mês numérico para extenso (Ex: "05/2026" -> "Maio de 2026")
+                        const partes = doc.mes_ano.split('/');
+                        const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'DEZEMBRO'];
+                        const mesNomeAno = partes.length === 2 ? `${mesesExtenso[parseInt(partes[0]) - 1]} de ${partes[1]}` : doc.mes_ano;
+
+                        sucesso = await enviarMensagemGraphAPI(
+                            fone, 
+                            'envio_de_holerite_sistema_novo', 
+                            [primeiroNome, doc.tipo_documento, mesNomeAno], 
+                            doc.documento_pdf,                  
+                            doc.token                        
+                        );
+                    }
+                    return sucesso;
+                } catch (e) {
+                    return false;
+                }
+            });
+
+            // Executa os 10 disparos do lote ao mesmo tempo!
+            const resultados = await Promise.all(promessasLote);
+            resultados.forEach(ok => { if (ok) enviados++; else falhas++; });
+
+            // Descansa 1 segundo entre os lotes (Escudo Anti-Spam exigido pela Meta)
+            if (i + tamanhoLote < pendentesAtuaisFiltro.length) {
+                await new Promise(r => setTimeout(r, 1000));
             }
-        } catch (err) {
-            console.error(`Erro ao reenviar para ${doc.nome}:`, err);
         }
-    }
 
-    mostrarAlerta(`Cobrança em massa concluída!<br><b>${enviados}</b> mensagens enviadas com sucesso.`, "sucesso");
-    
-    // Devolve o botão ao normal
-    btn.disabled = false;
-    btn.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar ${pendentesAtuaisFiltro.length} Pendente(s) no Zap`;
+        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        
+        // Recarrega o status do dashboard
+        if (typeof carregarStatusHolerites === 'function') carregarStatusHolerites();
+
+    } catch (err) {
+        mostrarAlerta("Erro durante o processo em massa: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fa-brands fa-whatsapp fa-lg"></i> Cobrar Todos no Zap`;
+        if (typeof filtrarTabelaDocs === 'function') filtrarTabelaDocs();
+    }
 };
 
         window.excluirDocumento = async function(idDocumento, urlPdfOriginal, urlPdfAssinado) {
@@ -40548,6 +40651,289 @@ window.exportarExcelCesta_R6 = async function() {
         URL.revokeObjectURL(link.href);
     } catch(err) {
         mostrarAlerta("Erro ao gerar R6: " + err.message, "erro");
+    }
+};
+
+      // =========================================================================
+// 🖨️ EMISSÃO DE RELATÓRIO DE PENDÊNCIAS DE PONTO EM PDF (TEMA CLARO SEGURO)
+// =========================================================================
+window.exportarRelatorioPontoPDF = function() {
+    if (!window.justificativasFiltradasAtual || window.justificativasFiltradasAtual.length === 0) {
+        return mostrarAlerta("Nenhum dado na tela para exportar! Selecione uma unidade ou período primeiro.", "aviso");
+    }
+
+    const filtroMes = document.getElementById('filtro-mes-zap-justificativas').value;
+    const filtroStatus = document.getElementById('filtro-status-justificativas').value;
+    const buscaTexto = document.getElementById('busca-zap-justificativas').value.trim();
+
+    const mesTexto = filtroMes ? filtroMes.split('-').reverse().join('/') : 'Todos os Meses';
+    const statusTexto = document.getElementById('filtro-status-justificativas').options[document.getElementById('filtro-status-justificativas').selectedIndex].text;
+    const unidadeTexto = buscaTexto ? `Filtro de Busca: "${buscaTexto}"` : 'Todas as Unidades';
+    
+    const dataGeracao = new Date().toLocaleString('pt-BR');
+
+    // Contadores estatísticos para a capa do PDF
+    const total = window.justificativasFiltradasAtual.length;
+    const pendentesRH = window.justificativasFiltradasAtual.filter(j => j.status === 'Pendente').length;
+    const aguardandoColab = window.justificativasFiltradasAtual.filter(j => j.status === 'Aguardando Colaborador').length;
+    const concluidos = total - pendentesRH - aguardandoColab;
+
+    // Monta as linhas da tabela limpando tokens invisíveis de máquina
+    let linhasTabelaHtml = '';
+    
+    // Clonamos e ordenamos por Nome do Funcionário para o relatório ficar profissional
+    const dadosOrdenados = [...window.justificativasFiltradasAtual].sort((a, b) => a.nome.localeCompare(b.nome));
+
+    dadosOrdenados.forEach((j, index) => {
+        const bgRow = index % 2 === 0 ? '#ffffff' : '#f8fafc'; // Efeito Zebrado Limpo
+
+        // Cor de status personalizada para impressão tradicional
+        let corStatus = '#333';
+        if (j.status === 'Pendente') corStatus = '#0284c7'; // Azul Informativo
+        else if (j.status === 'Concluído') corStatus = '#2e7d32'; // Verde
+        else if (j.status === 'Aguardando Colaborador') corStatus = '#b55d00'; // Laranja Escuro
+
+        // Limpa a justificativa do funcionário tirando carimbos ocultos e anexos
+        let justificativaLimpa = j.justificativa || 'Aguardando resposta do colaborador...';
+        
+        // Descobre o tipo oficial do erro para colocar em destaque
+        let tipoErroTxt = 'Esquecimento / Falha de Batida';
+        if (justificativaLimpa.includes('[TIPO_OFICIAL:Atestado]')) tipoErroTxt = 'Atestado / Licença';
+        else if (justificativaLimpa.includes('[TIPO_OFICIAL:FT]')) tipoErroTxt = 'Folga Trabalhada (FT)';
+        else if (justificativaLimpa.includes('[TIPO_OFICIAL:Troca de Turno]')) tipoErroTxt = 'Troca de Turno';
+        else if (justificativaLimpa.includes('[TIPO_OFICIAL:Folga]')) tipoErroTxt = 'Era Dia de Folga';
+
+        justificativaLimpa = justificativaLimpa.replace(/\[TIPO_OFICIAL:[^\]]+\]\s*/g, '');
+        if (justificativaLimpa.includes('|||ANEXO|||')) {
+            justificativaLimpa = `${justificativaLimpa.split('|||ANEXO|||')[0].trim()} <small style="color:#0284c7; font-weight:bold; display:block; margin-top:2px;">(Comprovante Anexado no Sistema)</small>`;
+        }
+
+        // Limpa o motivo do RH tirando a palavra fixa inicial
+        let motivoRHLimpo = (j.motivo_rh || '-').replace('Faltou bater o ponto na: ', 'Inconsistência na: ');
+
+        linhasTabelaHtml += `
+            <tr style="background-color: ${bgRow}; page-break-inside: avoid;">
+                <td style="padding: 10px 8px; border: 1px solid #dee2e6; color: #111; font-weight: bold; font-size: 11px;">${j.nome}</td>
+                <td style="padding: 10px 6px; border: 1px solid #dee2e6; color: #333; font-size: 11px; text-align: center;">${j.unidade || '-'}</td>
+                <td style="padding: 10px 6px; border: 1px solid #dee2e6; color: #111; font-size: 11px; text-align: center; font-weight: bold; white-space: nowrap;">${formatarDataBR(j.data_falha)}</td>
+                <td style="padding: 10px 8px; border: 1px solid #dee2e6; color: #444; font-size: 10px; line-height: 1.3;">
+                    <b style="color: #002347; display:block; margin-bottom:2px;">${tipoErroTxt}</b>
+                    ${motivoRHLimpo}
+                </td>
+                <td style="padding: 10px 8px; border: 1px solid #dee2e6; color: #555; font-size: 10px; font-style: italic; line-height: 1.3;">
+                    ${j.status === 'Aguardando Colaborador' ? '<span style="color:#999;">Aguardando retorno do funcionário...</span>' : `"${justificativaLimpa}"`}
+                </td>
+                <td style="padding: 10px 6px; border: 1px solid #dee2e6; color: ${corStatus}; font-weight: bold; font-size: 10px; text-align: center; text-transform: uppercase;">${j.status === 'Pendente' ? 'Respondido' : j.status}</td>
+            </tr>
+        `;
+    });
+
+    const conteudoHTML = `
+        <!DOCTYPE html>
+        <html lang="pt-BR">
+        <head>
+            <meta charset="UTF-8">
+            <title>Relatorio_Pendencias_Ponto</title>
+            <style>
+                body { font-family: Arial, Helvetica, sans-serif; padding: 20px; color: #111; margin: 0; background: #fff; }
+                @media print { 
+                    body { padding: 0; } 
+                    @page { margin: 12mm 10mm; size: landscape; } 
+                    thead { display: table-header-group; } 
+                    tr { page-break-inside: avoid; } 
+                }
+                .color-block { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            </style>
+        </head>
+        <body>
+            <div style="border-bottom: 2px solid #002347; padding-bottom: 10px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div class="color-block" style="background-color: #002347; color: #ffc107; padding: 8px 12px; font-size: 14px; font-weight: bold; border-radius: 6px; text-align: center; line-height: 1.2; font-family: sans-serif;">RH SOUL<br><span style="font-size: 8px; color: #fff;">Gestão Inteligente</span></div>
+                    <div>
+                        <h1 style="color: #002347; margin: 0; font-size: 18px; text-transform: uppercase; font-weight: 900; letter-spacing: 0.5px;">Acompanhamento e Pendências de Ponto</h1>
+                        <h2 style="color: #555; margin: 4px 0 0 0; font-size: 11px; font-weight: 500;">
+                            Mapeamento: <b style="color: #002347;">${unidadeTexto}</b> &nbsp;|&nbsp; Mês Alvo: <b style="color: #002347;">${mesTexto}</b> &nbsp;|&nbsp; Filtro de Status: <b style="color: #002347;">${statusTexto}</b>
+                        </h2>
+                    </div>
+                </div>
+                <div style="text-align: right; color: #555; font-size: 9px; background: #f8f9fa; padding: 4px 8px; border-radius: 4px; border: 1px solid #dee2e6;">
+                    Gerado em:<br><b style="color: #111; font-size: 10px;">${dataGeracao}</b>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-bottom: 20px; page-break-inside: avoid;">
+                <div class="color-block" style="flex: 1; border: 1px solid #dee2e6; border-left: 4px solid #002347; padding: 10px; border-radius: 5px; text-align: center; background: #f8fafc;">
+                    <span style="font-size: 10px; color: #002347; font-weight: bold; text-transform: uppercase;">Total Registrado</span><br>
+                    <b style="font-size: 20px; color: #111;">${total}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #dee2e6; border-left: 4px solid #0284c7; padding: 10px; border-radius: 5px; text-align: center; background: #f0f9ff;">
+                    <span style="font-size: 10px; color: #0284c7; font-weight: bold; text-transform: uppercase;">Pendente (Análise RH)</span><br>
+                    <b style="font-size: 20px; color: #111;">${pendentesRH}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #dee2e6; border-left: 4px solid #b55d00; padding: 10px; border-radius: 5px; text-align: center; background: #fffaf0;">
+                    <span style="font-size: 10px; color: #b55d00; font-weight: bold; text-transform: uppercase;">Aguardando Funcionário</span><br>
+                    <b style="font-size: 20px; color: #111;">${aguardandoColab}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #dee2e6; border-left: 4px solid #2e7d32; padding: 10px; border-radius: 5px; text-align: center; background: #f4fdf5;">
+                    <span style="font-size: 10px; color: #2e7d32; font-weight: bold; text-transform: uppercase;">Arquivados</span><br>
+                    <b style="font-size: 20px; color: #111;">${concluidos}</b>
+                </div>
+            </div>
+
+            <table class="color-block" style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-family: sans-serif;">
+                <thead>
+                    <tr style="background-color: #002347; color: #fff;">
+                        <th style="padding: 10px 8px; border: 1px solid #002347; text-align: left; width: 22%; font-size: 11px;">COLABORADOR</th>
+                        <th style="padding: 10px 6px; border: 1px solid #002347; text-align: center; width: 12%; font-size: 11px;">UNIDADE</th>
+                        <th style="padding: 10px 6px; border: 1px solid #002347; text-align: center; width: 10%; font-size: 11px;">DATA FALHA</th>
+                        <th style="padding: 10px 8px; border: 1px solid #002347; text-align: left; width: 23%; font-size: 11px;">INCONSISTÊNCIA COBRADA</th>
+                        <th style="padding: 10px 8px; border: 1px solid #002347; text-align: left; width: 23%; font-size: 11px;">JUSTIFICATIVA APRESENTADA</th>
+                        <th style="padding: 10px 6px; border: 1px solid #002347; text-align: center; width: 10%; font-size: 11px;">STATUS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${linhasTabelaHtml}
+                </tbody>
+            </table>
+        </body>
+        </html>
+    `;
+
+    mostrarAlerta("Construindo documento executivo de apuração...", "sucesso");
+
+    const novaJanela = window.open('', '_blank');
+    novaJanela.document.write(conteudoHTML);
+    novaJanela.document.close();
+
+    setTimeout(() => {
+        novaJanela.onafterprint = function() { novaJanela.close(); };
+        novaJanela.print();
+    }, 800);
+};
+
+      // =========================================================================
+// 🚀 EXPORTADOR R6 INDIVIDUAL (ABA DE ADMISSÕES APROVADAS)
+// =========================================================================
+
+window.exportarExcelAdmissaoR6 = async function(idColab) {
+    // Procura o colaborador na lista que já está carregada na tela
+    const c = todasAdmissoesAprovadas.find(x => x.id === idColab);
+    if (!c) return mostrarAlerta("Erro: Dados do colaborador não encontrados na memória.", "erro");
+
+    try {
+        mostrarAlerta("Lendo dados e montando planilha R6...", "sucesso");
+        
+        const workbook = new ExcelJS.Workbook();
+        const sheet = workbook.addWorksheet('R6 Admissao');
+
+        // 👇 CABEÇALHO EXATAMENTE COM OS NOMES SOLICITADOS 👇
+        const cabecalhos = [
+            "CPF", "e-mail", "Primeiro nome e segundo nome, se houver", "Sobrenome", 
+            "Data de Nascimento", "Nome da mãe", "Cep", "Endereço", "Número", 
+            "Bairro", "Cidade", "UF", "Complemento", "Celular", "Time"
+        ];
+
+        const headerRow = sheet.addRow(cabecalhos);
+        headerRow.font = { bold: true, color: { argb: 'FF000000' } };
+        headerRow.height = 20;
+        headerRow.eachCell(cell => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } }; // Cinza clarinho padrão do Excel
+            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
+
+        // Ajuste inteligente das larguras das colunas
+        sheet.columns = [
+            { width: 18 }, { width: 30 }, { width: 38 }, { width: 30 }, 
+            { width: 18 }, { width: 30 }, { width: 12 }, { width: 35 }, { width: 10 }, 
+            { width: 20 }, { width: 20 }, { width: 6 }, { width: 15 }, { width: 18 }, { width: 25 }
+        ];
+
+        // 👇 EXTRAÇÃO DOS DADOS 👇
+        const adm = c.dados_admissao || {};
+        
+        const cpf = adm.cpf ? mascaraCPF(adm.cpf) : '';
+        const email = adm.email_pessoal || '';
+
+        // Mágica de Separação do Nome
+        const nomeParts = (c.nome || '').trim().split(' ');
+        let pNome = '', sNome = '';
+        
+        if (nomeParts.length === 1) { 
+            pNome = nomeParts[0]; 
+        } else if (nomeParts.length === 2) { 
+            pNome = nomeParts[0]; 
+            sNome = nomeParts[1]; 
+        } else if (nomeParts.length >= 3) { 
+            pNome = nomeParts[0] + ' ' + nomeParts[1]; // Pega 1º e 2º nome
+            sNome = nomeParts.slice(2).join(' ');      // Todo o restante é sobrenome
+        }
+
+        let nasc = adm.nascimento || '';
+        if (nasc) nasc = formatarDataBR(nasc);
+        const mae = adm.mae || '';
+
+        // Mágica do Endereço (Extraindo rua, numero, bairro...)
+        let eCep = adm.cep ? adm.cep.replace(/\D/g, '').replace(/^(\d{5})(\d)/, '$1-$2') : '';
+        let eRua = '', eNum = '', eComp = '', eBairro = '', eCidadeStr = '', eUF = '';
+        
+        if (adm.endereco) {
+            let partesEnd = adm.endereco.split(' - ');
+            if (partesEnd.length > 0) {
+                let pRuaNum = partesEnd[0].split(', Nº ');
+                eRua = pRuaNum[0] || '';
+                eNum = pRuaNum[1] || '';
+            }
+            if (partesEnd.length === 3) {
+                eComp = partesEnd[1];
+                let pBairroCid = partesEnd[2].split(', ');
+                eBairro = pBairroCid[0] || '';
+                eCidadeStr = pBairroCid[1] || '';
+            } else if (partesEnd.length === 2) {
+                let pBairroCid = partesEnd[1].split(', ');
+                eBairro = pBairroCid[0] || '';
+                eCidadeStr = pBairroCid[1] || '';
+            }
+        }
+        
+        // Separa Cidade da UF
+        if (eCidadeStr.includes('/')) {
+            let cParts = eCidadeStr.split('/');
+            eCidadeStr = cParts[0].trim();
+            eUF = cParts[1].trim();
+        } else if (eCidadeStr.includes('-')) {
+            let cParts = eCidadeStr.split('-');
+            eCidadeStr = cParts[0].trim();
+            eUF = cParts[1].trim();
+        }
+
+        const celular = adm.telefone || '';
+        const time = c.unidade || ''; // A Unidade vai preencher o campo "Time"
+
+        // Injeta a linha na planilha
+        const row = sheet.addRow([
+            cpf, email, pNome, sNome, nasc, mae, eCep, eRua, eNum, eBairro, eCidadeStr, eUF, eComp, celular, time
+        ]);
+
+        // Impede que o Excel remova zeros à esquerda de CPF e CEP
+        row.getCell(1).numFmt = '@'; 
+        row.getCell(7).numFmt = '@'; 
+        
+        row.eachCell((cell) => {
+            cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+        });
+
+        // 3. SALVA O ARQUIVO AUTOMATICAMENTE
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `R6_Admissao_${pNome.replace(/ /g, '_')}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+    } catch (e) {
+        mostrarAlerta("Erro ao gerar Excel: " + e.message, "erro");
     }
 };
       
