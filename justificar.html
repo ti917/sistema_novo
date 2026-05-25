@@ -756,33 +756,66 @@
                 const { data: pData } = supabaseClient.storage.from('documentos').getPublicUrl(caminhoPdf);
                 const pdfUrlFinal = pData.publicUrl;
 
-                // 4. SALVAR NO BANCO
-               // E troque aqui (Onde ele salva no Banco de Dados Supabase)
+               // 4. SALVAR NO BANCO (BLINDADO)
                 const dadosBanco = {
                     entrada: entrada || null, ida_refeicao: idaRef || null, volta_refeicao: voltaRef || null, saida: saida || null,
                     justificativa: docFinalUrl ? `${justificativaBlindada}|||ANEXO|||${docFinalUrl}` : justificativaBlindada,
                     doc_colaborador: pdfUrlFinal, status: 'Pendente'
                 };
 
-                if (ocorrenciaGlobal) {
+                if (ocorrenciaGlobal && ocorrenciaGlobal.id) {
+                    // Atualiza a ocorrência existente
                     await supabaseClient.from('ocorrencias_ponto').update(dadosBanco).eq('id', ocorrenciaGlobal.id);
                     
+                    // 👇 A MÁGICA DO ESCUDO: Só tenta mexer na notificação se o cara mandou os dados certos na URL
                     if (ocorrenciaGlobal.colaborador_id) {
-                        await supabaseClient.from('notificacoes').insert([{ 
-                            colaborador_id: ocorrenciaGlobal.colaborador_id, nome: `Ocorrência Respondida: ${ocorrenciaGlobal.nome}`, 
-                            unidade: ocorrenciaGlobal.unidade, lida: false, tipo: 'Ocorrencia_Ponto_Admin', referencia_id: ocorrenciaGlobal.id 
-                        }]);
+                        try {
+                            // Deleta notificações antigas fantasma (se tiverem ficado presas no RH)
+                            await supabaseClient.from('notificacoes').delete()
+                                .eq('referencia_id', ocorrenciaGlobal.id)
+                                .in('tipo', ['Ocorrencia_Ponto', 'Ocorrencia_Ponto_Admin']);
+
+                            // E aí sim, insere a notificação limpa avisando o Admin
+                            await supabaseClient.from('notificacoes').insert([{ 
+                                colaborador_id: ocorrenciaGlobal.colaborador_id, 
+                                nome: `Ocorrência Respondida: ${ocorrenciaGlobal.nome}`, 
+                                unidade: ocorrenciaGlobal.unidade || 'Matriz', 
+                                lida: false, 
+                                tipo: 'Ocorrencia_Ponto_Admin', 
+                                referencia_id: ocorrenciaGlobal.id 
+                            }]);
+                        } catch (e) {
+                            console.warn("Ignorando erro ao criar notificação. O chamado foi salvo na base.", e);
+                        }
                     }
                 } else {
-                    const { data: nOc } = await supabaseClient.from('ocorrencias_ponto').insert([{
-                        ...dadosBanco, colaborador_id: cId, nome: cNome, unidade: cUnidade, empresa: cEmpresa, data_falha: dataFalhaRaw
+                    // É um lançamento proativo (o próprio funcionário entrou no link em branco para avisar)
+                    const { data: nOc, error: errInsertOco } = await supabaseClient.from('ocorrencias_ponto').insert([{
+                        ...dadosBanco, 
+                        colaborador_id: cId, 
+                        nome: cNome, 
+                        unidade: cUnidade, 
+                        empresa: cEmpresa, 
+                        data_falha: dataFalhaRaw
                     }]).select('id').single();
-                    await supabaseClient.from('notificacoes').insert([{ 
-                        colaborador_id: cId, nome: `Ocorrência Proativa: ${cNome}`, unidade: cUnidade, 
-                        lida: false, tipo: 'Ocorrencia_Ponto_Admin', referencia_id: nOc.id 
-                    }]);
-                }
 
+                    if (errInsertOco) throw errInsertOco;
+
+                    if (nOc && nOc.id) {
+                        try {
+                            await supabaseClient.from('notificacoes').insert([{ 
+                                colaborador_id: cId, 
+                                nome: `Ocorrência Proativa: ${cNome}`, 
+                                unidade: cUnidade, 
+                                lida: false, 
+                                tipo: 'Ocorrencia_Ponto_Admin', 
+                                referencia_id: nOc.id 
+                            }]);
+                        } catch (e) {
+                            console.warn("Aviso: Notificação de ponto não criada, mas registro salvo.", e);
+                        }
+                    }
+                }
                 document.getElementById('card-formulario').style.display = 'none';
                 document.getElementById('sucesso-msg').style.display = 'block';
 
