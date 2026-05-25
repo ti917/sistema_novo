@@ -3671,6 +3671,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <div style="background: linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(0,0,0,0.2) 100%); padding: 15px; border-radius: 12px; border: 1px solid rgba(255, 152, 0, 0.3); text-align: center; position: relative;">
             <span style="display: block; font-size: 0.75rem; color: #ff9800; font-weight: bold; text-transform: uppercase;"><i class="fa-solid fa-clock"></i> Pendentes</span>
             <strong id="count-avulso-pendentes" style="font-size: 1.8rem; color: #ff9800;">0</strong>
+            
+            <button id="btn-reenviar-avulso-massa" class="btn-success hidden" style="position: absolute; top: -10px; right: -10px; padding: 4px 10px; font-size: 0.7rem; border-radius: 20px; font-weight: bold; border: none; background: #25D366; color: #fff; cursor: pointer; box-shadow: 0 4px 10px rgba(37, 211, 102, 0.4);" onclick="reenviarTermoAvulsoMassa()" title="Cobrar pendentes no WhatsApp">
+                <i class="fa-brands fa-whatsapp"></i> Cobrar
+            </button>
         </div>
     </div>
 
@@ -37923,6 +37927,9 @@ window.filtrarStatusAvulsosVisual = function() {
         document.getElementById('count-avulso-total').innerText = '0';
         document.getElementById('count-avulso-assinados').innerText = '0';
         document.getElementById('count-avulso-pendentes').innerText = '0';
+        
+        // Esconde botão em massa
+        document.getElementById('btn-reenviar-avulso-massa')?.classList.add('hidden');
         return;
     }
 
@@ -37949,6 +37956,13 @@ window.filtrarStatusAvulsosVisual = function() {
     document.getElementById('count-avulso-assinados').innerText = assinados;
     document.getElementById('count-avulso-pendentes').innerText = pendentes;
 
+    // 👇 LIGA/DESLIGA O BOTÃO DE MASSA DEPENDENDO DO NÚMERO DE PENDENTES
+    const btnMassa = document.getElementById('btn-reenviar-avulso-massa');
+    if (btnMassa) {
+        if (pendentes > 0) btnMassa.classList.remove('hidden');
+        else btnMassa.classList.add('hidden');
+    }
+
     if (filtrados.length === 0) {
         lista.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">Nenhum documento encontrado com esses filtros.</p>';
         return;
@@ -37957,7 +37971,6 @@ window.filtrarStatusAvulsosVisual = function() {
     let html = '';
     filtrados.forEach(r => {
         let statusAtual = r.status || 'Pendente'; 
-        
         let isAssinado = statusAtual === 'Assinado';
         let corStatus = isAssinado ? '#28a745' : '#ff9800';
         let corFundoCard = isAssinado ? 'rgba(40, 167, 69, 0.05)' : 'rgba(255, 152, 0, 0.05)';
@@ -37966,7 +37979,6 @@ window.filtrarStatusAvulsosVisual = function() {
         const nomeFinal = r.nome_colaborador || r.nome || 'Não Identificado';
         const tituloFinal = r.titulo_documento || r.titulo || 'Documento Avulso';
         
-        // 👇 A MÁGICA DA DATA AQUI 👇
         const dataDoBanco = r.created_at || r.criado_em;
         let dataEnvio = dataDoBanco ? new Date(dataDoBanco).toLocaleDateString('pt-BR') : '-';
         
@@ -38011,6 +38023,96 @@ window.filtrarStatusAvulsosVisual = function() {
     });
 
     lista.innerHTML = html;
+};
+
+// 👇 NOVA FUNÇÃO: O MOTOR TURBO EM MASSA PARA AVULSOS 👇
+window.reenviarTermoAvulsoMassa = async function() {
+    // 1. Pega EXATAMENTE os caras que estão filtrados na tela (respeita busca e unidade atual do select)
+    const termo = window.removerAcentos(document.getElementById('busca-avulso-status').value);
+    const uniFiltro = document.getElementById('filtro-unidade-avulso').value;
+
+    const pendentes = window.dadosAvulsosAtuais.filter(r => {
+        const nomeColab = r.nome_colaborador || r.nome || '';
+        const tituloDoc = r.titulo_documento || r.titulo || '';
+        const matchTexto = window.removerAcentos(nomeColab).includes(termo) || window.removerAcentos(tituloDoc).includes(termo);
+        const matchStatus = (r.status || 'Pendente') === 'Pendente';
+        const matchUnidade = uniFiltro === 'Todas' || r.unidade === uniFiltro;
+        
+        return matchTexto && matchStatus && matchUnidade;
+    });
+
+    if (pendentes.length === 0) return mostrarAlerta("Nenhum documento pendente na lista atual.", "aviso");
+
+    const confirmado = await mostrarConfirmacao(`Deseja disparar cobranças no WhatsApp para <b>${pendentes.length}</b> documentos pendentes?`, "Cobrança em Massa");
+    if (!confirmado) return;
+
+    // 2. Trava o botão
+    const btnMassa = document.getElementById('btn-reenviar-avulso-massa');
+    if (btnMassa) {
+        btnMassa.disabled = true;
+        btnMassa.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Cobrando...';
+    }
+
+    mostrarAlerta("Iniciando envios em massa (Modo Turbo)...", "aviso");
+
+    let sucessos = 0;
+    let falhas = 0;
+
+    try {
+        // Busca os telefones pra agilizar
+        const idsColabs = [...new Set(pendentes.map(p => p.colaborador_id))];
+        const { data: perfis } = await supabaseClient.from('perfis').select('id, empresa, dados_admissao').in('id', idsColabs);
+
+        const tamanhoLote = 10;
+
+        // 3. Disparo Lote a Lote
+        for (let i = 0; i < pendentes.length; i += tamanhoLote) {
+            const loteAtual = pendentes.slice(i, i + tamanhoLote);
+
+            const promessasLote = loteAtual.map(async (doc) => {
+                const perfil = perfis.find(x => x.id === doc.colaborador_id);
+                const telefone = perfil?.dados_admissao?.telefone;
+
+                if (!telefone) return false;
+
+                const primeiroNome = (doc.nome_colaborador || doc.nome || 'Colaborador').split(' ')[0];
+                const tituloDoc = doc.titulo_documento || doc.titulo || 'Documento';
+                
+                // Mágica da Logo
+                let urlImagemReal = 'https://gozgames.neocities.org/Si%CC%81mbolo%20-%20fundo%20azul.png'; 
+                if (perfil.empresa && perfil.empresa.trim().toUpperCase().includes('VILLAC')) {
+                    urlImagemReal = 'https://gozgames.neocities.org/LOGO%20VILLAC%20SEM%20FUNDO%20(1).png';
+                }
+
+                // Disparo (O template "aviso_assinatura_documento" só pede 2 variáveis: [Nome, Nome do Documento])
+                const ok = await enviarMensagemGraphAPI(
+                    telefone, 
+                    'aviso_assinatura_documento', 
+                    [primeiroNome, tituloDoc], 
+                    urlImagemReal, 
+                    doc.token
+                );
+                
+                return ok;
+            });
+
+            const resultados = await Promise.all(promessasLote);
+            resultados.forEach(ok => { if (ok) sucessos++; else falhas++; });
+
+            if (i + tamanhoLote < pendentes.length) {
+                await new Promise(r => setTimeout(r, 1000)); // Proteção da Meta (Anti-Spam)
+            }
+        }
+
+        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+    } catch (err) {
+        mostrarAlerta("Erro durante o processo em massa: " + err.message, "erro");
+    } finally {
+        if (btnMassa) {
+            btnMassa.disabled = false;
+            btnMassa.innerHTML = `<i class="fa-brands fa-whatsapp"></i> Cobrar`;
+        }
+    }
 };
 
    // =========================================================
