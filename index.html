@@ -14761,19 +14761,23 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                 sigla = ''; cssTipo = 'celula-inativo'; hora = 'Pré-Admissão (Ainda não estava na empresa)';
             }
             else {
-                let jornadaVigente = jor;
-                if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
-                    const histOrdenado = [...jor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
-                    for (let h of histOrdenado) {
-                        const dHist = new Date(h.data_inicio + 'T00:00:00');
-                        if (dataAtual >= dHist) { jornadaVigente = h; break; }
-                    }
+            let jornadaVigente = jor;
+            if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    const dHist = new Date(h.data_inicio + 'T00:00:00');
+                    if (dataAtual >= dHist) { jornadaVigente = h; break; }
                 }
+            }
 
-                const dInicioVigenteObj = new Date(jornadaVigente.data_inicio + 'T00:00:00');
+            const dInicioVigenteObj = new Date(jornadaVigente.data_inicio + 'T00:00:00');
 
-                if (jornadaVigente.tipo === '12x36') {
-                    const diffTempo = dataAtual.getTime() - dInicioVigenteObj.getTime();
+            // 👇 A MÁGICA AQUI: Se for folguista, a base dele é em branco (limpa a sujeira visual) 👇
+            if (adm.is_folguista) {
+                sigla = '-'; cssTipo = ''; hora = 'Não Escalonado';
+            }
+            else if (jornadaVigente.tipo === '12x36') {
+                const diffTempo = dataAtual.getTime() - dInicioVigenteObj.getTime();
                     const diffDias = Math.floor(diffTempo / (1000 * 3600 * 24));
                     const isMesmoStatus = (diffDias % 2 === 0);
                     const statusPrimeiroDia = jornadaVigente.status_inicio || 'Trabalho';
@@ -18816,70 +18820,77 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         // ==========================================
         let listaColaboradoresAtivosAusencia = [];
 
-        // 👇 FUNÇÃO ATUALIZADA: AGORA CORES, HISTÓRICOS E TRAVAS FALAM A MESMA LÍNGUA 👇
-        window.isDiaDeFolga = function(colab, dataIso) {
-            const adm = colab.dados_admissao || {};
-            const jorRaiz = adm.jornada || {};
-            const dAtual = new Date(dataIso + 'T00:00:00');
+        // 👇 FUNÇÃO ATUALIZADA: AGORA LÊ O LÁPIS DO FOLGUISTA E TROCAS PRIMEIRO 👇
+window.isDiaDeFolga = function(colab, dataIso) {
+    const adm = colab.dados_admissao || {};
+    const jorRaiz = adm.jornada || {};
+    const dAtual = new Date(dataIso + 'T00:00:00');
+    
+    // 1. MÁGICA: Verifica Exceções Pontuais PRIMEIRO (O Lápis do Folguista e Trocas de Turno)
+    if (jorRaiz.excecoes_pontuais && jorRaiz.excecoes_pontuais[dataIso]) {
+        const exc = jorRaiz.excecoes_pontuais[dataIso];
+        if (exc === 'Folga' || exc.startsWith('FP|')) return true; // É folga
+        if (exc.includes('às') || exc.startsWith('TP|')) return false; // Está escalado para trabalhar
+    }
+
+    // 2. Se é folguista e NÃO TEM exceção no lápis, então ele não está escalado (dia livre/folga)
+    if (adm.is_folguista) return true;
+
+    // 3. Se for funcionário normal, encontra qual regra de jornada base estava VALENDO no dia
+    let jor = jorRaiz;
+    if (jorRaiz.historico_alteracoes && jorRaiz.historico_alteracoes.length > 0) {
+        const histValidos = jorRaiz.historico_alteracoes.filter(h => new Date(h.data_inicio + 'T00:00:00') <= dAtual);
+        if (histValidos.length > 0) {
+            const histOrdenado = [...histValidos].sort((a,b) => new Date(b.data_inicio + 'T00:00:00') - new Date(a.data_inicio + 'T00:00:00'));
+            jor = histOrdenado[0];
+        }
+    }
+
+    const dataInicioStr = jor.data_inicio || jorRaiz.data_inicio || adm.data_inicio;
+    if (!dataInicioStr) return false;
+
+    const dInicio = new Date(dataInicioStr + 'T00:00:00');
+    if (dAtual < dInicio) return true; 
+
+    const diffTempo = dAtual.getTime() - dInicio.getTime();
+    const diffDias = Math.round(diffTempo / (1000 * 3600 * 24));
+
+    // Executa a matemática baseada na regra vigente
+    if (jor.tipo === '12x36') {
+        const isMesmoStatus = (diffDias % 2 === 0);
+        const statusPrimeiroDia = jor.status_inicio || 'Trabalho';
+        let hojeTrabalha = (statusPrimeiroDia === 'Trabalho') ? isMesmoStatus : !isMesmoStatus;
+        return !hojeTrabalha; 
+    } else if (jor.escala) {
+        const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        const diaNome = nomesDiasFull[dAtual.getDay()];
+        const diaEscala = jor.escala[diaNome];
+        
+        if (diaEscala) {
+            if (diaEscala.status === 'Folga') return true;
+            if (diaEscala.status === 'Trabalho') return false;
             
-            // 1. MÁGICA: Encontra qual regra de jornada estava VALENDO no dia da falta (dataIso)
-            let jor = jorRaiz;
-            if (jorRaiz.historico_alteracoes && jorRaiz.historico_alteracoes.length > 0) {
-                // Filtra apenas as alterações de histórico que começaram antes ou no dia pesquisado
-                const histValidos = jorRaiz.historico_alteracoes.filter(h => new Date(h.data_inicio + 'T00:00:00') <= dAtual);
-                if (histValidos.length > 0) {
-                    // Ordena da alteração mais nova para a mais antiga e pega a vigente para aquele dia
-                    const histOrdenado = [...histValidos].sort((a,b) => new Date(b.data_inicio + 'T00:00:00') - new Date(a.data_inicio + 'T00:00:00'));
-                    jor = histOrdenado[0];
+            if (diaEscala.status === 'Alternado') {
+                const diffSemanas = Math.floor(diffDias / 7);
+                const padrao = diaEscala.padrao || '1x1';
+                const inicio = diaEscala.inicio || 'Trabalha';
+                let trabalhaHoje = false;
+
+                if (padrao === '1x1') trabalhaHoje = (diffSemanas % 2 === 0) ? (inicio === 'Trabalha') : (inicio === 'Folga');
+                else if (padrao === '2x1') {
+                    let resto = diffSemanas % 3;
+                    if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 1 || resto === 2);
                 }
-            }
-
-            // Pega a data de início da regra que estava valendo naquele período
-            const dataInicioStr = jor.data_inicio || jorRaiz.data_inicio || adm.data_inicio;
-            if (!dataInicioStr) return false;
-
-            const dInicio = new Date(dataInicioStr + 'T00:00:00');
-            if (dAtual < dInicio) return true; // Antes de iniciar a regra, bloqueia/considera folga
-
-            const diffTempo = dAtual.getTime() - dInicio.getTime();
-            const diffDias = Math.round(diffTempo / (1000 * 3600 * 24));
-
-            // 2. Executa a matemática baseada na regra vigente do histórico
-            if (jor.tipo === '12x36') {
-                const isMesmoStatus = (diffDias % 2 === 0);
-                const statusPrimeiroDia = jor.status_inicio || 'Trabalho';
-                let hojeTrabalha = (statusPrimeiroDia === 'Trabalho') ? isMesmoStatus : !isMesmoStatus;
-                return !hojeTrabalha; // Se não trabalha hoje, é folga
-            } else if (jor.escala) {
-                const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
-                const diaNome = nomesDiasFull[dAtual.getDay()];
-                const diaEscala = jor.escala[diaNome];
-                
-                if (diaEscala) {
-                    if (diaEscala.status === 'Folga') return true;
-                    if (diaEscala.status === 'Trabalho') return false;
-                    
-                    if (diaEscala.status === 'Alternado') {
-                        const diffSemanas = Math.floor(diffDias / 7);
-                        const padrao = diaEscala.padrao || '1x1';
-                        const inicio = diaEscala.inicio || 'Trabalha';
-                        let trabalhaHoje = false;
-
-                        if (padrao === '1x1') trabalhaHoje = (diffSemanas % 2 === 0) ? (inicio === 'Trabalha') : (inicio === 'Folga');
-                        else if (padrao === '2x1') {
-                            let resto = diffSemanas % 3;
-                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 1 || resto === 2);
-                        }
-                        else if (padrao === '2x2') {
-                            let resto = diffSemanas % 4;
-                            if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 2 || resto === 3);
-                        }
-                        return !trabalhaHoje;
-                    }
+                else if (padrao === '2x2') {
+                    let resto = diffSemanas % 4;
+                    if(inicio === 'Trabalha') trabalhaHoje = (resto === 0 || resto === 1); else trabalhaHoje = (resto === 2 || resto === 3);
                 }
+                return !trabalhaHoje;
             }
-            return false;
-        };
+        }
+    }
+    return false;
+};
 
        window.buscarColaboradoresParaAusencia = async function() {
     const unidade = document.getElementById('aus-unidade').value;
