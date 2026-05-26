@@ -29665,18 +29665,24 @@ window.abrirModalAvaliacaoExp = function(indexCache) {
     const mesAno = document.getElementById('filtro-mes-escala').value;
     if (!mesAno) return;
     
-    mostrarAlerta("Buscando escala do folguista...", "aviso");
+    mostrarAlerta("Buscando escala e checando travas do folguista...", "aviso");
 
     const [ano, mes] = mesAno.split('-');
     const diasNoMes = new Date(ano, mes, 0).getDate();
 
-    // Busca os dados do colaborador
+    // Busca os dados do colaborador no banco
     const { data: colab } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
     if (!colab) return mostrarAlerta("Erro ao carregar folguista", "erro");
 
     const adm = colab.dados_admissao || {};
     const jor = adm.jornada || {};
     const excecoes = jor.excecoes_pontuais || {};
+
+    // 👇 MÁGICA: Localiza a linha calculada deste colaborador na memória ativa do sistema 👇
+    const colabEscalaAtiva = escalaMesAtualGerada.find(x => String(x.id_colaborador) === String(idColab));
+
+    // Lista de siglas oficiais do RH que trancam o dia imediatamente
+    const siglasBloqueadas = ['ATM', 'FA', 'ATOB', 'LDM', 'LDP', 'ATC', 'DECL', 'AF', 'FER', 'FT', 'TP', 'FP', 'DES', 'AD', 'TR', 'AL', 'FRD'];
 
     let diasHtml = '';
     const diasDaSemanaNomes = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
@@ -29690,19 +29696,35 @@ window.abrirModalAvaliacaoExp = function(indexCache) {
         let valorSalvo = excecoes[dataIso] || '';
         let isFolga = valorSalvo === 'Folga';
         
-        // Pega as horas caso ele tenha salvo (Ex: "06:00 às 18:00")
         let ent = '06:00', sai = '18:00';
         if (valorSalvo && !isFolga) {
             const match = valorSalvo.match(/(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
             if (match) { ent = match[1]; sai = match[2]; }
         }
 
-        diasHtml += `
-            <div style="display:flex; justify-content: space-between; align-items: center; padding: 10px 15px; border-bottom: 1px solid var(--cor-borda); background: rgba(0,0,0,0.05);">
-                <div style="width: 80px; font-weight: bold; color: var(--cor-texto-secundario);">
-                    ${dataBR} <span style="font-size: 0.7rem; font-weight: normal; display: block;">${nomeDiaCurto}</span>
+        // Verifica o que o algoritmo de escala cuspiu para esse dia específico
+        const diaCalculadoAtivo = colabEscalaAtiva && colabEscalaAtiva.dias[d] ? colabEscalaAtiva.dias[d] : null;
+        const siglaDoDia = diaCalculadoAtivo ? diaCalculadoAtivo.sigla : '';
+
+        let seletorDiaHtml = '';
+
+        // 👇 SE O DIA TIVER LANÇAMENTO OFICIAL, TRANCA O CAMPO NO MODAL 👇
+        if (diaCalculadoAtivo && siglasBloqueadas.includes(siglaDoDia)) {
+            let corStatus = '#ff9800'; // Laranja padrão (Atestados)
+            if (siglaDoDia === 'FER') corStatus = '#f57f17'; // Férias
+            if (siglaDoDia === 'FA') corStatus = 'var(--cor-perigo)'; // Falta
+            if (siglaDoDia === 'TP' || siglaDoDia === 'FT') corStatus = '#0284c7'; // Troca/FT
+
+            seletorDiaHtml = `
+                <div style="display: flex; align-items: center; background: ${corStatus}15; border: 1px solid ${corStatus}50; padding: 6px 12px; border-radius: 6px; gap: 8px;">
+                    <span style="color: ${corStatus}; font-weight: bold; font-size: 0.8rem; text-transform: uppercase;">
+                        <i class="fa-solid fa-lock"></i> Lançamento Oficial: ${siglaDoDia}
+                    </span>
                 </div>
-                
+            `;
+        } else {
+            // DIA LIVRE: Renderiza o select e os inputs normais de horário para o gestor editar
+            seletorDiaHtml = `
                 <div style="display: flex; gap: 10px; align-items: center;">
                     <select id="folg-status-${dataIso}" onchange="document.getElementById('folg-horas-${dataIso}').style.display = this.value === 'Folga' ? 'none' : 'flex'" style="padding: 6px; border-radius: 6px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
                         <option value="">Padrão Escala</option>
@@ -29716,6 +29738,15 @@ window.abrirModalAvaliacaoExp = function(indexCache) {
                         <input type="text" id="folg-sai-${dataIso}" value="${sai}" readonly onclick="abrirTimePicker(this)" style="width: 65px; text-align: center; cursor: pointer; padding: 6px; border-radius: 6px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
                     </div>
                 </div>
+            `;
+        }
+
+        diasHtml += `
+            <div style="display:flex; justify-content: space-between; align-items: center; padding: 10px 15px; border-bottom: 1px solid var(--cor-borda); background: rgba(0,0,0,0.05);">
+                <div style="width: 80px; font-weight: bold; color: var(--cor-texto-secundario);">
+                    ${dataBR} <span style="font-size: 0.7rem; font-weight: normal; display: block;">${nomeDiaCurto}</span>
+                </div>
+                ${seletorDiaHtml}
             </div>
         `;
     }
@@ -29742,7 +29773,6 @@ window.abrirModalAvaliacaoExp = function(indexCache) {
         </div>
     </div>`;
     
-    // Limpa toasts de "Buscando..."
     document.getElementById('toast-container').innerHTML = '';
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
@@ -29763,7 +29793,12 @@ window.salvarEscalaFolguista = async function(idColab) {
 
         for (let d = 1; d <= diasNoMes; d++) {
             const dataIso = `${ano}-${mes}-${String(d).padStart(2, '0')}`;
-            const status = document.getElementById(`folg-status-${dataIso}`).value;
+            const statusElement = document.getElementById(`folg-status-${dataIso}`);
+
+            // 👇 ESCUDO: Se o elemento não existe na tela, o dia estava trancado. Pula pro próximo dia! 👇
+            if (!statusElement) continue;
+
+            const status = statusElement.value;
 
             if (status === 'Folga') {
                 jor.excecoes_pontuais[dataIso] = 'Folga';
@@ -29772,10 +29807,10 @@ window.salvarEscalaFolguista = async function(idColab) {
                 const sai = document.getElementById(`folg-sai-${dataIso}`).value;
                 jor.excecoes_pontuais[dataIso] = `${ent} às ${sai}`;
             } else {
-                // "Padrão Escala" (Vazio) -> Remove a exceção pra voltar à regra de admissão
+                // "Padrão Escala" (Vazio) -> Remove a exceção manual
                 if (jor.excecoes_pontuais[dataIso]) {
-                    // Impede deletar as Trocas e Feriados de FT (já que eles são geridos pelas outras telas)
                     const valAntigo = jor.excecoes_pontuais[dataIso];
+                    // Dupla proteção: não mexe em trocas antigas gravadas como texto
                     if (!valAntigo.startsWith('TP|') && !valAntigo.startsWith('FP|')) {
                         delete jor.excecoes_pontuais[dataIso];
                     }
@@ -29787,8 +29822,8 @@ window.salvarEscalaFolguista = async function(idColab) {
         await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
 
         document.getElementById('modal-edicao-folguista').remove();
-        mostrarAlerta("Escala do folguista atualizada com sucesso!", "sucesso");
-        processarEscala(); // Recarrega a tela de trás pra ele ver a mágica
+        mostrarAlerta("Escala do folguista atualizada respeitando os bloqueios oficiais!", "sucesso");
+        processarEscala(); 
 
     } catch (e) {
         mostrarAlerta("Erro ao salvar escala do folguista: " + e.message, "erro");
