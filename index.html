@@ -14623,38 +14623,60 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
             }
 
             if (listaAusencias && listaAusencias.length > 0) {
-                // 👇 MÁGICA DE LEITURA DO NOVO H+ MÚLTIPLO E DA FOLGA 👇
                 const dataBr = formatarDataBR(dataIsoStr);
                 let detalheHPlusAtual = '';
                 
+                // 👇 1. ACHA SE O DIA ATUAL É UM DIA DE QUEBRA (H+) OU HORA EXTRA (HE) 👇
                 const hPlusRec = listaAusencias.find(a => {
                     if (String(a.colaborador_id) !== String(colab.id)) return false;
                     
+                    const obs = a.observacao || '';
+                    
                     if (a.sigla === 'H+') {
-                        // Se for modelo Antigo (uma data só)
-                        if (a.data_inicio === dataIsoStr && (!a.observacao || !a.observacao.includes('Dias de H+:'))) return true;
+                        const isModeloNovo = obs.includes('Dias Trabalhados a mais:') || obs.includes('Dias de H+:');
                         
-                        // Se for Modelo Novo (Múltiplas Datas), extrai só o bloco que fala de H+ e vê se o dia ta lá
-                        if (a.observacao && a.observacao.includes('Dias de H+:')) {
-                            const partesHplus = a.observacao.split('Compensação:')[0];
+                        if (!isModeloNovo) {
+                            // Modelo Antigo (1 data só)
+                            return a.data_inicio === dataIsoStr;
+                        } else {
+                            // Modelo Novo (Múltiplas datas)
+                            const partesHplus = obs.split(/Compensação:|COMPENSAÇÃO/i)[0];
                             if (partesHplus.includes(dataBr)) {
-                                // Captura as horas pra mostrar no popup
-                                const regexH = new RegExp(`${dataBr}\\s*\\(([^)]+)\\)`);
+                                // Puxa as horas (08:00 às 10:00) de dentro do parênteses 
+                                const regexH = new RegExp(`${dataBr.replace(/\//g, '\\/')}\\s*\\(([^)]+)\\)`);
                                 const match = partesHplus.match(regexH);
                                 if (match) detalheHPlusAtual = match[1];
                                 return true;
                             }
                         }
                     }
-                    if (a.sigla === 'HE' && a.observacao && a.observacao.includes(dataBr)) return true;
+                    
+                    if (a.sigla === 'HE') {
+                        // A Hora Extra mantém a data de início como o dia da ocorrência principal
+                        return a.data_inicio === dataIsoStr;
+                    }
+                    
                     return false;
                 });
 
-                // Lê as Folgas Programadas geradas por H+ Múltiplos
+                // 👇 2. ACHA SE O DIA ATUAL É UMA FOLGA PROGRAMADA (Gerada por H+ ou HE) 👇
+                let detalheFolgaParcial = '';
                 const folgaProgMultipla = listaAusencias.find(a => {
-                    if (a.sigla === 'H+' && String(a.colaborador_id) === String(colab.id) && a.observacao && a.observacao.includes('Folga Programada (FP)')) {
-                        const partesFP = a.observacao.split('Compensação:')[1].split('Justificativa:')[0];
-                        if (partesFP && partesFP.includes(dataBr)) return true;
+                    if ((a.sigla === 'H+' || a.sigla === 'HE') && String(a.colaborador_id) === String(colab.id)) {
+                        const obs = a.observacao || '';
+                        
+                        const regexComp = /Compensação:|COMPENSAÇÃO \(Banco\):/i;
+                        if (regexComp.test(obs)) {
+                            const partesFP = obs.split(regexComp)[1];
+                            
+                            // Se a data de hoje estiver listada ali nas folgas
+                            if (partesFP && partesFP.split('Justificativa:')[0].includes(dataBr)) {
+                                const regexF = new RegExp(`${dataBr.replace(/\//g, '\\/')}\\s*\\(([^)]+)\\)`);
+                                const matchF = partesFP.match(regexF);
+                                if (matchF) detalheFolgaParcial = matchF[1];
+                                return true;
+                            }
+                        }
                     }
                     return false;
                 });
@@ -14696,8 +14718,8 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                             <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 4px; font-style: italic;">"${hPlusRec.observacao}"</span>
                         </div>`;
                     } else {
-                        // Lógica mantida da Hora Extra Normal (HE)
-                        const reg = new RegExp(`${dataBr}\\s*\\(([^)]+)\\)`);
+                        // Hora Extra (HE) Padrão
+                        const reg = new RegExp(`${dataBr.replace(/\//g, '\\/')}\\s*\\(([^)]+)\\)`);
                         const m = hPlusRec.observacao.match(reg);
                         let detalhe = m ? m[1] : 'Folga Integral';
                         obsHPlus += `
@@ -14709,7 +14731,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                     }
                 }
 
-                // E por fim, a lógica que dita o visual do quadrado do calendário
+                // 3. RENDERIZAÇÃO DO QUADRADO DA ESCALA
                 const atestadoHoje = listaAusencias.find(a => {
                     if (a.sigla === 'H+' || a.sigla === 'HE' || a.sigla === 'DECL') return false; 
                     if (String(a.colaborador_id).trim() !== String(colab.id).trim()) return false;
@@ -14724,11 +14746,36 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                     return (dataAtual >= dIni && dataAtual <= dFim);
                 });
 
-                if (folgaProgMultipla) {
-                    sigla = 'FP'; cssTipo = 'celula-folga'; hora = 'Folga Compensatória';
+               if (folgaProgMultipla) {
+                    sigla = 'FP'; 
+                    cssTipo = 'celula-folga'; 
+                    hora = (!detalheFolgaParcial || detalheFolgaParcial.includes('Integral')) ? 'Folga Compensatória' : `Descanso: ${detalheFolgaParcial}`;
+                    
+                    // 👇 A MÁGICA: Extrai as datas que geraram essa folga 👇
+                    let diasTrabalhadosRef = '';
+                    
+                    if (folgaProgMultipla.sigla === 'H+') {
+                        const obs = folgaProgMultipla.observacao || '';
+                        // Pega tudo que vem antes da palavra "Compensação"
+                        const partesAntesCompensacao = obs.split(/Compensação:|COMPENSAÇÃO/i)[0];
+                        // Limpa os textos fixos para sobrar só as datas
+                        let limpo = partesAntesCompensacao.replace(/Dias Trabalhados a mais:/i, '').replace(/Dias de H+:/i, '').trim();
+                        if (limpo.endsWith('.')) limpo = limpo.slice(0, -1);
+                        // Troca os "||" por quebra de linha para ficar um embaixo do outro
+                        diasTrabalhadosRef = limpo.replace(/\|\|/g, '<br>');
+                    } else if (folgaProgMultipla.sigla === 'HE') {
+                        diasTrabalhadosRef = `${formatarDataBR(folgaProgMultipla.data_inicio)}`;
+                    }
+                    
                     obsHPlus += `
-                    <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05);">
-                        Neste dia, <b>${linhaColab.nome}</b> folga para compensar a(s) Quebra(s) de Horário (H+) já realizada(s).
+                    <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #28a745;">
+                        Neste dia, <b>${linhaColab.nome}</b> tem um descanso programado referente a banco de horas.<br>
+                        <br><span style="color: #28a745;"><i class="fa-solid fa-bed"></i> Tipo de Descanso: <b>${detalheFolgaParcial || 'Folga Integral'}</b></span>
+                        
+                        <div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 8px;">
+                            <b style="text-transform: uppercase;">Referente ao(s) dia(s) trabalhado(s):</b><br>
+                            <span style="color: #4fc3f7; display: inline-block; margin-top: 4px; line-height: 1.4;">${diasTrabalhadosRef}</span>
+                        </div>
                     </div>`;
                 }
                 else if (atestadoHoje) {
