@@ -11082,6 +11082,93 @@ let queryNotifs = supabaseClient
     }
 }
 
+      // ESCUDO DEFINITIVO: O fim do botão "Arquivado" estático
+window.alternarLeituraNotificacaoDinamica = async function(idNotificacao, statusLida, colaboradorId, referenciaId, tipoNotif, unidade, nomeColab) {
+    if (event) event.stopPropagation();
+    const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
+
+    // Caso 1: A notificação já está no cache local ativo
+    if (idNotificacao && idNotificacao !== 'null' && idNotificacao !== 'undefined') {
+        window.alternarLeituraNotificacao(idNotificacao, statusLida);
+        return;
+    }
+
+    // Caso 2: Registro antigo fora do cache de 10k
+    const idVisualElement = idNotificacao || `fallback_${referenciaId || colaboradorId}`;
+    const btnTela = document.getElementById(`btn-leitura-${idVisualElement}`) || document.getElementById(`btn-leitura-ferias-${idVisualElement}`);
+    const containerLeitura = document.getElementById(`container-leitura-${idVisualElement}`) || (btnTela ? btnTela.parentElement : null);
+
+    if (btnTela) {
+        btnTela.disabled = true;
+        btnTela.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ...';
+    }
+
+    try {
+        // Vai buscar direto na tabela por fora do cache
+        let query = supabaseClient.from('notificacoes').select('id').eq('tipo', tipoNotif);
+        if (referenciaId) query = query.eq('referencia_id', referenciaId);
+        else query = query.eq('colaborador_id', colaboradorId);
+
+        const { data: notifReal } = await query.maybeSingle();
+        let targetId = null;
+
+        if (notifReal && notifReal.id) {
+            targetId = notifReal.id;
+            await supabaseClient.from('notificacoes').update({ lida: statusLida, lida_por: nomeQuemLeu }).eq('id', targetId);
+        } else {
+            // Se não existir a linha por algum erro antigo, cria ela na hora com o status certo
+            const { data: novaNotif } = await supabaseClient.from('notificacoes').insert([{
+                colaborador_id: colaboradorId, referencia_id: referenciaId,
+                nome: nomeColab, unidade: unidade || 'Matriz',
+                tipo: tipoNotif, lida: statusLida, lida_por: nomeQuemLeu
+            }]).select('id').single();
+            if (novaNotif) targetId = novaNotif.id;
+        }
+
+        // Alimenta a memória local para o próximo clique espelhar o cache
+        if (targetId) {
+            const notifIndex = notificacoesGlobais.findIndex(n => n.id === targetId);
+            if (notifIndex !== -1) {
+                notificacoesGlobais[notifIndex].lida = statusLida;
+                notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
+            } else {
+                notificacoesGlobais.push({ id: targetId, lida: statusLida, lida_por: nomeQuemLeu, tipo: tipoNotif, colaborador_id: colaboradorId, referencia_id: referenciaId, nome: nomeColab, unidade });
+            }
+        }
+
+        // Transforma o visual do botão na mesma hora de forma ultra fluida
+        if (btnTela && containerLeitura) {
+            btnTela.disabled = false;
+            const existingSpan = containerLeitura.querySelector('.leitura-nome');
+            if (existingSpan) existingSpan.remove();
+
+            if (statusLida) {
+                btnTela.className = 'btn-secondary';
+                btnTela.style.opacity = '0.6';
+                btnTela.innerHTML = '<i class="fa-solid fa-check-double"></i> Lido';
+                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacaoDinamica('${targetId}', false, '${colaboradorId}', '${referenciaId}', '${tipoNotif}', '${unidade}', '${nomeColab}')`);
+                
+                if (nomeQuemLeu) {
+                    const primeiroNome = nomeQuemLeu.split(' ')[0];
+                    containerLeitura.insertAdjacentHTML('beforeend', `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${primeiroNome}</b></span>`);
+                }
+            } else {
+                btnTela.className = 'btn-success';
+                btnTela.style.opacity = '1';
+                btnTela.innerHTML = '<i class="fa-solid fa-envelope"></i> Marcar como Lido';
+                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacaoDinamica('${targetId}', true, '${colaboradorId}', '${referenciaId}', '${tipoNotif}', '${unidade}', '${nomeColab}')`);
+            }
+        }
+
+        // Atualiza as contagens em background
+        atualizarContador(true);
+
+    } catch (err) {
+        console.error("Erro na trava dinâmica:", err);
+        if (btnTela) { btnTela.disabled = false; btnTela.innerHTML = 'Erro'; }
+    }
+};
+
 window.alternarLeituraNotificacao = function(idNotificacao, statusLida) {
     if (event) event.stopPropagation();
 
@@ -12415,15 +12502,17 @@ if (silencioso) {
                         </div>
                     `;
                 } else {
-                    // 👇 FALLBACK: Se a notificação tem mais de 60 dias, bota o botão Arquivado!
-                    btnNotifHtml = `
-                        <div style="width: 100%; min-width: 130px; display: flex; flex-direction: column; align-items: center;">
-                            <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; opacity: 0.5; width: 100%; cursor: not-allowed;" disabled title="Registro antigo arquivado.">
-                                <i class="fa-solid fa-box-archive"></i> Arquivado
-                            </button>
-                        </div>
-                    `;
-                }
+    // Substituto dinâmico para registros fora do cache de 10k
+    const itemLoteId = `fallback_${a.id}`;
+    btnNotifHtml = `
+        <div id="container-leitura-${itemLoteId}" style="width: 100%; min-width: 130px; display: flex; flex-direction: column; align-items: center;">
+            <button id="btn-leitura-${itemLoteId}" class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; opacity: 0.6; width: 100%;" 
+                onclick="event.stopPropagation(); window.alternarLeituraNotificacaoDinamica(null, true, '${a.id}', null, '${tipoBuscaAdmissao}', '${a.unidade}', '${a.nome.replace(/'/g, "\\'")}')">
+                <i class="fa-solid fa-check-double"></i> Lido
+            </button>
+        </div>
+    `;
+}
 
                 let dataEnvio = '-';
                 if (a.created_at || adm.data_envio) {
@@ -15323,15 +15412,16 @@ window.filtrarFeriasAdmin = function() {
                 </div>
             `;
         } else {
-            // Se for um registro velho que já não tem notificação, não deixa o buraco em branco
-            btnNotifHtml = `
-                <div style="width: 100%; min-width: 140px; display: flex; flex-direction: column; align-items: center;">
-                    <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; opacity: 0.5; width: 100%; cursor: not-allowed;" disabled title="Registro antigo sem notificação ativa.">
-                        <i class="fa-solid fa-box-archive"></i> Arquivado
-                    </button>
-                </div>
-            `;
-        }
+    const itemLoteId = `fallback_${f.id}`;
+    btnNotifHtml = `
+        <div id="container-leitura-${itemLoteId}" style="width: 100%; min-width: 140px; display: flex; flex-direction: column; align-items: center;">
+            <button id="btn-leitura-ferias-${itemLoteId}" class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; opacity: 0.6; width: 100%;" 
+                onclick="event.stopPropagation(); window.alternarLeituraNotificacaoDinamica(null, true, '${f.colaborador_id}', '${f.id}', '${tipoNotifBusca}', '${f.unidade}', '${f.nome.replace(/'/g, "\\'")}')">
+                <i class="fa-solid fa-check-double"></i> Lido
+            </button>
+        </div>
+    `;
+}
 
         // 👇 2. CÉREBRO DE QUEM APROVOU (Tabela: solicitacoes_ferias) 👇
         let aprovadorReal = f.aprovado_por;
@@ -21414,6 +21504,7 @@ function renderizarPaginacaoFTsAdmin() {
         const notifDestaFT = notifsBanco.find(n => String(n.referencia_id) === String(ft.id) && n.tipo.includes('FT'));
         let btnNotifHtml = '';
 
+        // Se a notificação estiver dentro do cache (as 10k mais recentes)
         if (notifDestaFT) {
             const isLida = notifDestaFT.lida;
             const classeBotao = isLida ? 'btn-secondary' : 'btn-success';
@@ -21425,6 +21516,19 @@ function renderizarPaginacaoFTsAdmin() {
                 <div id="container-leitura-${notifDestaFT.id}">
                     <button id="btn-leitura-${notifDestaFT.id}" class="${classeBotao}" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; ${isLida ? 'opacity: 0.6;' : ''} width: 100%;" onclick="alternarLeituraNotificacao('${notifDestaFT.id}', ${!isLida})" title="Alternar status de leitura"><i class="fa-solid ${icone}"></i> ${texto}</button>
                     ${quemLeu}
+                </div>
+            `;
+        } 
+        // 👇 O SEU NOVO BLOCO ENTRA EXATAMENTE AQUI PARA CASOS FORA DO CACHE 👇
+        else {
+            const itemLoteId = `fallback_${ft.id}`;
+            const tipoNotifBuscaFT = usuarioAtual.perfil === 'Admin' ? 'FT_Admin' : 'FT'; // Ajustado para usuarioAtual
+            btnNotifHtml = `
+                <div id="container-leitura-${itemLoteId}" style="width: 100%; min-width: 140px; display: flex; flex-direction: column; align-items: center;">
+                    <button id="btn-leitura-${itemLoteId}" class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; opacity: 0.6; width: 100%;" 
+                        onclick="event.stopPropagation(); window.alternarLeituraNotificacaoDinamica(null, true, '${ft.colaborador_id}', '${ft.id}', '${tipoNotifBuscaFT}', '${ft.unidade}', '${ft.nome.replace(/'/g, "\\'")}')">
+                        <i class="fa-solid fa-check-double"></i> Lido
+                    </button>
                 </div>
             `;
         }
