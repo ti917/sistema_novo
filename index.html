@@ -14516,8 +14516,10 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const { data: ftsAprovadas } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
             const { data: feriasAprovadas } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
             const { data: ocorrenciasPonto } = await supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes);
-            // 👇 A MÁGICA: Busca as Ocorrências Operacionais (Atrasos, Postura, etc) 👇
             const { data: ocorrenciasPlantao } = await supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes);
+            
+            // 👇 A MÁGICA: BUSCA AS TROCAS DIRETAMENTE DO BANCO OFICIAL PARA ESMAGAR O LÁPIS 👇
+            const { data: trocasAprovadas } = await supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or(`dia_solicitante_ira.gte.${dataBuscaStr},dia_substituto_ira.gte.${dataBuscaStr}`);
 
             if(!colaboradores || colaboradores.length === 0){
                 containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador encontrado para este mês.</p>';
@@ -14525,8 +14527,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
 
             const ocorrenciasMescladas = [...(ausenciasAprovadas || []), ...(ftsAprovadas || [])];
-            // 👇 Adiciona o novo array no final dos parâmetros da função 👇
-            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || [], ocorrenciasPlantao || []);
+            
+            // Injeta a lista de trocas no algoritmo!
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || [], ocorrenciasPlantao || [], trocasAprovadas || []);
 
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
             
@@ -14557,7 +14560,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
    // ==========================================
 // CÉREBRO GERADOR DA ESCALA (ALGORITMO)
 // ==========================================
-function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = [], listaFerias = [], listaOcorrenciasPlantao = []) {
+function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidadeEscalaGerada, listaOcorrenciasPonto = [], listaFerias = [], listaOcorrenciasPlantao = [], listaTrocas = []) {
     const partes = mesAno.split('-');
     const ano = parseInt(partes[0]);
     const mes = parseInt(partes[1]) - 1; 
@@ -14571,9 +14574,9 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
         const adm = colab.dados_admissao || {}; 
         const jor = adm.jornada || {};
         
-        // 👇 NOVO CÉREBRO DO INSS (SOMATÓRIA DE CID EM 60 DIAS) 👇
+        // CÉREBRO DO INSS (SOMATÓRIA DE CID EM 60 DIAS)
         let ausenciasDoColab = (listaAusencias || []).filter(a => String(a.colaborador_id) === String(colab.id) && a.sigla === 'ATM');
-        let mapaInssCID = {}; // Guardará: { '2026-05-10': 'ATM', '2026-05-20': 'AF' }
+        let mapaInssCID = {};
 
         if (ausenciasDoColab.length > 0) {
             let cidsUnicos = [...new Set(ausenciasDoColab.map(a => a.cid).filter(Boolean))];
@@ -14590,21 +14593,14 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
 
                     if (ultimaDataFim) {
                         let diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
-                        if (diffParaUltimo > 60) {
-                            diasAcumulados = 0;
-                        }
+                        if (diffParaUltimo > 60) diasAcumulados = 0;
                     }
 
                     let tempD = new Date(dIni);
                     while (tempD <= dFim) {
                         diasAcumulados++;
                         let isoStr = `${tempD.getFullYear()}-${String(tempD.getMonth() + 1).padStart(2, '0')}-${String(tempD.getDate()).padStart(2, '0')}`;
-
-                        if (diasAcumulados > 15) {
-                            mapaInssCID[isoStr] = 'AF';
-                        } else {
-                            mapaInssCID[isoStr] = 'ATM';
-                        }
+                        mapaInssCID[isoStr] = diasAcumulados > 15 ? 'AF' : 'ATM';
                         tempD.setDate(tempD.getDate() + 1);
                     }
                     ultimaDataFim = new Date(dFim);
@@ -14634,11 +14630,9 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
         }
 
         const ultimoDiaDoMesEscala = new Date(ano, mes, diasNoMes, 23, 59, 59);
-        if (dataInicioObj && dataInicioObj.getTime() > ultimoDiaDoMesEscala.getTime()) {
-            return; 
-        }
+        if (dataInicioObj && dataInicioObj.getTime() > ultimoDiaDoMesEscala.getTime()) return; 
 
-       let dataUltimoDiaObj = null;
+        let dataUltimoDiaObj = null;
         let dataSaidaPraticaObj = null; 
 
         let resc = colab.dados_rescisao;
@@ -14658,9 +14652,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
         }
         
         const primeiroDiaDoMesEscala = new Date(ano, mes, 1, 0, 0, 0, 0);
-        if (dataUltimoDiaObj && primeiroDiaDoMesEscala > dataUltimoDiaObj) {
-            return; 
-        }
+        if (dataUltimoDiaObj && primeiroDiaDoMesEscala > dataUltimoDiaObj) return; 
 
         let cargoNestaUnidade = adm.cargo || '-';
         let dataEntradaNestaUnidade = new Date('1970-01-01');
@@ -14669,17 +14661,13 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
         
         if (transferenciasValidas.length > 0) {
             const histDesc = [...transferenciasValidas].sort((a,b) => new Date(b.data_mudanca) - new Date(a.data_mudanca));
-            
             if (colab.unidade !== unidadeEscalaGerada) {
                 const histItem = histDesc.find(h => h.unidade_antiga === unidadeEscalaGerada);
                 if (histItem) cargoNestaUnidade = histItem.cargo_antigo;
             }
-
             const histAsc = [...transferenciasValidas].sort((a,b) => new Date(a.data_mudanca) - new Date(b.data_mudanca));
             for (let h of histAsc) {
-                if (h.unidade_nova === unidadeEscalaGerada) {
-                    dataEntradaNestaUnidade = new Date(h.data_mudanca + 'T00:00:00');
-                }
+                if (h.unidade_nova === unidadeEscalaGerada) dataEntradaNestaUnidade = new Date(h.data_mudanca + 'T00:00:00');
             }
         }
 
@@ -14692,50 +14680,32 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
             
             let sigla = '-'; let cssTipo = ''; let hora = '';
             let temHPlus = false; let obsHPlus = ''; let siglaTag = '';
-            
-            let temDecl = false;
-            let obsDecl = '';
-            
-            let nomeFeriadoParaModal = '';
+            let temDecl = false; let obsDecl = ''; let nomeFeriadoParaModal = '';
 
             const nomeFeriadoDoDia = feriadosNacionais[dataIsoStr]; 
-            
-            let statusOcorrenciaPonto = null; 
-            let docRhPonto = null;
-            let docColabPonto = null;
-            let justificativaPonto = null;
+            let statusOcorrenciaPonto = null; let docRhPonto = null; let docColabPonto = null; let justificativaPonto = null;
 
-            // 👇 MÁGICA: Encontra se teve Ocorrência Operacional neste dia 👇
             let ocoPlantaoAtual = null;
             if (listaOcorrenciasPlantao && listaOcorrenciasPlantao.length > 0) {
                 const ocoPlan = listaOcorrenciasPlantao.find(o => String(o.colaborador_id) === String(colab.id) && o.data_ocorrencia === dataIsoStr);
-                if (ocoPlan) {
-                    ocoPlantaoAtual = ocoPlan;
-                }
+                if (ocoPlan) ocoPlantaoAtual = ocoPlan;
             }
 
-            // 👇 MÁGICA: Encontra se teve Ocorrência de Ponto neste dia 👇
             if (listaOcorrenciasPonto && listaOcorrenciasPonto.length > 0) {
                 const ocoPonto = listaOcorrenciasPonto.find(o => String(o.colaborador_id) === String(colab.id) && o.data_falha === dataIsoStr);
                 if (ocoPonto) {
-                    statusOcorrenciaPonto = ocoPonto.status;
-                    docRhPonto = ocoPonto.doc_rh;
-                    docColabPonto = ocoPonto.doc_colaborador;
-                    justificativaPonto = ocoPonto.justificativa;
+                    statusOcorrenciaPonto = ocoPonto.status; docRhPonto = ocoPonto.doc_rh;
+                    docColabPonto = ocoPonto.doc_colaborador; justificativaPonto = ocoPonto.justificativa;
                 }
             }
 
             let unidadeNesteDia = colab.unidade; 
-            
             if (transferenciasValidas.length > 0) {
                 const histOrdenado = [...transferenciasValidas].sort((a,b) => new Date(a.data_mudanca) - new Date(b.data_mudanca));
                 unidadeNesteDia = histOrdenado[0].unidade_antiga;
-
                 for (let h of histOrdenado) {
                     const dMudanca = new Date(h.data_mudanca + 'T00:00:00');
-                    if (dataAtual >= dMudanca) {
-                        unidadeNesteDia = h.unidade_nova;
-                    }
+                    if (dataAtual >= dMudanca) unidadeNesteDia = h.unidade_nova;
                 }
             }
 
@@ -14761,7 +14731,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                 sigla = ''; cssTipo = 'celula-inativo'; hora = 'Pré-Admissão (Ainda não estava na empresa)';
             }
             else {
-                // 1️⃣ CAMADA BASE: CALCULA A JORNADA PADRÃO DO COLABORADOR
+                // 1️⃣ CAMADA BASE: CALCULA A JORNADA PADRÃO
                 let jornadaVigente = jor;
                 if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
                     const histOrdenado = [...jor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
@@ -14796,8 +14766,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                     if (diaEscala) {
                         if (nomeFeriadoDoDia) {
                             sigla = 'FRD'; cssTipo = 'celula-frd'; hora = 'Feriado Oficial'; nomeFeriadoParaModal = nomeFeriadoDoDia;
-                        } 
-                        else {
+                        } else {
                             let trabalhaHoje = false;
                             if (diaEscala.status === 'Trabalho') trabalhaHoje = true;
                             else if (diaEscala.status === 'Alternado') {
@@ -14828,42 +14797,72 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                     }
                 }
 
-                // 2️⃣ CAMADA INTERMÉDIA: O LÁPIS DO GESTOR (EXCEÇÕES PONTUAIS ESCRITAS)
-                // Se o gestor clicou no Lápis, ele preenche a base aqui por cima da jornada normal
+                // 2️⃣ CAMADA INTERMÉDIA: O LÁPIS DO GESTOR (APENAS HORÁRIOS NORMAIS E FOLGAS)
                 if (jor.excecoes_pontuais && jor.excecoes_pontuais[dataIsoStr]) {
                     const exc = jor.excecoes_pontuais[dataIsoStr];
-                    if (exc.startsWith('TP|')) {
-                        const parts = exc.split('|');
-                        sigla = 'TP'; cssTipo = 'celula-tp'; hora = parts[1]; 
-                        obsHPlus = `
-                        <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5;">
-                            Neste dia, <b>${linhaColab.nome}</b> estará trabalhando no lugar de <b style="color: #4dabf7;">${parts[2]}</b>.
-                        </div>
-                        <div style="margin-top: 10px; background: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda);">
-                            <small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase;">Referência</small>
-                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 3px;">Troca solicitada para folgar no dia <b>${formatarDataBR(parts[3])}</b></span>
-                        </div>`;
-                    } else if (exc.startsWith('FP|')) {
-                        const parts = exc.split('|');
-                        sigla = 'FP'; cssTipo = 'celula-folga'; hora = 'Folga da Troca'; 
-                        obsHPlus = `
-                        <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(0,0,0,0.1); padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda);">
-                            Neste dia, <b>${linhaColab.nome}</b> folga, já que trabalhou no lugar de <b style="color: #28a745;">${parts[1]}</b> no dia <b>${formatarDataBR(parts[2])}</b>.
-                        </div>`;
-                    } else if (exc === 'Folga') {
+                    // A partir de agora, o lápis não lê mais TP e FP aqui, deixamos isso pra Camada 3!
+                    if (exc === 'Folga') {
                         sigla = 'F'; cssTipo = 'celula-folga'; hora = 'Folga (Exceção)';
                     } else if (exc === 'Feriado') {
                         sigla = 'FRD'; cssTipo = 'celula-frd'; hora = 'Feriado (Lançado pelo Gestor)';
                         nomeFeriadoParaModal = nomeFeriadoDoDia || 'Feriado Regional / Concedido pelo Gestor';
-                    } else {
+                    } else if (!exc.startsWith('TP|') && !exc.startsWith('FP|')) {
                         hora = exc; 
                         const turno = descobreTurno(hora, '44h Semanais'); 
                         sigla = turno.sigla; cssTipo = turno.css;
                     }
                 }
 
-                // 3️⃣ CAMADA DO TOPO: LANÇAMENTOS DO BANCO (FÉRIAS E AUSÊNCIAS OFICIAIS)
-                // Se houver Atestado, Falta ou Férias no Banco de Dados, eles rodam por ÚLTIMO e esmagam o Lápis!
+                // 3️⃣ CAMADA DO TOPO: LANÇAMENTOS DO BANCO (TROCAS, FÉRIAS E AUSÊNCIAS OFICIAIS)
+                // 👇 A MÁGICA FINAL: AS TROCAS ESQUECIDAS VOLTARAM E ESMAGAM O LÁPIS! 👇
+                if (listaTrocas && listaTrocas.length > 0) {
+                    const trocaHoje = listaTrocas.find(t => 
+                        (String(t.solicitante_id) === String(colab.id) && (dataIsoStr === t.dia_solicitante_ira || dataIsoStr === t.dia_substituto_ira)) ||
+                        (String(t.substituto_id) === String(colab.id) && (dataIsoStr === t.dia_substituto_ira || dataIsoStr === t.dia_solicitante_ira))
+                    );
+
+                    if (trocaHoje) {
+                        if (String(trocaHoje.solicitante_id) === String(colab.id)) {
+                            if (dataIsoStr === trocaHoje.dia_solicitante_ira) {
+                                sigla = 'TP'; cssTipo = 'celula-tp'; hora = trocaHoje.horario_solicitante;
+                                obsHPlus = `
+                                <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5;">
+                                    Neste dia, <b>${colab.nome}</b> estará trabalhando no lugar de <b style="color: #4dabf7;">${trocaHoje.nome_substituto}</b>.
+                                </div>
+                                <div style="margin-top: 10px; background: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda);">
+                                    <small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase;">Referência</small>
+                                    <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 3px;">Troca solicitada para folgar no dia <b>${formatarDataBR(trocaHoje.dia_substituto_ira)}</b></span>
+                                </div>`;
+                            } else if (dataIsoStr === trocaHoje.dia_substituto_ira) {
+                                sigla = 'FP'; cssTipo = 'celula-folga'; hora = 'Folga da Troca';
+                                obsHPlus = `
+                                <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(0,0,0,0.1); padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda);">
+                                    Neste dia, <b>${colab.nome}</b> folga, já que trabalhou no lugar de <b style="color: #28a745;">${trocaHoje.nome_substituto}</b> no dia <b>${formatarDataBR(trocaHoje.dia_solicitante_ira)}</b>.
+                                </div>`;
+                            }
+                        } else {
+                            if (dataIsoStr === trocaHoje.dia_substituto_ira) {
+                                sigla = 'TP'; cssTipo = 'celula-tp'; hora = trocaHoje.horario_substituto;
+                                obsHPlus = `
+                                <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5;">
+                                    Neste dia, <b>${colab.nome}</b> estará trabalhando no lugar de <b style="color: #4dabf7;">${trocaHoje.nome_solicitante}</b>.
+                                </div>
+                                <div style="margin-top: 10px; background: rgba(0,0,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda);">
+                                    <small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase;">Referência</small>
+                                    <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 3px;">Troca solicitada para folgar no dia <b>${formatarDataBR(trocaHoje.dia_solicitante_ira)}</b></span>
+                                </div>`;
+                            } else if (dataIsoStr === trocaHoje.dia_solicitante_ira) {
+                                sigla = 'FP'; cssTipo = 'celula-folga'; hora = 'Folga da Troca';
+                                obsHPlus = `
+                                <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(0,0,0,0.1); padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda);">
+                                    Neste dia, <b>${colab.nome}</b> folga, já que trabalhou no lugar de <b style="color: #28a745;">${trocaHoje.nome_solicitante}</b> no dia <b>${formatarDataBR(trocaHoje.dia_substituto_ira)}</b>.
+                                </div>`;
+                            }
+                        }
+                    }
+                }
+
+                // FÉRIAS E AUSÊNCIAS CONTINUAM ESMAGANDO O LÁPIS E A TROCA
                 if (listaFerias && listaFerias.length > 0) {
                     const feriasHoje = listaFerias.find(f => {
                         if (String(f.colaborador_id).trim() !== String(colab.id).trim()) return false;
