@@ -13502,7 +13502,7 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
         tbody.innerHTML = "<tr><td colspan='5' style='text-align: center; padding: 40px; border-radius: 12px;'><i class='fa-solid fa-spinner fa-spin fa-2x' style='color: var(--cor-acento); margin-bottom: 10px;'></i><br><span style='color: var(--cor-texto-secundario);'>Carregando solicitações...</span></td></tr>";
     }
 
-    // 🛡️ ALINHAMENTO COMPLETO: Lista cravada com as 13 chaves oficiais do banco para o fallback nulo funcionar
+    // Coleta as categorias salvas nas preferências de roteamento
     const p = usuarioAtual.permissoes?.recebe_solicitacoes || [
         'Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 
         'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 
@@ -13510,16 +13510,17 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
     ];
 
     // ==========================================
-// CORREÇÃO DA QUERY DINÂMICA DE ADMISSÃO/RESCISÃO
-// ==========================================
-let statusAprovacaoFiltro = [];
-if (p.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
-if (p.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
+    // FILTRO DINÂMICO DE ADMISSÃO / RESCISÃO
+    // ==========================================
+    let statusAprovacaoFiltro = [];
+    if (p.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
+    if (p.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
 
-// A query só é criada se pelo menos um dos dois status estiver selecionado nas caixas
-let qP = statusAprovacaoFiltro.length > 0 
-    ? supabaseClient.from('perfis').select('*').in('status_aprovacao', statusAprovacaoFiltro).order('nome') 
-    : null;
+    // A query só é criada se pelo menos uma das duas categorias estiver ativa
+    let qP = statusAprovacaoFiltro.length > 0 
+        ? supabaseClient.from('perfis').select('*').in('status_aprovacao', statusAprovacaoFiltro).order('nome') 
+        : null;
+
     let qA = p.includes('Ausencia') ? supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
     let qF = p.includes('FT') ? supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
     let qT = p.includes('Troca') ? supabaseClient.from('trocas_turno').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
@@ -13529,22 +13530,26 @@ let qP = statusAprovacaoFiltro.length > 0
     let qFer = p.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
     let qDes = p.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
           
-    // 🚀 BYPASS DE SEGURANÇA CONTRA RLS: Coleta as unidades através da tabela 'perfis' (acesso garantido do gestor)
     let unidsFiltro = null;
     if (usuarioAtual.perfil === 'Admin') {
         unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
     } else if (usuarioAtual.perfil === 'Gestor') {
-        // Código Corrigido (Busca na tabela oficial de unidades):
-if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
-    const empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
-    const { data: unisData } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor);
-    
-    if (unisData && unisData.length > 0) {
-        unidsFiltro = [...new Set(unisData.map(u => u.nome.trim()))].filter(x => x !== "" && x !== "Todas");
-    }
-}
+        // BUSCA DA VISÃO GLOBAL EM TABELA OFICIAL DE UNIDADES
+        if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
+            let empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
+            
+            // Normalização inteligente de strings para compatibilidade de dados legados
+            if (empresasGestor.includes('SOUL GESTÃO') && !empresasGestor.includes('SOUL')) empresasGestor.push('SOUL');
+            if (empresasGestor.includes('SOUL') && !empresasGestor.includes('SOUL GESTÃO')) empresasGestor.push('SOUL GESTÃO');
+            
+            const { data: unisData } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor);
+            
+            if (unisData && unisData.length > 0) {
+                unidsFiltro = [...new Set(unisData.map(u => u.nome.trim()))].filter(x => x !== "" && x !== "Todas");
+            }
+        }
         
-        // Se a busca global falhar ou vier vazia, recua com segurança para as unidades fixas dele
+        // Se não tiver poder global ou a busca falhar, restringe às unidades alocadas no perfil
         if (!unidsFiltro || unidsFiltro.length === 0) {
             unidsFiltro = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : ['TRAVA_ANTI_VAZAMENTO'];
         }
@@ -13554,27 +13559,19 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         if(qP) qP = qP.eq('empresa', empresaSelecionadaFiltro);
     }
     
-    // Aplica os filtros nas queries conforme o perfil logado
-    if (usuarioAtual.perfil === 'Gestor') {
-        if(qP) qP = qP.in('unidade', unidsFiltro);
-        if(qA) qA = qA.in('unidade', unidsFiltro);
-        if(qF) qF = qF.in('unidade', unidsFiltro);
-        if(qT) qT = qT.in('unidade_solicitante', unidsFiltro);
-        if(qAdv) qAdv = qAdv.in('unidade', unidsFiltro);
-        if(qExp) qExp = qExp.in('unidade', unidsFiltro);
-        if(qDoc) qDoc = qDoc.in('unidade', unidsFiltro);
-        if(qFer) qFer = qFer.in('unidade', unidsFiltro);
-        if(qDes) qDes = qDes.in('unidade', unidsFiltro);
-    } else if (usuarioAtual.perfil === 'Admin' && unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
-        if(qA) qA = qA.in('unidade', unidsFiltro);
-        if(qF) qF = qF.in('unidade', unidsFiltro);
-        if(qT) qT = qT.in('unidade_solicitante', unidsFiltro);
-        if(qAdv) qAdv = qAdv.in('unidade', unidsFiltro);
-        if(qExp) qExp = qExp.in('unidade', unidsFiltro);
-        if(qDoc) qDoc = qDoc.in('unidade', unidsFiltro);
-        if(qFer) qFer = qFer.in('unidade', unidsFiltro);
-        if(qDes) qDes = qDes.in('unidade', unidsFiltro);
+    // Injeção de escopo de segurança baseado nas unidades permitidas
+    if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
+        if (qP) qP = qP.in('unidade', unidsFiltro);
+        if (qA) qA = qA.in('unidade', unidsFiltro);
+        if (qF) qF = qF.in('unidade', unidsFiltro);
+        if (qT) qT = qT.in('unidade_solicitante', unidsFiltro);
+        if (qAdv) qAdv = qAdv.in('unidade', unidsFiltro);
+        if (qExp) qExp = qExp.in('unidade', unidsFiltro);
+        if (qDoc) qDoc = qDoc.in('unidade', unidsFiltro);
+        if (qFer) qFer = qFer.in('unidade', unidsFiltro);
+        if (qDes) qDes = qDes.in('unidade', unidsFiltro);
     }
+
     const respVazia = { data: [] };
     const { data: perfisData } = qP ? await qP : respVazia; 
     const { data: ausenciasData } = qA ? await qA : respVazia; 
@@ -13586,7 +13583,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
     const { data: ferData } = qFer ? await qFer : respVazia; 
     const { data: desData } = qDes ? await qDes : respVazia;
 
-    // 👇 A SOLUÇÃO DO BUG AQUI: Faz o mapeamento para os dois nomes funcionarem! 👇
     const feriasData = ferData; 
 
     listaAdmissoesPendentes = perfisData || [];
@@ -13607,7 +13603,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         return;
     }
 
-    // Função Auxiliar que formata o texto de envio
     const formatarEnvio = (criadoPor, dataISO) => {
         if (!dataISO) return '';
         const dataObj = new Date(dataISO);
@@ -13616,47 +13611,44 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
     };
 
     const desenharLinha = (nome, icone, corTema, tituloTipo, subDetalhe, empresa, unidade, funcAcao, infoEnvio = '', iconeAcao = 'fa-eye', txtAcao = 'Analisar') => {
-    const estiloIcone = `width: 45px; height: 45px; border-radius: 12px; background: linear-gradient(135deg, ${corTema}22 0%, rgba(0,0,0,0.2) 100%); display: flex; justify-content: center; align-items: center; color: ${corTema}; font-size: 1.3rem; flex-shrink: 0; border: 1px solid ${corTema}44; box-shadow: inset 0 2px 5px rgba(255,255,255,0.05);`;
-    const corLinhaHighlight = `border-left: 4px solid ${corTema} !important;`;
-    const htmlEnvio = infoEnvio ? `<div style="display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; background: rgba(0,0,0,0.2); padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05);"><i class="fa-regular fa-clock" style="color: ${corTema}; font-size: 0.75rem;"></i> <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${infoEnvio}</span></div>` : '';
-    const htmlEmpresa = (empresa && empresa !== '-') ? `<span style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px;">${empresa}</span>` : '';
+        const estiloIcone = `width: 45px; height: 45px; border-radius: 12px; background: linear-gradient(135deg, ${corTema}22 0%, rgba(0,0,0,0.2) 100%); display: flex; justify-content: center; align-items: center; color: ${corTema}; font-size: 1.3rem; flex-shrink: 0; border: 1px solid ${corTema}44; box-shadow: inset 0 2px 5px rgba(255,255,255,0.05);`;
+        const corLinhaHighlight = `border-left: 4px solid ${corTema} !important;`;
+        const htmlEnvio = infoEnvio ? `<div style="display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; background: rgba(0,0,0,0.2); padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05);"><i class="fa-regular fa-clock" style="color: ${corTema}; font-size: 0.75rem;"></i> <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${infoEnvio}</span></div>` : '';
+        const htmlEmpresa = (empresa && empresa !== '-') ? `<span style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px;">${empresa}</span>` : '';
 
-    return `<tr style="${corLinhaHighlight}">
-        <td style="text-align: left; padding: 15px 20px;">
-            <div style="display: flex; align-items: center; gap: 15px;">
-                <div style="${estiloIcone}"><i class="fa-solid ${icone}"></i></div>
-                <div>
-                    <strong style="font-size: 1.05rem; display: block; color: var(--cor-texto-principal);">${nome}</strong>
+        return `<tr style="${corLinhaHighlight}">
+            <td style="text-align: left; padding: 15px 20px;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div style="${estiloIcone}"><i class="fa-solid ${icone}"></i></div>
+                    <div>
+                        <strong style="font-size: 1.05rem; display: block; color: var(--cor-texto-principal);">${nome}</strong>
+                    </div>
                 </div>
-            </div>
-        </td>
-        <td style="text-align: left; padding: 15px 10px;">
-            <div style="display: flex; flex-direction: column; align-items: flex-start;">
-                <span class="badge" style="background: ${corTema}15; color: ${corTema}; border: 1px solid ${corTema}55; padding: 4px 10px; border-radius: 6px; font-weight: 800; letter-spacing: 0.5px;">${tituloTipo}</span>
-                <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 6px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${subDetalhe}">${subDetalhe}</span>
-                ${htmlEnvio}
-            </div>
-        </td>
-        
-        <td style="text-align: center; padding: 15px;">
-            <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--cor-texto-secundario); font-size: 0.8rem; font-weight: bold; background: rgba(255,255,255,0.05); padding: 6px 12px; border: 1px dashed var(--cor-borda);">
-                <i class="fa-solid fa-hourglass-half fa-spin-pulse" style="color: #ff9800;"></i> Aguardando RH
-            </span>
-        </td>
-        
-        <td style="text-align: left; padding: 15px 10px;">
-            <span style="font-size: 0.9rem; font-weight: bold; color: var(--cor-texto-principal); display: block;"><i class="fa-solid fa-location-dot" style="color: ${corTema}; margin-right: 6px;"></i> ${unidade || '-'}</span>
-            ${htmlEmpresa}
-        </td>
-        <td style="text-align: right; padding: 15px 20px;">
-            <button class="btn-secondary" style="padding: 10px 20px; font-size: 0.9rem; border-color: ${corTema}; color: ${corTema}; font-weight: bold; border-radius: 8px; transition: all 0.2s ease-in-out;" onmouseover="this.style.background='${corTema}'; this.style.color='#000';" onmouseout="this.style.background='transparent'; this.style.color='${corTema}';" onclick="${funcAcao}">
-                <i class="fa-solid ${iconeAcao}"></i> ${txtAcao}
-            </button>
-        </td>
-    </tr>`;
-};
+            </td>
+            <td style="text-align: left; padding: 15px 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <span class="badge" style="background: ${corTema}15; color: ${corTema}; border: 1px solid ${corTema}55; padding: 4px 10px; border-radius: 6px; font-weight: 800; letter-spacing: 0.5px;">${tituloTipo}</span>
+                    <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 6px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${subDetalhe}">${subDetalhe}</span>
+                    ${htmlEnvio}
+                </div>
+            </td>
+            <td style="text-align: center; padding: 15px;">
+                <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--cor-texto-secundario); font-size: 0.8rem; font-weight: bold; background: rgba(255,255,255,0.05); padding: 6px 12px; border: 1px dashed var(--cor-borda);">
+                    <i class="fa-solid fa-hourglass-half fa-spin-pulse" style="color: #ff9800;"></i> Aguardando RH
+                </span>
+            </td>
+            <td style="text-align: left; padding: 15px 10px;">
+                <span style="font-size: 0.9rem; font-weight: bold; color: var(--cor-texto-principal); display: block;"><i class="fa-solid fa-location-dot" style="color: ${corTema}; margin-right: 6px;"></i> ${unidade || '-'}</span>
+                ${htmlEmpresa}
+            </td>
+            <td style="text-align: right; padding: 15px 20px;">
+                <button class="btn-secondary" style="padding: 10px 20px; font-size: 0.9rem; border-color: ${corTema}; color: ${corTema}; font-weight: bold; border-radius: 8px; transition: all 0.2s ease-in-out;" onmouseover="this.style.background='${corTema}'; this.style.color='#000';" onmouseout="this.style.background='transparent'; this.style.color='${corTema}';" onclick="${funcAcao}">
+                    <i class="fa-solid ${iconeAcao}"></i> ${txtAcao}
+                </button>
+            </td>
+        </tr>`;
+    };
 
-    // 1. ADMISSÕES E RESCISÕES
     if (perfisData && perfisData.length > 0) {
         perfisData.forEach(u => {
             if (u.status_aprovacao === 'Pendente') {
@@ -13669,7 +13661,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 2. AUSÊNCIAS E ATESTADOS
     if (ausenciasData && ausenciasData.length > 0) {
         ausenciasData.forEach(aus => {
             const detalheData = `Dias: ${aus.data_inicio.split('-').reverse().join('/')} a ${aus.data_fim.split('-').reverse().join('/')}`;
@@ -13678,7 +13669,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 3. FALTAS TRABALHADAS (FT) E HORAS EXTRAS (H+)
     if (ftData && ftData.length > 0) {
         ftData.forEach(ft => {
             const detalhe = `Data: ${ft.data_inicio.split('-').reverse().join('/')}`;
@@ -13687,7 +13677,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 4. TROCAS DE TURNO
     if (trocasData && trocasData.length > 0) {
         trocasData.forEach(t => {
             const nomeComposto = `${t.nome_solicitante.split(' ')[0]} <i class="fa-solid fa-arrow-right-arrow-left" style="font-size: 0.7rem; color: #4dabf7; margin: 0 4px;"></i> ${t.nome_substituto.split(' ')[0]}`;
@@ -13696,7 +13685,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 5. MEDIDAS DISCIPLINARES
     if (advData && advData.length > 0) {
         advData.forEach(adv => {
             const infoEnvio = formatarEnvio(adv.criado_por, adv.created_at);
@@ -13704,28 +13692,13 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 6. AVALIAÇÕES DE EXPERIÊNCIA (Substitua o bloco inteiro por este)
     if (expData && expData.length > 0) {
         expData.forEach(exp => {
             const infoEnvio = formatarEnvio(exp.criado_por, exp.created_at);
-            // Agora o botão chama o Modal de análise e tem ícone de PDF!
-            tbody.innerHTML += desenharLinha(
-                exp.nome_colaborador, 
-                'fa-star', 
-                '#ffc107', 
-                'Avaliação Experiência', 
-                exp.periodo, 
-                exp.empresa, 
-                exp.unidade, 
-                `verFichaExperienciaPendente('${exp.id}')`, 
-                infoEnvio, 
-                'fa-file-pdf', 
-                'Ver Documento'
-            );
+            tbody.innerHTML += desenharLinha(exp.nome_colaborador, 'fa-star', '#ffc107', 'Avaliação Experiência', exp.periodo, exp.empresa, exp.unidade, `verFichaExperienciaPendente('${exp.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
         });
     }
 
-    // 7. ENVIO DE DOCUMENTOS
     if (docData && docData.length > 0) {
         docData.forEach(d => {
             const nomeExib = d.nome_colaborador ? d.nome_colaborador : 'Institucional';
@@ -13734,7 +13707,6 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 8. FÉRIAS
     if (ferData && ferData.length > 0) {
         ferData.forEach(f => {
             const infoEnvio = formatarEnvio(f.criado_por, f.created_at);
@@ -13742,24 +13714,10 @@ if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
         });
     }
 
-    // 9. AVALIAÇÕES DE DESEMPENHO (Trimestral)
     if (desData && desData.length > 0) {
         desData.forEach(des => {
             const infoEnvio = formatarEnvio(des.criado_por, des.created_at);
-            // 📊 SINALIZADO EXPLICITAMENTE: Agora o botão principal da linha nasce como "Ver Documento" com ícone de PDF!
-            tbody.innerHTML += desenharLinha(
-                des.nome_colaborador, 
-                'fa-chart-line', 
-                '#00bcd4', 
-                'Avaliação de Desempenho', 
-                'Ciclo Trimestral Concluído', 
-                des.empresa, 
-                des.unidade, 
-                `verFichaDesempenhoPendente('${des.id}')`, 
-                infoEnvio, 
-                'fa-file-pdf', 
-                'Ver Documento'
-            );
+            tbody.innerHTML += desenharLinha(des.nome_colaborador, 'fa-chart-line', '#00bcd4', 'Avaliação de Desempenho', 'Ciclo Trimestral Concluído', des.empresa, des.unidade, `verFichaDesempenhoPendente('${des.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
         });
     }
 
