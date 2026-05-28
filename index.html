@@ -43176,150 +43176,6 @@ document.addEventListener('DOMContentLoaded', () => {
 // =========================================================================
 window.todosSaldosBHAdmin = []; 
 
-window.carregarExtratoBancoHorasAdmin = async function() {
-    const tbody = document.getElementById('lista-extrato-bh-admin-body');
-    if (!tbody) return;
-
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color:#4fc3f7; margin-bottom:15px;"></i><br>Executando varredura contábil e processando vencimentos FIFO...</td></tr>';
-    window.todosSaldosBHAdmin = [];
-
-    const diasValidadeConfig = parseInt(document.getElementById('cfg-bh-validade-dias').value) || 60;
-
-    try {
-        const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
-        
-        let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo');
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
-            queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
-        }
-
-        let queryFts = supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado');
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && unidsFiltro) {
-            queryFts = queryFts.in('unidade', unidsFiltro);
-        }
-
-        const [resPerf, resFts] = await Promise.all([queryPerfis, queryFts]);
-        if (resPerf.error) throw resPerf.error;
-
-        const colabs = resPerf.data || [];
-        const fts = resFts.data || [];
-
-        const hoje = new Date();
-        hoje.setHours(0,0,0,0);
-
-        colabs.forEach(c => {
-            const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
-            if (asHorasDesteColab.length === 0) return; // ignora se nunca teve nenhuma movimentação
-
-            let arrayCreditos = []; // Guardará cada crédito individual para o FIFO
-            let totalMinutosDebito = 0;
-
-            // Separador de fluxo entre créditos (+) e débitos (-)
-            asHorasDesteColab.forEach(f => {
-                let txtObs = (f.observacao || '').toUpperCase();
-                
-                // FLUXO DE DÉBITO (BAIXA/FOLGA)
-                if (txtObs.includes('[ABATE_BANCO]')) {
-                    const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
-                    if (matchM) totalMinutosDebito += parseInt(matchM[1]);
-                } 
-                // FLUXO DE CRÉDITO (HORA EXTRA / FT ENVIADA PRO BANCO)
-                else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
-                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
-                        if (matchesLote) {
-                            // Extrai lote multifatas
-                            matchesLote.forEach(m => {
-                                let dec = parseFloat(m.replace('(','').replace(')',''));
-                                arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
-                            });
-                        }
-                    } else {
-                        const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
-                        if (matchDec) {
-                            arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(parseFloat(matchDec[1]) * 60) });
-                        }
-                    }
-                }
-            });
-
-            // Ordena os créditos em ordem cronológica (Mais antigo primeiro) pro FIFO amortizar certo
-            arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
-
-            // Algoritmo FIFO de Amortização de Horas
-            let debitoRestante = totalMinutosDebito;
-            arrayCreditos.forEach(cred => {
-                if (debitoRestante > 0) {
-                    if (cred.minutos <= debitoRestante) {
-                        debitoRestante -= cred.minutos;
-                        cred.minutos = 0; // zerou esse crédito antigo
-                    } else {
-                        cred.minutos -= debitoRestante;
-                        debitoRestante = 0; // zerou todos os débitos históricos
-                    }
-                }
-            });
-
-            // Varejo dos minutos finais e cálculo de vencimento (60 dias)
-            let somaMinutosCreditoTotal = 0;
-            let somaMinutosVencidos = 0;
-
-            arrayCreditos.forEach(cred => {
-                somaMinutosCreditoTotal += cred.minutos;
-                
-                if (cred.minutos > 0) {
-                    const dCred = new Date(cred.data + 'T00:00:00');
-                    const diffDias = Math.floor((hoje - dCred) / (1000 * 3600 * 24));
-                    
-                    if (diffDias > diasValidadeConfig) {
-                        somaMinutosVencidos += cred.minutos;
-                    }
-                }
-            });
-
-            let saldoFinal = somaMinutosCreditoTotal; 
-
-            // Se o cara zerou tudo ou o saldo tá negativo, ele não tem horas vencidas para cobrar
-            if (saldoFinal <= 0) somaMinutosVencidos = 0; 
-
-            window.todosSaldosBHAdmin.push({
-                id: c.id,
-                nome: c.nome,
-                unidade: c.unidade,
-                empresa: c.empresa,
-                creditoTotal: minutosCreditoCalculado(asHorasDesteColab), 
-                debitoTotal: totalMinutosDebito,
-                saldo: saldoFinal,
-                vencido: somaMinutosVencidos
-            });
-        });
-
-        // Helper para somar os créditos brutos originais históricos
-        function minutosCreditoCalculado(arr) {
-            let total = 0;
-            arr.forEach(f => {
-                let txtObs = (f.observacao || '').toUpperCase();
-                if (!txtObs.includes('[ABATE_BANCO]') && f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
-                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        const m = txtObs.match(/\((\d+\.\d+)\)/g);
-                        if (m) m.forEach(x => total += parseFloat(x.replace('(','').replace(')','')) * 60);
-                    } else {
-                        const m = txtObs.match(/\((\d+\.\d+)\)/);
-                        if (m) total += parseFloat(m[1]) * 60;
-                    }
-                }
-            });
-            return total;
-        }
-
-        window.filtrarExtratoBHAdminVisual();
-
-    } catch (e) {
-        console.error(e);
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-perigo);">Erro crítico ao computar extratos.</td></tr>';
-    }
-};
-
 window.filtrarExtratoBHAdminVisual = function() {
     const termo = window.removerAcentos(document.getElementById('busca-extrato-bh-admin').value.toLowerCase());
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -43341,7 +43197,7 @@ window.filtrarExtratoBHAdminVisual = function() {
         return `${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
     };
 
-    filtrados.forEach((u, i) => {
+   filtrados.forEach((u, i) => {
         let bgRow = i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent';
         let corSaldo = u.saldo > 0 ? '#28a745' : 'var(--cor-texto-secundario)';
         
@@ -43349,12 +43205,19 @@ window.filtrarExtratoBHAdminVisual = function() {
         let areaAcaoHtml = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;">Regular</span>';
 
         if (u.vencido > 0) {
-            // Se houver minutos vencidos, pinta em vermelho-alerta e ativa a liquidação de folha
-            stringVencido = `<b style="color: #ff4d4d; animation: pulse 2s infinite;">⚠️ ${stringVencido}</b>`;
+            // 👇 A MÁGICA: Colocamos o botão do "Olho" vermelho debaixo das horas vencidas 👇
+            stringVencido = `
+                <b style="color: #ff4d4d; animation: pulse 2s infinite;">⚠️ ${stringVencido}</b>
+                <br>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem das horas vencidas">
+                    <i class="fa-solid fa-eye"></i> Detalhes
+                </button>
+            `;
+            
             areaAcaoHtml = `
                 <button class="btn-success" style="background: rgba(220,53,69,0.15); border: 1px solid #dc3545; color: #ff4d4d; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
                     onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencido}, '${u.unidade}', '${u.empresa}')">
-                    <i class="fa-solid fa-money-bill-wave"></i> Enviar para Holerite
+                    <i class="fa-solid fa-money-bill-wave"></i> Liquidar Saldo
                 </button>
             `;
         }
@@ -43369,9 +43232,9 @@ window.filtrarExtratoBHAdminVisual = function() {
                     ${u.creditoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #4fc3f7; color: #4fc3f7; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" onclick="abrirModalExtratoBH('${u.id}', 'creditos')" title="Ver origem dos créditos"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
                 </td>
                 
-                <td style="padding: 15px; text-align: center; color: #dc3545; vertical-align: middle;">
+                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle;">
                     <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.debitoTotal)}</span>
-                    ${u.debitoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'" onclick="abrirModalExtratoBH('${u.id}', 'debitos')" title="Ver motivos dos abates e folgas"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
+                    ${u.debitoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #a6b0cf; color: #a6b0cf; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#a6b0cf'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#a6b0cf'" onclick="abrirModalExtratoBH('${u.id}', 'debitos')" title="Ver motivos dos abates"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
                 </td>
 
                 <td style="padding: 15px; text-align: center; font-weight: bold; font-size:1.05rem; color: ${corSaldo}; vertical-align: middle;">${minToHr(u.saldo)}</td>
@@ -43382,33 +43245,46 @@ window.filtrarExtratoBHAdminVisual = function() {
     });
 };
 
-      // =========================================================================
-// MÁGICA: MODAL DE EXTRATO DETALHADO DO BANCO DE HORAS
-// =========================================================================
+      window.trocarAbaExtratoModal = function(abaSelecionada) {
+    ['creditos', 'debitos', 'vencidos'].forEach(a => {
+        const el = document.getElementById(`area-${a}-bh`);
+        if (el) el.classList.add('hidden');
+        const btn = document.getElementById(`btn-tab-${a}`);
+        if (btn) {
+            btn.style.color = 'var(--cor-texto-secundario)';
+            btn.style.borderColor = 'var(--cor-borda)';
+        }
+    });
+    const elAtivo = document.getElementById(`area-${abaSelecionada}-bh`);
+    if (elAtivo) elAtivo.classList.remove('hidden');
+    
+    const btnAtivo = document.getElementById(`btn-tab-${abaSelecionada}`);
+    if (btnAtivo) {
+        let cor = abaSelecionada === 'creditos' ? '#4fc3f7' : (abaSelecionada === 'debitos' ? '#a6b0cf' : '#ff4d4d');
+        btnAtivo.style.color = cor;
+        btnAtivo.style.borderColor = cor;
+    }
+};
+
 window.abrirModalExtratoBH = function(idColab, abaAtiva) {
     const u = window.todosSaldosBHAdmin.find(x => x.id === idColab);
     if (!u) return;
 
-    // Converte minutos para string legível
     const minToHr = (mins) => {
         const h = Math.floor(mins / 60);
         const m = Math.round(mins % 60);
         return `${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
     };
 
-    // --- 1. MONTA LISTA DE CRÉDITOS ---
+    // --- 1. CRÉDITOS ---
     let listaCreditosHtml = '';
     if (u.historicoCreditos && u.historicoCreditos.length > 0) {
-        // Ordena dos mais recentes pros mais antigos
         const creds = [...u.historicoCreditos].sort((a,b) => new Date(b.data) - new Date(a.data));
         creds.forEach(cred => {
             const h = Math.floor(cred.horas);
             const m = Math.round((cred.horas - h) * 60);
             const stringHora = `${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
-
-            let corBadge = '#4fc3f7';
-            if (cred.sigla === 'H+') corBadge = '#ff9800';
-            else if (cred.sigla === 'FT') corBadge = '#20c997';
+            let corBadge = cred.sigla === 'H+' ? '#ff9800' : (cred.sigla === 'FT' ? '#20c997' : '#4fc3f7');
 
             listaCreditosHtml += `
                 <div style="background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); border-left: 3px solid ${corBadge}; margin-bottom: 8px;">
@@ -43426,20 +43302,19 @@ window.abrirModalExtratoBH = function(idColab, abaAtiva) {
         listaCreditosHtml = '<p style="text-align:center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum crédito acumulado.</p>';
     }
 
-    // --- 2. MONTA LISTA DE DÉBITOS (FOLGAS) ---
+    // --- 2. DÉBITOS ---
     let listaDebitosHtml = '';
     if (u.historicoDebitos && u.historicoDebitos.length > 0) {
-        // Ordena dos mais recentes pros mais antigos
         const debs = [...u.historicoDebitos].sort((a,b) => new Date(b.data) - new Date(a.data));
         debs.forEach(deb => {
             const stringHora = minToHr(deb.minutos);
             let icon = deb.motivo.includes('Dinheiro') || deb.motivo.includes('Liquidação') ? 'fa-money-bill-wave' : 'fa-bed';
 
             listaDebitosHtml += `
-                <div style="background: rgba(220,53,69,0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(220,53,69,0.2); border-left: 3px solid #dc3545; margin-bottom: 8px;">
+                <div style="background: rgba(166, 176, 207, 0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(166, 176, 207, 0.2); border-left: 3px solid #a6b0cf; margin-bottom: 8px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span class="badge" style="background: rgba(220,53,69,0.15); color: #dc3545; border: 1px solid #dc3545; font-size: 0.75rem;"><i class="fa-solid fa-minus"></i> Abate do Banco</span>
-                        <strong style="color: #dc3545; font-size: 1.1rem;">- ${stringHora}</strong>
+                        <span class="badge" style="background: rgba(166, 176, 207, 0.15); color: #a6b0cf; border: 1px solid #a6b0cf; font-size: 0.75rem;"><i class="fa-solid fa-minus"></i> Abate do Banco</span>
+                        <strong style="color: #a6b0cf; font-size: 1.1rem;">- ${stringHora}</strong>
                     </div>
                     <small style="color: var(--cor-texto-secundario); display: block; margin-bottom: 5px; font-weight: bold;"><i class="fa-solid ${icon}"></i> Ocorrência: ${deb.motivo} (${formatarDataBR(deb.data)})</small>
                     <div style="background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
@@ -43451,40 +43326,65 @@ window.abrirModalExtratoBH = function(idColab, abaAtiva) {
         listaDebitosHtml = '<p style="text-align:center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum abate ou folga utilizado.</p>';
     }
 
+    // --- 3. VENCIDOS ---
+    let listaVencidosHtml = '';
+    if (u.historicoVencidos && u.historicoVencidos.length > 0) {
+        const vencs = [...u.historicoVencidos].sort((a,b) => new Date(b.data) - new Date(a.data));
+        vencs.forEach(v => {
+            const stringHora = minToHr(v.minutos);
+
+            listaVencidosHtml += `
+                <div style="background: rgba(220,53,69,0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(220,53,69,0.2); border-left: 3px solid #ff4d4d; margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span class="badge" style="background: rgba(220,53,69,0.15); color: #ff4d4d; border: 1px solid #ff4d4d; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> PRAZO VENCIDO</span>
+                        <strong style="color: #ff4d4d; font-size: 1.1rem;">${stringHora}</strong>
+                    </div>
+                    <small style="color: var(--cor-texto-secundario); display: block; margin-bottom: 5px; font-weight: bold;"><i class="fa-regular fa-calendar-xmark"></i> Sobrou do dia: ${formatarDataBR(v.data)}</small>
+                    <div style="background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-principal); font-style: italic; line-height: 1.4; display: block;">"${v.obs}"</span>
+                    </div>
+                </div>`;
+        });
+    } else {
+        listaVencidosHtml = '<p style="text-align:center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma hora vencida identificada.</p>';
+    }
+
     const modalHtml = `
     <div id="modal-extrato-bh" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 550px; border: 1px solid #4fc3f7; position: relative; max-height: 85vh; overflow-y: auto; padding: 0;">
+        <div class="glass-card" style="width: 100%; max-width: 550px; border: 1px solid #4fc3f7; position: relative; max-height: 90vh; overflow-y: hidden; padding: 0; display: flex; flex-direction: column;">
             
-            <div style="padding: 20px; border-bottom: 1px solid var(--cor-borda); position: sticky; top: 0; background: var(--cor-principal); z-index: 10;">
+            <div style="padding: 20px; border-bottom: 1px solid var(--cor-borda); background: var(--cor-principal); flex-shrink: 0;">
                 <button onclick="document.getElementById('modal-extrato-bh').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
                 <h3 style="color: #4fc3f7; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> Extrato Detalhado</h3>
                 <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Movimentações de <b style="color: #fff;">${u.nome}</b>.</p>
                 
-                <div style="display: flex; gap: 5px;">
-                    <button class="btn-secondary" id="btn-tab-creditos" style="flex: 1; border-color: ${abaAtiva === 'creditos' ? '#4fc3f7' : 'var(--cor-borda)'}; color: ${abaAtiva === 'creditos' ? '#4fc3f7' : 'var(--cor-texto-secundario)'};" onclick="document.getElementById('area-debitos-bh').classList.add('hidden'); document.getElementById('area-creditos-bh').classList.remove('hidden'); this.style.color='#4fc3f7'; this.style.borderColor='#4fc3f7'; document.getElementById('btn-tab-debitos').style.color='var(--cor-texto-secundario)'; document.getElementById('btn-tab-debitos').style.borderColor='var(--cor-borda)';">
+                <div style="display: flex; gap: 5px; overflow-x: auto; padding-bottom: 5px;">
+                    <button class="btn-secondary" id="btn-tab-creditos" style="flex: 1; min-width: 130px; border-color: ${abaAtiva === 'creditos' ? '#4fc3f7' : 'var(--cor-borda)'}; color: ${abaAtiva === 'creditos' ? '#4fc3f7' : 'var(--cor-texto-secundario)'};" onclick="trocarAbaExtratoModal('creditos')">
                         <i class="fa-solid fa-plus-circle"></i> Créditos (+)
                     </button>
-                    <button class="btn-secondary" id="btn-tab-debitos" style="flex: 1; border-color: ${abaAtiva === 'debitos' ? '#dc3545' : 'var(--cor-borda)'}; color: ${abaAtiva === 'debitos' ? '#dc3545' : 'var(--cor-texto-secundario)'};" onclick="document.getElementById('area-creditos-bh').classList.add('hidden'); document.getElementById('area-debitos-bh').classList.remove('hidden'); this.style.color='#dc3545'; this.style.borderColor='#dc3545'; document.getElementById('btn-tab-creditos').style.color='var(--cor-texto-secundario)'; document.getElementById('btn-tab-creditos').style.borderColor='var(--cor-borda)';">
-                        <i class="fa-solid fa-minus-circle"></i> Abates / Folgas (-)
+                    <button class="btn-secondary" id="btn-tab-debitos" style="flex: 1; min-width: 140px; border-color: ${abaAtiva === 'debitos' ? '#a6b0cf' : 'var(--cor-borda)'}; color: ${abaAtiva === 'debitos' ? '#a6b0cf' : 'var(--cor-texto-secundario)'};" onclick="trocarAbaExtratoModal('debitos')">
+                        <i class="fa-solid fa-minus-circle"></i> Abates (-)
+                    </button>
+                    <button class="btn-secondary" id="btn-tab-vencidos" style="flex: 1; min-width: 130px; border-color: ${abaAtiva === 'vencidos' ? '#ff4d4d' : 'var(--cor-borda)'}; color: ${abaAtiva === 'vencidos' ? '#ff4d4d' : 'var(--cor-texto-secundario)'};" onclick="trocarAbaExtratoModal('vencidos')">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Vencidas
                     </button>
                 </div>
             </div>
 
-            <div style="padding: 20px;">
-                <div id="area-creditos-bh" class="${abaAtiva === 'creditos' ? '' : 'hidden'}">
-                    ${listaCreditosHtml}
-                </div>
-                
-                <div id="area-debitos-bh" class="${abaAtiva === 'debitos' ? '' : 'hidden'}">
-                    ${listaDebitosHtml}
-                </div>
+            <div style="padding: 20px; overflow-y: auto; flex: 1;">
+                <div id="area-creditos-bh" class="${abaAtiva === 'creditos' ? '' : 'hidden'}">${listaCreditosHtml}</div>
+                <div id="area-debitos-bh" class="${abaAtiva === 'debitos' ? '' : 'hidden'}">${listaDebitosHtml}</div>
+                <div id="area-vencidos-bh" class="${abaAtiva === 'vencidos' ? '' : 'hidden'}">${listaVencidosHtml}</div>
+            </div>
+            
+            <div style="padding: 15px 20px; border-top: 1px solid var(--cor-borda); background: var(--cor-principal); flex-shrink: 0;">
+                <button class="btn-primary" style="width: 100%; height: 50px; justify-content: center;" onclick="document.getElementById('modal-extrato-bh').remove()">Fechar Extrato</button>
             </div>
         </div>
     </div>`;
 
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
-
       // =========================================================================
 // MÁGICA: MODAL DE DETALHES DE CRÉDITOS DO BANCO DE HORAS
 // =========================================================================
@@ -43712,7 +43612,7 @@ window.carregarConfigBHUnidade = function() {
 };
 
 // =========================================================================
-// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (ATUALIZADO E LIMPO)
+// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (FIFO + MEMÓRIA DE VENCIDOS)
 // =========================================================================
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -43724,7 +43624,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
     try {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
         
-        // 👇 BUSCA AS REGRAS OFICIAIS DO BANCO DE DADOS
+        // Busca regras do banco de horas
         const { data: configsBH } = await supabaseClient.from('config_banco_horas').select('*');
         configsBancoHorasGlobais = configsBH || [];
 
@@ -43747,18 +43647,18 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         hoje.setHours(0,0,0,0);
 
         colabs.forEach(c => {
-            // 👇 1. LÊ A REGRA DA UNIDADE (Se não tiver, o padrão é SIM e 60 dias) 👇
             const configUnidade = configsBancoHorasGlobais.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
-            
-            // Se a unidade não usa banco de horas, simplesmente pula esse colaborador inteiro!
             if (!configUnidade.usa_banco) return;
 
             const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
-            if (asHorasDesteColab.length === 0) return; // Se nunca teve movimento, ignora
+            if (asHorasDesteColab.length === 0) return; 
 
             let arrayCreditos = []; 
-            let historicoDebitos = []; // 👈 NOVA MEMÓRIA PARA AS FOLGAS
+            let historicoDebitos = []; // 👈 Guarda as folgas/abates
             let totalMinutosDebito = 0;
+
+            let sumBaseCred = 0;
+            let historicoCreditos = []; // 👈 Guarda os créditos originais
 
             asHorasDesteColab.forEach(f => {
                 let txtObs = (f.observacao || '').toUpperCase();
@@ -43769,18 +43669,10 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     if (matchM) {
                         let mins = parseInt(matchM[1]);
                         totalMinutosDebito += mins;
-                        
-                        // Limpa os códigos de máquina para mostrar só o texto do gestor
                         let obsLimpa = (f.observacao || '').replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
-                        
-                        historicoDebitos.push({
-                            data: f.data_inicio,
-                            minutos: mins,
-                            motivo: f.motivo || 'Folga / Abate',
-                            obs: obsLimpa
-                        });
+                        historicoDebitos.push({ data: f.data_inicio, minutos: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
                     }
-                }
+                } 
                 // FLUXO DE CRÉDITO
                 else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
                     if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
@@ -43788,20 +43680,26 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                         if (matchesLote) {
                             matchesLote.forEach(m => {
                                 let dec = parseFloat(m.replace('(','').replace(')',''));
-                                arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
+                                arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: Math.round(dec * 60), obs: f.observacao });
+                                sumBaseCred += Math.round(dec * 60);
+                                historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
                             });
                         }
                     } else {
                         const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                         if (matchDec) {
-                            arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(parseFloat(matchDec[1]) * 60) });
+                            let dec = parseFloat(matchDec[1]);
+                            arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: Math.round(dec * 60), obs: f.observacao });
+                            sumBaseCred += Math.round(dec * 60);
+                            historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
                         }
                     }
                 }
             });
 
-            // FIFO
+            // FIFO - Ordena os créditos dos mais antigos para os mais novos
             arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+            
             let debitoRestante = totalMinutosDebito;
             arrayCreditos.forEach(cred => {
                 if (debitoRestante > 0) {
@@ -43817,6 +43715,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
 
             let somaMinutosCreditoTotal = 0;
             let somaMinutosVencidos = 0;
+            let historicoVencidos = []; // 👈 Guarda APENAS o que sobrou e venceu
 
             arrayCreditos.forEach(cred => {
                 somaMinutosCreditoTotal += cred.minutos;
@@ -43824,45 +43723,27 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     const dCred = new Date(cred.data + 'T00:00:00');
                     const diffDias = Math.floor((hoje - dCred) / (1000 * 3600 * 24));
                     
-                    // 👇 Usa a validade que foi configurada na regra da unidade 👇
                     if (diffDias > configUnidade.dias_validade) {
                         somaMinutosVencidos += cred.minutos;
+                        historicoVencidos.push({
+                            sigla: cred.sigla,
+                            minutos: cred.minutos,
+                            data: cred.data,
+                            obs: cred.obs
+                        });
                     }
                 }
             });
 
             let saldoFinal = somaMinutosCreditoTotal; 
-            if (saldoFinal <= 0) somaMinutosVencidos = 0; 
+            if (saldoFinal <= 0) {
+                somaMinutosVencidos = 0; 
+                historicoVencidos = [];
+            }
 
-            // 👇 A MÁGICA FINAL: Só manda pra tela se o saldo for diferente de ZERO! 👇
-            if (saldoFinal === 0 && totalMinutosDebito === 0) return; // Limpa os zeros completamente
+            if (saldoFinal === 0 && totalMinutosDebito === 0) return; 
 
-            // Helper interno + Captura de Histórico Detalhado
-            let sumBaseCred = 0;
-            let historicoCreditos = []; // 👈 NOVA LISTA PARA O MODAL
-            
-            asHorasDesteColab.forEach(f => {
-                let txtObs = (f.observacao || '').toUpperCase();
-                if (!txtObs.includes('[ABATE_BANCO]') && f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
-                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        const m = txtObs.match(/\((\d+\.\d+)\)/g);
-                        if (m) m.forEach(x => {
-                            let hVal = parseFloat(x.replace('(','').replace(')',''));
-                            sumBaseCred += hVal * 60;
-                            historicoCreditos.push({ sigla: f.sigla, horas: hVal, data: f.data_inicio, obs: f.observacao });
-                        });
-                    } else {
-                        const m = txtObs.match(/\((\d+\.\d+)\)/);
-                        if (m) {
-                            let hVal = parseFloat(m[1]);
-                            sumBaseCred += hVal * 60;
-                            historicoCreditos.push({ sigla: f.sigla, horas: hVal, data: f.data_inicio, obs: f.observacao });
-                        }
-                    }
-                }
-            });
-
-           window.todosSaldosBHAdmin.push({
+            window.todosSaldosBHAdmin.push({
                 id: c.id,
                 nome: c.nome,
                 unidade: c.unidade,
@@ -43872,7 +43753,8 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 saldo: saldoFinal,
                 vencido: somaMinutosVencidos,
                 historicoCreditos: historicoCreditos,
-                historicoDebitos: historicoDebitos // 👈 INJETE AQUI O HISTÓRICO DAS FOLGAS
+                historicoDebitos: historicoDebitos,
+                historicoVencidos: historicoVencidos // 👈 INJETADO NO OBJETO!
             });
         });
 
