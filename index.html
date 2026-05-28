@@ -2679,9 +2679,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                                         <div style="display: flex; align-items: center;"><span style="display:inline-block; width:14px; height:14px; background:rgba(166, 176, 207, 0.15); border:1px solid #a6b0cf; border-radius:4px; margin-right:8px;"></span><b style="color:#a6b0cf; width:35px;">AL/TR:</b> Transferência</div>
                                     </div>
                                     <div style="margin-top: 15px; font-size: 0.75rem; color: var(--cor-texto-secundario); font-style: italic; border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 10px;">
-                                        * O símbolo <b><span style="color:#ff9800; font-weight: 900;">h+</span></b> indica que o colaborador possui <b>Hora Extra/Quebra</b> registrada naquele dia. <br>
-                                        * O símbolo <b><i class="fa-solid fa-triangle-exclamation" style="color: #ffc107;"></i></b> indica uma <b>Ocorrência de Ponto</b> (Atraso ou Falha de Batida).
-                                    </div>
+    * O símbolo <b><span style="color:#ff9800; font-weight: 900;">h+</span></b> ou <b><span style="color:#ff9800; font-weight: 900;">he</span></b> indica que o colaborador possui <b>Hora Extra/Quebra</b> registrada no dia. <br>
+    * O símbolo <b><span style="color:#dc3545; font-weight: 900;">h-</span></b> indica <b>Abate do Banco de Horas</b> (Chegou tarde ou saiu cedo). <br>
+    * O símbolo <b><i class="fa-solid fa-triangle-exclamation" style="color: #ffc107;"></i></b> indica uma <b>Ocorrência de Ponto</b>.
+</div>
                                 </div>
                             </div>
                             </div>
@@ -6695,6 +6696,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <option value="Admissoes">Admissões / Contratações</option>
                     <option value="Rescisoes">Desligamentos (Turnover)</option>
                     <option value="Lotacao" style="font-weight: bold; color: var(--cor-acento);">📊 Lotação de Unidades (Capacidade)</option>
+                    <option value="BancoHoras" style="font-weight: bold; color: #8b5cf6;">⏳ Extrato de Banco de Horas (Saldos)</option>
                 </select>
             </div>
             <button class="btn-success" style="background-color: #00bcd4; color: #000; border: none; padding: 12px 25px;" onclick="gerarDadosBI()">
@@ -9508,7 +9510,7 @@ window.filtrarLotacaoBI = function() {
 };
 
 // ========================================================
-// 📊 GERADOR DE INDICADORES (BI) - ATUALIZADO (C/ CÁLCULO DE HORAS E NOVA LOTAÇÃO)
+// 📊 GERADOR DE INDICADORES (BI) - COM CÁLCULO DE BANCO DE HORAS
 // ========================================================
 window.gerarDadosBI = async function() {
     let dIni = document.getElementById('bi-data-inicio').value;
@@ -9534,145 +9536,212 @@ window.gerarDadosBI = async function() {
     const containerRankingMain = document.getElementById('bi-ranking-lista').parentElement.parentElement;
     const rankDiv = document.getElementById('bi-ranking-lista');
 
-    // RESET DE LAYOUT
+    // RESET DE LAYOUT PADRÃO
     containerCardsTopo.style.display = 'grid';
     containerGrafico.style.display = 'block';
     containerTabela.style.display = 'block';
+    containerTabela.parentElement.style.gridColumn = ''; // Reseta largura
     containerRankingMain.style.gridTemplateColumns = '1fr 2fr';
     rankDiv.style.display = 'flex';
     rankDiv.style.maxHeight = '350px';
     rankDiv.style.flexDirection = 'column';
 
+    // Restaura o cabeçalho padrão da tabela
+    const tbodyDetalhes = document.getElementById('bi-tabela-detalhes');
+    const theadTr = tbodyDetalhes.parentElement.querySelector('thead tr');
+    theadTr.innerHTML = `
+        <th style="text-align: left;">Colaborador</th>
+        <th>Unidade</th>
+        <th>Data</th>
+        <th>Detalhe</th>
+    `;
+
     try {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
 
         let qAus = supabaseClient.from('ausencias').select('colaborador_id, nome, unidade, sigla, motivo, data_inicio').gte('data_inicio', dIni).lte('data_inicio', dFim).eq('status', 'Aprovado');
-        let qFt = supabaseClient.from('horas_extras_ft').select('*').gte('data_inicio', dIni).lte('data_inicio', dFim).eq('status', 'Aprovado');
         let qPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
+        let qConfigsBH = supabaseClient.from('config_banco_horas').select('*'); // Regras do Banco
+        
+        // Mágica: Se for Banco de Horas, precisamos de todo o passado até dFim (pra saber o saldo).
+        // Se for outro indicador, pegamos só o que aconteceu dentro do mês selecionado.
+        let qFt = supabaseClient.from('horas_extras_ft').select('*').lte('data_inicio', dFim).eq('status', 'Aprovado');
+        if (indicador !== 'BancoHoras') {
+            qFt = qFt.gte('data_inicio', dIni);
+        }
         
         if (empresaSelecionadaFiltro !== 'Todas') {
             if(unidsFiltro) { qAus = qAus.in('unidade', unidsFiltro); qFt = qFt.in('unidade', unidsFiltro); }
             qPerfis = qPerfis.eq('empresa', empresaSelecionadaFiltro);
         }
 
-        const [resAus, resFt, resPerf] = await Promise.all([qAus, qFt, qPerfis]);
+        const [resAus, resFt, resPerf, resConfBH] = await Promise.all([qAus, qFt, qPerfis, qConfigsBH]);
         const ausencias = resAus.data || [];
         const fts = resFt.data || [];
         const perfis = resPerf.data || [];
+        const regrasBH = resConfBH.data || [];
 
-        const admissoes = [];
-        const rescisoes = [];
-        perfis.forEach(p => {
-            const adm = p.dados_admissao || {};
-            const dtAdm = adm.jornada?.data_inicio || adm.data_inicio;
-            if (dtAdm && dtAdm >= dIni && dtAdm <= dFim) admissoes.push({ ...p, data_acao: dtAdm, detalhe: adm.cargo });
-
-            const resc = p.dados_rescisao || {};
-            if (resc.data_comunicado && resc.data_comunicado >= dIni && resc.data_comunicado <= dFim) rescisoes.push({ ...p, data_acao: resc.data_comunicado, detalhe: resc.tipo });
-        });
+        const minToHr = (mins) => {
+            const isNeg = mins < 0;
+            const absMins = Math.abs(mins);
+            const h = Math.floor(absMins / 60);
+            const m = Math.round(absMins % 60);
+            return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
+        };
 
         // ========================================================
-        // ⏰ MÁGICA SUPERIOR: CÁLCULO INTELIGENTE DE HORAS (FT E H+)
+        // ⏳ MÓDULO: EXTRATO DE BANCO DE HORAS (SOMA TOTAL)
         // ========================================================
-        let totalHorasPagar = 0;
-        
-        const ftsMapeadas = fts.map(f => {
-            let horas = 0;
+        if (indicador === 'BancoHoras') {
+            let totalSaldoGeral = 0;
+            let totalVencidoGeral = 0;
+            let totalCreditoGeral = 0;
+            let totalDebitoGeral = 0;
+            let dadosTabelaBH = [];
 
-            let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
-            horas = parseFloat(hText);
-            
-            if (!horas && f.observacao) {
-                const match = f.observacao.match(/(\d+([.,]\d+)?)\s*(?:h|hora|hs)/i); 
-                if (match) horas = parseFloat(match[1].replace(',', '.'));
+            perfis.filter(p => p.status === 'Ativo').forEach(c => {
+                const configUnidade = regrasBH.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
+                if (!configUnidade.usa_banco) return;
+
+                const asHoras = fts.filter(f => f.colaborador_id === c.id);
+                if (asHoras.length === 0) return;
+
+                let arrayCreditos = []; 
+                let totalMinutosDebito = 0;
+                let sumBaseCred = 0;
+
+                asHoras.forEach(f => {
+                    let txtObs = (f.observacao || '').toUpperCase();
+                    if (txtObs.includes('[ABATE_BANCO]')) {
+                        const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
+                        if (matchM) totalMinutosDebito += parseInt(matchM[1]);
+                    } else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
+                        if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
+                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                            if (matchesLote) {
+                                matchesLote.forEach(m => {
+                                    let dec = parseFloat(m.replace('(','').replace(')',''));
+                                    arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
+                                    sumBaseCred += Math.round(dec * 60);
+                                });
+                            }
+                        } else {
+                            const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
+                            if (matchDec) {
+                                let dec = parseFloat(matchDec[1]);
+                                arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
+                                sumBaseCred += Math.round(dec * 60);
+                            }
+                        }
+                    }
+                });
+
+                arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+                let debitoRestante = totalMinutosDebito;
+                
+                arrayCreditos.forEach(cred => {
+                    if (debitoRestante > 0) {
+                        if (cred.minutos <= debitoRestante) {
+                            debitoRestante -= cred.minutos;
+                            cred.minutos = 0; 
+                        } else {
+                            cred.minutos -= debitoRestante;
+                            debitoRestante = 0; 
+                        }
+                    }
+                });
+
+                let somaMinutosCreditoTotal = 0;
+                let somaMinutosVencidos = 0;
+                const dataReferenciaFim = new Date(dFim + 'T00:00:00');
+
+                arrayCreditos.forEach(cred => {
+                    somaMinutosCreditoTotal += cred.minutos;
+                    if (cred.minutos > 0) {
+                        const dCred = new Date(cred.data + 'T00:00:00');
+                        const diffDias = Math.floor((dataReferenciaFim - dCred) / (1000 * 3600 * 24));
+                        if (diffDias > configUnidade.dias_validade) {
+                            somaMinutosVencidos += cred.minutos;
+                        }
+                    }
+                });
+
+                let saldoFinal = somaMinutosCreditoTotal - debitoRestante; 
+                if (saldoFinal <= 0) somaMinutosVencidos = 0; 
+
+                if (saldoFinal === 0 && totalMinutosDebito === 0) return; 
+
+                totalSaldoGeral += saldoFinal;
+                totalVencidoGeral += somaMinutosVencidos;
+                totalCreditoGeral += sumBaseCred;
+                totalDebitoGeral += totalMinutosDebito;
+
+                dadosTabelaBH.push({
+                    nome: c.nome, unidade: c.unidade,
+                    creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito,
+                    saldo: saldoFinal, vencido: somaMinutosVencidos
+                });
+            });
+
+            // Arruma o layout da tela para o Banco de Horas
+            containerGrafico.style.display = 'none';
+            rankDiv.parentElement.style.display = 'none'; // Esconde o Top 10
+            containerTabela.parentElement.style.gridColumn = 'span 2'; // Expande a tabela
+            containerCardsTopo.style.gridTemplateColumns = 'repeat(4, 1fr)';
+
+            let htmlCardsBI = '';
+            htmlCardsBI += criarCardBI('bi-vis-bh-saldo', 'Saldo Total (Unidade)', minToHr(totalSaldoGeral), 'fa-scale-balanced', '#8b5cf6');
+            htmlCardsBI += criarCardBI('bi-vis-bh-vencido', 'Horas Vencidas', minToHr(totalVencidoGeral), 'fa-triangle-exclamation', '#dc3545');
+            htmlCardsBI += criarCardBI('bi-vis-bh-cred', 'Total Acumulado (+)', minToHr(totalCreditoGeral), 'fa-plus-circle', '#4fc3f7');
+            htmlCardsBI += criarCardBI('bi-vis-bh-deb', 'Total Abatido (-)', minToHr(totalDebitoGeral), 'fa-minus-circle', '#ff9800');
+
+            const inputsOcultosPDF = `
+                <div style="display:none;">
+                    <span id="bi-card-bh-saldo">${totalSaldoGeral}</span>
+                    <span id="bi-card-bh-vencido">${totalVencidoGeral}</span>
+                    <span id="bi-card-bh-cred">${totalCreditoGeral}</span>
+                    <span id="bi-card-bh-deb">${totalDebitoGeral}</span>
+                    <textarea id="bi-dados-bh-json">${JSON.stringify(dadosTabelaBH)}</textarea>
+                </div>
+            `;
+            document.getElementById('bi-cards-container').innerHTML = htmlCardsBI + inputsOcultosPDF;
+
+            // Recria o Thead específico pro Banco de Horas
+            theadTr.innerHTML = `
+                <th style="text-align: left; padding: 10px;">Colaborador</th>
+                <th style="padding: 10px;">Unidade</th>
+                <th style="text-align: center; padding: 10px;">Créditos (+)</th>
+                <th style="text-align: center; padding: 10px;">Débitos (-)</th>
+                <th style="text-align: center; padding: 10px;">Saldo Atual</th>
+                <th style="text-align: center; padding: 10px;">Vencidas</th>
+            `;
+
+            tbodyDetalhes.innerHTML = '';
+            if (dadosTabelaBH.length === 0) {
+                tbodyDetalhes.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum saldo registrado.</td></tr>';
+            } else {
+                dadosTabelaBH.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(b => {
+                    let corSaldo = b.saldo > 0 ? '#28a745' : (b.saldo < 0 ? '#dc3545' : 'var(--cor-texto-secundario)');
+                    let strVencido = b.vencido > 0 ? `<b style="color:#dc3545;">${minToHr(b.vencido)}</b>` : minToHr(b.vencido);
+
+                    tbodyDetalhes.innerHTML += `<tr>
+                        <td style="text-align: left; padding: 10px;"><b style="color: #8b5cf6;">${b.nome}</b></td>
+                        <td style="padding: 10px;">${b.unidade}</td>
+                        <td style="text-align: center; padding: 10px; color: #4fc3f7;">${minToHr(b.creditoTotal)}</td>
+                        <td style="text-align: center; padding: 10px; color: #ff9800;">${minToHr(b.debitoTotal)}</td>
+                        <td style="text-align: center; padding: 10px; font-weight: bold; color: ${corSaldo}; font-size: 1.1rem;">${minToHr(b.saldo)}</td>
+                        <td style="text-align: center; padding: 10px;">${strVencido}</td>
+                    </tr>`;
+                });
             }
 
-            const perf = perfis.find(p => p.nome === f.nome);
-            let jornadaVigente = perf?.dados_admissao?.jornada || {};
+            document.getElementById('bi-resultados').classList.remove('hidden');
+            document.getElementById('bi-loading').classList.add('hidden');
+            return; // Mata a execução aqui pra não rodar a lógica padrão abaixo!
+        }
 
-            if (jornadaVigente.historico_alteracoes && jornadaVigente.historico_alteracoes.length > 0) {
-                const histOrdenado = [...jornadaVigente.historico_alteracoes].sort((a,b) => new Date(a.data_inicio + 'T00:00:00') - new Date(b.data_inicio + 'T00:00:00'));
-                for (let h of histOrdenado) {
-                    if (new Date(f.data_inicio + 'T00:00:00') >= new Date(h.data_inicio + 'T00:00:00')) {
-                        jornadaVigente = h;
-                    }
-                }
-            }
-
-            const tipoJornada = jornadaVigente.tipo || '12x36';
-
-            if (!horas && f.sigla === 'FT') {
-                horas = (tipoJornada === '12x36') ? 12 : 8; 
-            }
-
-            if (!horas && f.sigla === 'H+') {
-                let horarioPadrao = '';
-                if (tipoJornada === '12x36') {
-                    horarioPadrao = jornadaVigente.horario || '';
-                } else if (jornadaVigente.escala) {
-                    const nomesDias = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
-                    const diaSemana = new Date(f.data_inicio + 'T00:00:00').getDay();
-                    const diaNome = nomesDias[diaSemana];
-                    if (jornadaVigente.escala[diaNome]) {
-                        horarioPadrao = jornadaVigente.escala[diaNome].horario || '';
-                    }
-                }
-
-                const textoCompleto = (f.motivo + ' ' + (f.observacao||''));
-                const tempoReal = textoCompleto.match(/(entrada|sa[íi]da).*?(\d{2}):(\d{2})/i);
-                const temposEscala = horarioPadrao.match(/(\d{2}:\d{2})/g);
-
-                if (tempoReal && temposEscala && temposEscala.length >= 2) {
-                    const isEntrada = tempoReal[1].toLowerCase() === 'entrada';
-                    
-                    const toMinutes = (timeStr) => {
-                        const [h, m] = timeStr.split(':').map(Number);
-                        return (h * 60) + m;
-                    };
-
-                    let minReal = toMinutes(`${tempoReal[2]}:${tempoReal[3]}`);
-                    let hrEscalaStr = isEntrada ? temposEscala[0] : temposEscala[1];
-                    let minEscala = toMinutes(hrEscalaStr);
-
-                    let diffMinutos = 0;
-
-                    if (isEntrada) {
-                        diffMinutos = minEscala - minReal; 
-                    } else {
-                        diffMinutos = minReal - minEscala; 
-                    }
-
-                    if (diffMinutos < 0) diffMinutos += 1440; 
-
-                    const diffHorasDecimais = diffMinutos / 60;
-                    
-                    if (diffHorasDecimais > 0 && diffHorasDecimais <= 12) {
-                        horas = diffHorasDecimais;
-                    }
-                }
-            }
-
-            horas = isNaN(horas) ? 0 : parseFloat(horas.toFixed(2));
-
-            const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
-            let isDinheiro = textoBuscaPgto.includes('dinheiro') || f.sigla === 'H+';
-            
-            let formaPgtoTxt = isDinheiro ? 'Dinheiro' : 'Folga';
-            if (f.sigla === 'H+') formaPgtoTxt = 'Dinheiro (H+)';
-
-            if (isDinheiro) totalHorasPagar += horas;
-
-            let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); 
-            
-            let textoDetalhe = `${f.sigla}: ${horasFormatadas}h (${formaPgtoTxt})`;
-            if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
-            if (f.observacao) textoDetalhe += ` | Obs: ${f.observacao}`;
-
-            return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
-        });
-
-       // ========================================================
-        // 🏢 NOVO DESIGN: LOTAÇÃO, AVISO PRÉVIO E AFASTAMENTOS (INSS)
+        // ========================================================
+        // 🏢 LÓGICA DA LOTAÇÃO DE UNIDADES (Mantido o seu original perfeito)
         // ========================================================
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
@@ -9693,7 +9762,6 @@ window.gerarDadosBI = async function() {
                 });
             }
 
-            // 👇 MÁGICA: Busca quem tá afastado hoje (INSS, Maternidade, Atestados) 👇
             const hojeIso = new Date().toISOString().split('T')[0];
             const { data: ausenciasLotacao } = await supabaseClient.from('ausencias')
                 .select('colaborador_id, sigla, data_fim')
@@ -9704,7 +9772,6 @@ window.gerarDadosBI = async function() {
             let mapaAfastamentos = {};
             if (ausenciasLotacao) {
                 ausenciasLotacao.forEach(a => {
-                    // Mapeia quem está ausente a longo prazo
                     if (a.sigla === 'AF' || a.sigla === 'ATM' || a.sigla === 'LDM' || a.sigla === 'LDP') {
                         mapaAfastamentos[a.colaborador_id] = { sigla: a.sigla, retorno: a.data_fim };
                     }
@@ -9756,8 +9823,6 @@ window.gerarDadosBI = async function() {
             });
 
             rankDiv.innerHTML = '';
-            
-            // Cabeçalho e Barra de Busca
             rankDiv.previousElementSibling.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; width: 100%;">
                     <div style="font-size: 1.15rem; color: #4fc3f7;"><i class="fa-solid fa-chart-gantt"></i> Mapeamento de Lotação Operacional</div>
@@ -9773,8 +9838,7 @@ window.gerarDadosBI = async function() {
             Object.entries(dadosLotacao).forEach(([unidade, dados]) => {
                 if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && dados.inssTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
                 
-                // O cara no INSS também ocupa vaga!
-                const totalPessoas = dados.ativosTotal; // 👈 A MÁGICA: Só contabiliza os ativos efetivos
+                const totalPessoas = dados.ativosTotal;
                 const limiteGeral = dados.limiteTotal || '∞';
                 
                 let pctTotalReal = 0; let pctTotalBarra = 0; let corTotal = '#4fc3f7'; let statusTotalTxt = 'Ilimitado';
@@ -9793,7 +9857,7 @@ window.gerarDadosBI = async function() {
                 cargosUnicos.forEach(cargo => {
                     const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
-                    const totalNoCargo = infoCargo.qtdAtivos; // 👈 A MÁGICA: Só contabiliza os ativos efetivos
+                    const totalNoCargo = infoCargo.qtdAtivos; 
                     let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
 
                     if (limiteCargo !== '∞') {
@@ -9817,7 +9881,6 @@ window.gerarDadosBI = async function() {
                            </div>`
                         : '';
 
-                    // 👇 A MÁGICA DOS AFASTAMENTOS (INSS) EM LARANJA 👇
                     let listInss = infoCargo.nomesInss.length > 0
                         ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
                                <small style="color: #ff9800; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
@@ -9827,14 +9890,13 @@ window.gerarDadosBI = async function() {
                                    ${infoCargo.nomesInss.map(av => `
                                        <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
                                            <span style="color: #ff9800; font-size: 0.8rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title="${av.nome}">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
-                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;" title="Retorno previsto">Volta: ${av.data}</span>
+                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Volta: ${av.data}</span>
                                        </div>
                                    `).join('')}
                                </div>
                            </div>`
                         : '';
 
-                    // 👇 AVISO PRÉVIO AGORA É VERMELHO PRA NÃO CONFUNDIR COM INSS 👇
                     let listAviso = infoCargo.nomesAviso.length > 0
                         ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
                                <small style="color: #dc3545; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
@@ -9911,16 +9973,107 @@ window.gerarDadosBI = async function() {
             return; 
         }
         
+        // ========================================================
+        // 📈 MÓDULOS PADRÕES (GERAL E OUTROS INDICADORES)
+        // ========================================================
         let listaDetalhada = [];
         let dadosParaGrafico = []; 
         let tituloRanking = "Top Ocorrências";
         let dadosRanking = []; 
+        let totalHorasPagar = 0; // Usado no FT
         
         const agruparPorMes = (arrayDados, dataChave) => {
             let mapa = {};
             arrayDados.forEach(item => { let mesAno = item[dataChave].substring(0, 7); mapa[mesAno] = (mapa[mesAno] || 0) + 1; });
             return mapa;
         };
+
+        const admissoes = [];
+        const rescisoes = [];
+        perfis.forEach(p => {
+            const adm = p.dados_admissao || {};
+            const dtAdm = adm.jornada?.data_inicio || adm.data_inicio;
+            if (dtAdm && dtAdm >= dIni && dtAdm <= dFim) admissoes.push({ ...p, data_acao: dtAdm, detalhe: adm.cargo });
+
+            const resc = p.dados_rescisao || {};
+            if (resc.data_comunicado && resc.data_comunicado >= dIni && resc.data_comunicado <= dFim) rescisoes.push({ ...p, data_acao: resc.data_comunicado, detalhe: resc.tipo });
+        });
+
+        // Mapeamento visual das FTs
+        const ftsMapeadas = fts.map(f => {
+            let horas = 0;
+            let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
+            horas = parseFloat(hText);
+            
+            if (!horas && f.observacao) {
+                const match = f.observacao.match(/(\d+([.,]\d+)?)\s*(?:h|hora|hs)/i); 
+                if (match) horas = parseFloat(match[1].replace(',', '.'));
+            }
+
+            const perf = perfis.find(p => p.nome === f.nome);
+            let jornadaVigente = perf?.dados_admissao?.jornada || {};
+
+            if (jornadaVigente.historico_alteracoes && jornadaVigente.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornadaVigente.historico_alteracoes].sort((a,b) => new Date(a.data_inicio + 'T00:00:00') - new Date(b.data_inicio + 'T00:00:00'));
+                for (let h of histOrdenado) {
+                    if (new Date(f.data_inicio + 'T00:00:00') >= new Date(h.data_inicio + 'T00:00:00')) {
+                        jornadaVigente = h;
+                    }
+                }
+            }
+
+            const tipoJornada = jornadaVigente.tipo || '12x36';
+
+            if (!horas && f.sigla === 'FT') {
+                horas = (tipoJornada === '12x36') ? 12 : 8; 
+            }
+
+            if (!horas && f.sigla === 'H+') {
+                let horarioPadrao = '';
+                if (tipoJornada === '12x36') {
+                    horarioPadrao = jornadaVigente.horario || '';
+                } else if (jornadaVigente.escala) {
+                    const nomesDias = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+                    const diaSemana = new Date(f.data_inicio + 'T00:00:00').getDay();
+                    const diaNome = nomesDias[diaSemana];
+                    if (jornadaVigente.escala[diaNome]) {
+                        horarioPadrao = jornadaVigente.escala[diaNome].horario || '';
+                    }
+                }
+
+                const textoCompleto = (f.motivo + ' ' + (f.observacao||''));
+                const tempoReal = textoCompleto.match(/(entrada|sa[íi]da).*?(\d{2}):(\d{2})/i);
+                const temposEscala = horarioPadrao.match(/(\d{2}:\d{2})/g);
+
+                if (tempoReal && temposEscala && temposEscala.length >= 2) {
+                    const isEntrada = tempoReal[1].toLowerCase() === 'entrada';
+                    const toMinutes = (t) => { const [h, m] = t.split(':').map(Number); return (h * 60) + m; };
+                    let minReal = toMinutes(`${tempoReal[2]}:${tempoReal[3]}`);
+                    let hrEscalaStr = isEntrada ? temposEscala[0] : temposEscala[1];
+                    let minEscala = toMinutes(hrEscalaStr);
+
+                    let diffMinutos = isEntrada ? (minEscala - minReal) : (minReal - minEscala);
+                    if (diffMinutos < 0) diffMinutos += 1440; 
+                    const diffHorasDecimais = diffMinutos / 60;
+                    if (diffHorasDecimais > 0 && diffHorasDecimais <= 12) horas = diffHorasDecimais;
+                }
+            }
+
+            horas = isNaN(horas) ? 0 : parseFloat(horas.toFixed(2));
+
+            const textoBuscaPgto = String((f.forma_pagamento || '') + ' ' + (f.motivo || '') + ' ' + (f.observacao || '')).toLowerCase();
+            let isDinheiro = textoBuscaPgto.includes('dinheiro') || textoBuscaPgto.includes('pagar');
+            
+            let formaPgtoTxt = isDinheiro ? 'Dinheiro' : 'Banco/Folga';
+            if (isDinheiro) totalHorasPagar += horas;
+
+            let horasFormatadas = Number.isInteger(horas) ? horas : horas.toFixed(2); 
+            let textoDetalhe = `${f.sigla}: ${horasFormatadas}h (${formaPgtoTxt})`;
+            if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
+            if (f.observacao) textoDetalhe += ` | Obs: ${f.observacao}`;
+
+            return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
+        });
 
         if (indicador === 'Geral') {
             dadosParaGrafico.push({ label: 'Admissões', cor: '#28a745', dataMap: agruparPorMes(admissoes, 'data_acao') });
@@ -9967,9 +10120,7 @@ window.gerarDadosBI = async function() {
             tituloRanking = "Top Unidades com Desligamentos";
         }
 
-        // ========================================================
-        // 💎 NOVA GERAÇÃO DE CARDS DINÂMICOS E PREMIUM (BI)
-        // ========================================================
+        // Criador de Cards Customizado
         const criarCardBI = (idHTML, titulo, valor, icone, cor, subtitulo = '', idHoras = '') => {
             let spanSub = '';
             if (subtitulo && idHoras) {
@@ -9989,8 +10140,7 @@ window.gerarDadosBI = async function() {
                     ${spanSub}
                 </div>
                 <i class="fa-solid ${icone} fa-5x" style="position: absolute; right: -15px; bottom: -20px; color: ${cor}; opacity: 0.04; transform: rotate(-15deg); z-index: 1;"></i>
-            </div>
-            `;
+            </div>`;
         };
 
         let htmlCardsBI = '';
@@ -10006,7 +10156,6 @@ window.gerarDadosBI = async function() {
             </div>
         `;
 
-        // INTELIGÊNCIA DE EXIBIÇÃO
         if (indicador === 'Geral') {
             containerCardsTopo.style.gridTemplateColumns = 'repeat(4, 1fr)';
             htmlCardsBI += criarCardBI('bi-vis-adm', 'Admissões', admissoes.length, 'fa-user-plus', '#28a745');
@@ -10015,11 +10164,9 @@ window.gerarDadosBI = async function() {
             htmlCardsBI += criarCardBI('bi-vis-ft', 'Hora Extra / FT', fts.length, 'fa-business-time', '#4fc3f7', `${totalHorasPagar.toFixed(2)}h a pagar`, 'bi-vis-ft-horas');
         } 
         else if (indicador === 'Ausencias' || indicador === 'FA' || indicador === 'ATM') {
-            containerCardsTopo.style.gridTemplateColumns = 'repeat(2, 1fr)'; // Estica para caber a tela toda
+            containerCardsTopo.style.gridTemplateColumns = 'repeat(2, 1fr)'; 
             let corCard = indicador === 'FA' ? '#dc3545' : (indicador === 'ATM' ? '#ff9800' : '#ffc107');
             let tituloCard = indicador === 'FA' ? 'Faltas Injustificadas' : (indicador === 'ATM' ? 'Atestados Médicos' : 'Ausências Gerais');
-            
-            // Calcula quantas pessoas DIFERENTES se ausentaram
             let mapaPessoas = new Set(dadosRanking.map(r => r.nome)).size;
             
             htmlCardsBI += criarCardBI('bi-vis-aus', `Total de ${tituloCard}`, dadosRanking.length, 'fa-user-clock', corCard);
@@ -10033,22 +10180,19 @@ window.gerarDadosBI = async function() {
         else if (indicador === 'Admissoes') {
             containerCardsTopo.style.gridTemplateColumns = 'repeat(2, 1fr)';
             let mapaUnidades = new Set(admissoes.map(r => r.unidade)).size;
-            
             htmlCardsBI += criarCardBI('bi-vis-adm', 'Total de Contratações', admissoes.length, 'fa-user-plus', '#28a745');
             htmlCardsBI += criarCardBI('bi-vis-adm-uni', 'Unidades Contratantes', mapaUnidades, 'fa-building', '#a6b0cf', 'Polos que admitiram no período');
         }
         else if (indicador === 'Rescisoes') {
             containerCardsTopo.style.gridTemplateColumns = 'repeat(2, 1fr)';
             htmlCardsBI += criarCardBI('bi-vis-resc', 'Total de Desligamentos', rescisoes.length, 'fa-user-minus', '#dc3545');
-            
             let justaCausa = rescisoes.filter(r => r.detalhe && r.detalhe.includes('Justa Causa')).length;
             htmlCardsBI += criarCardBI('bi-vis-resc-jc', 'Justa Causa', justaCausa, 'fa-gavel', '#ff9800', `De ${rescisoes.length} registros totais`);
         }
 
-        // Aplica o HTML na tela preservando a invisibilidade para a geração do PDF
         document.getElementById('bi-cards-container').innerHTML = htmlCardsBI + inputsOcultosPDF;
-        // ========================================================
 
+        // Gráfico Mensal
         let labelsX = []; let dIniObj = new Date(dIni + 'T00:00:00'); let dFimObj = new Date(dFim + 'T00:00:00');
         let cursor = new Date(dIniObj.getFullYear(), dIniObj.getMonth(), 1);
         const dictMeses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
@@ -10068,6 +10212,7 @@ window.gerarDadosBI = async function() {
             options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: '#a6b0cf', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' } }, x: { ticks: { color: '#a6b0cf' }, grid: { display: false } } }, plugins: { legend: { labels: { color: '#a6b0cf', font: {size: 13} }, position: 'top' } } }
         });
 
+        // Top 10 Ranking
         let mapaRanking = {};
         dadosRanking.forEach(r => { let chave = (indicador === 'Admissoes' || indicador === 'Rescisoes') ? r.unidade : r.nome; mapaRanking[chave] = (mapaRanking[chave] || 0) + 1; });
 
@@ -10081,7 +10226,7 @@ window.gerarDadosBI = async function() {
             rankDiv.innerHTML += `<div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);"><div style="font-size: 0.85rem; color: var(--cor-texto-principal);"><strong style="color: ${corMedalha}; margin-right: 5px;">#${index + 1}</strong> ${item[0]}</div><span class="badge" style="background: rgba(255,152,0,0.2); color: #ff9800;">${item[1]} reg.</span></div>`;
         });
 
-        const tbodyDetalhes = document.getElementById('bi-tabela-detalhes');
+        // Tabela Padrão
         tbodyDetalhes.innerHTML = '';
         listaDetalhada.sort((a, b) => new Date(b.dt) - new Date(a.dt)); 
 
@@ -10100,10 +10245,10 @@ window.gerarDadosBI = async function() {
 };
 
 // ========================================================
-// 🖨️ EXPORTADOR DO BI (PDF COM TEMA CLARO GARANTIDO)
+// 🖨️ EXPORTADOR DO BI E DO BANCO DE HORAS (PDF TEMA CLARO)
 // ========================================================
 window.exportarPDFBI = function() {
-    mostrarAlerta("Montando o relatório executivo de BI...", "sucesso");
+    mostrarAlerta("Montando o relatório executivo...", "sucesso");
 
     const indicador = document.getElementById('bi-indicador').value;
     const dIni = document.getElementById('bi-data-inicio').value.split('-').reverse().join('/');
@@ -10113,31 +10258,104 @@ window.exportarPDFBI = function() {
 
     let corpoDoRelatorio = '';
 
-    if (indicador === 'Lotacao') {
+    // ==========================================================
+    // 1. RELATÓRIO DO BANCO DE HORAS (SALDOS GERAIS)
+    // ==========================================================
+    if (indicador === 'BancoHoras') {
+        const minToHr = (mins) => {
+            const isNeg = mins < 0;
+            const absMins = Math.abs(mins);
+            const h = Math.floor(absMins / 60);
+            const m = Math.round(absMins % 60);
+            return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
+        };
+
+        const totalSaldoMins = parseInt(document.getElementById('bi-card-bh-saldo').innerText);
+        const totalVencidoMins = parseInt(document.getElementById('bi-card-bh-vencido').innerText);
+        const totalCredMins = parseInt(document.getElementById('bi-card-bh-cred').innerText);
+        const totalDebMins = parseInt(document.getElementById('bi-card-bh-deb').innerText);
+        
+        // Pega os dados brutos salvos no textarea oculto
+        const dadosJSON = JSON.parse(document.getElementById('bi-dados-bh-json').value || '[]');
+
+        let htmlTabela = '';
+        if (dadosJSON.length === 0) {
+            htmlTabela = '<tr><td colspan="6" style="text-align:center; padding:15px; color:#555;">Nenhum saldo registrado neste período.</td></tr>';
+        } else {
+            dadosJSON.sort((a,b) => a.nome.localeCompare(b.nome)).forEach((b, i) => {
+                const bgCor = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+                let corSaldo = b.saldo > 0 ? '#28a745' : (b.saldo < 0 ? '#dc3545' : '#555');
+                let strVenc = b.vencido > 0 ? `<b style="color:#dc3545">${minToHr(b.vencido)}</b>` : minToHr(b.vencido);
+
+                htmlTabela += `<tr style="background-color: ${bgCor}; page-break-inside: avoid;">
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; color: #111; font-weight: bold; font-size: 11px;">${b.nome}</td>
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; color: #333; text-align: center; font-size: 11px;">${b.unidade}</td>
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; color: #0284c7; text-align: center; font-size: 11px;">${minToHr(b.creditoTotal)}</td>
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; color: #b55d00; text-align: center; font-size: 11px;">${minToHr(b.debitoTotal)}</td>
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; color: ${corSaldo}; text-align: center; font-weight: bold; font-size: 13px;">${minToHr(b.saldo)}</td>
+                    <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: center; font-size: 11px;">${strVenc}</td>
+                </tr>`;
+            });
+        }
+
+        corpoDoRelatorio = `
+            <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+                <div class="color-block" style="flex: 1; border: 1px solid #8b5cf6; border-left: 5px solid #8b5cf6; padding: 15px; border-radius: 6px; text-align: center; background: #f3e8ff;">
+                    <span style="font-size: 12px; color: #8b5cf6; font-weight: bold; text-transform: uppercase;">Saldo Total Unidade</span><br>
+                    <b style="font-size: 26px; color: #111;">${minToHr(totalSaldoMins)}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #dc3545; border-left: 5px solid #dc3545; padding: 15px; border-radius: 6px; text-align: center; background: #fff5f6;">
+                    <span style="font-size: 12px; color: #dc3545; font-weight: bold; text-transform: uppercase;">Horas Vencidas</span><br>
+                    <b style="font-size: 26px; color: #111;">${minToHr(totalVencidoMins)}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #4fc3f7; border-left: 5px solid #4fc3f7; padding: 15px; border-radius: 6px; text-align: center; background: #f0fbff;">
+                    <span style="font-size: 12px; color: #0284c7; font-weight: bold; text-transform: uppercase;">Total Acumulado (+)</span><br>
+                    <b style="font-size: 26px; color: #111;">${minToHr(totalCredMins)}</b>
+                </div>
+                <div class="color-block" style="flex: 1; border: 1px solid #ff9800; border-left: 5px solid #ff9800; padding: 15px; border-radius: 6px; text-align: center; background: #fffaf0;">
+                    <span style="font-size: 12px; color: #b55d00; font-weight: bold; text-transform: uppercase;">Total Abatido (-)</span><br>
+                    <b style="font-size: 26px; color: #111;">${minToHr(totalDebMins)}</b>
+                </div>
+            </div>
+            
+            <h3 style="font-size: 14px; color: #002347; margin: 0 0 10px 0; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px;">Detalhamento de Saldos Individuais</h3>
+            <table class="color-block" style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;">
+                <thead>
+                    <tr style="background-color: #002347; color: #fff;">
+                        <th style="padding: 8px; border: 1px solid #002347; width: 30%;">Colaborador</th>
+                        <th style="padding: 8px; border: 1px solid #002347; width: 20%; text-align: center;">Unidade</th>
+                        <th style="padding: 8px; border: 1px solid #002347; width: 12%; text-align: center;">Créditos (+)</th>
+                        <th style="padding: 8px; border: 1px solid #002347; width: 12%; text-align: center;">Débitos (-)</th>
+                        <th style="padding: 8px; border: 1px solid #002347; width: 14%; text-align: center;">Saldo Atual</th>
+                        <th style="padding: 8px; border: 1px solid #002347; width: 12%; text-align: center;">Vencidas</th>
+                    </tr>
+                </thead>
+                <tbody>${htmlTabela}</tbody>
+            </table>
+        `;
+    }
+    // ==========================================================
+    // 2. RELATÓRIO DE LOTAÇÃO / CAPACIDADE OPERACIONAL
+    // ==========================================================
+    else if (indicador === 'Lotacao') {
         let htmlLotacao = document.getElementById('bi-ranking-lista').innerHTML;
         
-        // Conversão avançada de cores para o PDF (Tema Claro)
         htmlLotacao = htmlLotacao.replace(/color:\s*var\(--cor-texto-principal\)/gi, 'color: #1a1a1a');
         htmlLotacao = htmlLotacao.replace(/color:\s*var\(--cor-texto-secundario\)/gi, 'color: #555555');
         htmlLotacao = htmlLotacao.replace(/color:\s*#fff/gi, 'color: #111111');
         htmlLotacao = htmlLotacao.replace(/color:\s*#e2e8f0/gi, 'color: #222222');
         htmlLotacao = htmlLotacao.replace(/color:\s*#eee/gi, 'color: #333333');
         
-        // Fundos dos Cards e Divisores
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(0,0,0,0\.3\)/gi, 'background: #f8fafc'); 
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(0,0,0,0\.2\)/gi, 'background: #f1f5f9');
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(255,\s*255,\s*255,\s*0\.03\)/gi, 'background: #ffffff');
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(255,\s*152,\s*0,\s*0\.08\)/gi, 'background: #fffaf0');
         htmlLotacao = htmlLotacao.replace(/border:\s*1px\s*solid\s*rgba\(255,255,255,0\.05\)/gi, 'border: 1px solid #e2e8f0');
         
-        // Bordas e tracejados internos
         htmlLotacao = htmlLotacao.replace(/border-top:\s*1px\s*dashed\s*rgba\(255,255,255,0\.1\)/gi, 'border-top: 1px dashed #cbd5e1');
         htmlLotacao = htmlLotacao.replace(/border-bottom:\s*1px\s*solid\s*rgba\(255,255,255,0\.05\)/gi, 'border-bottom: 1px solid #cbd5e1');
         
-        // Barra de progresso fundo
         htmlLotacao = htmlLotacao.replace(/background:\s*rgba\(255,255,255,0\.05\)/gi, 'background: #e2e8f0');
-        
-        // Remove a sombra preta para o PDF
         htmlLotacao = htmlLotacao.replace(/box-shadow:\s*0\s*8px\s*25px\s*rgba\(0,0,0,0\.2\)/gi, 'box-shadow: none; border: 1px solid #cbd5e1');
         
         corpoDoRelatorio = `
@@ -10146,7 +10364,11 @@ window.exportarPDFBI = function() {
                 <p style="font-size: 13px; color: #555; margin: 0;">Relação detalhada de ocupação de vagas por Unidade e Cargo.</p>
             </div>
             <div class="color-block" style="margin-top: 15px;">${htmlLotacao}</div>`;
-    } else {
+    } 
+    // ==========================================================
+    // 3. RELATÓRIOS PADRÕES (Geral, Admissão, Falta, etc.)
+    // ==========================================================
+    else {
         const valAdm = document.getElementById('bi-card-adm').innerText;
         const valResc = document.getElementById('bi-card-resc').innerText;
         const valAus = document.getElementById('bi-card-aus').innerText;
@@ -10205,6 +10427,7 @@ window.exportarPDFBI = function() {
                 </div>
             </div>
             ${imgGrafico ? `<div class="color-block" style="margin-bottom: 20px; text-align: center; border: 1px solid #cbd5e1; border-radius: 8px; padding: 15px; background: #f8fafc; page-break-inside: avoid;"><h3 style="font-size: 15px; color: #002347; margin: 0 0 15px 0;">Evolução Mensal (Tendência)</h3><div style="background: #ffffff; border-radius: 4px; padding: 10px; display: flex; justify-content: center;"><img src="${imgGrafico}" style="max-width: 100%; height: auto; max-height: 280px;" /></div></div>` : ''}
+            
             <div style="display: flex; gap: 20px; align-items: flex-start;">
                 <div style="width: 35%;">
                     <h3 style="font-size: 14px; color: #ff9800; margin: 0 0 10px 0; border-bottom: 1px solid #cbd5e1; padding-bottom: 5px;">${tituloRankOrig}</h3>
@@ -10228,7 +10451,7 @@ window.exportarPDFBI = function() {
             <meta charset="UTF-8">
             <title>Relatório BI - ${empresa}</title>
             <style>
-                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #111; margin: 0; }
+                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #111; margin: 0; background: #fff;}
                 @media print { 
                     body { padding: 0; } 
                     @page { margin: 10mm; size: landscape; } 
@@ -15163,6 +15386,55 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                     });
 
                     const declRec = listaAusencias.find(a => a.sigla === 'DECL' && String(a.colaborador_id) === String(colab.id) && a.data_inicio === dataIsoStr);
+
+      // 👇 A MÁGICA NOVA DO ABATE DE BANCO DE HORAS (H-) 👇
+                    let temHMinus = false;
+                    const abateBanco = listaAusencias.find(a => String(a.colaborador_id) === String(colab.id) && a.data_inicio === dataIsoStr && (a.observacao || '').includes('[ABATE_BANCO]'));
+
+                    if (abateBanco) {
+                        const obs = abateBanco.observacao || '';
+                        const matchMins = obs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/i);
+                        let mins = matchMins ? parseInt(matchMins[1]) : 0;
+                        let h = Math.floor(mins / 60);
+                        let m = Math.round(mins % 60);
+                        let stringDesconto = `${h}h ${String(m).padStart(2,'0')}m`;
+
+                        let tipoAbate = (abateBanco.motivo || '').replace('Folga do Banco: ', '').trim();
+                        let motivoLimpo = obs.replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
+
+                        if (tipoAbate === 'Dia Completo') {
+                            sigla = 'FP';
+                            cssTipo = 'celula-folga';
+                            hora = 'Folga Compensatória (Banco)';
+                            
+                            obsHPlus += `
+                            <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(220,53,69,0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(220,53,69,0.2); border-left: 4px solid #dc3545; margin-top: 10px;">
+                                Neste dia, <b>${colab.nome}</b> tirou uma folga integral utilizando seu Banco de Horas.<br>
+                                <br><span style="color: #dc3545;"><i class="fa-solid fa-minus-circle"></i> Tempo Deduzido do Banco: <b>${stringDesconto}</b></span>
+                                
+                                <div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 8px;">
+                                    <b style="text-transform: uppercase;">Motivo / Justificativa:</b><br>
+                                    <span style="color: #fff; display: inline-block; margin-top: 4px; font-style: italic;">"${motivoLimpo}"</span>
+                                </div>
+                            </div>`;
+                        } else {
+                            temHMinus = true;
+                            siglaTag = 'h-';
+                            // Não muda a sigla nem a hora, pois ele trabalhou nesse dia, só chegou tarde ou saiu cedo!
+                            
+                            obsHPlus += `
+                            <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.5; background: rgba(220,53,69,0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(220,53,69,0.2); border-left: 4px solid #dc3545; margin-top: 10px;">
+                                Neste dia, <b>${colab.nome}</b> utilizou o Banco de Horas para <b>${tipoAbate}</b>.<br>
+                                <br><span style="color: #dc3545;"><i class="fa-solid fa-clock"></i> Tempo Deduzido do Banco: <b>${stringDesconto}</b></span>
+                                
+                                <div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); border-top: 1px dashed rgba(255,255,255,0.1); padding-top: 8px;">
+                                    <b style="text-transform: uppercase;">Motivo / Justificativa:</b><br>
+                                    <span style="color: #fff; display: inline-block; margin-top: 4px; font-style: italic;">"${motivoLimpo}"</span>
+                                </div>
+                            </div>`;
+                        }
+                    }
+                    // 👆 FIM DA MÁGICA DO ABATE 👆
                     
                     if (declRec) {
                         temDecl = true;
@@ -15349,6 +15621,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
                 cssClass: cssTipo, 
                 horario: hora, 
                 temHPlus: temHPlus, 
+                temHMinus: temHMinus, // 👈 VARIÁVEL NOVA ADICIONADA AQUI
                 siglaTag: siglaTag, 
                 obsHPlus: obsHPlus, 
                 temDecl: temDecl,    
@@ -16375,7 +16648,11 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
 
             let tagHPlus = '';
             if (diaData.temHPlus) {
+                // Se for hora extra (+), fica laranja
                 tagHPlus = `<span style="position: absolute; top: 2px; left: ${posLeftDynamic}px; font-size: 0.65rem; color: #ff9800; font-weight: 900;">${diaData.siglaTag}</span>`;
+            } else if (diaData.temHMinus) {
+                // Se for desconto de hora (-), fica vermelho
+                tagHPlus = `<span style="position: absolute; top: 2px; left: ${posLeftDynamic}px; font-size: 0.65rem; color: #dc3545; font-weight: 900;">${diaData.siglaTag}</span>`;
             }
 
             let obsFinal = diaData.obsHPlus || '';
