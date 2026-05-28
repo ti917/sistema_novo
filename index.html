@@ -11398,13 +11398,18 @@ window.atualizarContador = async function() {
     const perms = usuarioAtual.permissoes || {};
     const isGlobal = perms.escala_global === true;
 
-    // 👇 Aplica a mesma leitura fiel do JSONB do banco
+    // 👇 Sincronizado com o novo leitor de JSONB
     const listaCompleta = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
-    const modulosPermitidos = Array.isArray(perms.recebe_solicitacoes) ? perms.recebe_solicitacoes : listaCompleta;
+    let modulosPermitidos = [];
+    if (Array.isArray(perms.recebe_solicitacoes)) {
+        modulosPermitidos = perms.recebe_solicitacoes;
+    } else {
+        modulosPermitidos = listaCompleta;
+    }
 
     const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && (isGlobal || perms['tela-solicitacoes']?.visivel === true || modulosPermitidos.length > 0));
 
-    // 👇 Puxa as unidades usando o novo motor inteligente
+    // 👇 O Motor Universal resolve o filtro do Sino
     let unidsFiltro = await window.obterFiltroUnidadesSeguro();
 
     if (podeAprovar) {
@@ -11424,6 +11429,10 @@ window.atualizarContador = async function() {
         let qDoc = modulosPermitidos.includes('ArquivoDigital') ? supabaseClient.from('envio_documentos').select('id, nome_colaborador, nome_documento, unidade, tipo', { count: 'exact' }).eq('status', 'Pendente') : null;
         let qFer = modulosPermitidos.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('id, nome, unidade, data_inicio_ferias', { count: 'exact' }).eq('status', 'Pendente') : null;
         let qDes = modulosPermitidos.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('id, nome_colaborador, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
+
+        if (isAdmin && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && qP) {
+            qP = qP.eq('empresa', empresaSelecionadaFiltro);
+        }
 
         if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
             if (qP && usuarioAtual.perfil === 'Gestor') qP = qP.in('unidade', unidsFiltro);
@@ -13302,35 +13311,50 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 }
 
-     // ========================================================
-// 🛡️ MOTOR UNIVERSAL DE UNIDADES PERMITIDAS 🛡️
+    // ========================================================
+// 🛡️ MOTOR UNIVERSAL DE UNIDADES PERMITIDAS (BLINDADO) 🛡️
 // ========================================================
 window.obterFiltroUnidadesSeguro = async function() {
     const isAdmin = usuarioAtual.perfil === 'Admin';
     const perms = usuarioAtual.permissoes || {};
     const isGlobal = perms.escala_global === true;
 
+    // 1. ADMIN
     if (isAdmin) {
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro && empresaSelecionadaFiltro !== 'Todas') {
             const { data } = await supabaseClient.from('unidades_oficiais').select('nome').eq('empresa', empresaSelecionadaFiltro);
             if (data && data.length > 0) return [...new Set(data.map(u => u.nome.trim()))].filter(Boolean);
+            return ['TRAVA_ANTI_VAZAMENTO']; // Se a empresa não tem unidades, trava.
         }
-        return null; // Admin sem filtro vê todas
+        return null; // Admin sem filtro vê absolutamente tudo
     }
 
+    // 2. GESTOR COM VISÃO GLOBAL (O Pulo do Gato)
     if (isGlobal && usuarioAtual.empresa) {
-        // Se for Gestor Global, pega TODAS as unidades na tabela oficial da empresa dele!
-        let empresasFiltro = usuarioAtual.empresa.split(',').map(e => e.trim());
-        if (empresasFiltro.includes('SOUL GESTÃO') && !empresasFiltro.includes('SOUL')) empresasFiltro.push('SOUL');
-        if (empresasFiltro.includes('SOUL') && !empresasFiltro.includes('SOUL GESTÃO')) empresasFiltro.push('SOUL GESTÃO');
-        
-        const { data: unidadesGlobais } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasFiltro);
-        if (unidadesGlobais && unidadesGlobais.length > 0) {
-            return [...new Set(unidadesGlobais.map(u => u.nome.trim()))].filter(Boolean);
+        // Formata os nomes para driblar qualquer erro de digitação (Ex: SOUL vs SOUL GESTÃO)
+        let empresasAlvo = usuarioAtual.empresa.split(',').map(e => e.trim());
+        if (empresasAlvo.includes('SOUL GESTÃO') && !empresasAlvo.includes('SOUL')) empresasAlvo.push('SOUL');
+        if (empresasAlvo.includes('SOUL') && !empresasAlvo.includes('SOUL GESTÃO')) empresasAlvo.push('SOUL GESTÃO');
+
+        try {
+            // MÁGICA: Bate em DUAS tabelas ao mesmo tempo para garantir que nenhuma unidade escape!
+            const [resU, resP] = await Promise.all([
+                supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasAlvo),
+                supabaseClient.from('perfis').select('unidade').in('empresa', empresasAlvo).not('unidade', 'is', null)
+            ]);
+
+            let uSet = new Set();
+            if (resU.data) resU.data.forEach(x => { if (x.nome) uSet.add(x.nome.trim()); });
+            if (resP.data) resP.data.forEach(x => { if (x.unidade) x.unidade.split(',').forEach(u => uSet.add(u.trim())); });
+            
+            const arrayFinal = [...uSet].filter(Boolean);
+            if (arrayFinal.length > 0) return arrayFinal;
+        } catch (e) {
+            console.error("Erro no motor global:", e);
         }
     }
 
-    // Se ele não for Global (ou se der erro na busca), trava só nas unidades alocadas no perfil dele
+    // 3. GESTOR REGIONAL (Padrão) - Só vê as unidades do próprio perfil
     if (usuarioAtual.unidade) {
         const arr = usuarioAtual.unidade.split(',').map(u => u.trim()).filter(Boolean);
         if (arr.includes('Todas')) return null; 
@@ -13349,12 +13373,16 @@ window.listarSolicitacoes = async function(silencioso = false) {
     const perms = usuarioAtual.permissoes || {};
     const isGlobal = perms.escala_global === true;
 
-    // 👇 Leitura exata do JSONB do banco: Pega apenas o que o Admin liberou no painel!
+    // 👇 Leitura exata do JSONB do banco: Respeita o Array ou libera tudo se for Null (Legado)
     const listaCompleta = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
-    const modulosPermitidos = Array.isArray(perms.recebe_solicitacoes) ? perms.recebe_solicitacoes : listaCompleta;
+    let modulosPermitidos = [];
+    if (Array.isArray(perms.recebe_solicitacoes)) {
+        modulosPermitidos = perms.recebe_solicitacoes; 
+    } else {
+        modulosPermitidos = listaCompleta; 
+    }
 
-    const possuiRotas = modulosPermitidos.length > 0;
-    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && (isGlobal || perms['tela-solicitacoes']?.visivel === true || possuiRotas));
+    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && (isGlobal || perms['tela-solicitacoes']?.visivel === true || modulosPermitidos.length > 0));
 
     if (!podeAprovar) return;
 
@@ -13372,14 +13400,14 @@ window.listarSolicitacoes = async function(silencioso = false) {
         tbody.innerHTML = "<tr><td colspan='5' style='text-align: center; padding: 40px; border-radius: 12px;'><i class='fa-solid fa-spinner fa-spin fa-2x' style='color: var(--cor-acento); margin-bottom: 10px;'></i><br><span style='color: var(--cor-texto-secundario);'>Carregando solicitações...</span></td></tr>";
     }
 
-    // Puxa as unidades usando o novo motor inteligente (Se for Global, puxa TODAS da empresa)
+    // 👇 O Motor Universal entra em ação aqui
     let unidsFiltro = await window.obterFiltroUnidadesSeguro();
 
     let statusAprovacaoFiltro = [];
     if (modulosPermitidos.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
     if (modulosPermitidos.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
 
-    // Filtra APENAS as tabelas que ele tem permissão para ver
+    // Só monta a query se o módulo estiver no Array JSON do perfil dele!
     let qP = statusAprovacaoFiltro.length > 0 ? supabaseClient.from('perfis').select('*').in('status_aprovacao', statusAprovacaoFiltro).order('nome') : null;
     let qA = modulosPermitidos.includes('Ausencia') ? supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
     let qF = modulosPermitidos.includes('FT') ? supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
@@ -13390,7 +13418,11 @@ window.listarSolicitacoes = async function(silencioso = false) {
     let qFer = modulosPermitidos.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
     let qDes = modulosPermitidos.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
           
-    // Aplica o filtro de Unidades que descobrimos lá em cima
+    if (isAdmin && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && qP) {
+        qP = qP.eq('empresa', empresaSelecionadaFiltro);
+    }
+    
+    // Injeta o Filtro de Unidades nas queries habilitadas
     if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
         if (qP) qP = qP.in('unidade', unidsFiltro);
         if (qA) qA = qA.in('unidade', unidsFiltro);
