@@ -8791,6 +8791,11 @@ window.removerAcentos = function(texto) {
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         
         let usuarioAtual = null;
+      window.getUnidadesReaisGestor = function() {
+    if (!usuarioAtual || !usuarioAtual.unidade) return [];
+    // Corta tudo que vem depois do " -- " e devolve só a matriz real dele
+    return usuarioAtual.unidade.split('--')[0].split(',').map(u => u.trim()).filter(Boolean);
+};
         let escalaMesAtualGerada = [];
         let listaAdmissoesPendentes = [];
         
@@ -13366,9 +13371,9 @@ window.obterFiltroUnidadesSeguro = async function() {
         }
     }
 
-    // 3. GESTOR REGIONAL PADRÃO
+    // 3. GESTOR REGIONAL (Padrão) - Transforma o "--" em vírgula para ler tudo como uma coisa só na hora de exibir a escala
     if (usuarioAtual.unidade) {
-        const arr = usuarioAtual.unidade.split(',').map(u => u.trim()).filter(Boolean);
+        const arr = usuarioAtual.unidade.replace(/ -- /g, ', ').split(',').map(u => u.trim()).filter(Boolean);
         if (arr.includes('Todas')) return null; 
         return arr.length > 0 ? arr : ['TRAVA_ANTI_VAZAMENTO'];
     }
@@ -18166,7 +18171,8 @@ window.abrirModalEditarUnidadesUsuario = async function(idUsuario) {
     // Pega as unidades que o cara já tem e transforma em tags com botão de excluir
     let tagsHtml = '';
     if (user.unidade) {
-        const unids = user.unidade.split(',').map(u => u.trim()).filter(u => u);
+        // 👇 CORTA NO '--' PRA MOSTRAR SÓ AS UNIDADES VERDADEIRAS NAS TAGS DO ADMIN 👇
+        const unids = user.unidade.split('--')[0].split(',').map(u => u.trim()).filter(u => u);
         unids.forEach(u => {
             tagsHtml += `<span class="tag-unidade" data-val="${u}">${u} <i class="fa-solid fa-times" onclick="this.parentElement.remove()"></i></span>`;
         });
@@ -18406,7 +18412,7 @@ window.abrirModalPermissoes = async function(idUser) {
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-   document.getElementById('form-salvar-permissoes').addEventListener('submit', async (e) => {
+  document.getElementById('form-salvar-permissoes').addEventListener('submit', async (e) => {
         e.preventDefault();
         const btn = document.getElementById('btn-salvar-perms');
         btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
@@ -18416,11 +18422,7 @@ window.abrirModalPermissoes = async function(idUser) {
         document.querySelectorAll('.chk-menu-visivel').forEach(chk => {
             const menuId = chk.getAttribute('data-menu-id');
             const selectNivel = document.querySelector(`.sel-menu-nivel[data-menu-id="${menuId}"]`);
-            
-            novoJsonPermissoes[menuId] = {
-                visivel: chk.checked,
-                nivel: selectNivel.value
-            };
+            novoJsonPermissoes[menuId] = { visivel: chk.checked, nivel: selectNivel.value };
         });
 
         const chkGlobal = document.getElementById('chk-escala-global');
@@ -18430,11 +18432,13 @@ window.abrirModalPermissoes = async function(idUser) {
             isGlobalChecked = chkGlobal.checked;
         }
 
-        // 👇 A MÁGICA QUE VAI SALVAR A SUA VIDA COM O BANCO DE DADOS (RLS) 👇
-        let stringUnidadesUpdate = u.unidade; // Começa com o que ele já tem
+        // 👇 A MÁGICA DOS DOIS TRAÇOS AQUI 👇
+        let stringUnidadesUpdate = u.unidade || '';
+        // Pega só a unidade real que ele já tinha antes (ignora se já tinha globais velhas salvas)
+        let unidadesReaisArray = stringUnidadesUpdate.split('--')[0].split(',').map(x => x.trim()).filter(Boolean);
+        stringUnidadesUpdate = unidadesReaisArray.join(', ');
 
         if (isGlobalChecked) {
-            // Se o Admin ativou o Global, o sistema puxa TODAS as unidades da empresa na força bruta!
             let empresasAlvo = u.empresa ? u.empresa.split(',').map(e => e.trim()) : [];
             if (empresasAlvo.includes('SOUL GESTÃO') && !empresasAlvo.includes('SOUL')) empresasAlvo.push('SOUL');
             if (empresasAlvo.includes('SOUL') && !empresasAlvo.includes('SOUL GESTÃO')) empresasAlvo.push('SOUL GESTÃO');
@@ -18442,15 +18446,23 @@ window.abrirModalPermissoes = async function(idUser) {
             const { data: todasUnidades } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasAlvo);
             
             if (todasUnidades && todasUnidades.length > 0) {
-                // Transforma num texto separadinho por vírgula e injeta na coluna do usuário
-                stringUnidadesUpdate = [...new Set(todasUnidades.map(x => x.nome.trim()))].join(', ');
+                let globais = [];
+                todasUnidades.forEach(x => {
+                    let nomeU = x.nome.trim();
+                    if (!unidadesReaisArray.includes(nomeU)) {
+                        globais.push(nomeU); // Só adiciona como global se já não for a real dele
+                    }
+                });
+                
+                if (globais.length > 0) {
+                    stringUnidadesUpdate = unidadesReaisArray.join(', ') + ' -- ' + globais.join(', ');
+                }
             }
         }
 
-        // Atualiza o JSONB de permissões E a coluna de texto da Unidade de uma vez só!
         const { error } = await supabaseClient.from('perfis').update({ 
             permissoes: novoJsonPermissoes,
-            unidade: stringUnidadesUpdate  // <--- O Supabase agora vai liberar o acesso!
+            unidade: stringUnidadesUpdate  // <--- Salva no padrão "Real1 -- Global1, Global2"
         }).eq('id', idUser);
 
         if (error) {
@@ -18462,12 +18474,10 @@ window.abrirModalPermissoes = async function(idUser) {
             
             if (idUser === usuarioAtual.id) {
                 usuarioAtual.permissoes = novoJsonPermissoes;
-                usuarioAtual.unidade = stringUnidadesUpdate; // Atualiza a memória se for você mesmo
+                usuarioAtual.unidade = stringUnidadesUpdate; 
                 atualizarContador();
                 if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
             }
-            
-            // Recarrega a tabela de usuários pra você ver a coluna "Unidade" preenchida magicamente
             if (typeof listarUsuarios === 'function') listarUsuarios();
         }
     });
@@ -18588,7 +18598,7 @@ window.abrirModalPermissoes = async function(idUser) {
             document.getElementById('box-opcoes-aviso').classList.add('hidden');
 
             if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+                const unids = window.getUnidadesReaisGestor();
                 selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
                 unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
             } else {
@@ -20314,7 +20324,7 @@ if (sigla === 'ATM' && document.getElementById('edit-aus-possui-cid').value === 
             document.getElementById('form-ausencia').reset();
 
             if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+                const unids = window.getUnidadesReaisGestor();
                 selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
                 unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
             } else {
@@ -21365,7 +21375,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
     selectColab.disabled = true;
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+       const unids = window.getUnidadesReaisGestor();
         selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
     } else {
@@ -22237,7 +22247,7 @@ window.addDiaFolgaHplus = function(perfil) {
     document.getElementById('bloco-opcoes-he')?.classList.add('hidden');
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        const unids = window.getUnidadesReaisGestor();
         
         let optionsHtml = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => optionsHtml += `<option value="${u}">${u}</option>`);
@@ -24141,7 +24151,7 @@ async function abrirAbaAdv() {
     `;
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+       const unids = window.getUnidadesReaisGestor();
         selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
     }
@@ -25593,7 +25603,7 @@ window.prepararAbaWhatsApp = async function() {
         let options = '<option value="">Selecione a unidade...</option>';
 
         if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-            const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+            const unids = window.getUnidadesReaisGestor();
             unids.forEach(u => options += `<option value="${u}">${u}</option>`);
         } else {
             let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
@@ -26005,7 +26015,7 @@ async function carregarJustificativasZap(manterScroll = false) {
 
     // Filtra pela unidade do Gestor ou do Admin
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        const unids = window.getUnidadesReaisGestor();
         query = query.in('unidade', unids);
     } else if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
@@ -29857,7 +29867,7 @@ window.carregarTabelaINSS = async function() {
     } 
     // Se for Gestor, puxa só da unidade dele
     else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        const unids = window.getUnidadesReaisGestor();
         query = query.in('unidade', unids);
     }
 
@@ -30046,7 +30056,7 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
         containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de experiência...</p>';
     }
 
-    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    const unids = window.getUnidadesReaisGestor();
     
     // Busca todos os colaboradores ativos dessas unidades
     const { data: colabs } = await supabaseClient.from('perfis')
@@ -39210,7 +39220,7 @@ document.addEventListener('DOMContentLoaded', () => {
 window.checarLembretesProrrogacaoAoLogar = async function() {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
-    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    const unids = window.getUnidadesReaisGestor();
     const hoje = new Date();
     hoje.setHours(0,0,0,0);
 
@@ -39600,7 +39610,7 @@ window.carregarStatusAvulsos = async function() {
 
         // 3. Filtro de Gestor (Evita passar array vazio que causa Erro 400)
         if (usuarioAtual && usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-            const unids = usuarioAtual.unidade.split(',').map(u => u.trim()).filter(Boolean);
+            const unids = window.getUnidadesReaisGestor()).filter(Boolean);
             if (unids.length > 0) {
                 query = query.in('unidade', unids);
             }
@@ -40512,7 +40522,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     }
 
     try {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        const unids = window.getUnidadesReaisGestor();
         const { data: colabs, error } = await supabaseClient
             .from('perfis')
             .select('id, nome, empresa, unidade, dados_admissao')
@@ -41013,7 +41023,7 @@ window.carregarDesempenhosAndamento = async function() {
     const container = document.getElementById('lista-desempenho-concluido');
     container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando arquivo morto...</p>';
 
-    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    const unids = window.getUnidadesReaisGestor();
     
     // 👇 BUSCA BLINDADA: Filtra Aprovados (Bons), Alertas (Ruins) e Concluídos do banco
     const { data, error } = await supabaseClient.from('avaliacoes_desempenho')
