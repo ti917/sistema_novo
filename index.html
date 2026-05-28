@@ -8791,11 +8791,6 @@ window.removerAcentos = function(texto) {
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         
         let usuarioAtual = null;
-      window.getUnidadesReaisGestor = function() {
-    if (!usuarioAtual || !usuarioAtual.unidade) return [];
-    // Corta tudo que vem depois do " -- " e devolve só a matriz real dele
-    return usuarioAtual.unidade.split('--')[0].split(',').map(u => u.trim()).filter(Boolean);
-};
         let escalaMesAtualGerada = [];
         let listaAdmissoesPendentes = [];
         
@@ -11136,14 +11131,13 @@ window.enviarTRCTAssinadoGestor = async function(idColab, nomeColab, unidadeCola
         }
     }
 
-   const menu = document.getElementById('menu-navegacao');
+    const menu = document.getElementById('menu-navegacao');
     const perms = data?.permissoes || {}; // Puxa as regras do banco
 
     const isVisible = (idMenu) => {
-        // 👇 MÁGICA 1: A aba de Solicitações agora respeita a Visão Global OU o Roteamento Específico!
+        // 👇 MÁGICA: A aba de Solicitações agora é ESCRAVA da Visão Global!
         if (idMenu === 'tela-solicitacoes' && data.perfil === 'Gestor') {
-            const possuiRotas = Array.isArray(perms.recebe_solicitacoes) && perms.recebe_solicitacoes.length > 0;
-            return perms.escala_global === true || possuiRotas; 
+            return perms.escala_global === true; 
         }
 
         // Se a permissão foi salva explicitamente no banco
@@ -11400,48 +11394,57 @@ window.atualizarContador = async function() {
     let countPendentes = 0; let countAusencias = 0; let countFTs = 0; let countTrocas = 0; let countAdv = 0; let countOco = 0; let countExp = 0; let countDoc = 0; let countFerias = 0; let countDes = 0;
     let pendentesData = null; let ausenciasPendentesData = null; let ftPendentesData = null; let trocasPendentesData = null; let advPendentesData = null; let ocoPendentesData = null; let expPendentesData = null; let docPendentesData = null; let feriasPendentesData = null; let desPendentesData = null;
 
-    // 👇 BLINDAGEM 3: JSONB seguro
-    let perms = usuarioAtual.permissoes || {};
-    if (typeof perms === 'string') {
-        try { perms = JSON.parse(perms); } catch(e) { perms = {}; }
-    }
-    const isGlobal = perms.escala_global === true;
+    // 👇 MÁGICA 1: O "Interruptor Mestre". Se ele for Gestor, só aprova coisas na Central se tiver Visão Global.
+    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true);
 
-    const listaCompleta = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
-    let modulosPermitidos = listaCompleta;
-    if (perms.recebe_solicitacoes !== null && perms.recebe_solicitacoes !== undefined) {
-        if (Array.isArray(perms.recebe_solicitacoes)) {
-            modulosPermitidos = perms.recebe_solicitacoes;
+    let unidsFiltro = null;
+    if (isAdmin) {
+        unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
+    } else if (usuarioAtual.perfil === 'Gestor') {
+        if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
+            const empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
+            if (empresasGestor.includes('SOUL GESTÃO') && !empresasGestor.includes('SOUL')) empresasGestor.push('SOUL');
+            if (empresasGestor.includes('SOUL') && !empresasGestor.includes('SOUL GESTÃO')) empresasGestor.push('SOUL GESTÃO');
+
+            const { data: unisData } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor);
+            if (unisData && unisData.length > 0) {
+                unidsFiltro = [...new Set(unisData.map(u => u.nome.trim()))].filter(x => x !== "" && x !== "Todas");
+            }
+        }
+        if (!unidsFiltro || unidsFiltro.length === 0) {
+            unidsFiltro = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : ['TRAVA_ANTI_VAZAMENTO'];
         }
     }
 
-    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && (isGlobal || perms['tela-solicitacoes']?.visivel === true || modulosPermitidos.length > 0));
-
-    let unidsFiltro = await window.obterFiltroUnidadesSeguro();
-
     if (podeAprovar) {
-        if (notifFooter) notifFooter.style.display = 'block';
+        if (notifFooter) notifFooter.style.display = 'block'; // Libera o atalho pro Gestor Global também!
+
+        const p = usuarioAtual.permissoes?.recebe_solicitacoes || [
+            'Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia',
+            'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto',
+            'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'
+        ];
 
         let statusAprovacaoFiltro = [];
-        if (modulosPermitidos.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
-        if (modulosPermitidos.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
+        if (p.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
+        if (p.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
 
         let qP = statusAprovacaoFiltro.length > 0 ? supabaseClient.from('perfis').select('id, nome, unidade, status_aprovacao', { count: 'exact' }).in('status_aprovacao', statusAprovacaoFiltro) : null;
-        let qA = modulosPermitidos.includes('Ausencia') ? supabaseClient.from('ausencias').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qF = modulosPermitidos.includes('FT') ? supabaseClient.from('horas_extras_ft').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qT = modulosPermitidos.includes('Troca') ? supabaseClient.from('trocas_turno').select('id, nome_solicitante, nome_substituto, unidade_solicitante', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qAdv = modulosPermitidos.includes('Advertencia') ? supabaseClient.from('advertencias').select('id, nome, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qOco = modulosPermitidos.includes('OcorrenciaPlantao') ? supabaseClient.from('ocorrencias_plantao').select('id, nome, unidade, tipo, data_ocorrencia', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qExp = modulosPermitidos.includes('AvaliacaoExp') ? supabaseClient.from('avaliacoes_experiencia').select('id, nome_colaborador, unidade, periodo', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qDoc = modulosPermitidos.includes('ArquivoDigital') ? supabaseClient.from('envio_documentos').select('id, nome_colaborador, nome_documento, unidade, tipo', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qFer = modulosPermitidos.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('id, nome, unidade, data_inicio_ferias', { count: 'exact' }).eq('status', 'Pendente') : null;
-        let qDes = modulosPermitidos.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('id, nome_colaborador, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qA = p.includes('Ausencia') ? supabaseClient.from('ausencias').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qF = p.includes('FT') ? supabaseClient.from('horas_extras_ft').select('id, nome, unidade, sigla, motivo, data_inicio', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qT = p.includes('Troca') ? supabaseClient.from('trocas_turno').select('id, nome_solicitante, nome_substituto, unidade_solicitante', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qAdv = p.includes('Advertencia') ? supabaseClient.from('advertencias').select('id, nome, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qOco = p.includes('OcorrenciaPlantao') ? supabaseClient.from('ocorrencias_plantao').select('id, nome, unidade, tipo, data_ocorrencia', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qExp = p.includes('AvaliacaoExp') ? supabaseClient.from('avaliacoes_experiencia').select('id, nome_colaborador, unidade, periodo', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qDoc = p.includes('ArquivoDigital') ? supabaseClient.from('envio_documentos').select('id, nome_colaborador, nome_documento, unidade, tipo', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qFer = p.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('id, nome, unidade, data_inicio_ferias', { count: 'exact' }).eq('status', 'Pendente') : null;
+        let qDes = p.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('id, nome_colaborador, unidade', { count: 'exact' }).eq('status', 'Pendente') : null;
 
         if (isAdmin && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && qP) {
             qP = qP.eq('empresa', empresaSelecionadaFiltro);
         }
 
-        if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
+        if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
             if (qP && usuarioAtual.perfil === 'Gestor') qP = qP.in('unidade', unidsFiltro);
             if (qA) qA = qA.in('unidade', unidsFiltro);
             if (qF) qF = qF.in('unidade', unidsFiltro);
@@ -11452,18 +11455,19 @@ window.atualizarContador = async function() {
             if (qDoc) qDoc = qDoc.in('unidade', unidsFiltro);
             if (qFer) qFer = qFer.in('unidade', unidsFiltro);
             if (qDes) qDes = qDes.in('unidade', unidsFiltro);
-        } else if (unidsFiltro && unidsFiltro[0] === 'TRAVA_ANTI_VAZAMENTO') {
-            qP = null; qA = null; qF = null; qT = null; qAdv = null; qExp = null; qDoc = null; qFer = null; qDes = null; qOco = null;
         }
 
-        const safeFetchCount = async (query) => {
-            if (!query) return { count: 0, data: [] };
-            try { return await query; } catch (e) { return { count: 0, data: [] }; }
-        };
-
-        const [resPerfis, resAusencias, resFT, resTrocas, resAdv, resExp, resDoc, resFer, resOco, resDes] = await Promise.all([
-            safeFetchCount(qP), safeFetchCount(qA), safeFetchCount(qF), safeFetchCount(qT), safeFetchCount(qAdv), safeFetchCount(qExp), safeFetchCount(qDoc), safeFetchCount(qFer), safeFetchCount(qOco), safeFetchCount(qDes)
-        ]);
+        const respVazia = { count: 0, data: [] };
+        const resPerfis = qP ? await qP : respVazia;
+        const resAusencias = qA ? await qA : respVazia;
+        const resFT = qF ? await qF : respVazia;
+        const resTrocas = qT ? await qT : respVazia;
+        const resAdv = qAdv ? await qAdv : respVazia;
+        const resExp = qExp ? await qExp : respVazia;
+        const resDoc = qDoc ? await qDoc : respVazia;
+        const resFer = qFer ? await qFer : respVazia;
+        const resOco = qOco ? await qOco : respVazia;
+        const resDes = qDes ? await qDes : respVazia;
 
         countOco = resOco.count || 0; ocoPendentesData = resOco.data;
         countDes = resDes.count || 0; desPendentesData = resDes.data;
@@ -11475,15 +11479,17 @@ window.atualizarContador = async function() {
 
     let queryNotifs = supabaseClient.from('notificacoes').select('id, lida, tipo, colaborador_id, referencia_id, nome, unidade, lida_por, created_at').order('created_at', { ascending: false }).limit(30000);
 
-    const p_notif = modulosPermitidos;
+    const p_notif = usuarioAtual.permissoes?.recebe_solicitacoes || ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'OcorrenciaPlantao', 'AvaliacaoExp', 'Ferias', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoDesempenho'];
     let tiposPermitidos = [];
 
+    // 1. Avisos padrões do Gestor (Nunca bloqueiam)
     if (!isAdmin) {
         tiposPermitidos.push('Admissão', 'Contrato_Gestor', 'Admissão_Devolvida', 'Rescisão', 'Rescisão_Para_Assinar', 'Ausência', 'FT', 'Troca', 'Advertência_Gestor', 'Ferias_Gestor', 'Avaliacao_Desempenho_Aprovada', 'Ocorrencia_Ponto', 'Lembrete_Prorrogacao');
     }
 
+    // 2. Avisos da Central Administrativa (Obedece rigorosamente os checkboxes se tiver Visão Global)
     if (isAdmin || podeAprovar) {
-        tiposPermitidos.push('Avaliacao_Alerta_Ruim');
+        tiposPermitidos.push('Avaliacao_Alerta_Ruim'); // Alerta grave sempre passa
         if(p_notif.includes('Admissao')) tiposPermitidos.push('Admissão_Admin', 'Contrato_Admin');
         if(p_notif.includes('Rescisao')) tiposPermitidos.push('Rescisão_Admin');
         if(p_notif.includes('Ausencia')) tiposPermitidos.push('Ausência_Admin');
@@ -11546,57 +11552,37 @@ window.atualizarContador = async function() {
         if (podeAprovar && (countPendentes > 0 || countAusencias > 0 || countFTs > 0 || countTrocas > 0 || countAdv > 0 || countFerias > 0 || countExp > 0 || countOco > 0 || countDoc > 0 || countDes > 0)) {
             htmlFinal += `<div style="padding: 10px 15px; background: rgba(255,193,7,0.15); color: var(--cor-acento); font-size: 0.75rem; font-weight: bold; text-transform: uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Aguardando Aprovação (Central)</div>`;
 
-            if (pendentesData && pendentesData.length > 0) {
-                pendentesData.forEach(item => {
-                    let isAdm = item.status_aprovacao === 'Pendente';
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid ${isAdm ? 'fa-user-plus' : 'fa-user-slash'} fa-2x" style="color: ${isAdm ? '#28a745' : 'var(--cor-perigo)'};"></i><div><strong style="color: white; display: block;">${isAdm ? 'Nova Admissão' : 'Desligamento'} Pendente</strong><span>${item.nome} (${item.unidade || '-'}) aguarda sua análise.</span></div></div>`;
-                });
-            }
-            if (ausenciasPendentesData && ausenciasPendentesData.length > 0) {
-                ausenciasPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-notes-medical fa-2x" style="color: #ff9800;"></i><div><strong style="color: #ff9800; display: block;">Ausência para Análise</strong><span>${item.nome} (${item.unidade || '-'}) enviou um(a) ${item.sigla}.</span></div></div>`;
-                });
-            }
-            if (ftPendentesData && ftPendentesData.length > 0) {
-                ftPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-business-time fa-2x" style="color: #4fc3f7;"></i><div><strong style="color: #4fc3f7; display: block;">Nova FT / Hora Extra</strong><span>${item.nome} (${item.unidade || '-'}) enviou registro de ${item.sigla}.</span></div></div>`;
-                });
-            }
-            if (trocasPendentesData && trocasPendentesData.length > 0) {
-                trocasPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-people-arrows fa-2x" style="color: #4dabf7;"></i><div><strong style="color: #4dabf7; display: block;">Troca de Turno Pendente</strong><span><b>${item.nome_solicitante.split(' ')[0]}</b> e <b>${item.nome_substituto.split(' ')[0]}</b> aguardam aprovação.</span></div></div>`;
-                });
-            }
-            if (advPendentesData && advPendentesData.length > 0) {
-                advPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-gavel fa-2x" style="color: var(--cor-advertencia);"></i><div><strong style="color: var(--cor-advertencia); display: block;">Medida Disciplinar Pendente</strong><span>${item.nome} (${item.unidade || '-'}) aguarda análise do RH.</span></div></div>`;
-                });
-            }
-            if (feriasPendentesData && feriasPendentesData.length > 0) {
-                feriasPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-plane-departure fa-2x" style="color: #ffd54f;"></i><div><strong style="color: #ffd54f; display: block;">Férias Pendentes</strong><span>${item.nome} (${item.unidade || '-'}) aguarda aprovação de férias.</span></div></div>`;
-                });
-            }
-            if (expPendentesData && expPendentesData.length > 0) {
-                expPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-star fa-2x" style="color: #ffc107;"></i><div><strong style="color: #ffc107; display: block;">Avaliação de Experiência</strong><span>${item.nome_colaborador} (${item.unidade || '-'}) aguarda sua análise.</span></div></div>`;
-                });
-            }
-            if (docDocPendentesData && docPendentesData.length > 0) {
-                docPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-file-arrow-up fa-2x" style="color: #a6b0cf;"></i><div><strong style="color: #a6b0cf; display: block;">Novo Documento p/ Validar</strong><span>${item.nome_colaborador || 'Institucional'} (${item.unidade || '-'}): ${item.nome_documento}.</span></div></div>`;
-                });
-            }
-            if (desPendentesData && desPendentesData.length > 0) {
-                desPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-chart-line fa-2x" style="color: #00bcd4;"></i><div><strong style="color: #00bcd4; display: block;">Avaliação de Desempenho</strong><span>${item.nome_colaborador} (${item.unidade || '-'}) aguarda sua aprovação.</span></div></div>`;
-                });
-            }
-            if (ocoPendentesData && ocoPendentesData.length > 0) {
-                ocoPendentesData.forEach(item => {
-                    htmlFinal += `<div class="notif-item" style="background: rgba(233, 30, 99, 0.05); border-bottom: 1px solid var(--cor-borda);" onclick="document.querySelector('[data-target=\\'tela-ocorrencias-admin\\']')?.click()"><i class="fa-solid fa-clipboard-list fa-2x" style="color: #e91e63;"></i><div><strong style="color: #e91e63; display: block;">Nova Ocorrência: ${item.tipo}</strong><span>${item.nome} (${item.unidade || '-'}) aguarda sua ciência.</span></div></div>`;
-                });
-            }
+            if (pendentesData) pendentesData.forEach(item => {
+                let isAdm = item.status_aprovacao === 'Pendente';
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid ${isAdm ? 'fa-file-signature' : 'fa-user-slash'} fa-2x" style="color: ${isAdm ? '#4fc3f7' : 'var(--cor-perigo)'};"></i><div><strong style="color: white; display: block;">${isAdm ? 'Nova Admissão' : 'Desligamento'} Pendente</strong><span>${item.nome} (${item.unidade || '-'}) aguarda sua análise.</span></div></div>`;
+            });
+            if (ausenciasPendentesData) ausenciasPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-notes-medical fa-2x" style="color: #ff9800;"></i><div><strong style="color: #ff9800; display: block;">Ausência para Análise</strong><span>${item.nome} (${item.unidade || '-'}) enviou um(a) ${item.sigla}.</span></div></div>`;
+            });
+            if (ftPendentesData) ftPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-business-time fa-2x" style="color: #4fc3f7;"></i><div><strong style="color: #4fc3f7; display: block;">Nova FT / Hora Extra</strong><span>${item.nome} (${item.unidade || '-'}) enviou registro de ${item.sigla}.</span></div></div>`;
+            });
+            if (trocasPendentesData) trocasPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-people-arrows fa-2x" style="color: #4dabf7;"></i><div><strong style="color: #4dabf7; display: block;">Troca de Turno Pendente</strong><span><b>${item.nome_solicitante}</b> e <b>${item.nome_substituto}</b> aguardam aprovação.</span></div></div>`;
+            });
+            if (advPendentesData) advPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-gavel fa-2x" style="color: var(--cor-advertencia);"></i><div><strong style="color: var(--cor-advertencia); display: block;">Medida Disciplinar Pendente</strong><span>${item.nome} (${item.unidade || '-'}) aguarda análise do RH.</span></div></div>`;
+            });
+            if (feriasPendentesData) feriasPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-plane-departure fa-2x" style="color: #ffd54f;"></i><div><strong style="color: #ffd54f; display: block;">Férias Pendentes</strong><span>${item.nome} (${item.unidade || '-'}) aguarda aprovação de férias.</span></div></div>`;
+            });
+            if (expPendentesData) expPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-star fa-2x" style="color: #ffc107;"></i><div><strong style="color: #ffc107; display: block;">Avaliação de Experiência Pendente</strong><span>${item.nome_colaborador} (${item.unidade || '-'}) aguarda sua análise.</span></div></div>`;
+            });
+            if (docPendentesData) docPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-file-arrow-up fa-2x" style="color: #a6b0cf;"></i><div><strong style="color: #a6b0cf; display: block;">Novo Documento p/ Validar</strong><span>${item.nome_colaborador || 'Institucional'} (${item.unidade || '-'}): ${item.nome_documento}.</span></div></div>`;
+            });
+            if (desPendentesData) desPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(255,193,7,0.05);" onclick="document.querySelector('[data-target=\\'tela-solicitacoes\\']')?.click()"><i class="fa-solid fa-chart-line fa-2x" style="color: #00bcd4;"></i><div><strong style="color: #00bcd4; display: block;">Avaliação de Desempenho Pendente</strong><span>${item.nome_colaborador} (${item.unidade || '-'}) aguarda sua aprovação.</span></div></div>`;
+            });
+            if (ocoPendentesData) ocoPendentesData.forEach(item => {
+                htmlFinal += `<div class="notif-item" style="background: rgba(233, 30, 99, 0.05);" onclick="document.querySelector('[data-target=\\'tela-ocorrencias-admin\\']')?.click()"><i class="fa-solid fa-clipboard-list fa-2x" style="color: #e91e63;"></i><div><strong style="color: #e91e63; display: block;">Nova Ocorrência: ${item.tipo}</strong><span>${item.nome} (${item.unidade || '-'}) aguarda sua ciência.</span></div></div>`;
+            });
         }
 
         const avisosNaoLidosDropdown = notifsAprovadas.filter(item => !item.lida);
@@ -13317,95 +13303,17 @@ let aprovadoInfo = adm.aprovado_por ? `<span style="font-size: 0.75rem; color: v
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 }
-
-  // ========================================================
-// 🛡️ MOTOR UNIVERSAL DE UNIDADES PERMITIDAS (BLINDADO JSON) 🛡️
-// ========================================================
-window.obterFiltroUnidadesSeguro = async function() {
-    const isAdmin = usuarioAtual.perfil === 'Admin';
-    
-    // 👇 BLINDAGEM 1: Força a conversão do JSON se o Supabase mandar como Texto
-    let perms = usuarioAtual.permissoes || {};
-    if (typeof perms === 'string') {
-        try { perms = JSON.parse(perms); } catch(e) { perms = {}; }
-    }
-    
-    const isGlobal = perms.escala_global === true;
-
-    // 1. ADMIN
-    if (isAdmin) {
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro && empresaSelecionadaFiltro !== 'Todas') {
-            const { data } = await supabaseClient.from('unidades_oficiais').select('nome').eq('empresa', empresaSelecionadaFiltro);
-            if (data && data.length > 0) return [...new Set(data.map(u => u.nome.trim()))].filter(Boolean);
-            return ['TRAVA_ANTI_VAZAMENTO'];
-        }
-        return null; // Admin sem filtro vê tudo
-    }
-
-    // 2. GESTOR COM VISÃO GLOBAL (Agora imune à falta da empresa no cadastro)
-    if (isGlobal) {
-        try {
-            let queryU = supabaseClient.from('unidades_oficiais').select('nome');
-            let queryP = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
-
-            // Se ele tem empresa vinculada, restringe à empresa dele. Se não tem, pega TUDO do sistema!
-            if (usuarioAtual.empresa && usuarioAtual.empresa !== 'Todas') {
-                let empresasAlvo = usuarioAtual.empresa.split(',').map(e => e.trim());
-                if (empresasAlvo.includes('SOUL GESTÃO') && !empresasAlvo.includes('SOUL')) empresasAlvo.push('SOUL');
-                if (empresasAlvo.includes('SOUL') && !empresasAlvo.includes('SOUL GESTÃO')) empresasAlvo.push('SOUL GESTÃO');
-                
-                queryU = queryU.in('empresa', empresasAlvo);
-                queryP = queryP.in('empresa', empresasAlvo);
-            }
-
-            const [resU, resP] = await Promise.all([queryU, queryP]);
-
-            let uSet = new Set();
-            if (resU.data) resU.data.forEach(x => { if (x.nome) uSet.add(x.nome.trim()); });
-            if (resP.data) resP.data.forEach(x => { if (x.unidade) x.unidade.split(',').forEach(u => uSet.add(u.trim())); });
-            
-            const arrayFinal = [...uSet].filter(Boolean);
-            if (arrayFinal.length > 0) return arrayFinal;
-        } catch (e) {
-            console.error("Erro no motor global:", e);
-        }
-    }
-
-    // 3. GESTOR REGIONAL (Padrão) - Transforma o "--" em vírgula para ler tudo como uma coisa só na hora de exibir a escala
-    if (usuarioAtual.unidade) {
-        const arr = usuarioAtual.unidade.replace(/ -- /g, ', ').split(',').map(u => u.trim()).filter(Boolean);
-        if (arr.includes('Todas')) return null; 
-        return arr.length > 0 ? arr : ['TRAVA_ANTI_VAZAMENTO'];
-    }
-
-    return ['TRAVA_ANTI_VAZAMENTO'];
-};
         
-window.listarSolicitacoes = async function(silencioso = false) {
+  window.listarSolicitacoes = async function(silencioso = false) {
     const tbody = document.getElementById('lista-solicitacoes-body');
     const thead = document.querySelector('#tabela-solicitacoes thead');
     const scrollAnterior = window.scrollY;
 
     const isAdmin = usuarioAtual.perfil === 'Admin';
-    
-    // 👇 BLINDAGEM 2: Leitura rigorosa do JSON
-    let perms = usuarioAtual.permissoes || {};
-    if (typeof perms === 'string') {
-        try { perms = JSON.parse(perms); } catch(e) { perms = {}; }
-    }
-    const isGlobal = perms.escala_global === true;
+    // 👇 MÁGICA 2: O Interruptor da Central na visualização da tabela
+    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true);
 
-    // Respeita se for Null (Herdar tudo) ou o Array com itens específicos ("AvaliacaoDesempenho")
-    const listaCompleta = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
-    let modulosPermitidos = listaCompleta;
-    if (perms.recebe_solicitacoes !== null && perms.recebe_solicitacoes !== undefined) {
-        if (Array.isArray(perms.recebe_solicitacoes)) {
-            modulosPermitidos = perms.recebe_solicitacoes;
-        }
-    }
-
-    const podeAprovar = isAdmin || (usuarioAtual.perfil === 'Gestor' && (isGlobal || perms['tela-solicitacoes']?.visivel === true || modulosPermitidos.length > 0));
-
+    // Se ele for gestor e NÃO tiver poder Global, aborta a montagem da tabela
     if (!podeAprovar) return;
 
     if (thead) {
@@ -13422,30 +13330,50 @@ window.listarSolicitacoes = async function(silencioso = false) {
         tbody.innerHTML = "<tr><td colspan='5' style='text-align: center; padding: 40px; border-radius: 12px;'><i class='fa-solid fa-spinner fa-spin fa-2x' style='color: var(--cor-acento); margin-bottom: 10px;'></i><br><span style='color: var(--cor-texto-secundario);'>Carregando solicitações...</span></td></tr>";
     }
 
-    // Chama o novo Motor que não falha mais
-    let unidsFiltro = await window.obterFiltroUnidadesSeguro();
+    const p = usuarioAtual.permissoes?.recebe_solicitacoes || [
+        'Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 
+        'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 
+        'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'
+    ];
 
     let statusAprovacaoFiltro = [];
-    if (modulosPermitidos.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
-    if (modulosPermitidos.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
+    if (p.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
+    if (p.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
 
-    // Filtra para exibir APENAS as caixinhas que ele tem permissão
     let qP = statusAprovacaoFiltro.length > 0 ? supabaseClient.from('perfis').select('*').in('status_aprovacao', statusAprovacaoFiltro).order('nome') : null;
-    let qA = modulosPermitidos.includes('Ausencia') ? supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qF = modulosPermitidos.includes('FT') ? supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qT = modulosPermitidos.includes('Troca') ? supabaseClient.from('trocas_turno').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qAdv = modulosPermitidos.includes('Advertencia') ? supabaseClient.from('advertencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qExp = modulosPermitidos.includes('AvaliacaoExp') ? supabaseClient.from('avaliacoes_experiencia').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qDoc = modulosPermitidos.includes('ArquivoDigital') ? supabaseClient.from('envio_documentos').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qFer = modulosPermitidos.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
-    let qDes = modulosPermitidos.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qA = p.includes('Ausencia') ? supabaseClient.from('ausencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qF = p.includes('FT') ? supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qT = p.includes('Troca') ? supabaseClient.from('trocas_turno').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qAdv = p.includes('Advertencia') ? supabaseClient.from('advertencias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qExp = p.includes('AvaliacaoExp') ? supabaseClient.from('avaliacoes_experiencia').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qDoc = p.includes('ArquivoDigital') ? supabaseClient.from('envio_documentos').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qFer = p.includes('Ferias') ? supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
+    let qDes = p.includes('AvaliacaoDesempenho') ? supabaseClient.from('avaliacoes_desempenho').select('*').eq('status', 'Pendente').order('created_at', { ascending: false }) : null;
           
-    if (isAdmin && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && qP) {
-        qP = qP.eq('empresa', empresaSelecionadaFiltro);
+    let unidsFiltro = null;
+    if (isAdmin) {
+        unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
+    } else if (usuarioAtual.perfil === 'Gestor') {
+        if (usuarioAtual.permissoes?.escala_global === true && usuarioAtual.empresa) {
+            let empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
+            if (empresasGestor.includes('SOUL GESTÃO') && !empresasGestor.includes('SOUL')) empresasGestor.push('SOUL');
+            if (empresasGestor.includes('SOUL') && !empresasGestor.includes('SOUL GESTÃO')) empresasGestor.push('SOUL GESTÃO');
+            
+            const { data: unisData } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor);
+            if (unisData && unisData.length > 0) {
+                unidsFiltro = [...new Set(unisData.map(u => u.nome.trim()))].filter(x => x !== "" && x !== "Todas");
+            }
+        }
+        if (!unidsFiltro || unidsFiltro.length === 0) {
+            unidsFiltro = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : ['TRAVA_ANTI_VAZAMENTO'];
+        }
+    }
+
+    if (isAdmin && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+        if(qP) qP = qP.eq('empresa', empresaSelecionadaFiltro);
     }
     
-    // Injeta a força global das unidades nas buscas
-    if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
+    if (unidsFiltro && unidsFiltro.length > 0 && unidsFiltro[0] !== 'NENHUMA_UNIDADE_ENCONTRADA') {
         if (qP) qP = qP.in('unidade', unidsFiltro);
         if (qA) qA = qA.in('unidade', unidsFiltro);
         if (qF) qF = qF.in('unidade', unidsFiltro);
@@ -13455,160 +13383,157 @@ window.listarSolicitacoes = async function(silencioso = false) {
         if (qDoc) qDoc = qDoc.in('unidade', unidsFiltro);
         if (qFer) qFer = qFer.in('unidade', unidsFiltro);
         if (qDes) qDes = qDes.in('unidade', unidsFiltro);
-    } else if (unidsFiltro && unidsFiltro[0] === 'TRAVA_ANTI_VAZAMENTO') {
-        qP = null; qA = null; qF = null; qT = null; qAdv = null; qExp = null; qDoc = null; qFer = null; qDes = null;
     }
 
-    try {
-        const safeFetch = async (query) => { if (!query) return []; const { data } = await query; return data || []; };
+    const respVazia = { data: [] };
+    const { data: perfisData } = qP ? await qP : respVazia; 
+    const { data: ausenciasData } = qA ? await qA : respVazia; 
+    const { data: ftData } = qF ? await qF : respVazia; 
+    const { data: trocasData } = qT ? await qT : respVazia;
+    const { data: advData } = qAdv ? await qAdv : respVazia;
+    const { data: expData } = qExp ? await qExp : respVazia;
+    const { data: docData } = qDoc ? await qDoc : respVazia;
+    const { data: ferData } = qFer ? await qFer : respVazia; 
+    const { data: desData } = qDes ? await qDes : respVazia;
 
-        const [perfisData, ausenciasData, ftData, trocasData, advData, expData, docData, ferData, desData] = await Promise.all([
-            safeFetch(qP), safeFetch(qA), safeFetch(qF), safeFetch(qT), safeFetch(qAdv), safeFetch(qExp), safeFetch(qDoc), safeFetch(qFer), safeFetch(qDes)
-        ]);
+    listaAdmissoesPendentes = perfisData || [];
+    listaAusenciasPendentes = ausenciasData || []; 
+    listaFTPendentes = ftData || []; 
+    listaTrocasPendentes = trocasData || [];
+    window.listaDocsPendentes = docData || [];
+    window.listaFeriasPendentes = ferData || []; 
+    window.listaDesempenhoPendentes = desData || [];
+    window.listaExpPendentes = expData || [];
+    
+    tbody.innerHTML = "";
 
-        listaAdmissoesPendentes = perfisData;
-        listaAusenciasPendentes = ausenciasData; 
-        listaFTPendentes = ftData; 
-        listaTrocasPendentes = trocasData;
-        window.listaDocsPendentes = docData;
-        window.listaFeriasPendentes = ferData; 
-        window.listaDesempenhoPendentes = desData;
-        window.listaExpPendentes = expData;
-        
-        tbody.innerHTML = "";
+    const totalItems = (perfisData?.length || 0) + (ausenciasData?.length || 0) + (ftData?.length || 0) + (trocasData?.length || 0) + (advData?.length || 0) + (expData?.length || 0) + (docData?.length || 0) + (ferData?.length || 0) + (desData?.length || 0);
 
-        const totalItems = perfisData.length + ausenciasData.length + ftData.length + trocasData.length + advData.length + expData.length + docData.length + ferData.length + desData.length;
+    if (totalItems === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 40px; border-radius: 12px; background: rgba(0,0,0,0.1); border: 1px dashed var(--cor-borda);"><i class="fa-solid fa-inbox fa-3x" style="opacity: 0.5; margin-bottom: 15px;"></i><br>Caixa de entrada limpa. Nenhuma solicitação pendente para o seu perfil!</td></tr>`;
+        return;
+    }
 
-        if (totalItems === 0) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 40px; border-radius: 12px; background: rgba(0,0,0,0.1); border: 1px dashed var(--cor-borda);"><i class="fa-solid fa-inbox fa-3x" style="opacity: 0.5; margin-bottom: 15px;"></i><br>Caixa de entrada limpa. Nenhuma solicitação pendente para o seu perfil!</td></tr>`;
-            return;
-        }
+    const formatarEnvio = (criadoPor, dataISO) => {
+        if (!dataISO) return '';
+        const dataObj = new Date(dataISO);
+        const dataFormatada = dataObj.toLocaleDateString('pt-BR') + ' às ' + dataObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        return criadoPor ? `Por ${criadoPor.split(' ')[0]} em ${dataFormatada}` : `Em ${dataFormatada}`;
+    };
 
-        const formatarEnvio = (criadoPor, dataISO) => {
-            if (!dataISO) return '';
-            const dataObj = new Date(dataISO);
-            const dataFormatada = dataObj.toLocaleDateString('pt-BR') + ' às ' + dataObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-            return criadoPor ? `Por ${criadoPor.split(' ')[0]} em ${dataFormatada}` : `Em ${dataFormatada}`;
-        };
+    const desenharLinha = (nome, icone, corTema, tituloTipo, subDetalhe, empresa, unidade, funcAcao, infoEnvio = '', iconeAcao = 'fa-eye', txtAcao = 'Analisar') => {
+        const estiloIcone = `width: 45px; height: 45px; border-radius: 12px; background: linear-gradient(135deg, ${corTema}22 0%, rgba(0,0,0,0.2) 100%); display: flex; justify-content: center; align-items: center; color: ${corTema}; font-size: 1.3rem; flex-shrink: 0; border: 1px solid ${corTema}44; box-shadow: inset 0 2px 5px rgba(255,255,255,0.05);`;
+        const corLinhaHighlight = `border-left: 4px solid ${corTema} !important;`;
+        const htmlEnvio = infoEnvio ? `<div style="display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; background: rgba(0,0,0,0.2); padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05);"><i class="fa-regular fa-clock" style="color: ${corTema}; font-size: 0.75rem;"></i> <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${infoEnvio}</span></div>` : '';
+        const htmlEmpresa = (empresa && empresa !== '-') ? `<span style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px;">${empresa}</span>` : '';
 
-        const desenharLinha = (nome, icone, corTema, tituloTipo, subDetalhe, empresa, unidade, funcAcao, infoEnvio = '', iconeAcao = 'fa-eye', txtAcao = 'Analisar') => {
-            const estiloIcone = `width: 45px; height: 45px; border-radius: 12px; background: linear-gradient(135deg, ${corTema}22 0%, rgba(0,0,0,0.2) 100%); display: flex; justify-content: center; align-items: center; color: ${corTema}; font-size: 1.3rem; flex-shrink: 0; border: 1px solid ${corTema}44; box-shadow: inset 0 2px 5px rgba(255,255,255,0.05);`;
-            const corLinhaHighlight = `border-left: 4px solid ${corTema} !important;`;
-            const htmlEnvio = infoEnvio ? `<div style="display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; background: rgba(0,0,0,0.2); padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05);"><i class="fa-regular fa-clock" style="color: ${corTema}; font-size: 0.75rem;"></i> <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${infoEnvio}</span></div>` : '';
-            const htmlEmpresa = (empresa && empresa !== '-') ? `<span style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px;">${empresa}</span>` : '';
-
-            return `<tr style="${corLinhaHighlight}">
-                <td style="text-align: left; padding: 15px 20px;">
-                    <div style="display: flex; align-items: center; gap: 15px;">
-                        <div style="${estiloIcone}"><i class="fa-solid ${icone}"></i></div>
-                        <div>
-                            <strong style="font-size: 1.05rem; display: block; color: var(--cor-texto-principal);">${nome}</strong>
-                        </div>
+        return `<tr style="${corLinhaHighlight}">
+            <td style="text-align: left; padding: 15px 20px;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div style="${estiloIcone}"><i class="fa-solid ${icone}"></i></div>
+                    <div>
+                        <strong style="font-size: 1.05rem; display: block; color: var(--cor-texto-principal);">${nome}</strong>
                     </div>
-                </td>
-                <td style="text-align: left; padding: 15px 10px;">
-                    <div style="display: flex; flex-direction: column; align-items: flex-start;">
-                        <span class="badge" style="background: ${corTema}15; color: ${corTema}; border: 1px solid ${corTema}55; padding: 4px 10px; border-radius: 6px; font-weight: 800; letter-spacing: 0.5px;">${tituloTipo}</span>
-                        <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 6px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${subDetalhe}">${subDetalhe}</span>
-                        ${htmlEnvio}
-                    </div>
-                </td>
-                <td style="text-align: center; padding: 15px;">
-                    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--cor-texto-secundario); font-size: 0.8rem; font-weight: bold; background: rgba(255,255,255,0.05); padding: 6px 12px; border: 1px dashed var(--cor-borda);">
-                        <i class="fa-solid fa-hourglass-half fa-spin-pulse" style="color: #ff9800;"></i> Aguardando RH
-                    </span>
-                </td>
-                <td style="text-align: left; padding: 15px 10px;">
-                    <span style="font-size: 0.9rem; font-weight: bold; color: var(--cor-texto-principal); display: block;"><i class="fa-solid fa-location-dot" style="color: ${corTema}; margin-right: 6px;"></i> ${unidade || '-'}</span>
-                    ${htmlEmpresa}
-                </td>
-                <td style="text-align: right; padding: 15px 20px;">
-                    <button class="btn-secondary" style="padding: 10px 20px; font-size: 0.9rem; border-color: ${corTema}; color: ${corTema}; font-weight: bold; border-radius: 8px; transition: all 0.2s ease-in-out;" onmouseover="this.style.background='${corTema}'; this.style.color='#000';" onmouseout="this.style.background='transparent'; this.style.color='${corTema}';" onclick="${funcAcao}">
-                        <i class="fa-solid ${iconeAcao}"></i> ${txtAcao}
-                    </button>
-                </td>
-            </tr>`;
-        };
+                </div>
+            </td>
+            <td style="text-align: left; padding: 15px 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                    <span class="badge" style="background: ${corTema}15; color: ${corTema}; border: 1px solid ${corTema}55; padding: 4px 10px; border-radius: 6px; font-weight: 800; letter-spacing: 0.5px;">${tituloTipo}</span>
+                    <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 6px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${subDetalhe}">${subDetalhe}</span>
+                    ${htmlEnvio}
+                </div>
+            </td>
+            <td style="text-align: center; padding: 15px;">
+                <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--cor-texto-secundario); font-size: 0.8rem; font-weight: bold; background: rgba(255,255,255,0.05); padding: 6px 12px; border: 1px dashed var(--cor-borda);">
+                    <i class="fa-solid fa-hourglass-half fa-spin-pulse" style="color: #ff9800;"></i> Aguardando RH
+                </span>
+            </td>
+            <td style="text-align: left; padding: 15px 10px;">
+                <span style="font-size: 0.9rem; font-weight: bold; color: var(--cor-texto-principal); display: block;"><i class="fa-solid fa-location-dot" style="color: ${corTema}; margin-right: 6px;"></i> ${unidade || '-'}</span>
+                ${htmlEmpresa}
+            </td>
+            <td style="text-align: right; padding: 15px 20px;">
+                <button class="btn-secondary" style="padding: 10px 20px; font-size: 0.9rem; border-color: ${corTema}; color: ${corTema}; font-weight: bold; border-radius: 8px; transition: all 0.2s ease-in-out;" onmouseover="this.style.background='${corTema}'; this.style.color='#000';" onmouseout="this.style.background='transparent'; this.style.color='${corTema}';" onclick="${funcAcao}">
+                    <i class="fa-solid ${iconeAcao}"></i> ${txtAcao}
+                </button>
+            </td>
+        </tr>`;
+    };
 
-        if (perfisData && perfisData.length > 0) {
-            perfisData.forEach(u => {
-                if (u.status_aprovacao === 'Pendente') {
-                    const infoEnvio = formatarEnvio(u.dados_admissao?.criado_por, u.dados_admissao?.data_envio || u.created_at);
-                    tbody.innerHTML += desenharLinha(u.nome, 'fa-user-plus', '#28a745', 'Nova Admissão', `Cargo: ${u.dados_admissao?.cargo || '-'}`, u.empresa, u.unidade, `verFichaAdmissao('${u.id}')`, infoEnvio);
-                } else {
-                    const infoEnvio = formatarEnvio(u.dados_rescisao?.registrado_por, u.dados_rescisao?.data_registro || u.created_at);
-                    tbody.innerHTML += desenharLinha(u.nome, 'fa-user-slash', '#dc3545', 'Desligamento', `Aviso: ${u.dados_rescisao?.aviso_cumprido || '-'}`, u.empresa, u.unidade, `verFichaRescisaoPendente('${u.id}')`, infoEnvio);
-                }
-            });
-        }
+    if (perfisData && perfisData.length > 0) {
+        perfisData.forEach(u => {
+            if (u.status_aprovacao === 'Pendente') {
+                const infoEnvio = formatarEnvio(u.dados_admissao?.criado_por, u.dados_admissao?.data_envio || u.created_at);
+                tbody.innerHTML += desenharLinha(u.nome, 'fa-user-plus', '#28a745', 'Nova Admissão', `Cargo: ${u.dados_admissao?.cargo || '-'}`, u.empresa, u.unidade, `verFichaAdmissao('${u.id}')`, infoEnvio);
+            } else {
+                const infoEnvio = formatarEnvio(u.dados_rescisao?.registrado_por, u.dados_rescisao?.data_registro || u.created_at);
+                tbody.innerHTML += desenharLinha(u.nome, 'fa-user-slash', '#dc3545', 'Desligamento', `Aviso: ${u.dados_rescisao?.aviso_cumprido || '-'}`, u.empresa, u.unidade, `verFichaRescisaoPendente('${u.id}')`, infoEnvio);
+            }
+        });
+    }
 
-        if (ausenciasData && ausenciasData.length > 0) {
-            ausenciasData.forEach(aus => {
-                const detalheData = `Dias: ${aus.data_inicio.split('-').reverse().join('/')} a ${aus.data_fim.split('-').reverse().join('/')}`;
-                const infoEnvio = formatarEnvio(aus.criado_por, aus.created_at);
-                tbody.innerHTML += desenharLinha(aus.nome, 'fa-user-clock', '#ff9800', `Ausência (${aus.sigla})`, detalheData, '-', aus.unidade, `verFichaAusenciaPendente('${aus.id}')`, infoEnvio);
-            });
-        }
+    if (ausenciasData && ausenciasData.length > 0) {
+        ausenciasData.forEach(aus => {
+            const detalheData = `Dias: ${aus.data_inicio.split('-').reverse().join('/')} a ${aus.data_fim.split('-').reverse().join('/')}`;
+            const infoEnvio = formatarEnvio(aus.criado_por, aus.created_at);
+            tbody.innerHTML += desenharLinha(aus.nome, 'fa-user-clock', '#ff9800', `Ausência (${aus.sigla})`, detalheData, '-', aus.unidade, `verFichaAusenciaPendente('${aus.id}')`, infoEnvio);
+        });
+    }
 
-        if (ftData && ftData.length > 0) {
-            ftData.forEach(ft => {
-                const detalhe = `Data: ${ft.data_inicio.split('-').reverse().join('/')}`;
-                const infoEnvio = formatarEnvio(ft.criado_por, ft.created_at);
-                tbody.innerHTML += desenharLinha(ft.nome, 'fa-business-time', '#4fc3f7', `Lançamento (${ft.sigla})`, detalhe, '-', ft.unidade, `verFichaFTPendente('${ft.id}')`, infoEnvio);
-            });
-        }
+    if (ftData && ftData.length > 0) {
+        ftData.forEach(ft => {
+            const detalhe = `Data: ${ft.data_inicio.split('-').reverse().join('/')}`;
+            const infoEnvio = formatarEnvio(ft.criado_por, ft.created_at);
+            tbody.innerHTML += desenharLinha(ft.nome, 'fa-business-time', '#4fc3f7', `Lançamento (${ft.sigla})`, detalhe, '-', ft.unidade, `verFichaFTPendente('${ft.id}')`, infoEnvio);
+        });
+    }
 
-        if (trocasData && trocasData.length > 0) {
-            trocasData.forEach(t => {
-                const nomeComposto = `${t.nome_solicitante.split(' ')[0]} <i class="fa-solid fa-arrow-right-arrow-left" style="font-size: 0.7rem; color: #4dabf7; margin: 0 4px;"></i> ${t.nome_substituto.split(' ')[0]}`;
-                const infoEnvio = formatarEnvio(t.criado_por, t.created_at);
-                tbody.innerHTML += desenharLinha(nomeComposto, 'fa-people-arrows', '#4dabf7', 'Troca de Turno', 'Ajuste de Escala Dupla', '-', t.unidade_solicitante, `verFichaTrocaPendente('${t.id}')`, infoEnvio);
-            });
-        }
+    if (trocasData && trocasData.length > 0) {
+        trocasData.forEach(t => {
+            const nomeComposto = `${t.nome_solicitante.split(' ')[0]} <i class="fa-solid fa-arrow-right-arrow-left" style="font-size: 0.7rem; color: #4dabf7; margin: 0 4px;"></i> ${t.nome_substituto.split(' ')[0]}`;
+            const infoEnvio = formatarEnvio(t.criado_por, t.created_at);
+            tbody.innerHTML += desenharLinha(nomeComposto, 'fa-people-arrows', '#4dabf7', 'Troca de Turno', 'Ajuste de Escala Dupla', '-', t.unidade_solicitante, `verFichaTrocaPendente('${t.id}')`, infoEnvio);
+        });
+    }
 
-        if (advData && advData.length > 0) {
-            advData.forEach(adv => {
-                const infoEnvio = formatarEnvio(adv.criado_por, adv.created_at);
-                tbody.innerHTML += desenharLinha(adv.nome, 'fa-gavel', 'var(--cor-advertencia)', 'Medida Disciplinar', 'Aguardando Análise RH', '-', adv.unidade, `abrirModalAprovarAdv('${adv.id}')`, infoEnvio);
-            });
-        }
+    if (advData && advData.length > 0) {
+        advData.forEach(adv => {
+            const infoEnvio = formatarEnvio(adv.criado_por, adv.created_at);
+            tbody.innerHTML += desenharLinha(adv.nome, 'fa-gavel', 'var(--cor-advertencia)', 'Medida Disciplinar', 'Aguardando Análise RH', '-', adv.unidade, `abrirModalAprovarAdv('${adv.id}')`, infoEnvio);
+        });
+    }
 
-        if (expData && expData.length > 0) {
-            expData.forEach(exp => {
-                const infoEnvio = formatarEnvio(exp.criado_por, exp.created_at);
-                tbody.innerHTML += desenharLinha(exp.nome_colaborador, 'fa-star', '#ffc107', 'Avaliação Experiência', exp.periodo, exp.empresa, exp.unidade, `verFichaExperienciaPendente('${exp.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
-            });
-        }
+    if (expData && expData.length > 0) {
+        expData.forEach(exp => {
+            const infoEnvio = formatarEnvio(exp.criado_por, exp.created_at);
+            tbody.innerHTML += desenharLinha(exp.nome_colaborador, 'fa-star', '#ffc107', 'Avaliação Experiência', exp.periodo, exp.empresa, exp.unidade, `verFichaExperienciaPendente('${exp.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
+        });
+    }
 
-        if (docData && docData.length > 0) {
-            docData.forEach(d => {
-                const nomeExib = d.nome_colaborador ? d.nome_colaborador : 'Institucional';
-                const infoEnvio = formatarEnvio(d.criado_por, d.created_at);
-                tbody.innerHTML += desenharLinha(nomeExib, 'fa-file-arrow-up', '#a6b0cf', 'Documento Enviado', d.tipo, d.empresa, d.unidade, `verFichaDocumentoPendente('${d.id}')`, infoEnvio);
-            });
-        }
+    if (docData && docData.length > 0) {
+        docData.forEach(d => {
+            const nomeExib = d.nome_colaborador ? d.nome_colaborador : 'Institucional';
+            const infoEnvio = formatarEnvio(d.criado_por, d.created_at);
+            tbody.innerHTML += desenharLinha(nomeExib, 'fa-file-arrow-up', '#a6b0cf', 'Documento Enviado', d.tipo, d.empresa, d.unidade, `verFichaDocumentoPendente('${d.id}')`, infoEnvio);
+        });
+    }
 
-        if (ferData && ferData.length > 0) {
-            ferData.forEach(f => {
-                const infoEnvio = formatarEnvio(f.criado_por, f.created_at);
-                tbody.innerHTML += desenharLinha(f.nome, 'fa-plane-departure', '#ffd54f', 'Férias', `Saída em: ${f.data_inicio_ferias.split('-').reverse().join('/')}`, f.empresa, f.unidade, `verFichaFeriasPendente('${f.id}')`, infoEnvio);
-            });
-        }
+    if (ferData && ferData.length > 0) {
+        ferData.forEach(f => {
+            const infoEnvio = formatarEnvio(f.criado_por, f.created_at);
+            tbody.innerHTML += desenharLinha(f.nome, 'fa-plane-departure', '#ffd54f', 'Férias', `Saída em: ${f.data_inicio_ferias.split('-').reverse().join('/')}`, f.empresa, f.unidade, `verFichaFeriasPendente('${f.id}')`, infoEnvio);
+        });
+    }
 
-        if (desData && desData.length > 0) {
-            desData.forEach(des => {
-                const infoEnvio = formatarEnvio(des.criado_por, des.created_at);
-                tbody.innerHTML += desenharLinha(des.nome_colaborador, 'fa-chart-line', '#00bcd4', 'Avaliação de Desempenho', 'Ciclo Trimestral Concluído', des.empresa, des.unidade, `verFichaDesempenhoPendente('${des.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
-            });
-        }
+    if (desData && desData.length > 0) {
+        desData.forEach(des => {
+            const infoEnvio = formatarEnvio(des.criado_por, des.created_at);
+            tbody.innerHTML += desenharLinha(des.nome_colaborador, 'fa-chart-line', '#00bcd4', 'Avaliação de Desempenho', 'Ciclo Trimestral Concluído', des.empresa, des.unidade, `verFichaDesempenhoPendente('${des.id}')`, infoEnvio, 'fa-file-pdf', 'Ver Documento');
+        });
+    }
 
-        if (silencioso) {
-            setTimeout(() => window.scrollTo(0, scrollAnterior), 10);
-        }
-
-    } catch (e) {
-        console.error("Erro crítico na montagem da Central:", e);
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Falha ao carregar as solicitações. Atualize a página.</td></tr>`;
+    if (silencioso) {
+        setTimeout(() => window.scrollTo(0, scrollAnterior), 10);
     }
 };
       
@@ -14673,29 +14598,41 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
        async function setupFiltroEscala() {
     const selectFiltroU = document.getElementById('filtro-unidade-escala');
-    selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
-
+    
     if (usuarioAtual.perfil === 'Gestor') {
-        // Puxa as unidades usando o novo motor inteligente (Global ou Local)
-        const unidsFiltro = await window.obterFiltroUnidadesSeguro();
-        
-        if (unidsFiltro && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
-            unidsFiltro.sort().forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
-        } else if (!unidsFiltro) {
-            selectFiltroU.innerHTML += `<option value="Todas">Todas as Unidades</option>`;
+        const perms = usuarioAtual.permissoes || {};
+        selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
+
+        // Se ele tiver o Superpoder de Visão Global E uma empresa vinculada
+        if (perms.escala_global && usuarioAtual.empresa) {
+            // Pega o nome da empresa principal dele
+            const empresaGestor = usuarioAtual.empresa.split(',')[0].trim();
+            // Busca TODAS as unidades da empresa no banco
+            const { data } = await supabaseClient.from('unidades_oficiais').select('nome').eq('empresa', empresaGestor).order('nome');
+            
+            if (data) {
+                const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
+                uSet.forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
+            }
+        } 
+        // Se ele for um Gestor comum, usa a lista normal
+        else if (usuarioAtual.unidade) {
+            const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+            unids.forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
         }
-    } 
-    else if (usuarioAtual.perfil === 'Admin') {
+
+    } else if (usuarioAtual.perfil === 'Admin') {
         let query = supabaseClient.from('unidades_oficiais').select('*').order('nome');
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+        
+        if (empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
         }
 
         const { data } = await query;
-        if (data) {
-            const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
-            uSet.sort().forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
-        }
+        const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
+        
+        selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
+        uSet.sort().forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
     }
 }
 
@@ -18171,8 +18108,7 @@ window.abrirModalEditarUnidadesUsuario = async function(idUsuario) {
     // Pega as unidades que o cara já tem e transforma em tags com botão de excluir
     let tagsHtml = '';
     if (user.unidade) {
-        // 👇 CORTA NO '--' PRA MOSTRAR SÓ AS UNIDADES VERDADEIRAS NAS TAGS DO ADMIN 👇
-        const unids = user.unidade.split('--')[0].split(',').map(u => u.trim()).filter(u => u);
+        const unids = user.unidade.split(',').map(u => u.trim()).filter(u => u);
         unids.forEach(u => {
             tagsHtml += `<span class="tag-unidade" data-val="${u}">${u} <i class="fa-solid fa-times" onclick="this.parentElement.remove()"></i></span>`;
         });
@@ -18412,76 +18348,41 @@ window.abrirModalPermissoes = async function(idUser) {
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-  document.getElementById('form-salvar-permissoes').addEventListener('submit', async (e) => {
+    document.getElementById('form-salvar-permissoes').addEventListener('submit', async (e) => {
         e.preventDefault();
         const btn = document.getElementById('btn-salvar-perms');
         btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
 
-        let novoJsonPermissoes = { ...permissoesAtuais };
+        let novoJsonPermissoes = {};
         
         document.querySelectorAll('.chk-menu-visivel').forEach(chk => {
             const menuId = chk.getAttribute('data-menu-id');
             const selectNivel = document.querySelector(`.sel-menu-nivel[data-menu-id="${menuId}"]`);
-            novoJsonPermissoes[menuId] = { visivel: chk.checked, nivel: selectNivel.value };
+            
+            novoJsonPermissoes[menuId] = {
+                visivel: chk.checked,
+                nivel: selectNivel.value
+            };
         });
 
+        // Adiciona a permissão de escala global se ela existir na tela
         const chkGlobal = document.getElementById('chk-escala-global');
-        let isGlobalChecked = false;
         if (chkGlobal) {
             novoJsonPermissoes.escala_global = chkGlobal.checked;
-            isGlobalChecked = chkGlobal.checked;
         }
 
-        // 👇 A MÁGICA DOS DOIS TRAÇOS AQUI 👇
-        let stringUnidadesUpdate = u.unidade || '';
-        // Pega só a unidade real que ele já tinha antes (ignora se já tinha globais velhas salvas)
-        let unidadesReaisArray = stringUnidadesUpdate.split('--')[0].split(',').map(x => x.trim()).filter(Boolean);
-        stringUnidadesUpdate = unidadesReaisArray.join(', ');
-
-        if (isGlobalChecked) {
-            let empresasAlvo = u.empresa ? u.empresa.split(',').map(e => e.trim()) : [];
-            if (empresasAlvo.includes('SOUL GESTÃO') && !empresasAlvo.includes('SOUL')) empresasAlvo.push('SOUL');
-            if (empresasAlvo.includes('SOUL') && !empresasAlvo.includes('SOUL GESTÃO')) empresasAlvo.push('SOUL GESTÃO');
-            
-            const { data: todasUnidades } = await supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasAlvo);
-            
-            if (todasUnidades && todasUnidades.length > 0) {
-                let globais = [];
-                todasUnidades.forEach(x => {
-                    let nomeU = x.nome.trim();
-                    if (!unidadesReaisArray.includes(nomeU)) {
-                        globais.push(nomeU); // Só adiciona como global se já não for a real dele
-                    }
-                });
-                
-                if (globais.length > 0) {
-                    stringUnidadesUpdate = unidadesReaisArray.join(', ') + ' -- ' + globais.join(', ');
-                }
-            }
-        }
-
-        const { error } = await supabaseClient.from('perfis').update({ 
-            permissoes: novoJsonPermissoes,
-            unidade: stringUnidadesUpdate  // <--- Salva no padrão "Real1 -- Global1, Global2"
-        }).eq('id', idUser);
+        const { error } = await supabaseClient.from('perfis').update({ permissoes: novoJsonPermissoes }).eq('id', idUser);
 
         if (error) {
             mostrarAlerta("Erro ao salvar permissões.", "erro");
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Permissões';
         } else {
-            mostrarAlerta("Permissões e Acessos Globais salvos com sucesso!", "sucesso");
+            mostrarAlerta("Permissões salvas com sucesso!", "sucesso");
             document.getElementById('modal-permissoes-usuario').remove();
-            
-            if (idUser === usuarioAtual.id) {
-                usuarioAtual.permissoes = novoJsonPermissoes;
-                usuarioAtual.unidade = stringUnidadesUpdate; 
-                atualizarContador();
-                if(!document.getElementById('tela-solicitacoes').classList.contains('hidden')) listarSolicitacoes();
-            }
-            if (typeof listarUsuarios === 'function') listarUsuarios();
         }
     });
 };
+
         window.verHistoricoTransferencias = async function(idColab) {
     const user = todosUsuariosCadastrados.find(u => u.id === idColab);
     if (!user) return mostrarAlerta("Usuário não encontrado.", "erro");
@@ -18598,7 +18499,7 @@ window.abrirModalPermissoes = async function(idUser) {
             document.getElementById('box-opcoes-aviso').classList.add('hidden');
 
             if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-                const unids = window.getUnidadesReaisGestor();
+                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
                 selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
                 unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
             } else {
@@ -20324,7 +20225,7 @@ if (sigla === 'ATM' && document.getElementById('edit-aus-possui-cid').value === 
             document.getElementById('form-ausencia').reset();
 
             if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-                const unids = window.getUnidadesReaisGestor();
+                const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
                 selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
                 unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
             } else {
@@ -21375,7 +21276,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
     selectColab.disabled = true;
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-       const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
     } else {
@@ -22247,7 +22148,7 @@ window.addDiaFolgaHplus = function(perfil) {
     document.getElementById('bloco-opcoes-he')?.classList.add('hidden');
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         
         let optionsHtml = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => optionsHtml += `<option value="${u}">${u}</option>`);
@@ -24151,7 +24052,7 @@ async function abrirAbaAdv() {
     `;
 
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-       const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
     }
@@ -25603,7 +25504,7 @@ window.prepararAbaWhatsApp = async function() {
         let options = '<option value="">Selecione a unidade...</option>';
 
         if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-            const unids = window.getUnidadesReaisGestor();
+            const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
             unids.forEach(u => options += `<option value="${u}">${u}</option>`);
         } else {
             let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
@@ -26015,7 +25916,7 @@ async function carregarJustificativasZap(manterScroll = false) {
 
     // Filtra pela unidade do Gestor ou do Admin
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         query = query.in('unidade', unids);
     } else if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
@@ -29867,7 +29768,7 @@ window.carregarTabelaINSS = async function() {
     } 
     // Se for Gestor, puxa só da unidade dele
     else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         query = query.in('unidade', unids);
     }
 
@@ -30056,7 +29957,7 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
         containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de experiência...</p>';
     }
 
-    const unids = window.getUnidadesReaisGestor();
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     
     // Busca todos os colaboradores ativos dessas unidades
     const { data: colabs } = await supabaseClient.from('perfis')
@@ -39220,7 +39121,7 @@ document.addEventListener('DOMContentLoaded', () => {
 window.checarLembretesProrrogacaoAoLogar = async function() {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
-    const unids = window.getUnidadesReaisGestor();
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hoje = new Date();
     hoje.setHours(0,0,0,0);
 
@@ -39610,7 +39511,7 @@ window.carregarStatusAvulsos = async function() {
 
         // 3. Filtro de Gestor (Evita passar array vazio que causa Erro 400)
         if (usuarioAtual && usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-            const unids = window.getUnidadesReaisGestor().filter(Boolean);
+            const unids = usuarioAtual.unidade.split(',').map(u => u.trim()).filter(Boolean);
             if (unids.length > 0) {
                 query = query.in('unidade', unids);
             }
@@ -40522,7 +40423,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     }
 
     try {
-        const unids = window.getUnidadesReaisGestor();
+        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         const { data: colabs, error } = await supabaseClient
             .from('perfis')
             .select('id, nome, empresa, unidade, dados_admissao')
@@ -40871,22 +40772,13 @@ window.carregarDesempenhosAndamento = async function() {
     const container = document.getElementById('lista-desempenho-andamento');
     container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando andamento...</p>';
 
-    // 👇 A MÁGICA AQUI: O filtro cego foi substituído pelo nosso Escudo Universal!
-    const unidsFiltro = await window.obterFiltroUnidadesSeguro();
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     
-    let query = supabaseClient.from('avaliacoes_desempenho')
+    const { data, error } = await supabaseClient.from('avaliacoes_desempenho')
         .select('*')
+        .in('unidade', unids)
         .in('status', ['Aguardando Assinatura', 'Aguardando Feedback', 'Pendente'])
         .order('created_at', { ascending: false });
-
-    // Aplica o filtro global com proteção
-    if (unidsFiltro && unidsFiltro[0] !== 'TRAVA_ANTI_VAZAMENTO') {
-        query = query.in('unidade', unidsFiltro);
-    } else if (unidsFiltro && unidsFiltro[0] === 'TRAVA_ANTI_VAZAMENTO') {
-        query = query.eq('id', '00000000-0000-0000-0000-000000000000'); // Trava de Segurança
-    }
-
-    const { data, error } = await query;
 
     if (error || !data || data.length === 0) {
         container.innerHTML = `<p style="text-align: center; color: var(--cor-texto-secundario); padding: 40px;">Nenhuma avaliação em andamento.</p>`;
@@ -41023,7 +40915,7 @@ window.carregarDesempenhosAndamento = async function() {
     const container = document.getElementById('lista-desempenho-concluido');
     container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando arquivo morto...</p>';
 
-    const unids = window.getUnidadesReaisGestor();
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     
     // 👇 BUSCA BLINDADA: Filtra Aprovados (Bons), Alertas (Ruins) e Concluídos do banco
     const { data, error } = await supabaseClient.from('avaliacoes_desempenho')
