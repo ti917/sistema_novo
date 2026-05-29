@@ -44133,7 +44133,7 @@ window.carregarConfigBHUnidade = function() {
 };
 
 // =========================================================================
-// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (FIFO COM SUPORTE A SALDO NEGATIVO)
+// 🔄 MOTOR CENTRAL: EXTRATO COM FILA FIFO DUPLA (CRÉDITOS E DÍVIDAS VENCIDAS)
 // =========================================================================
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -44167,51 +44167,30 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         hoje.setHours(0,0,0,0);
 
         colabs.forEach(c => {
-            // 🔴 ADICIONE ESTE LOG AQUI PARA RASTREAR NO NAVEGADOR:
-            console.log(`🔍 Analisando ${c.nome}:`, {
-                unidade: c.unidade,
-                horasFiltradasNoBanco: fts.filter(f => f.colaborador_id === c.id).length
-            });
-
             const configUnidade = configsBancoHorasGlobais.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
-            if (!configUnidade.usa_banco) {
-                console.warn(`⚠️ ${c.nome} ocultado porque a unidade desativou o banco.`);
-                return;
-            }
+            if (!configUnidade.usa_banco) return;
 
             const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
-            if (asHorasDesteColab.length === 0) {
-                console.warn(`⚠️ ${c.nome} ocultado porque não tem nenhuma hora APROVADA na unidade filtrada.`);
-                return;
-            }
             
-            let arrayCreditos = []; 
-            let historicoDebitos = []; 
-            let totalMinutosDebito = 0;
-            let sumBaseCred = 0;
-            let historicoCreditos = []; 
+            let listCreditos = [];
+            let listDebitos = [];
 
             asHorasDesteColab.forEach(f => {
                 let txtObs = (f.observacao || '').toUpperCase();
                 let txtMotivo = (f.motivo || '').toUpperCase();
                 
-                // FLUXO DE DÉBITO
+                // Mapeia os Débitos (Abates)
                 if (txtObs.includes('[ABATE_BANCO]')) {
                     const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                     if (matchM) {
                         let mins = parseInt(matchM[1]);
-                        totalMinutosDebito += mins;
                         let obsLimpa = (f.observacao || '').replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
-                        historicoDebitos.push({ data: f.data_inicio, minutos: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
+                        listDebitos.push({ data: f.data_inicio, minutos: mins, minutosOriginais: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
                     }
                 } 
-                // FLUXO DE CRÉDITO
+                // Mapeia os Créditos (Extras)
                 else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
-                    
-                    // 🛡️ ESCUDO ANTI-FANTASMA: Se o registro antigo já tem folga casada no texto, ignora do saldo acumulado
-                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
-                        return; 
-                    }
+                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) return; // Filtro de legados
 
                     if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
                         const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
@@ -44219,9 +44198,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                             matchesLote.forEach(m => {
                                 let dec = parseFloat(m.replace('(','').replace(')',''));
                                 let mins = Math.round(dec * 60);
-                                arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
-                                sumBaseCred += mins;
-                                historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
+                                listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
                             });
                         }
                     } else {
@@ -44229,72 +44206,69 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                         if (matchDec) {
                             let dec = parseFloat(matchDec[1]);
                             let mins = Math.round(dec * 60);
-                            arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
-                            sumBaseCred += mins;
-                            historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
+                            listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
                         }
                     }
                 }
             });
 
-            // FIFO Contábil: Ordena créditos dos mais antigos para os mais novos
-            arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+            // Totais brutos para as colunas gerais
+            let sumBaseCred = listCreditos.reduce((acc, curr) => acc + curr.minutosOriginais, 0);
+            let totalMinutosDebito = listDebitos.reduce((acc, curr) => acc + curr.minutosOriginais, 0);
+            let saldoFinal = sumBaseCred - totalMinutosDebito;
+
+            // Ordena ambas as filas por data ascendente para o cruzamento FIFO
+            listCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+            listDebitos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
             
-            let debitoRestante = totalMinutosDebito;
-            arrayCreditos.forEach(cred => {
-                if (debitoRestante > 0) {
-                    if (cred.minutos <= debitoRestante) {
-                        debitoRestante -= cred.minutos;
-                        cred.minutos = 0; 
-                    } else {
-                        cred.minutos -= debitoRestante;
-                        debitoRestante = 0; 
-                    }
-                }
-            });
-
-            let somaMinutosVencidos = 0;
-            let historicoVencidos = [];
-
-            // Varre o que sobrou na fila para descobrir o que venceu baseado na regra de dias da unidade
-            arrayCreditos.forEach(cred => {
-                if (cred.minutos > 0) {
-                    const dCred = new Date(cred.data + 'T00:00:00');
-                    const diffDias = Math.floor((hoje - dCred) / (1000 * 3600 * 24));
-                    
-                    if (diffDias > configUnidade.dias_validade) {
-                        somaMinutosVencidos += cred.minutos;
-                        historicoVencidos.push({
-                            sigla: cred.sigla,
-                            minutos: cred.minutos,
-                            data: cred.data,
-                            obs: cred.obs
-                        });
-                    }
-                }
-            });
-
-            // 👇 CORREÇÃO MATEMÁTICA: Saldo real pode ser negativo se os débitos superarem os créditos!
-            let saldoFinal = sumBaseCred - totalMinutosDebito; 
-            if (saldoFinal <= 0) {
-                somaMinutosVencidos = 0; 
-                historicoVencidos = [];
+            // ⚔️ A BATALHA FIFO: Cruza créditos contra débitos para anular compensações
+            let cIdx = 0; let dIdx = 0;
+            while (cIdx < listCreditos.length && dIdx < listDebitos.length) {
+                let cred = listCreditos[cIdx];
+                let deb = listDebitos[dIdx];
+                let amnt = Math.min(cred.minutos, deb.minutos);
+                
+                cred.minutos -= amnt;
+                deb.minutos -= amnt;
+                
+                if (cred.minutos === 0) cIdx++;
+                if (deb.minutos === 0) dIdx++;
             }
 
-            if (saldoFinal === 0 && totalMinutosDebito === 0) return; 
+            // Identifica o que sobrou sem pagar e passou de 60 dias
+            let vencidoPositivo = 0;
+            let hVencidosPos = [];
+            listCreditos.forEach(cred => {
+                if (cred.minutos > 0) {
+                    const diff = Math.floor((hoje - new Date(cred.data + 'T00:00:00')) / (1000 * 3600 * 24));
+                    if (diff > configUnidade.dias_validade) {
+                        vencidoPositivo += cred.minutos;
+                        hVencidosPos.push({ sigla: cred.sigla, data: cred.data, minutos: cred.minutos, obs: cred.obs });
+                    }
+                }
+            });
+
+            let vencidoNegativo = 0;
+            let hVencidosNeg = [];
+            listDebitos.forEach(deb => {
+                if (deb.minutos > 0) {
+                    const diff = Math.floor((hoje - new Date(deb.data + 'T00:00:00')) / (1000 * 3600 * 24));
+                    if (diff > configUnidade.dias_validade) {
+                        vencidoNegativo += deb.minutos;
+                        hVencidosNeg.push({ data: deb.data, minutos: deb.minutos, motivo: deb.motivo, obs: deb.obs });
+                    }
+                }
+            });
+
+            if (saldoFinal === 0 && totalMinutosDebito === 0) return;
 
             window.todosSaldosBHAdmin.push({
-                id: c.id,
-                nome: c.nome,
-                unidade: c.unidade,
-                empresa: c.empresa,
-                creditoTotal: sumBaseCred, 
-                debitoTotal: totalMinutosDebito,
-                saldo: saldoFinal,
-                vencido: somaMinutosVencidos,
-                historicoCreditos: historicoCreditos,
-                historicoDebitos: historicoDebitos,
-                historicoVencidos: historicoVencidos 
+                id: c.id, nome: c.nome, unidade: c.unidade, empresa: c.empresa,
+                creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito, saldo: saldoFinal,
+                vencidoPositivo, vencidoNegativo,
+                historicoCreditos: listCreditos.map(x => ({ sigla: x.sigla, horas: x.minutosOriginais/60, data: x.data, obs: x.obs })),
+                historicoDebitos: listDebitos.map(x => ({ data: x.data, minutos: x.minutosOriginais, motivo: x.motivo, obs: x.obs })),
+                hVencidosPos, hVencidosNeg
             });
         });
 
@@ -44307,7 +44281,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
 };
 
 // =========================================================================
-// 🔍 RENDERIZADOR VISUAL DO EXTRATO DO ADMIN (SUPORTE A SALDOS NEGATIVOS)
+// 🔍 RENDERIZADOR DA LISTA DO ADMIN (FOCO EXCLUSIVO NO VALOR DAS VENCIDAS)
 // =========================================================================
 window.filtrarExtratoBHAdminVisual = function() {
     const termo = window.removerAcentos(document.getElementById('busca-extrato-bh-admin').value.toLowerCase());
@@ -44319,11 +44293,6 @@ window.filtrarExtratoBHAdminVisual = function() {
         window.removerAcentos(u.nome.toLowerCase()).includes(termo) || 
         window.removerAcentos(u.unidade.toLowerCase()).includes(termo)
     );
-
-    if (filtrados.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 30px;">Nenhum colaborador encontrado com os filtros atuais.</td></tr>';
-        return;
-    }
 
     const minToHr = (mins) => {
         const isNeg = mins < 0;
@@ -44338,32 +44307,34 @@ window.filtrarExtratoBHAdminVisual = function() {
         let corSaldo = u.saldo >= 0 ? '#28a745' : '#dc3545';
         let bgPilula = u.saldo >= 0 ? 'rgba(40,167,69,0.15)' : 'rgba(220,53,69,0.15)';
         
-        let stringVencido = minToHr(u.vencido);
+        let stringVencido = '<span style="color:#777">00h 00m</span>';
         let areaAcaoHtml = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;">Regular</span>';
 
-        // Se tiver horas vencidas (Positivas acumuladas sem uso)
-        if (u.vencido > 0) {
+        // Caso 1: Empresa deve ao colaborador e estourou os 60 dias (Gera Pagamento)
+        if (u.vencidoPositivo > 0) {
             stringVencido = `
-                <b style="color: #ff4d4d;">⚠️ ${minToHr(u.vencido)}</b>
+                <b style="color: #28a745;">▲ ${minToHr(u.vencidoPositivo)}</b>
                 <br>
-                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem das horas vencidas">
-                    <i class="fa-solid fa-eye"></i> Detalhes
-                </button>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #28a745; color: #28a745; border-radius: 6px;" onclick="abrirModalExtratoBH('${u.id}', 'creditos')" title="Ver origem das horas"><i class="fa-solid fa-eye"></i> Detalhes</button>
             `;
-            
             areaAcaoHtml = `
                 <button class="btn-success" style="background: rgba(40,167,69,0.15); border: 1px solid #28a745; color: #28a745; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
-                    onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencido}, '${u.unidade}', '${u.empresa}')">
+                    onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencidoPositivo}, '${u.unidade}', '${u.empresa}')">
                     <i class="fa-solid fa-money-bill-wave"></i> Liquidar Vencidas
                 </button>
             `;
         }
-
-        // 👇 SE O SALDO ATUAL FOR NEGATIVO, O RH SÓ PODE DESCONTAR A DÍVIDA VENCIDA EM FOLHA 👇
-        if (u.saldo < 0) {
+        // Caso 2: Colaborador deve à empresa e estourou os 60 dias (🌟 ENTRA A SUA REGRA DE DESCONTO DA DÍVIDA VENCIDA)
+        else if (u.vencidoNegativo > 0) {
+            stringVencido = `
+                <b style="color: #ff4d4d;">▼ -${minToHr(u.vencidoNegativo)}</b>
+                <br>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px;" onclick="abrirModalExtratoBH('${u.id}', 'debitos')" title="Ver origem da dívida"><i class="fa-solid fa-eye"></i> Detalhes</button>
+            `;
+            // 🌟 AGORA SIM: Passa rigorosamente o valor de 'u.vencidoNegativo' para o desconto em holerite, ignorando o Saldo Atual!
             areaAcaoHtml = `
                 <button class="btn-success" style="background: rgba(220,53,69,0.15); border: 1px solid #dc3545; color: #ff4d4d; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
-                    onclick="window.abrirModalDescontarDividaVencidaAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${Math.abs(u.saldo)}, '${u.unidade}', '${u.empresa}')">
+                    onclick="window.abrirModalDescontarDividaVencidaAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencidoNegativo}, '${u.unidade}', '${u.empresa}')">
                     <i class="fa-solid fa-hand-holding-dollar"></i> Descontar Dívida Vencida
                 </button>
             `;
@@ -44373,21 +44344,12 @@ window.filtrarExtratoBHAdminVisual = function() {
             <tr style="background: ${bgRow}; border-bottom: 1px solid var(--cor-borda);">
                 <td style="padding: 15px; text-align: left;"><strong style="color:var(--cor-acento); font-size:1rem;">${u.nome}</strong></td>
                 <td style="padding: 15px; text-align: left; color: var(--cor-texto-secundario); font-size:0.85rem;">${u.unidade}<br><small style="opacity:0.7;">${u.empresa}</small></td>
-                
-                <td style="padding: 15px; text-align: center; color: #4fc3f7; vertical-align: middle;">
-                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.creditoTotal)}</span>
-                    ${u.creditoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #4fc3f7; color: #4fc3f7; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" onclick="abrirModalExtratoBH('${u.id}', 'creditos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
-                </td>
-                
-                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle;">
-                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.debitoTotal)}</span>
-                    ${u.debitoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #a6b0cf; color: #a6b0cf; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#a6b0cf'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#a6b0cf'" onclick="abrirModalExtratoBH('${u.id}', 'debitos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
-                </td>
-
+                <td style="padding: 15px; text-align: center; color: #4fc3f7; vertical-align: middle; font-weight: bold;">${minToHr(u.creditoTotal)}</td>
+                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle; font-weight: bold;">${minToHr(u.debitoTotal)}</td>
                 <td style="padding: 15px; text-align: center; font-weight: bold; font-size:1.05rem; color: ${corSaldo}; vertical-align: middle;">
                     <span style="background: ${bgPilula}; padding: 4px 10px; border-radius: 12px; border: 1px solid ${corSaldo}40;">${minToHr(u.saldo)}</span>
                 </td>
-                <td style="padding: 15px; text-align: center; vertical-align: middle;">${stringVencido}</td>
+                <td style="padding: 15px; text-align: center; vertical-align: middle; font-size: 1.05rem;">${stringVencido}</td>
                 <td style="padding: 15px; text-align: right; padding-right: 25px; vertical-align: middle;">${areaAcaoHtml}</td>
             </tr>
         `;
