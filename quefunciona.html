@@ -6688,6 +6688,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <div class="input-wrapper" style="flex: 2; min-width: 250px;">
                 <i class="fa-solid fa-filter"></i>
                 <select id="bi-indicador">
+                    <option value="" selected disabled>Selecione um indicador...</option>
                     <option value="Geral">Visão Geral (Todos os Indicadores)</option>
                     <option value="Ausencias">Ausências e Atestados (Geral)</option>
                     <option value="FA">Apenas Faltas Injustificadas (FA)</option>
@@ -9180,9 +9181,11 @@ window.jaVerificouAvisosLogin = false;
                 const { count: countAdv } = await supabaseClient.from('advertencias').select('*', { count: 'exact', head: true }).eq('status', 'Pendente'); 
                 const { count: countOco } = await supabaseClient.from('ocorrencias_plantao').select('*', { count: 'exact', head: true }).eq('status', 'Pendente');
                 const { count: countAlt } = await supabaseClient.from('solicitacoes_alteracao').select('*', { count: 'exact', head: true }).eq('status', 'Pendente');
+                const { count: countFerias } = await supabaseClient.from('solicitacoes_ferias').select('*', { count: 'exact', head: true }).eq('status', 'Pendente'); // 👈 MÁGICA: Puxa a contagem de férias
 
                 // Separa o que vai pra Central do que tem aba própria
-                const centralPendentes = (countPerfis || 0) + (countAusencias || 0) + (countFT || 0) + (countTrocas || 0) + (countAdv || 0);
+                // 👇 Férias (countFerias) incluídas na somatória da Central com segurança!
+                const centralPendentes = (countPerfis || 0) + (countAusencias || 0) + (countFT || 0) + (countTrocas || 0) + (countAdv || 0) + (countFerias || 0);
                 const ocoPendentes = (countOco || 0);
                 const altPendentes = (countAlt || 0);
 
@@ -9506,6 +9509,11 @@ window.gerarDadosBI = async function() {
     let dFim = document.getElementById('bi-data-fim').value;
     const indicador = document.getElementById('bi-indicador').value;
 
+    // 👇 TRAVA: Se não selecionou nada, avisa e aborta!
+    if (!indicador || indicador === '') {
+        return mostrarAlerta("Por favor, selecione qual indicador você deseja visualizar!", "aviso");
+    }
+
     if(!dIni || !dFim) {
         const hoje = new Date();
         dIni = `${hoje.getFullYear()}-01-01`; 
@@ -9516,7 +9524,9 @@ window.gerarDadosBI = async function() {
 
     if (dIni > dFim) return mostrarAlerta("A data de início não pode ser maior que a final.", "aviso");
 
-    document.getElementById('bi-loading').classList.remove('hidden');
+    const loadingContainer = document.getElementById('bi-loading');
+    loadingContainer.innerHTML = '<i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Minerando dados e construindo gráficos...';
+    loadingContainer.classList.remove('hidden');
     document.getElementById('bi-resultados').classList.add('hidden');
     
     const containerCardsTopo = document.getElementById('bi-cards-container');
@@ -10027,16 +10037,27 @@ window.gerarDadosBI = async function() {
 
         const admissoes = [];
         const rescisoes = [];
-        perfis.forEach(p => {
+        
+        // 🚀 OTIMIZAÇÃO: Respiro de 10ms (Força a CPU a liberar a tela)
+        for (let i = 0; i < perfis.length; i++) {
+            if (i % 100 === 0) await new Promise(r => setTimeout(r, 10)); 
+            
+            const p = perfis[i];
             const adm = p.dados_admissao || {};
             const dtAdm = adm.jornada?.data_inicio || adm.data_inicio;
             if (dtAdm && dtAdm >= dIni && dtAdm <= dFim) admissoes.push({ ...p, data_acao: dtAdm, detalhe: adm.cargo });
 
             const resc = p.dados_rescisao || {};
             if (resc.data_comunicado && resc.data_comunicado >= dIni && resc.data_comunicado <= dFim) rescisoes.push({ ...p, data_acao: resc.data_comunicado, detalhe: resc.tipo });
-        });
+        }
 
-        const ftsMapeadas = fts.map(f => {
+        const ftsMapeadas = [];
+        
+       // 🚀 OTIMIZAÇÃO: Respiro de 10ms (Força a CPU a liberar a tela)
+        for (let i = 0; i < fts.length; i++) {
+            if (i % 50 === 0) await new Promise(r => setTimeout(r, 10)); 
+            
+            const f = fts[i];
             let horas = 0;
             let hText = String(f.quantidade_horas || f.horas || f.horas_extras || 0).replace(',', '.');
             horas = parseFloat(hText);
@@ -10108,9 +10129,8 @@ window.gerarDadosBI = async function() {
             if (f.motivo && f.motivo !== f.forma_pagamento) textoDetalhe += ` - ${f.motivo}`;
             if (f.observacao) textoDetalhe += ` | Obs: ${f.observacao}`;
 
-            return { nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe };
-        });
-
+            ftsMapeadas.push({ nome: f.nome, uni: f.unidade, dt: f.data_inicio, det: textoDetalhe });
+        }
         if (indicador === 'Geral') {
             dadosParaGrafico.push({ label: 'Admissões', cor: '#28a745', dataMap: agruparPorMes(admissoes, 'data_acao') });
             dadosParaGrafico.push({ label: 'Desligamentos', cor: '#dc3545', dataMap: agruparPorMes(rescisoes, 'data_acao') });
@@ -11323,7 +11343,26 @@ async function carregarPerfil(id) {
             if(btn.dataset.target === 'tela-ferias') abrirAbaFerias();
             if(btn.dataset.target === 'tela-ferias-admin') carregarFeriasAdmin();
             if(btn.dataset.target === 'tela-estoque') abrirAbaEstoque();
-            if(btn.dataset.target === 'tela-bi') gerarDadosBI();
+            if(btn.dataset.target === 'tela-bi') {
+                // Preenche as datas automaticamente se estiverem vazias
+                if (!document.getElementById('bi-data-inicio').value) {
+                    const hoje = new Date();
+                    document.getElementById('bi-data-inicio').value = `${hoje.getFullYear()}-01-01`; 
+                    document.getElementById('bi-data-fim').value = `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}-${String(new Date(hoje.getFullYear(), hoje.getMonth()+1, 0).getDate()).padStart(2,'0')}`;
+                }
+                
+                // Esconde os gráficos e mostra a mensagem de espera
+                document.getElementById('bi-resultados').classList.add('hidden');
+                const loadingContainer = document.getElementById('bi-loading');
+                loadingContainer.classList.remove('hidden');
+                loadingContainer.innerHTML = `
+                    <i class="fa-solid fa-chart-pie fa-4x" style="color: #00bcd4; opacity: 0.5; margin-bottom: 20px;"></i>
+                    <h3 style="color: #fff; font-size: 1.5rem;">Pronto para análise!</h3>
+                    <p style="color: var(--cor-texto-secundario); margin-top: 10px; font-size: 1rem;">
+                        Selecione um indicador no filtro acima e clique em <b>Gerar Análise</b>.
+                    </p>
+                `;
+            }
             if(btn.dataset.target === 'tela-whatsapp') prepararAbaWhatsApp(); 
             if(btn.dataset.target === 'tela-captacao') carregarBancoCurriculos();
             if(btn.dataset.target === 'tela-downloads') abrirAbaDownloads();
