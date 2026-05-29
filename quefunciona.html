@@ -9642,12 +9642,13 @@ window.gerarDadosBI = async function() {
                         const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                         if (matchM) totalMinutosDebito += parseInt(matchM[1]);
                     } 
-                    else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
-                        
-                        // 🛡️ ESCUDO ANTI-FANTASMA: Ignora o espelho de gráfico para regras antigas resolvidas
-                        if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
-                            return;
-                        }
+                    // Dentro de gerarDadosBI, localize o loop das fts e troque a trava:
+                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                    
+                    // 🛡️ REFINAMENTO ANTI-FANTASMA NO BI
+                    if (txtObs.includes('TROCAR POR DESCANSO')) {
+                        return;
+                    }
 
                         if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
                             const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
@@ -22115,15 +22116,33 @@ window.carregarPainelSaldosGestor = async function() {
                 // FLUXO DE CRÉDITO (SINCRONIZADO: Checa motivo E observação sem quebrar)
                 else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
                     
-                    // 🛡️ ESCUDO ANTI-FANTASMA: Corta lançamentos legados com compensação em texto
-                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
+                    // 🛡️ ESCUDO ANTI-FANTASMA ALINHADO COM O ADMIN
+                    if (txtObs.includes('TROCAR POR DESCANSO')) {
                         return; // Age como continue no loop forEach
                     }
 
-                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
-                        if (matchesLote) {
-                            matchesLote.forEach(m => minutosCredito += parseFloat(m.replace('(','').replace(')','')) * 60);
+                   if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
+                        // 👇 MÁGICA: Nova leitura capaz de converter (10:00 às 12:00) em minutos na hora! 👇
+                        const regexHorarios = /\((\d{2}:\d{2})\s*(?:às|as)\s*(\d{2}:\d{2})\)/gi;
+                        let matchHorario;
+                        let achouHorario = false;
+
+                        while ((matchHorario = regexHorarios.exec(txtObs)) !== null) {
+                            achouHorario = true;
+                            const [hE, mE] = matchHorario[1].split(':').map(Number);
+                            const [hS, mS] = matchHorario[2].split(':').map(Number);
+                            let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
+                            if (diff < 0) diff += 1440;
+                            if (diff > 360) diff -= 60; // Desconto de almoço automático se > 6h
+                            minutosCredito += diff;
+                        }
+
+                        // Fallback pro formato antigo decimal (ex: 2.50) caso existam registros velhos
+                        if (!achouHorario) {
+                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                            if (matchesLote) {
+                                matchesLote.forEach(m => minutosCredito += parseFloat(m.replace('(','').replace(')','')) * 60);
+                            }
                         }
                     } else {
                         const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
@@ -22191,50 +22210,200 @@ window.carregarPainelSaldosGestor = async function() {
 };
 
 // =========================================================================
-// 3. NOVO MODAL PARA PAGAR HORAS NEGATIVAS (LIQUIDAÇÃO DE DÍVIDA)
+// 🔄 GESTOR: MODAL INTELIGENTE PARA COMPENSAÇÃO DE HORAS NEGATIVAS (DÍVIDAS)
 // =========================================================================
-window.abrirModalPagarHorasNegativas = function(idColab, nome, minutosNegativos, unidade, empresa) {
+window.abrirModalPagarHorasNegativas = async function(idColab, nome, minutosNegativos, unidade, empresa) {
+    // Busca a ficha do colaborador para ler a jornada atual dele e calcular o teto do plantão
+    const { data: colab, error } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    if (error || !colab) return mostrarAlerta("Erro ao ler jornada do colaborador.", "erro");
+
+    const hojeIsoStr = new Date().toISOString().split('T')[0];
+    // Descobre quantas horas dura o plantão padrão dele (ex: 12.0 para 12x36 ou 8.8 para 44h)
+    const horasPlantaoBase = window.obterHorasJornadaAtual(colab.dados_admissao, hojeIsoStr);
+    const minutosPlantaoBase = Math.round(horasPlantaoBase * 60);
+
     const hrs = Math.floor(minutosNegativos / 60);
     const mins = minutosNegativos % 60;
-    const stringExibicao = `${hrs}h ${String(mins).padStart(2,'0')}m`;
+    const stringExibicaoDívida = `${hrs}h ${String(mins).padStart(2,'0')}m`;
+
+    // 🧠 A INTELIGÊNCIA: Se a dívida for menor que o plantão base, bloqueia o "Plantão Inteiro"
+    const ehDividaParcial = minutosNegativos < minutosPlantaoBase;
+
+    let opcoesCompensacaoHtml = '';
+    if (ehDividaParcial) {
+        opcoesCompensacaoHtml = `
+            <option value="Entrar Mais Cedo">⏰ Entrar Mais Cedo (Compensação Parcial)</option>
+            <option value="Sair Mais Tarde">⏰ Sair Mais Tarde (Compensação Parcial)</option>
+        `;
+    } else {
+        opcoesCompensacaoHtml = `
+            <option value="Dia Completo">📅 Trabalhar Plantão Inteiro (Quitação Total/Parcial)</option>
+            <option value="Entrar Mais Cedo">⏰ Entrar Mais Cedo (Compensação Parcial)</option>
+            <option value="Sair Mais Tarde">⏰ Sair Mais Tarde (Compensação Parcial)</option>
+        `;
+    }
 
     const modalHtml = `
     <div id="modal-pagar-negativo" class="modal-arquivo-overlay" style="z-index: 100025; display: flex; justify-content: center; align-items: center; padding: 20px;">
-        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid #dc3545; position: relative;">
+        <div class="glass-card" style="width: 100%; max-width: 480px; border: 1px solid #dc3545; position: relative;">
             <button onclick="document.getElementById('modal-pagar-negativo').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
 
-            <h3 style="color: #dc3545; margin-bottom: 5px;"><i class="fa-solid fa-hand-holding-dollar"></i> Quitar Horas Negativas</h3>
+            <h3 style="color: #dc3545; margin-bottom: 5px;"><i class="fa-solid fa-hand-holding-dollar"></i> Acordo de Compensação (-)</h3>
             <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 20px;">Colaborador: <b style="color: #fff;">${nome}</b></p>
 
             <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; margin-bottom: 20px; text-align: center;">
-                <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); text-transform: uppercase; font-weight: bold;">O colaborador deve ao Banco</span><br>
-                <strong style="font-size: 1.8rem; color: #dc3545;">- ${stringExibicao}</strong>
+                <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); text-transform: uppercase; font-weight: bold;">Total Devido ao Banco</span><br>
+                <strong style="font-size: 1.8rem; color: #dc3545;">- ${stringExibicaoDívida}</strong>
+                <small style="display:block; color: var(--cor-texto-secundario); margin-top:5px;">Duração do seu Plantão Base: ${Math.floor(horasPlantaoBase)}h ${Math.round((horasPlantaoBase%1)*60)}m</small>
             </div>
 
             <form id="form-pagar-negativo">
                 <div class="form-group">
-                    <label>Como essas horas serão quitadas? <span style="color: var(--cor-perigo);">*</span></label>
-                    <select id="pagar-neg-metodo" required style="width: 100%; padding: 12px; border-radius: 8px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);">
-                        <option value="Desconto em Folha de Pagamento">Desconto em Folha de Pagamento</option>
-                        <option value="Trabalhou a mais para compensar a dívida">Trabalhou a mais para compensar a dívida</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Justificativa / Observação <span style="color: var(--cor-perigo);">*</span></label>
-                    <textarea id="pagar-neg-obs" required placeholder="Explique os detalhes da quitação para o RH..." style="width: 100%; padding: 12px; border-radius: 8px; min-height: 80px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);"></textarea>
+                    <label>Data Agendada para o Trabalho <span style="color: var(--cor-perigo);">*</span></label>
+                    <input type="date" id="pagar-neg-data" required onclick="this.showPicker()" style="width: 100%;">
                 </div>
 
-                <button type="button" class="btn-success" style="width: 100%; height: 50px; background: #dc3545; color: #fff; border: none; font-weight: bold; margin-top: 10px;" 
-                    onclick="confirmarPagamentoNegativo('${idColab}', '${nome.replace(/'/g, "\\'")}', ${minutosNegativos}, '${unidade}', '${empresa}')">
-                    <i class="fa-solid fa-paper-plane"></i> Enviar Solicitação para o RH
+                <div class="form-group">
+                    <label>Como ele vai pagar essa dívida? <span style="color: var(--cor-perigo);">*</span></label>
+                    <select id="pagar-neg-metodo" required onchange="window.ajustarCamposHorasNegativas(${minutosNegativos}, ${minutosPlantaoBase})" style="width: 100%; padding: 12px; border-radius: 8px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);">
+                        ${opcoesCompensacaoHtml}
+                    </select>
+                </div>
+
+                <div class="form-group hidden" id="box-pagar-neg-horas">
+                    <label id="label-pagar-neg-horas">Quantidade de Horas a Trabalhar (Ex: 02:00) <span style="color: var(--cor-perigo);">*</span></label>
+                    <input type="text" id="pagar-neg-horas-valor" placeholder="00:00" style="text-align: center; font-weight: bold; color: #ff9800; font-size: 1.1rem;">
+                </div>
+
+                <div class="form-group">
+                    <label>Justificativa / Observação do Acordo <span style="color: var(--cor-perigo);">*</span></label>
+                    <textarea id="pagar-neg-obs" required placeholder="Ex: Colaborador aceitou vir 3 horas mais cedo no plantão diurno para zerar o saldo devedor..." style="width: 100%; padding: 12px; border-radius: 8px; min-height: 70px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);"></textarea>
+                </div>
+
+                <button type="button" class="btn-success" style="width: 100%; height: 50px; background: #dc3545; color: #fff; border: none; font-weight: bold; margin-top: 15px;" 
+                    onclick="window.confirmarCompensacaoDivida('${idColab}', '${nome}', ${minutosNegativos}, '${unidade}', '${empresa}')">
+                    <i class="fa-solid fa-paper-plane"></i> Agendar Trabalho na Escala
                 </button>
             </form>
         </div>
     </div>`;
 
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+    window.ajustarCamposHorasNegativas(minutosNegativos, minutosPlantaoBase);
 };
 
+// Controla se mostra o input de horas digitável ou não
+window.ajustarCamposHorasNegativas = function(minutosNegativos, minutosPlantaoBase) {
+    const metodo = document.getElementById('pagar-neg-metodo').value;
+    const boxHoras = document.getElementById('box-pagar-neg-horas');
+    const inputHoras = document.getElementById('pagar-neg-horas-valor');
+
+    if (metodo === 'Dia Completo') {
+        boxHoras.classList.add('hidden');
+        inputHoras.required = false;
+        inputHoras.value = '';
+    } else {
+        boxHoras.classList.remove('hidden');
+        inputHoras.required = true;
+        
+        // Se a dívida for menor que um plantão, já preenche o campo com o saldo exato que ele deve
+        if (minutosNegativos < minutosPlantaoBase) {
+            const h = Math.floor(minutosNegativos / 60);
+            const m = minutosNegativos % 60;
+            inputHoras.value = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        }
+    }
+};
+
+// =========================================================================
+// 🚀 SALVAMENTO E CARIMBO DO "h-" NA ESCALA (VIA MARCADOR [ABATE_BANCO])
+// =========================================================================
+window.confirmarCompensacaoDivida = async function(idColab, nome, minutosNegativos, unidade, empresa) {
+    const form = document.getElementById('form-pagar-negativo');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+
+    const dataTrabalho = document.getElementById('pagar-neg-data').value;
+    const metodo = document.getElementById('pagar-neg-metodo').value;
+    const obs = document.getElementById('pagar-neg-obs').value.trim();
+    const btn = document.querySelector('#modal-pagar-negativo .btn-success');
+
+    let totalMinutosCompensar = 0;
+
+    if (metodo === 'Dia Completo') {
+        // Se for dia completo, o sistema vai buscar dinamicamente o tamanho do plantão dele naquela data
+        const { data } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let hrsPlantao = window.obterHorasJornadaAtual(data.dados_admissao, dataTrabalho);
+        totalMinutosCompensar = Math.round(hrsPlantao * 60);
+    } else {
+        let val = document.getElementById('pagar-neg-horas-valor').value.trim().replace(',','.');
+        if (val.includes(':')) {
+            const [h, m] = val.split(':').map(Number);
+            totalMinutosCompensar = ((h || 0) * 60) + (m || 0);
+        } else {
+            totalMinutosCompensar = Math.round(parseFloat(val) * 60);
+        }
+    }
+
+    if (isNaN(totalMinutosCompensar) || totalMinutosCompensar <= 0) {
+        return mostrarAlerta("Informe uma quantidade de horas válida!", "aviso");
+    }
+
+    // Trava de segurança: Não deixa o gestor lançar mais horas parciais do que a própria dívida real
+    if (metodo !== 'Dia Completo' && totalMinutosCompensar > minutosNegativos) {
+        return mostrarAlerta("Operação bloqueada! Você não pode agendar mais horas de compensação parcial do que o total da dívida atual do colaborador.", "erro");
+    }
+
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Agendando...';
+    btn.disabled = true;
+
+    try {
+        // 🛡️ Anti-Conflito de Escala
+        let conflito = await window.checarConflitoGlobal(idColab, dataTrabalho, dataTrabalho);
+        if (conflito) {
+            btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Agendar Trabalho na Escala';
+            return mostrarAlerta(`Bloqueado: O colaborador já possui <b>${conflito}</b> no dia ${formatarDataBR(dataTrabalho)}.`, "erro");
+        }
+
+        // 🎯 A MÁGICA DO CARIMBO: Escrevemos a tag [ABATE_BANCO] com o valor dos minutos.
+        // Como o tipo de abate NÃO É "Dia Completo" (é o nome do método de trabalho), o motor da escala
+        // vai manter o dia de trabalho normal (D ou N) e vai acender a tag "h-" perfeitamente!
+        const objBanco = {
+            colaborador_id: idColab,
+            nome: nome,
+            unidade: unidade,
+            sigla: 'FP', // Alinha com o leitor do calendário
+            data_inicio: dataTrabalho,
+            data_fim: dataTrabalho,
+            motivo: `Folga do Banco: ${metodo}`, // Salva o tipo (Entrar mais cedo/Sair mais tarde)
+            observacao: `[ABATE_BANCO] DEDUÇÃO: ${totalMinutosCompensar} MINUTOS. Acordo de quitação de saldo devedor. Justificativa: ${obs}`,
+            status: 'Pendente', // Vai para a central do Admin aprovar
+            criado_por: usuarioAtual.nome
+        };
+
+        const { data: novaFP, error } = await supabaseClient.from('horas_extras_ft').insert([objBanco]).select('id').single();
+        if (error) throw error;
+
+        // Notifica o Admin
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: nome, unidade: unidade, lida: false,
+            tipo: 'FT_Admin', referencia_id: novaFP.id
+        }]);
+
+        mostrarAlerta("Acordo de compensação enviado com sucesso! O carimbo h- aparecerá na escala assim que o RH homologar.", "sucesso");
+        document.getElementById('modal-pagar-negativo').remove();
+        
+        // Recarrega a listinha
+        window.carregarPainelSaldosGestor();
+
+    } catch (e) {
+        mostrarAlerta("Erro ao salvar o acordo: " + e.message, "erro");
+        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Agendar Trabalho na Escala';
+    }
+};
+      
 window.confirmarPagamentoNegativo = async function(idColab, nome, minutosNegativos, unidade, empresa) {
     const metodo = document.getElementById('pagar-neg-metodo').value;
     const obs = document.getElementById('pagar-neg-obs').value.trim();
@@ -22516,15 +22685,21 @@ window.alternarCamposFT = function() {
     const bHPlus = document.getElementById('bloco-opcoes-hplus');
     const bHE = document.getElementById('bloco-opcoes-he'); 
 
-    // Limpa a obrigatoriedade antiga
+    // 👇 MÁGICA ANTI-ERRO: Tira a obrigatoriedade de todos os campos ocultos 👇
     ['he-horario-ent', 'he-horario-sai', 'he-qtd-horas'].forEach(id => {
         const el = document.getElementById(id); if (el) el.required = false;
     });
+    
+    if (bHPlus) {
+        bHPlus.querySelectorAll('input, select').forEach(el => el.required = false);
+    }
 
-    // Se for H+, a gente ESCONDE a data global, porque ele tem a data dentro do bloco agora!
+    // Se for H+, esconde a data global e devolve o 'required' pros campos dinâmicos dele
     if (tipo === 'H+') {
         document.getElementById('box-ft-data').classList.add('hidden');
         document.getElementById('ft-data').required = false;
+        
+        if (bHPlus) bHPlus.querySelectorAll('.q-data, .f-data, .f-tipo').forEach(el => el.required = true);
     } else {
         document.getElementById('box-ft-data').classList.remove('hidden');
         document.getElementById('ft-data').required = true;
@@ -22578,7 +22753,7 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
         });
 
         const comp = document.getElementById('hplus-compensacao-gestor').value;
-        let txtComp = 'Pagamento em Holerite';
+        let txtComp = comp === 'Banco' ? 'Acumular no Banco de Horas' : 'Pagamento em Holerite';
 
         if (comp === 'Folga') {
             const linhasF = document.querySelectorAll('.linha-folga-hplus-gestor');
@@ -22667,7 +22842,7 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
                 infoDescanso = ` | COMPENSAÇÃO (Banco): ${dias.join(', ')}`;
             }
             objBanco.data_fim = dataFimHE;
-            objBanco.observacao = `${document.getElementById('he-qtd-horas').value}. ${tipoComp === 'Descanso' ? 'BANCO' : 'PAGAR'}. ${motivoText}${infoDescanso}`;
+            objBanco.observacao = `${document.getElementById('he-qtd-horas').value}. ${(tipoComp === 'Banco' || tipoComp === 'Descanso') ? 'BANCO' : 'PAGAR'}. ${motivoText}${infoDescanso}`;
         }
     }
 
@@ -22992,8 +23167,9 @@ window.reprovarERemoverFT = async function(idFT) {
             </div>
 
             <div class="form-group">
-                <label>Texto Livre (Motivo, Horas e Detalhes) <span style="color: var(--cor-perigo);">*</span></label>
-                <textarea id="central-ft-obs" required style="width: 100%; padding: 12px; border-radius: 8px; background-color: var(--cor-fundo-input); color: #fff; min-height: 80px; border: 1px solid var(--cor-borda);">${obsLimpa}</textarea>
+                <label><i class="fa-solid fa-lock" style="color: var(--cor-texto-secundario);"></i> Texto Livre (Motivo, Horas e Detalhes)</label>
+                <small style="display:block; color:var(--cor-texto-secundario); margin-bottom:5px;">O relato do gestor e o registro de horas estão <b>bloqueados</b> para evitar a quebra do cálculo automático no banco de horas.</small>
+                <textarea id="analise-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 100px; border: 1px dashed var(--cor-borda); cursor: not-allowed; outline: none;">${obsLimpa}</textarea>
             </div>
         `;
     }
@@ -23190,6 +23366,9 @@ window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeCola
     if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
 };
 
+// =========================================================================
+// 🕵️ ADMIN: MODAL DE ANÁLISE CORRIGIDO (EXIBE DATA DA COMPENSAÇÃO NO ABATE)
+// =========================================================================
 window.abrirModalAnalisarFTAdmin = function(idFT) {
     const ft = todasFTsAdmin.find(f => f.id === idFT);
     if (!ft) return;
@@ -23215,13 +23394,12 @@ window.abrirModalAnalisarFTAdmin = function(idFT) {
             minutosAbate = parseInt(matchM[1]);
             let h = Math.floor(minutosAbate / 60);
             let m = Math.round(minutosAbate % 60);
-            stringAbateFormatada = `${h}h ${String(m).padStart(2,'0')}m`; // Ex: 5h 00m
+            stringAbateFormatada = `${h}h ${String(m).padStart(2,'0')}m`; 
         }
         
-        // Limpa a string de máquina para deixar só o que o gestor justificou no campo de texto
+        // Limpa a string de máquina para deixar só o que o gestor justificou
         obsLimpa = obsLimpa.replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
         
-        // Pega o tipo exato que o gestor selecionou (Sair mais cedo, Entrar mais tarde, etc)
         tipoFolgaGestor = (ft.motivo || '').replace('Folga do Banco: ', '').trim();
         if (!tipoFolgaGestor || tipoFolgaGestor === 'FP') tipoFolgaGestor = 'Abate de Banco de Horas';
 
@@ -23234,37 +23412,49 @@ window.abrirModalAnalisarFTAdmin = function(idFT) {
     let formConteudoHtml = '';
 
     // ==========================================
-    // SE FOR ABATE: LAYOUT VERMELHO SIMPLIFICADO
+    // SE FOR ABATE: LAYOUT VERMELHO EM 3 COLUNAS (CORRIGIDO)
     // ==========================================
     if (isAbate) {
         formConteudoHtml = `
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
                 <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
                     <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Tipo de Desconto</span>
-                    <b style="color: #fff; font-size: 1.1rem; margin-top: 4px;">${tipoFolgaGestor}</b>
+                    <b style="color: #fff; font-size: 1.05rem; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${tipoFolgaGestor}">${tipoFolgaGestor}</b>
                 </div>
+                
+                <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
+                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Data da Compensação</span>
+                    <b style="color: #fff; font-size: 1.05rem; margin-top: 4px;"><i class="fa-regular fa-calendar"></i> ${formatarDataBR(ft.data_inicio)}</b>
+                </div>
+
                 <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
                     <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Tempo Deduzido</span>
-                    <b style="color: #dc3545; font-size: 1.3rem; margin-top: 4px;"><i class="fa-solid fa-clock"></i> - ${stringAbateFormatada}</b>
+                    <b style="color: #chart-line; color: #ff4d4d; font-size: 1.1rem; margin-top: 4px;"><i class="fa-solid fa-clock"></i> - ${stringAbateFormatada}</b>
                 </div>
             </div>
             
-            <input type="hidden" id="analise-ft-sigla" value="FP">
             <input type="hidden" id="analise-ft-dini" value="${ft.data_inicio}">
             <input type="hidden" id="analise-ft-dfim" value="${ft.data_inicio}">
+            
+            <input type="hidden" id="analise-ft-sigla" value="FP">
             <input type="hidden" id="analise-ft-minutos-abate" value="${minutosAbate}">
             <input type="hidden" id="analise-ft-motivo-original" value="${ft.motivo}">
 
             <div class="form-group">
-                <label style="color: #dc3545;"><i class="fa-solid fa-comment-dots"></i> Relato / Motivo do Gestor <span style="color: var(--cor-perigo);">*</span></label>
-                <textarea id="analise-ft-obs" required style="width: 100%; padding: 12px; border-radius: 8px; background-color: var(--cor-fundo-input); color: #fff; min-height: 80px; border: 1px solid var(--cor-borda);">${obsLimpa}</textarea>
+                <label style="color: #dc3545;"><i class="fa-solid fa-lock"></i> Relato / Motivo do Gestor</label>
+                <textarea id="analise-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 80px; border: 1px dashed #dc3545; cursor: not-allowed;">${obsLimpa}</textarea>
             </div>
         `;
     } 
     // ==========================================
-    // SE FOR HORA EXTRA / FT: LAYOUT AZUL COM DESTINO CONTÁBIL
+    // SE FOR HORA EXTRA / FT: LAYOUT AZUL PADRÃO
     // ==========================================
     else {
+        let dataTexto = `<b style="font-size: 1.1rem; color: #4fc3f7;">${formatarDataBR(ft.data_inicio)}</b>`;
+        if (ft.sigla === 'FT' && ft.data_inicio !== ft.data_fim) {
+            dataTexto = `Data FT: <b style="color: #4fc3f7;">${formatarDataBR(ft.data_inicio)}</b> <br> Folga Prog.: <b style="color: #28a745;">${formatarDataBR(ft.data_fim)}</b>`;
+        }
+
         formConteudoHtml = `
             <div class="form-row-3">
                 <div class="form-group">
@@ -23285,7 +23475,7 @@ window.abrirModalAnalisarFTAdmin = function(idFT) {
                 </div>
             </div>
 
-            <div class="form-group" style="background: rgba(139, 92, 246, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #8b5cf6;">
+            <div class="form-group" style="background: rgba(139, 92, 246, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #8b5cf6; margin-bottom: 15px;">
                 <label style="color: #c4b5fd; font-weight: bold;"><i class="fa-solid fa-scale-balanced"></i> Destino Contábil do RH</label>
                 <select id="analise-ft-destino" required style="margin-top: 8px; font-weight: bold; color: #fff;">
                     <option value="Banco" ${destinoAtual === 'Banco' ? 'selected' : ''}>🟢 Enviar para o Banco de Horas (Acúmulo)</option>
@@ -23294,9 +23484,9 @@ window.abrirModalAnalisarFTAdmin = function(idFT) {
             </div>
 
             <div class="form-group">
-                <label>Texto Livre (Motivo, Horas e Detalhes) <span style="color: var(--cor-perigo);">*</span></label>
-                <small style="display:block; color:var(--cor-texto-secundario); margin-bottom:5px;">Ajuste as horas decimais (ex: 2.50) e o motivo do gestor livremente abaixo. Este texto será salvo no extrato:</small>
-                <textarea id="analise-ft-obs" required style="width: 100%; padding: 12px; border-radius: 8px; background-color: var(--cor-fundo-input); color: #fff; min-height: 100px; border: 1px solid var(--cor-borda);">${obsLimpa}</textarea>
+                <label><i class="fa-solid fa-lock" style="color: var(--cor-texto-secundario);"></i> Texto Livre (Motivo, Horas e Detalhes)</label>
+                <small style="display:block; color:var(--cor-texto-secundario); margin-bottom:5px;">O relato do gestor e o registro de horas estão <b>bloqueados</b> para evitar a quebra do cálculo automático no banco de horas.</small>
+                <textarea id="analise-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 100px; border: 1px dashed var(--cor-borda); cursor: not-allowed;">${obsLimpa}</textarea>
             </div>
         `;
     }
@@ -23304,11 +23494,13 @@ window.abrirModalAnalisarFTAdmin = function(idFT) {
     const modalHtml = `
     <div id="modal-analise-ft" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
         <div class="glass-card" style="width: 100%; max-width: 700px; border: 1px solid ${isAbate ? '#dc3545' : '#4fc3f7'}; max-height: 90vh; overflow-y: auto; position: relative;">
-            <button type="button" onclick="document.getElementById('modal-analise-ft').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
-            
-            <h3 style="color: ${isAbate ? '#dc3545' : '#4fc3f7'}; margin-bottom: 5px;"><i class="fa-solid ${isAbate ? 'fa-minus-circle' : 'fa-business-time'}"></i> ${isPendente ? 'Analisar e Aprovar Lançamento' : 'Editar Registro na Escala'}</h3>
+            <button type="button" onclick="document.getElementById('modal-analise-ft').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index: 10;"><i class="fa-solid fa-xmark"></i></button>
+
+            <h3 style="color: ${isAbate ? '#dc3545' : '#4fc3f7'}; margin-bottom: 20px; padding-right: 20px;">
+                <i class="fa-solid ${isAbate ? 'fa-minus-circle' : 'fa-business-time'}"></i> ${isPendente ? 'Analisar e Aprovar Lançamento' : 'Editar Registro na Escala'}
+            </h3>
             <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Colaborador: <b style="color: #fff;">${ft.nome}</b> (${ft.unidade})</p>
-            
+
             <form id="form-analise-ft-admin">
                 ${formConteudoHtml}
 
@@ -35762,13 +35954,20 @@ window.alternarCamposFTAdmin = function() {
     const bHPlus = document.getElementById('bloco-opcoes-hplus-admin');
     const bHE = document.getElementById('bloco-opcoes-he-admin'); 
 
+    // 👇 MÁGICA ANTI-ERRO: Tira a obrigatoriedade de todos os campos ocultos 👇
     ['he-admin-horario-ent', 'he-admin-horario-sai', 'he-admin-qtd-horas'].forEach(id => {
         const el = document.getElementById(id); if (el) el.required = false;
     });
+    
+    if (bHPlus) {
+        bHPlus.querySelectorAll('input, select').forEach(el => el.required = false);
+    }
 
     if (tipo === 'H+') {
         document.getElementById('box-ft-admin-data').classList.add('hidden');
         document.getElementById('ft-admin-data').required = false;
+        
+        if (bHPlus) bHPlus.querySelectorAll('.q-data, .f-data, .f-tipo').forEach(el => el.required = true);
     } else {
         document.getElementById('box-ft-admin-data').classList.remove('hidden');
         document.getElementById('ft-admin-data').required = true;
@@ -35789,7 +35988,7 @@ window.alternarCamposFTAdmin = function() {
         bFT.classList.add('hidden'); bHPlus.classList.add('hidden'); bHE.classList.add('hidden');
     }
 };
-
+      
 document.getElementById('he-admin-horario-ent')?.addEventListener('change', () => calcHEAdmin());
 document.getElementById('he-admin-horario-sai')?.addEventListener('change', () => calcHEAdmin());
       
@@ -35824,8 +36023,8 @@ document.getElementById('form-ft-admin')?.addEventListener('submit', async (e) =
             }
         });
 
-        const comp = document.getElementById('hplus-compensacao-admin').value;
-        let txtComp = 'Pagamento em Holerite';
+       const comp = document.getElementById('hplus-compensacao-admin').value;
+        let txtComp = comp === 'Banco' ? 'Acumular no Banco de Horas' : 'Pagamento em Holerite';
 
         if (comp === 'Folga') {
             const linhasF = document.querySelectorAll('.linha-folga-hplus-admin');
@@ -35914,7 +36113,7 @@ document.getElementById('form-ft-admin')?.addEventListener('submit', async (e) =
                 infoDescanso = ` | COMPENSAÇÃO (Banco): ${dias.join(', ')}`;
             }
             objBanco.data_fim = dataFimHE;
-            objBanco.observacao = `${document.getElementById('he-admin-qtd-horas').value}. ${tipoComp === 'Descanso' ? 'BANCO' : 'PAGAR'}. ${motivoText}${infoDescanso}`;
+            objBanco.observacao = `${document.getElementById('he-admin-qtd-horas').value}. ${(tipoComp === 'Banco' || tipoComp === 'Descanso') ? 'BANCO' : 'PAGAR'}. ${motivoText}${infoDescanso}`;
         }
     }
 
@@ -43967,7 +44166,7 @@ window.carregarConfigBHUnidade = function() {
 };
 
 // =========================================================================
-// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (FIFO COM SUPORTE A SALDO NEGATIVO)
+// 🔄 MOTOR CENTRAL: EXTRATO COM FILA FIFO (CORRIGIDO: FILTRO ANTI-FANTASMA REFINADO)
 // =========================================================================
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -44001,29 +44200,13 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         hoje.setHours(0,0,0,0);
 
         colabs.forEach(c => {
-            // 🔴 ADICIONE ESTE LOG AQUI PARA RASTREAR NO NAVEGADOR:
-            console.log(`🔍 Analisando ${c.nome}:`, {
-                unidade: c.unidade,
-                horasFiltradasNoBanco: fts.filter(f => f.colaborador_id === c.id).length
-            });
-
             const configUnidade = configsBancoHorasGlobais.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
-            if (!configUnidade.usa_banco) {
-                console.warn(`⚠️ ${c.nome} ocultado porque a unidade desativou o banco.`);
-                return;
-            }
+            if (!configUnidade.usa_banco) return;
 
             const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
-            if (asHorasDesteColab.length === 0) {
-                console.warn(`⚠️ ${c.nome} ocultado porque não tem nenhuma hora APROVADA na unidade filtrada.`);
-                return;
-            }
             
-            let arrayCreditos = []; 
-            let historicoDebitos = []; 
-            let totalMinutosDebito = 0;
-            let sumBaseCred = 0;
-            let historicoCreditos = []; 
+            let listCreditos = [];
+            let listDebitos = [];
 
             asHorasDesteColab.forEach(f => {
                 let txtObs = (f.observacao || '').toUpperCase();
@@ -44034,101 +44217,110 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                     if (matchM) {
                         let mins = parseInt(matchM[1]);
-                        totalMinutosDebito += mins;
                         let obsLimpa = (f.observacao || '').replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
-                        historicoDebitos.push({ data: f.data_inicio, minutos: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
+                        listDebitos.push({ data: f.data_inicio, minutos: mins, minutosOriginais: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
                     }
                 } 
                 // FLUXO DE CRÉDITO
                 else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
                     
-                    // 🛡️ ESCUDO ANTI-FANTASMA: Se o registro antigo já tem folga casada no texto, ignora do saldo acumulado
-                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
+                    // 🛡️ REFINAMENTO ANTI-FANTASMA: Alvo alterado para ignorar apenas strings legadas reais
+                    if (txtObs.includes('TROCAR POR DESCANSO')) {
                         return; 
                     }
 
                     if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
-                        if (matchesLote) {
-                            matchesLote.forEach(m => {
-                                let dec = parseFloat(m.replace('(','').replace(')',''));
-                                let mins = Math.round(dec * 60);
-                                arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
-                                sumBaseCred += mins;
-                                historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
-                            });
+                        // 👇 MÁGICA: Nova leitura capaz de converter (10:00 às 12:00) em minutos para o Admin! 👇
+                        const regexHorarios = /\((\d{2}:\d{2})\s*(?:às|as)\s*(\d{2}:\d{2})\)/gi;
+                        let matchHorario;
+                        let achouHorario = false;
+
+                        while ((matchHorario = regexHorarios.exec(txtObs)) !== null) {
+                            achouHorario = true;
+                            const [hE, mE] = matchHorario[1].split(':').map(Number);
+                            const [hS, mS] = matchHorario[2].split(':').map(Number);
+                            let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
+                            if (diff < 0) diff += 1440;
+                            if (diff > 360) diff -= 60; // Desconto de almoço automático se > 6h
+                            
+                            listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: diff, minutosOriginais: diff, obs: f.observacao });
+                        }
+
+                        // Fallback pro formato antigo
+                        if (!achouHorario) {
+                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                            if (matchesLote) {
+                                matchesLote.forEach(m => {
+                                    let dec = parseFloat(m.replace('(','').replace(')',''));
+                                    let mins = Math.round(dec * 60);
+                                    listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
+                                });
+                            }
                         }
                     } else {
                         const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                         if (matchDec) {
                             let dec = parseFloat(matchDec[1]);
                             let mins = Math.round(dec * 60);
-                            arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
-                            sumBaseCred += mins;
-                            historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
+                            listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
                         }
                     }
                 }
             });
 
-            // FIFO Contábil: Ordena créditos dos mais antigos para os mais novos
-            arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+            let sumBaseCred = listCreditos.reduce((acc, curr) => acc + curr.minutosOriginais, 0);
+            let totalMinutosDebito = listDebitos.reduce((acc, curr) => acc + curr.minutosOriginais, 0);
+            let saldoFinal = sumBaseCred - totalMinutosDebito;
+
+            listCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
+            listDebitos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
             
-            let debitoRestante = totalMinutosDebito;
-            arrayCreditos.forEach(cred => {
-                if (debitoRestante > 0) {
-                    if (cred.minutos <= debitoRestante) {
-                        debitoRestante -= cred.minutos;
-                        cred.minutos = 0; 
-                    } else {
-                        cred.minutos -= debitoRestante;
-                        debitoRestante = 0; 
-                    }
-                }
-            });
-
-            let somaMinutosVencidos = 0;
-            let historicoVencidos = [];
-
-            // Varre o que sobrou na fila para descobrir o que venceu baseado na regra de dias da unidade
-            arrayCreditos.forEach(cred => {
-                if (cred.minutos > 0) {
-                    const dCred = new Date(cred.data + 'T00:00:00');
-                    const diffDias = Math.floor((hoje - dCred) / (1000 * 3600 * 24));
-                    
-                    if (diffDias > configUnidade.dias_validade) {
-                        somaMinutosVencidos += cred.minutos;
-                        historicoVencidos.push({
-                            sigla: cred.sigla,
-                            minutos: cred.minutos,
-                            data: cred.data,
-                            obs: cred.obs
-                        });
-                    }
-                }
-            });
-
-            // 👇 CORREÇÃO MATEMÁTICA: Saldo real pode ser negativo se os débitos superarem os créditos!
-            let saldoFinal = sumBaseCred - totalMinutosDebito; 
-            if (saldoFinal <= 0) {
-                somaMinutosVencidos = 0; 
-                historicoVencidos = [];
+            let cIdx = 0; let dIdx = 0;
+            while (cIdx < listCreditos.length && dIdx < listDebitos.length) {
+                let cred = listCreditos[cIdx];
+                let deb = listDebitos[dIdx];
+                let amnt = Math.min(cred.minutos, deb.minutos);
+                
+                cred.minutos -= amnt;
+                deb.minutos -= amnt;
+                
+                if (cred.minutos === 0) cIdx++;
+                if (deb.minutos === 0) dIdx++;
             }
 
-            if (saldoFinal === 0 && totalMinutosDebito === 0) return; 
+            let vencidoPositivo = 0;
+            let hVencidosPos = [];
+            listCreditos.forEach(cred => {
+                if (cred.minutos > 0) {
+                    const diff = Math.floor((hoje - new Date(cred.data + 'T00:00:00')) / (1000 * 3600 * 24));
+                    if (diff > configUnidade.dias_validade) {
+                        vencidoPositivo += cred.minutos;
+                        hVencidosPos.push({ sigla: cred.sigla, data: cred.data, minutos: cred.minutos, obs: cred.obs });
+                    }
+                }
+            });
+
+            let vencidoNegativo = 0;
+            let hVencidosNeg = [];
+            listDebitos.forEach(deb => {
+                if (deb.minutos > 0) {
+                    const diff = Math.floor((hoje - new Date(deb.data + 'T00:00:00')) / (1000 * 3600 * 24));
+                    if (diff > configUnidade.dias_validade) {
+                        vencidoNegativo += deb.minutos;
+                        hVencidosNeg.push({ data: deb.data, minutes: deb.minutos, motivo: deb.motivo, obs: deb.obs });
+                    }
+                }
+            });
+
+            if (saldoFinal === 0 && totalMinutosDebito === 0) return;
 
             window.todosSaldosBHAdmin.push({
-                id: c.id,
-                nome: c.nome,
-                unidade: c.unidade,
-                empresa: c.empresa,
-                creditoTotal: sumBaseCred, 
-                debitoTotal: totalMinutosDebito,
-                saldo: saldoFinal,
-                vencido: somaMinutosVencidos,
-                historicoCreditos: historicoCreditos,
-                historicoDebitos: historicoDebitos,
-                historicoVencidos: historicoVencidos 
+                id: c.id, nome: c.nome, unidade: c.unidade, empresa: c.empresa,
+                creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito, saldo: saldoFinal,
+                vencidoPositivo, vencidoNegativo,
+                historicoCreditos: listCreditos.map(x => ({ sigla: x.sigla, horas: x.minutosOriginais/60, data: x.data, obs: x.obs })),
+                historicoDebitos: listDebitos.map(x => ({ data: x.data, minutos: x.minutosOriginais, motivo: x.motivo, obs: x.obs })),
+                hVencidosPos, hVencidosNeg
             });
         });
 
@@ -44141,7 +44333,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
 };
 
 // =========================================================================
-// 🔍 RENDERIZADOR VISUAL DO EXTRATO DO ADMIN (SUPORTE A SALDOS NEGATIVOS)
+// 🔍 RENDERIZADOR DO EXTRATO DO ADMIN (RETORNO DOS BOTÕES DE DETALHES)
 // =========================================================================
 window.filtrarExtratoBHAdminVisual = function() {
     const termo = window.removerAcentos(document.getElementById('busca-extrato-bh-admin').value.toLowerCase());
@@ -44172,60 +44364,155 @@ window.filtrarExtratoBHAdminVisual = function() {
         let corSaldo = u.saldo >= 0 ? '#28a745' : '#dc3545';
         let bgPilula = u.saldo >= 0 ? 'rgba(40,167,69,0.15)' : 'rgba(220,53,69,0.15)';
         
-        let stringVencido = minToHr(u.vencido);
+        let stringVencido = '<span style="color:#777">00h 00m</span>';
         let areaAcaoHtml = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;">Regular</span>';
 
-        // Se tiver horas vencidas (Positivas acumuladas sem uso)
-        if (u.vencido > 0) {
+        if (u.vencidoPositivo > 0) {
             stringVencido = `
-                <b style="color: #ff4d4d;">⚠️ ${minToHr(u.vencido)}</b>
+                <b style="color: #28a745;">▲ ${minToHr(u.vencidoPositivo)}</b>
                 <br>
-                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem das horas vencidas">
-                    <i class="fa-solid fa-eye"></i> Detalhes
-                </button>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #28a745; color: #28a745; border-radius: 6px;" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem das horas vencidas"><i class="fa-solid fa-eye"></i> Detalhes</button>
             `;
-            
             areaAcaoHtml = `
                 <button class="btn-success" style="background: rgba(40,167,69,0.15); border: 1px solid #28a745; color: #28a745; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
-                    onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencido}, '${u.unidade}', '${u.empresa}')">
+                    onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencidoPositivo}, '${u.unidade}', '${u.empresa}')">
                     <i class="fa-solid fa-money-bill-wave"></i> Liquidar Vencidas
                 </button>
             `;
         }
-
-        // 👇 SE O SALDO ATUAL FOR NEGATIVO, PERMITE LIQUIDAR A DÍVIDA DO COLABORADOR DIRETO DAQUI 👇
-        if (u.saldo < 0) {
+        else if (u.vencidoNegativo > 0) {
+            stringVencido = `
+                <b style="color: #ff4d4d;">▼ -${minToHr(u.vencidoNegativo)}</b>
+                <br>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px;" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem da divida vencida"><i class="fa-solid fa-eye"></i> Detalhes</button>
+            `;
             areaAcaoHtml = `
                 <button class="btn-success" style="background: rgba(220,53,69,0.15); border: 1px solid #dc3545; color: #ff4d4d; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
-                    onclick="window.abrirModalPagarHorasNegativas('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${Math.abs(u.saldo)}, '${u.unidade}', '${u.empresa}')">
-                    <i class="fa-solid fa-hand-holding-dollar"></i> Descontar Dívida
+                    onclick="window.abrirModalDescontarDividaVencidaAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencidoNegativo}, '${u.unidade}', '${u.empresa}')">
+                    <i class="fa-solid fa-hand-holding-dollar"></i> Descontar Dívida Vencida
                 </button>
             `;
         }
 
+        // 🌟 RETORNO DOS BOTÕES DE OLHO EMBAIXO DE CRÉDITOS E DÉBITOS GERAIS
         tbody.innerHTML += `
             <tr style="background: ${bgRow}; border-bottom: 1px solid var(--cor-borda);">
                 <td style="padding: 15px; text-align: left;"><strong style="color:var(--cor-acento); font-size:1rem;">${u.nome}</strong></td>
                 <td style="padding: 15px; text-align: left; color: var(--cor-texto-secundario); font-size:0.85rem;">${u.unidade}<br><small style="opacity:0.7;">${u.empresa}</small></td>
                 
-                <td style="padding: 15px; text-align: center; color: #4fc3f7; vertical-align: middle;">
-                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.creditoTotal)}</span>
+                <td style="padding: 15px; text-align: center; color: #4fc3f7; vertical-align: middle; font-weight: bold;">
+                    <span>${minToHr(u.creditoTotal)}</span>
                     ${u.creditoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #4fc3f7; color: #4fc3f7; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" onclick="abrirModalExtratoBH('${u.id}', 'creditos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
                 </td>
                 
-                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle;">
-                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.debitoTotal)}</span>
+                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle; font-weight: bold;">
+                    <span>${minToHr(u.debitoTotal)}</span>
                     ${u.debitoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #a6b0cf; color: #a6b0cf; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#a6b0cf'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#a6b0cf'" onclick="abrirModalExtratoBH('${u.id}', 'debitos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
                 </td>
 
                 <td style="padding: 15px; text-align: center; font-weight: bold; font-size:1.05rem; color: ${corSaldo}; vertical-align: middle;">
                     <span style="background: ${bgPilula}; padding: 4px 10px; border-radius: 12px; border: 1px solid ${corSaldo}40;">${minToHr(u.saldo)}</span>
                 </td>
-                <td style="padding: 15px; text-align: center; vertical-align: middle;">${stringVencido}</td>
+                <td style="padding: 15px; text-align: center; vertical-align: middle; font-size: 1.05rem;">${stringVencido}</td>
                 <td style="padding: 15px; text-align: right; padding-right: 25px; vertical-align: middle;">${areaAcaoHtml}</td>
             </tr>
         `;
     });
+};
+      
+      // =========================================================================
+// 💵 RH/ADMIN: MODAL EXCLUSIVO PARA DESCONTO DE DÍVIDA VENCIDA EM HOLERITE
+// =========================================================================
+window.abrirModalDescontarDividaVencidaAdmin = function(idColab, nome, minutosNegativos, unidade, empresa) {
+    const hrs = Math.floor(minutosNegativos / 60);
+    const mins = minutosNegativos % 60;
+    const stringExibicaoDívida = `${hrs}h ${String(mins).padStart(2,'0')}m`;
+
+    const modalHtml = `
+    <div id="modal-descontar-vencida-admin" class="modal-arquivo-overlay" style="z-index: 100025; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid #dc3545; position: relative;">
+            <button onclick="document.getElementById('modal-descontar-vencida-admin').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index:10;"><i class="fa-solid fa-xmark"></i></button>
+
+            <h3 style="color: #dc3545; margin-bottom: 5px;"><i class="fa-solid fa-hand-holding-dollar"></i> Descontar Dívida Vencida</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 20px;">Colaborador: <b style="color: #fff;">${nome}</b></p>
+
+            <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; margin-bottom: 20px; text-align: center;">
+                <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); text-transform: uppercase; font-weight: bold;">Dívida Acumulada a Descontar</span><br>
+                <strong style="font-size: 1.8rem; color: #dc3545;">- ${stringExibicaoDívida}</strong>
+            </div>
+
+            <form id="form-descontar-vencida-admin">
+                <div class="form-group">
+                    <label>Forma de Quitação Contábil</label>
+                    <select id="descontar-venc-metodo" required disabled style="width: 100%; padding: 12px; border-radius: 8px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda); opacity: 0.8; cursor: not-allowed;">
+                        <option value="Desconto em Folha de Pagamento" selected>💵 Desconto em Folha de Pagamento</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Observação / Justificativa do Fechamento <span style="color: var(--cor-perigo);">*</span></label>
+                    <textarea id="descontar-venc-obs" required placeholder="Digite as informações do fechamento (Ex: Desconto em folha efetuado no fechamento devido ao estouro de prazo do saldo negativo)..." style="width: 100%; padding: 12px; border-radius: 8px; min-height: 80px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);"></textarea>
+                </div>
+
+                <button type="button" class="btn-success" style="width: 100%; height: 50px; background: #dc3545; color: #fff; border: none; font-weight: bold; margin-top: 10px;" 
+                    onclick="window.confirmarDescontoFolhaAdmin('${idColab}', '${nome}', ${minutosNegativos}, '${unidade}', '${empresa}')">
+                    <i class="fa-solid fa-gavel"></i> Confirmar Desconto em Holerite
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// Salva e liquida a dívida direto no banco de dados como Aprovado
+window.confirmarDescontoFolhaAdmin = async function(idColab, nome, minutosNegativos, unidade, empresa) {
+    const obs = document.getElementById('descontar-venc-obs').value.trim();
+    if(!obs) return mostrarAlerta("Preencha a justificativa do fechamento!", "aviso");
+
+    const btn = document.querySelector('#modal-descontar-vencida-admin .btn-success');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando...';
+    btn.disabled = true;
+
+    const horasDecimais = (minutosNegativos / 60).toFixed(2);
+    const dataHojeIso = new Date().toISOString().split('T')[0];
+
+    // Para neutralizar o saldo devedor (-), o Admin insere um crédito balanceador (+) aprovado direto.
+    const objCreditoLiquidação = {
+        colaborador_id: idColab,
+        nome: nome,
+        unidade: unidade,
+        sigla: 'H+',
+        data_inicio: dataHojeIso,
+        data_fim: dataHojeIso,
+        motivo: 'Liquidação de Dívida Vencida',
+        observacao: `(${horasDecimais}). BANCO. [LIQUIDAÇÃO NEGATIVA] Método: Desconto em Folha de Pagamento. Justificativa: ${obs}`,
+        status: 'Aprovado', 
+        criado_por: usuarioAtual.nome,
+        aprovado_por: usuarioAtual.nome
+    };
+
+    try {
+        const { data: novaFT, error } = await supabaseClient.from('horas_extras_ft').insert([objCreditoLiquidação]).select('id').single();
+        if (error) throw error;
+
+        // Cria registros de notificações padrão para logs do sistema
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: idColab, nome: nome, unidade: unidade, lida: true, lida_por: usuarioAtual.nome, tipo: 'FT_Admin', referencia_id: novaFT.id },
+            { colaborador_id: idColab, nome: nome, unidade: unidade, lida: false, tipo: 'FT', referencia_id: novaFT.id }
+        ]);
+
+        mostrarAlerta(`Dívida de ${nome} descontada com sucesso! O saldo foi zerado no sistema.`, "sucesso");
+        document.getElementById('modal-descontar-vencida-admin').remove();
+        
+        // Recarrega o extrato contábil do admin imediatamente na tela
+        if (typeof window.carregarExtratoBancoHorasAdmin === 'function') {
+            await window.carregarExtratoBancoHorasAdmin();
+        }
+    } catch (e) {
+        mostrarAlerta("Erro ao processar o desconto: " + e.message, "erro");
+        btn.innerHTML = '<i class="fa-solid fa-gavel"></i> Confirmar Desconto em Holerite';
+        btn.disabled = false;
+    }
 };
       
         // Memória para saber se o número aumentou
