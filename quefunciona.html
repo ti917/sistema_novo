@@ -8413,40 +8413,40 @@ document.addEventListener('DOMContentLoaded', () => {
     'SETEMBRO': '09', 'OUTUBRO': '10', 'NOVEMBRO': '11', 'DEZEMBRO': '12'
 };
 
-        // 👇 FUNÇÃO ATUALIZADA COM 10 DIAS DE CARÊNCIA E BLINDAGEM DE JSON 👇
-        window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
-            const hoje = new Date();
-            hoje.setHours(0,0,0,0);
+        // 👇 FUNÇÃO ATUALIZADA COM 30 DIAS DE CARÊNCIA E BLINDAGEM DE JSON 👇
+window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
+    const hoje = new Date();
+    hoje.setHours(0,0,0,0);
 
-            return colaboradores.filter(c => {
-                if (c.status === 'Ativo') return true;
-                
-                // Se estiver Desligado, checa se o último dia + carência ainda não passou
-                if (c.status === 'Desligado' && c.dados_rescisao) {
+    return colaboradores.filter(c => {
+        if (c.status === 'Ativo') return true;
+        
+        // Se estiver Desligado, checa se o último dia + carência ainda não passou
+        if (c.status === 'Desligado' && c.dados_rescisao) {
+            
+            // MÁGICA: Converte para Objeto caso o banco tenha devolvido como Texto
+            let dr = c.dados_rescisao;
+            if (typeof dr === 'string') {
+                try { dr = JSON.parse(dr); } catch(e) {}
+            }
+            
+            if (dr && dr.ultimo_dia) {
+                const udRegex = dr.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                if (udRegex) {
+                    const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
+                    ud.setHours(0,0,0,0);
                     
-                    // MÁGICA: Converte para Objeto caso o banco tenha devolvido como Texto
-                    let dr = c.dados_rescisao;
-                    if (typeof dr === 'string') {
-                        try { dr = JSON.parse(dr); } catch(e) {}
-                    }
-                    
-                    if (dr && dr.ultimo_dia) {
-                        const udRegex = dr.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                        if (udRegex) {
-                            const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
-                            ud.setHours(0,0,0,0);
-                            
-                            // 👇 A MÁGICA AQUI: Mudamos de + 5 para + 10 dias de carência! 👇
-                            const udComCarencia = new Date(ud);
-                            udComCarencia.setDate(udComCarencia.getDate() + 10);
+                    // 👇 A MÁGICA AQUI: Mudamos para + 30 dias de carência! 👇
+                    const udComCarencia = new Date(ud);
+                    udComCarencia.setDate(udComCarencia.getDate() + 30);
 
-                            if (hoje <= udComCarencia) return true; // Ainda tá no período de carência!
-                        }
-                    }
+                    if (hoje <= udComCarencia) return true; // Ainda tá no período de carência!
                 }
-                return false;
-            });
-        };
+            }
+        }
+        return false;
+    });
+};
 
         async function buscarCEP(cep) {
             const cepLimpo = cep.replace(/\D/g, '');
@@ -9623,8 +9623,8 @@ window.gerarDadosBI = async function() {
             return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
         };
 
-        // ========================================================
-        // ⏳ MÓDULO: EXTRATO DE BANCO DE HORAS
+       // ========================================================
+        // ⏳ MÓDULO: EXTRATO DE BANCO DE HORAS (COM UNIDADES)
         // ========================================================
         if (indicador === 'BancoHoras') {
             let totalSaldoGeral = 0;
@@ -9632,6 +9632,9 @@ window.gerarDadosBI = async function() {
             let totalCreditoGeral = 0;
             let totalDebitoGeral = 0;
             let dadosTabelaBH = [];
+            
+            // 👇 MÁGICA NOVA: Dicionário para somar por unidade 👇
+            let saldosPorUnidade = {};
 
             perfis.filter(p => p.status === 'Ativo').forEach(c => {
                 const configUnidade = regrasBH.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
@@ -9652,29 +9655,48 @@ window.gerarDadosBI = async function() {
                         const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                         if (matchM) totalMinutosDebito += parseInt(matchM[1]);
                     } 
-                    // Dentro de gerarDadosBI, localize o loop das fts e troque a trava:
-                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
-                    
-                    // 🛡️ REFINAMENTO ANTI-FANTASMA NO BI
-                    if (txtObs.includes('TROCAR POR DESCANSO')) {
-                        return;
-                    }
+                    else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                        
+                        if (txtObs.includes('TROCAR POR DESCANSO')) return;
 
                         if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
-                            if (matchesLote) {
-                                matchesLote.forEach(m => {
-                                    let dec = parseFloat(m.replace('(','').replace(')',''));
-                                    arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
-                                    sumBaseCred += Math.round(dec * 60);
-                                });
+                            // 👇 MÁGICA DEFINITIVA PARA O BI 👇
+                            const regexDias = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
+                            let matchDia;
+                            let achouHorario = false;
+
+                            while ((matchDia = regexDias.exec(txtObs)) !== null) {
+                                achouHorario = true;
+                                const dataRealTrabalhada = `${matchDia[3]}-${matchDia[2]}-${matchDia[1]}`; 
+                                
+                                const [hE, mE] = matchDia[4].split(':').map(Number);
+                                const [hS, mS] = matchDia[5].split(':').map(Number);
+                                let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
+                                if (diff < 0) diff += 1440;
+                                if (diff > 360) diff -= 60; 
+                                
+                                arrayCreditos.push({ data: dataRealTrabalhada, minutos: diff });
+                                sumBaseCred += diff;
+                            }
+
+                            if (!achouHorario) {
+                                const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                                if (matchesLote) {
+                                    matchesLote.forEach(m => {
+                                        let dec = parseFloat(m.replace('(','').replace(')',''));
+                                        let mins = Math.round(dec * 60);
+                                        arrayCreditos.push({ data: f.data_inicio, minutos: mins });
+                                        sumBaseCred += mins;
+                                    });
+                                }
                             }
                         } else {
                             const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                             if (matchDec) {
                                 let dec = parseFloat(matchDec[1]);
-                                arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
-                                sumBaseCred += Math.round(dec * 60);
+                                let mins = Math.round(dec * 60);
+                                arrayCreditos.push({ data: f.data_inicio, minutos: mins });
+                                sumBaseCred += mins;
                             }
                         }
                     }
@@ -9720,6 +9742,15 @@ window.gerarDadosBI = async function() {
                 totalCreditoGeral += sumBaseCred;
                 totalDebitoGeral += totalMinutosDebito;
 
+                // 👇 ALIMENTA O MAPA DE UNIDADES 👇
+                if (!saldosPorUnidade[c.unidade]) {
+                    saldosPorUnidade[c.unidade] = { saldo: 0, vencido: 0, credito: 0, debito: 0 };
+                }
+                saldosPorUnidade[c.unidade].saldo += saldoFinal;
+                saldosPorUnidade[c.unidade].vencido += somaMinutosVencidos;
+                saldosPorUnidade[c.unidade].credito += sumBaseCred;
+                saldosPorUnidade[c.unidade].debito += totalMinutosDebito;
+
                 dadosTabelaBH.push({
                     nome: c.nome, unidade: c.unidade,
                     creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito,
@@ -9728,12 +9759,11 @@ window.gerarDadosBI = async function() {
             });
 
             containerGrafico.style.display = 'none';
-            rankDiv.parentElement.style.display = 'none'; 
-            containerTabela.parentElement.style.gridColumn = 'span 2'; 
+            // Removidas as linhas antigas que escondiam o Ranking! Vamos usá-lo para as unidades.
             containerCardsTopo.style.gridTemplateColumns = 'repeat(4, 1fr)';
 
             let htmlCardsBI = '';
-            htmlCardsBI += criarCardBI('bi-vis-bh-saldo', 'Saldo Total (Unidade)', minToHr(totalSaldoGeral), 'fa-scale-balanced', '#8b5cf6');
+            htmlCardsBI += criarCardBI('bi-vis-bh-saldo', 'Saldo Total Global', minToHr(totalSaldoGeral), 'fa-scale-balanced', '#8b5cf6');
             htmlCardsBI += criarCardBI('bi-vis-bh-vencido', 'Horas Vencidas', minToHr(totalVencidoGeral), 'fa-triangle-exclamation', '#dc3545');
             htmlCardsBI += criarCardBI('bi-vis-bh-cred', 'Total Acumulado (+)', minToHr(totalCreditoGeral), 'fa-plus-circle', '#4fc3f7');
             htmlCardsBI += criarCardBI('bi-vis-bh-deb', 'Total Abatido (-)', minToHr(totalDebitoGeral), 'fa-minus-circle', '#ff9800');
@@ -9748,6 +9778,39 @@ window.gerarDadosBI = async function() {
                 </div>
             `;
             document.getElementById('bi-cards-container').innerHTML = htmlCardsBI + inputsOcultosPDF;
+
+            // 👇 RENDERIZA O RANKING POR UNIDADE 👇
+            rankDiv.parentElement.style.display = 'block'; // Garante que a área lateral está visível
+            rankDiv.previousElementSibling.innerHTML = `<i class="fa-solid fa-building"></i> Saldo Consolidado por Unidade`;
+            rankDiv.innerHTML = '';
+            
+            // Ordena as unidades da que tem o maior saldo para a menor
+            const unidadesArr = Object.entries(saldosPorUnidade).sort((a,b) => b[1].saldo - a[1].saldo);
+            
+            if (unidadesArr.length === 0) {
+                rankDiv.innerHTML = '<p style="color:var(--cor-texto-secundario); font-size:0.85rem; text-align:center; padding:10px;">Sem dados suficientes no período.</p>';
+            } else {
+                unidadesArr.forEach((item) => {
+                    const nomeUni = item[0];
+                    const dadosUni = item[1];
+                    let corSaldo = dadosUni.saldo >= 0 ? '#28a745' : '#dc3545';
+                    
+                    rankDiv.innerHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 6px; border-left: 3px solid ${corSaldo}; margin-bottom: 8px;">
+                        <div style="flex: 1; padding-right: 10px;">
+                            <strong style="color: var(--cor-texto-principal); font-size: 0.9rem; display: block;">${nomeUni}</strong>
+                            <div style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-top: 4px;">
+                                <span style="color:#4fc3f7">+ ${minToHr(dadosUni.credito)}</span> &nbsp;|&nbsp; 
+                                <span style="color:#ff9800">- ${minToHr(dadosUni.debito)}</span>
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <span style="display: block; font-size: 1.1rem; font-weight: bold; color: ${corSaldo};">${minToHr(dadosUni.saldo)}</span>
+                            ${dadosUni.vencido > 0 ? `<span style="font-size: 0.7rem; color: #dc3545; display: block; margin-top: 2px;">⚠️ Venc: ${minToHr(dadosUni.vencido)}</span>` : ''}
+                        </div>
+                    </div>`;
+                });
+            }
 
             theadTr.innerHTML = `
                 <th style="text-align: left; padding: 10px;">Colaborador</th>
@@ -22161,22 +22224,21 @@ window.carregarPainelSaldosGestor = async function() {
                     }
 
                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        // 👇 MÁGICA: Nova leitura capaz de converter (10:00 às 12:00) em minutos na hora! 👇
-                        const regexHorarios = /\((\d{2}:\d{2})\s*(?:às|as)\s*(\d{2}:\d{2})\)/gi;
-                        let matchHorario;
+                        // 👇 MÁGICA DEFINITIVA PARA O GESTOR 👇
+                        const regexDias = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
+                        let matchDia;
                         let achouHorario = false;
 
-                        while ((matchHorario = regexHorarios.exec(txtObs)) !== null) {
+                        while ((matchDia = regexDias.exec(txtObs)) !== null) {
                             achouHorario = true;
-                            const [hE, mE] = matchHorario[1].split(':').map(Number);
-                            const [hS, mS] = matchHorario[2].split(':').map(Number);
+                            const [hE, mE] = matchDia[4].split(':').map(Number);
+                            const [hS, mS] = matchDia[5].split(':').map(Number);
                             let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
                             if (diff < 0) diff += 1440;
-                            if (diff > 360) diff -= 60; // Desconto de almoço automático se > 6h
+                            if (diff > 360) diff -= 60; 
                             minutosCredito += diff;
                         }
 
-                        // Fallback pro formato antigo decimal (ex: 2.50) caso existam registros velhos
                         if (!achouHorario) {
                             const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
                             if (matchesLote) {
@@ -22355,7 +22417,7 @@ window.ajustarCamposHorasNegativas = function(minutosNegativos, minutosPlantaoBa
 };
 
 // =========================================================================
-// 🚀 SALVAMENTO E CARIMBO DO "h-" NA ESCALA (VIA MARCADOR [ABATE_BANCO])
+// 🚀 SALVAMENTO E CARIMBO DO "H+" NA ESCALA (PAGAMENTO DE DÍVIDA DE HORAS)
 // =========================================================================
 window.confirmarCompensacaoDivida = async function(idColab, nome, minutosNegativos, unidade, empresa) {
     const form = document.getElementById('form-pagar-negativo');
@@ -22406,32 +22468,32 @@ window.confirmarCompensacaoDivida = async function(idColab, nome, minutosNegativ
             return mostrarAlerta(`Bloqueado: O colaborador já possui <b>${conflito}</b> no dia ${formatarDataBR(dataTrabalho)}.`, "erro");
         }
 
-        // 🎯 A MÁGICA DO CARIMBO: Escrevemos a tag [ABATE_BANCO] com o valor dos minutos.
-        // Como o tipo de abate NÃO É "Dia Completo" (é o nome do método de trabalho), o motor da escala
-        // vai manter o dia de trabalho normal (D ou N) e vai acender a tag "h-" perfeitamente!
+        // 👇 A MÁGICA DA CORREÇÃO: Transforma o evento em CRÉDITO (H+) para o Banco ler e abater o negativo
+        const horasDecimais = (totalMinutosCompensar / 60).toFixed(2);
+
         const objBanco = {
             colaborador_id: idColab,
             nome: nome,
             unidade: unidade,
-            sigla: 'FP', // Alinha com o leitor do calendário
+            sigla: 'H+', // 👈 Agora entra como Crédito na escala!
             data_inicio: dataTrabalho,
             data_fim: dataTrabalho,
-            motivo: `Folga do Banco: ${metodo}`, // Salva o tipo (Entrar mais cedo/Sair mais tarde)
-            observacao: `[ABATE_BANCO] DEDUÇÃO: ${totalMinutosCompensar} MINUTOS. Acordo de quitação de saldo devedor. Justificativa: ${obs}`,
+            motivo: `Quitação de Horas Devidas`,
+            observacao: `(${horasDecimais}). BANCO. [PAGAMENTO DE DÍVIDA] Método: ${metodo}. Justificativa: ${obs}`, // 👈 O motor contábil vai ler "(X.XX)" e "BANCO"
             status: 'Pendente', // Vai para a central do Admin aprovar
             criado_por: usuarioAtual.nome
         };
 
-        const { data: novaFP, error } = await supabaseClient.from('horas_extras_ft').insert([objBanco]).select('id').single();
+        const { data: novaFT, error } = await supabaseClient.from('horas_extras_ft').insert([objBanco]).select('id').single();
         if (error) throw error;
 
         // Notifica o Admin
         await supabaseClient.from('notificacoes').insert([{
             colaborador_id: idColab, nome: nome, unidade: unidade, lida: false,
-            tipo: 'FT_Admin', referencia_id: novaFP.id
+            tipo: 'FT_Admin', referencia_id: novaFT.id
         }]);
 
-        mostrarAlerta("Acordo de compensação enviado com sucesso! O carimbo h- aparecerá na escala assim que o RH homologar.", "sucesso");
+        mostrarAlerta("Acordo de compensação enviado com sucesso! O crédito aparecerá no saldo assim que o RH homologar.", "sucesso");
         document.getElementById('modal-pagar-negativo').remove();
         
         // Recarrega a listinha
@@ -22495,16 +22557,26 @@ window.addDiaQuebra = function(perfil) {
     const container = document.getElementById(`lista-dias-quebra-${perfil}`);
     const div = document.createElement('div');
     div.className = `linha-quebra-${perfil}`;
-    div.style = 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: rgba(255,152,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,152,0,0.2);';
+    // Ajustei o width para 100% para o dropdown caber direitinho na tela
+    div.style = 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: rgba(255,152,0,0.1); padding: 10px; border-radius: 6px; border: 1px solid rgba(255,152,0,0.2); width: 100%;';
     
     div.innerHTML = `
-        <input type="date" class="q-data" required style="flex: 1; min-width: 120px; padding: 8px;" onclick="this.showPicker()">
-        <div style="display: flex; gap: 5px; align-items: center; flex: 2; min-width: 200px;">
-            <input type="text" class="q-ent" readonly onclick="abrirTimePicker(this)" style="cursor:pointer; width:70px; text-align:center; padding:8px; border-radius:4px;" placeholder="Início" onchange="recalcularBancoHoras('${perfil}')">
+        <select class="q-tipo" required style="flex: 1; min-width: 140px; padding: 8px; border-radius: 4px; border: 1px solid var(--cor-borda); background: var(--cor-fundo-input); color: var(--cor-texto-principal);">
+            <option value="" disabled selected>Tipo de Quebra...</option>
+            <option value="Chegou mais cedo">Chegou mais cedo</option>
+            <option value="Ficou mais tarde">Ficou mais tarde</option>
+            <option value="Trabalho no intervalo">Trabalhou no intervalo</option>
+        </select>
+        
+        <input type="date" class="q-data" required style="flex: 1; min-width: 110px; padding: 8px;" onclick="this.showPicker()">
+        
+        <div style="display: flex; gap: 5px; align-items: center; flex: 2; min-width: 150px;">
+            <input type="text" class="q-ent" readonly onclick="abrirTimePicker(this)" style="cursor:pointer; width:65px; text-align:center; padding:8px; border-radius:4px;" placeholder="Início" onchange="recalcularBancoHoras('${perfil}')">
             <span style="color:#ff9800;">às</span>
-            <input type="text" class="q-sai" readonly onclick="abrirTimePicker(this)" style="cursor:pointer; width:70px; text-align:center; padding:8px; border-radius:4px;" placeholder="Fim" onchange="recalcularBancoHoras('${perfil}')">
+            <input type="text" class="q-sai" readonly onclick="abrirTimePicker(this)" style="cursor:pointer; width:65px; text-align:center; padding:8px; border-radius:4px;" placeholder="Fim" onchange="recalcularBancoHoras('${perfil}')">
         </div>
-        <button type="button" class="btn-danger-mini" onclick="if(document.querySelectorAll('.linha-quebra-${perfil}').length > 1) { this.parentElement.remove(); recalcularBancoHoras('${perfil}'); } else { mostrarAlerta('Você precisa de pelo menos 1 dia.', 'aviso'); }" style="padding: 8px; height: 38px;"><i class="fa-solid fa-times"></i></button>
+        
+        <button type="button" class="btn-danger-mini" onclick="if(document.querySelectorAll('.linha-quebra-${perfil}').length > 1) { this.parentElement.remove(); recalcularBancoHoras('${perfil}'); } else { mostrarAlerta('Você precisa de pelo menos 1 dia.', 'aviso'); }" style="padding: 8px; height: 38px;" title="Remover"><i class="fa-solid fa-times"></i></button>
     `;
     container.appendChild(div);
 };
@@ -22782,11 +22854,13 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
 
         let textosQuebra = [];
         linhasQ.forEach(l => {
+            const tipoQ = l.querySelector('.q-tipo').value; // Pega o dropdown
             const dt = l.querySelector('.q-data').value;
             const ent = l.querySelector('.q-ent').value;
             const sai = l.querySelector('.q-sai').value;
-            if(dt && ent && sai) {
-                textosQuebra.push(`${formatarDataBR(dt)} (${ent} às ${sai})`);
+            if(dt && ent && sai && tipoQ) {
+                // Monta o texto de uma forma que a matemática do Extrato ainda consiga ler os números
+                textosQuebra.push(`${tipoQ}: ${formatarDataBR(dt)} (${ent} às ${sai})`);
                 arrayDatasAntiConflito.push(dt);
             }
         });
@@ -23147,18 +23221,24 @@ window.reprovarERemoverFT = async function(idFT) {
     let formConteudoHtml = '';
 
     // ==========================================
-    // SE FOR ABATE: LAYOUT VERMELHO SIMPLIFICADO
+    // SE FOR ABATE: LAYOUT VERMELHO EM 3 COLUNAS (COM A DATA DA FOLGA)
     // ==========================================
     if (isAbate) {
         formConteudoHtml = `
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
                 <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
-                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold;">Tipo de Desconto</span>
-                    <b style="color: #fff; font-size: 1.1rem; margin-top: 4px;">${tipoFolgaGestor}</b>
+                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Tipo de Desconto</span>
+                    <b style="color: #fff; font-size: 1.05rem; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${tipoFolgaGestor}">${tipoFolgaGestor}</b>
                 </div>
+                
                 <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
-                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold;">Tempo Deduzido</span>
-                    <b style="color: #dc3545; font-size: 1.3rem; margin-top: 4px;"><i class="fa-solid fa-clock"></i> - ${stringAbateFormatada}</b>
+                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Data da Folga</span>
+                    <b style="color: #fff; font-size: 1.05rem; margin-top: 4px;"><i class="fa-regular fa-calendar"></i> ${formatarDataBR(ft.data_inicio)}</b>
+                </div>
+
+                <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; display: flex; flex-direction: column; justify-content: center;">
+                    <span style="color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; font-weight:bold; letter-spacing:0.5px;">Tempo Deduzido</span>
+                    <b style="color: #ff4d4d; font-size: 1.1rem; margin-top: 4px;"><i class="fa-solid fa-clock"></i> - ${stringAbateFormatada}</b>
                 </div>
             </div>
             
@@ -23167,11 +23247,11 @@ window.reprovarERemoverFT = async function(idFT) {
             <input type="hidden" id="central-ft-motivo-original" value="${ft.motivo}">
 
             <div class="form-group">
-                <label style="color: #dc3545;"><i class="fa-solid fa-comment-dots"></i> Relato / Motivo do Gestor <span style="color: var(--cor-perigo);">*</span></label>
-                <textarea id="central-ft-obs" required style="width: 100%; padding: 12px; border-radius: 8px; background-color: var(--cor-fundo-input); color: #fff; min-height: 80px; border: 1px solid var(--cor-borda);">${obsLimpa}</textarea>
+                <label style="color: #dc3545;"><i class="fa-solid fa-lock"></i> Relato / Motivo do Gestor</label>
+                <textarea id="central-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 80px; border: 1px dashed #dc3545; cursor: not-allowed; outline: none;">${obsLimpa}</textarea>
             </div>
         `;
-    } 
+    }
     // ==========================================
     // SE FOR HORA EXTRA / FT: LAYOUT AZUL COM DESTINO CONTÁBIL
     // ==========================================
@@ -23207,8 +23287,8 @@ window.reprovarERemoverFT = async function(idFT) {
 
             <div class="form-group">
                 <label><i class="fa-solid fa-lock" style="color: var(--cor-texto-secundario);"></i> Texto Livre (Motivo, Horas e Detalhes)</label>
-                <small style="display:block; color:var(--cor-texto-secundario); margin-bottom:5px;">O relato do gestor e o registro de horas estão <b>bloqueados</b> para evitar a quebra do cálculo automático no banco de horas.</small>
-                <textarea id="analise-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 100px; border: 1px dashed var(--cor-borda); cursor: not-allowed; outline: none;">${obsLimpa}</textarea>
+                <small style="display:block; color:var(--cor-texto-secundario); margin-bottom:5px;">O relato e as horas estão <b>bloqueados</b> para evitar a quebra do cálculo automático no banco.</small>
+                <textarea id="central-ft-obs" readonly style="width: 100%; padding: 12px; border-radius: 8px; background-color: rgba(0,0,0,0.2); color: #a6b0cf; min-height: 80px; border: 1px dashed var(--cor-borda); cursor: not-allowed; outline: none;">${obsLimpa}</textarea>
             </div>
         `;
     }
@@ -23259,35 +23339,45 @@ window.reprovarERemoverFTModal = async function(idFT) {
 window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeColab, isAbate) {
     // Trava para exigir que o Form esteja válido
     const form = document.getElementById('form-analise-central-ft');
-    if (!form.checkValidity()) {
+    if (form && !form.checkValidity()) {
         form.reportValidity();
         return;
     }
 
     const btn = document.querySelector('#modal-ficha-ft .btn-success');
-    btn.innerText = "Aprovando..."; btn.disabled = true;
+    if(btn) { btn.innerText = "Aprovando..."; btn.disabled = true; }
 
     const ft = listaFTPendentes.find(f => f.id === idFT);
-    const sigla = document.getElementById('central-ft-sigla').value;
-    const obsTexto = document.getElementById('central-ft-obs').value;
+    
+    // 🛡️ MÁGICA DE PROTEÇÃO: Busca tanto pelo ID antigo quanto pelo ID novo da trava!
+    const elSigla = document.getElementById('central-ft-sigla') || document.getElementById('analise-ft-sigla');
+    const sigla = elSigla ? elSigla.value : 'FT';
+    
+    const elObs = document.getElementById('central-ft-obs') || document.getElementById('analise-ft-obs');
+    const obsTexto = elObs ? elObs.value : '';
 
     let novoMotivo = ft.motivo;
     let novaObs = obsTexto.trim();
 
     if (isAbate) {
-        const minutos = document.getElementById('central-ft-minutos-abate').value;
-        const motivoOriginal = document.getElementById('central-ft-motivo-original').value;
+        const elMinutos = document.getElementById('central-ft-minutos-abate') || document.getElementById('analise-ft-minutos-abate');
+        const minutos = elMinutos ? elMinutos.value : 0;
+        
+        const elMotivoOrig = document.getElementById('central-ft-motivo-original') || document.getElementById('analise-ft-motivo-original');
+        const motivoOriginal = elMotivoOrig ? elMotivoOrig.value : ft.motivo;
+        
         novoMotivo = motivoOriginal;
         novaObs = `[ABATE_BANCO] DEDUÇÃO: ${minutos} MINUTOS. Motivo: ${novaObs}`;
     } else {
-        const destino = document.getElementById('central-ft-destino').value;
+        const elDestino = document.getElementById('central-ft-destino') || document.getElementById('analise-ft-destino');
+        const destino = elDestino ? elDestino.value : 'Banco';
+        
         if (sigla === 'FT') {
             if (destino === 'Pagamento') {
                 novoMotivo = 'Folga Trabalhada (Dinheiro)';
                 novaObs = `PAGAR. ${novaObs}`;
             } else {
                 novoMotivo = 'Folga Trabalhada (Banco)';
-                // Se já era compensada com FP na escala, a gente mantém a data, caso contrário, vai pro banco cego
                 novaObs = ft.motivo.includes('Compensada') ? ft.observacao : `BANCO. ${novaObs}`;
             }
         } else {
@@ -23329,8 +23419,7 @@ window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeCola
         if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
     } catch(e) {
         mostrarAlerta("Erro ao aprovar: " + e.message, "erro");
-        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR`; 
-        btn.disabled = false;
+        if(btn) { btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR`; btn.disabled = false; }
     }
 };
 
@@ -23565,32 +23654,45 @@ window.processarAnaliseFT = async function(idFT, acao, isAbate) {
     }
 
     const form = document.getElementById('form-analise-ft-admin');
-    if (!form.checkValidity()) {
+    if (form && !form.checkValidity()) {
         form.reportValidity();
         return;
     }
 
     const btn = document.querySelector('#modal-analise-ft .btn-success');
-    btn.disabled = true; 
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando...';
+    if(btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando...'; }
 
     const ft = todasFTsAdmin.find(f => f.id === idFT);
-    const sigla = document.getElementById('analise-ft-sigla').value;
-    const dIni = document.getElementById('analise-ft-dini').value;
-    const dFim = document.getElementById('analise-ft-dfim').value;
-    const obsTexto = document.getElementById('analise-ft-obs').value;
+    
+    // 🛡️ ESCUDO ANTI-NULL: Aceita qualquer um dos dois IDs!
+    const elSigla = document.getElementById('analise-ft-sigla') || document.getElementById('central-ft-sigla');
+    const sigla = elSigla ? elSigla.value : 'FT';
+    
+    const elDini = document.getElementById('analise-ft-dini');
+    const dIni = elDini ? elDini.value : ft.data_inicio;
+    
+    const elDfim = document.getElementById('analise-ft-dfim');
+    const dFim = elDfim ? elDfim.value : (ft.data_fim || ft.data_inicio);
+
+    const elObs = document.getElementById('analise-ft-obs') || document.getElementById('central-ft-obs');
+    const obsTexto = elObs ? elObs.value : '';
 
     let novoMotivo = ft.motivo;
     let novaObs = obsTexto.trim();
 
     if (isAbate) {
-        // Remonta a string de máquina com os minutos corretos para o Extrato/Saldo não quebrarem!
-        const minutos = document.getElementById('analise-ft-minutos-abate').value;
-        const motivoOriginal = document.getElementById('analise-ft-motivo-original').value;
+        const elMins = document.getElementById('analise-ft-minutos-abate') || document.getElementById('central-ft-minutos-abate');
+        const minutos = elMins ? elMins.value : 0;
+        
+        const elMot = document.getElementById('analise-ft-motivo-original') || document.getElementById('central-ft-motivo-original');
+        const motivoOriginal = elMot ? elMot.value : ft.motivo;
+        
         novoMotivo = motivoOriginal;
         novaObs = `[ABATE_BANCO] DEDUÇÃO: ${minutos} MINUTOS. Motivo: ${novaObs}`;
     } else {
-        const destino = document.getElementById('analise-ft-destino').value;
+        const elDestino = document.getElementById('analise-ft-destino') || document.getElementById('central-ft-destino');
+        const destino = elDestino ? elDestino.value : 'Banco';
+        
         if (sigla === 'FT') {
             if (destino === 'Pagamento') {
                 novoMotivo = 'Folga Trabalhada (Dinheiro)';
@@ -23642,8 +23744,7 @@ window.processarAnaliseFT = async function(idFT, acao, isAbate) {
 
     } catch(e) {
         mostrarAlerta("Erro ao salvar: " + e.message, "erro");
-        btn.disabled = false; 
-        btn.innerHTML = "Tentar Novamente";
+        if(btn) { btn.disabled = false; btn.innerHTML = "Tentar Novamente"; }
     }
 };
 
@@ -34724,8 +34825,8 @@ window.filtrarContratos = function() {
             }
         }
         
-        // 👇 A MÁGICA DA CORREÇÃO: O 'matchData' estava faltando neste return! 👇
-        return matchNome && matchStatus && matchData && c.status === 'Ativo'; 
+        // 👇 A MÁGICA: Agora libera Ativos E quem está Aguardando ASO 👇
+        return matchNome && matchStatus && matchData && (c.status === 'Ativo' || c.status === 'Aguardando ASO'); 
     });
 
     // 👇 A MÁGICA DOS PESOS: Pendentes em cima, Concluídos embaixo 👇
@@ -36053,11 +36154,13 @@ document.getElementById('form-ft-admin')?.addEventListener('submit', async (e) =
 
         let textosQuebra = [];
         linhasQ.forEach(l => {
+            const tipoQ = l.querySelector('.q-tipo').value; // Pega o dropdown
             const dt = l.querySelector('.q-data').value;
             const ent = l.querySelector('.q-ent').value;
             const sai = l.querySelector('.q-sai').value;
-            if(dt && ent && sai) {
-                textosQuebra.push(`${formatarDataBR(dt)} (${ent} às ${sai})`);
+            if(dt && ent && sai && tipoQ) {
+                // Monta o texto blindado para o extrato contábil
+                textosQuebra.push(`${tipoQ}: ${formatarDataBR(dt)} (${ent} às ${sai})`);
                 arrayDatasAntiConflito.push(dt);
             }
         });
@@ -43231,7 +43334,6 @@ window.filtrarContratosAcaoGestor = function() {
         const ctr = adm.contrato || { status: 'Aguardando RH' }; 
         const statusReal = ctr.status;
 
-        // 👇 A MÁGICA: O Admin não precisa ver o que está aguardando ele mesmo gerar!
         if (statusReal === 'Aguardando RH') return false;
 
         const matchNome = window.removerAcentos(c.nome).includes(termo) || (c.unidade && window.removerAcentos(c.unidade).includes(termo)); 
@@ -43249,10 +43351,11 @@ window.filtrarContratosAcaoGestor = function() {
                 matchData = false;
             }
         }
-        return matchNome && matchStatus && matchData && c.status === 'Ativo'; 
+        
+        // 👇 A MÁGICA: Agora libera Ativos E quem está Aguardando ASO 👇
+        return matchNome && matchStatus && matchData && (c.status === 'Ativo' || c.status === 'Aguardando ASO'); 
     });
 
-    // Ordenação (Pesos)
     const getPesoStatus = (status) => {
         if (status === 'Aguardando Assinatura') return 1;
         if (status === 'Aguardando Prorrogação') return 2;
@@ -43921,20 +44024,41 @@ window.abrirModalExtratoBH = function(idColab, abaAtiva) {
 
     // --- 3. VENCIDOS ---
     let listaVencidosHtml = '';
-    if (u.historicoVencidos && u.historicoVencidos.length > 0) {
-        const vencs = [...u.historicoVencidos].sort((a,b) => new Date(b.data) - new Date(a.data));
+    
+    // 👇 A MÁGICA DA CORREÇÃO: Unificamos as horas positivas e negativas vencidas num array temporário
+    let historicoVencidosReal = [];
+    if (u.hVencidosPos) {
+        u.hVencidosPos.forEach(v => historicoVencidosReal.push({...v, tipo: 'positivo'}));
+    }
+    if (u.hVencidosNeg) {
+        // Trata a variável "minutes" (que estava em inglês no gerador) para "minutos"
+        u.hVencidosNeg.forEach(v => historicoVencidosReal.push({...v, minutos: v.minutes || v.minutos, tipo: 'negativo'}));
+    }
+
+    if (historicoVencidosReal.length > 0) {
+        // Ordena da mais recente para a mais antiga
+        const vencs = [...historicoVencidosReal].sort((a,b) => new Date(b.data) - new Date(a.data));
+        
         vencs.forEach(v => {
             const stringHora = minToHr(v.minutos);
+            const isPos = v.tipo === 'positivo';
+            
+            // Cores dinâmicas (Verde se ele perdeu o crédito, Vermelho se ele perdeu o prazo pra pagar a dívida)
+            const corFundo = isPos ? 'rgba(40,167,69,0.05)' : 'rgba(220,53,69,0.05)';
+            const corBorda = isPos ? 'rgba(40,167,69,0.2)' : 'rgba(220,53,69,0.2)';
+            const corTexto = isPos ? '#28a745' : '#ff4d4d';
+            const textoBadge = isPos ? 'CRÉDITO VENCIDO' : 'DÍVIDA VENCIDA';
+            const iconeSinal = isPos ? 'fa-arrow-up' : 'fa-arrow-down';
 
             listaVencidosHtml += `
-                <div style="background: rgba(220,53,69,0.05); padding: 12px; border-radius: 8px; border: 1px solid rgba(220,53,69,0.2); border-left: 3px solid #ff4d4d; margin-bottom: 8px;">
+                <div style="background: ${corFundo}; padding: 12px; border-radius: 8px; border: 1px solid ${corBorda}; border-left: 3px solid ${corTexto}; margin-bottom: 8px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span class="badge" style="background: rgba(220,53,69,0.15); color: #ff4d4d; border: 1px solid #ff4d4d; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> PRAZO VENCIDO</span>
-                        <strong style="color: #ff4d4d; font-size: 1.1rem;">${stringHora}</strong>
+                        <span class="badge" style="background: ${corTexto}22; color: ${corTexto}; border: 1px solid ${corTexto}; font-size: 0.75rem;"><i class="fa-solid fa-triangle-exclamation"></i> ${textoBadge}</span>
+                        <strong style="color: ${corTexto}; font-size: 1.1rem;"><i class="fa-solid ${iconeSinal}"></i> ${stringHora}</strong>
                     </div>
                     <small style="color: var(--cor-texto-secundario); display: block; margin-bottom: 5px; font-weight: bold;"><i class="fa-regular fa-calendar-xmark"></i> Sobrou do dia: ${formatarDataBR(v.data)}</small>
                     <div style="background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-principal); font-style: italic; line-height: 1.4; display: block;">"${v.obs}"</span>
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-principal); font-style: italic; line-height: 1.4; display: block;">"${v.obs || v.motivo || 'Sem observações adicionais.'}"</span>
                     </div>
                 </div>`;
         });
@@ -44269,23 +44393,25 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     }
 
                     if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        // 👇 MÁGICA: Nova leitura capaz de converter (10:00 às 12:00) em minutos para o Admin! 👇
-                        const regexHorarios = /\((\d{2}:\d{2})\s*(?:às|as)\s*(\d{2}:\d{2})\)/gi;
-                        let matchHorario;
+                        // 👇 MÁGICA DEFINITIVA: Extrai a DATA EXATA e a HORA EXATA do texto! 👇
+                        const regexDias = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
+                        let matchDia;
                         let achouHorario = false;
 
-                        while ((matchHorario = regexHorarios.exec(txtObs)) !== null) {
+                        while ((matchDia = regexDias.exec(txtObs)) !== null) {
                             achouHorario = true;
-                            const [hE, mE] = matchHorario[1].split(':').map(Number);
-                            const [hS, mS] = matchHorario[2].split(':').map(Number);
+                            const dataRealTrabalhada = `${matchDia[3]}-${matchDia[2]}-${matchDia[1]}`; // Converte pra YYYY-MM-DD
+                            
+                            const [hE, mE] = matchDia[4].split(':').map(Number);
+                            const [hS, mS] = matchDia[5].split(':').map(Number);
                             let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
                             if (diff < 0) diff += 1440;
-                            if (diff > 360) diff -= 60; // Desconto de almoço automático se > 6h
+                            if (diff > 360) diff -= 60; // Desconto de almoço automático
                             
-                            listCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: diff, minutosOriginais: diff, obs: f.observacao });
+                            listCreditos.push({ sigla: f.sigla, data: dataRealTrabalhada, minutos: diff, minutosOriginais: diff, obs: f.observacao });
                         }
 
-                        // Fallback pro formato antigo
+                        // Fallback pro formato antigo decimal
                         if (!achouHorario) {
                             const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
                             if (matchesLote) {
