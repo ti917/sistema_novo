@@ -11015,19 +11015,26 @@ window.enviarTRCTAssinadoGestor = async function(idColab, nomeColab, unidadeCola
 
         document.getElementById('btnLogout').addEventListener('click', async () => { await supabaseClient.auth.signOut(); location.reload(); });
 
-       // 👇 1. COLOQUE ESTA FUNÇÃO LOGO ACIMA DA `carregarPerfil` 👇
-window.getUnidadesPermitidasGestor = async function() {
+       window.getUnidadesPermitidasGestor = async function() {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.empresa) return [];
     
     let empresasGestor = usuarioAtual.empresa.split(',').map(e => e.trim());
     if (empresasGestor.includes('SOUL GESTÃO') && !empresasGestor.includes('SOUL')) empresasGestor.push('SOUL');
     if (empresasGestor.includes('SOUL') && !empresasGestor.includes('SOUL GESTÃO')) empresasGestor.push('SOUL GESTÃO');
     
-    // Busca e varre todas as unidades que existem na empresa
-    const { data } = await supabaseClient.from('perfis').select('unidade').in('empresa', empresasGestor).not('unidade', 'is', null);
-    if (!data || data.length === 0) return [];
+    // 👇 A MÁGICA: Se ele tem a Visão Global ativada, puxa TODAS as unidades da empresa dele direto da tabela oficial!
+    if (usuarioAtual.permissoes?.escala_global === true) {
+        const { data } = await supabaseClient.from('unidades_oficiais')
+            .select('nome')
+            .in('empresa', empresasGestor);
+            
+        if (data && data.length > 0) {
+            return [...new Set(data.map(u => u.nome.trim()))];
+        }
+    }
     
-    return [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+    // Se NÃO tiver a visão global (ou se falhar), devolve só as unidades do cadastro dele
+    return usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
 };
 
 async function carregarPerfil(id) {
@@ -11517,9 +11524,17 @@ window.atualizarContador = async function() {
     if(tiposPermitidos.length === 0) tiposPermitidos = ['NENHUM'];
     queryNotifs = queryNotifs.in('tipo', tiposPermitidos);
 
-    if (unidsFiltro) {
-        queryNotifs = queryNotifs.in('unidade', unidsFiltro);
+    // 👇 A CORREÇÃO DE ROTEAMENTO AQUI 👇
+    // Para os alertas pessoais (Avisos e Alertas Recentes na parte de baixo do sino), 
+    // o Gestor SÓ PODE VER os da unidade de cadastro dele, mesmo que seja Global!
+    if (isAdmin) {
+        if (unidsFiltro) queryNotifs = queryNotifs.in('unidade', unidsFiltro);
+    } else if (usuarioAtual.perfil === 'Gestor') {
+        // Pega as unidades diretas dele para as notificações pessoais
+        const unidsPessoais = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
+        queryNotifs = queryNotifs.in('unidade', unidsPessoais);
     }
+    // 👆 FIM DA CORREÇÃO 👆
 
     const { data: notifsAprovadasDb } = await queryNotifs;
     let notifsAprovadas = notifsAprovadasDb || [];
@@ -17326,6 +17341,8 @@ document.getElementById('novo-perfil').addEventListener('change', async function
 });
 
       async function popularUnidades() {
+    // Se for Gestor, os formulários já pegam a unidade do próprio cadastro dele
+    // Ele NUNCA deve carregar unidades extras para lançar coisas.
     if(usuarioAtual.perfil === 'Gestor') return;
 
     const selectColab = document.getElementById('novo-unidade-select');
