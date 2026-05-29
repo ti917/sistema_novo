@@ -9623,8 +9623,8 @@ window.gerarDadosBI = async function() {
             return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
         };
 
-        // ========================================================
-        // ⏳ MÓDULO: EXTRATO DE BANCO DE HORAS
+       // ========================================================
+        // ⏳ MÓDULO: EXTRATO DE BANCO DE HORAS (COM UNIDADES)
         // ========================================================
         if (indicador === 'BancoHoras') {
             let totalSaldoGeral = 0;
@@ -9632,6 +9632,9 @@ window.gerarDadosBI = async function() {
             let totalCreditoGeral = 0;
             let totalDebitoGeral = 0;
             let dadosTabelaBH = [];
+            
+            // 👇 MÁGICA NOVA: Dicionário para somar por unidade 👇
+            let saldosPorUnidade = {};
 
             perfis.filter(p => p.status === 'Ativo').forEach(c => {
                 const configUnidade = regrasBH.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
@@ -9652,29 +9655,47 @@ window.gerarDadosBI = async function() {
                         const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                         if (matchM) totalMinutosDebito += parseInt(matchM[1]);
                     } 
-                    // Dentro de gerarDadosBI, localize o loop das fts e troque a trava:
-                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
-                    
-                    // 🛡️ REFINAMENTO ANTI-FANTASMA NO BI
-                    if (txtObs.includes('TROCAR POR DESCANSO')) {
-                        return;
-                    }
+                    else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                        
+                        if (txtObs.includes('TROCAR POR DESCANSO')) return;
 
                         if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
-                            if (matchesLote) {
-                                matchesLote.forEach(m => {
-                                    let dec = parseFloat(m.replace('(','').replace(')',''));
-                                    arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
-                                    sumBaseCred += Math.round(dec * 60);
-                                });
+                            // 👇 LÓGICA CORRIGIDA PARA O BI (Lê as horas e joga nas variáveis certas do BI) 👇
+                            const regexHorarios = /\((\d{2}:\d{2})\s*(?:às|as)\s*(\d{2}:\d{2})\)/gi;
+                            let matchHorario;
+                            let achouHorario = false;
+
+                            while ((matchHorario = regexHorarios.exec(txtObs)) !== null) {
+                                achouHorario = true;
+                                const [hE, mE] = matchHorario[1].split(':').map(Number);
+                                const [hS, mS] = matchHorario[2].split(':').map(Number);
+                                let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
+                                if (diff < 0) diff += 1440;
+                                if (diff > 360) diff -= 60; // Desconto de almoço automático se > 6h
+                                
+                                arrayCreditos.push({ data: f.data_inicio, minutos: diff });
+                                sumBaseCred += diff;
+                            }
+
+                            // Fallback pro formato antigo decimal (ex: 2.50)
+                            if (!achouHorario) {
+                                const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                                if (matchesLote) {
+                                    matchesLote.forEach(m => {
+                                        let dec = parseFloat(m.replace('(','').replace(')',''));
+                                        let mins = Math.round(dec * 60);
+                                        arrayCreditos.push({ data: f.data_inicio, minutos: mins });
+                                        sumBaseCred += mins;
+                                    });
+                                }
                             }
                         } else {
                             const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                             if (matchDec) {
                                 let dec = parseFloat(matchDec[1]);
-                                arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
-                                sumBaseCred += Math.round(dec * 60);
+                                let mins = Math.round(dec * 60);
+                                arrayCreditos.push({ data: f.data_inicio, minutos: mins });
+                                sumBaseCred += mins;
                             }
                         }
                     }
@@ -9720,6 +9741,15 @@ window.gerarDadosBI = async function() {
                 totalCreditoGeral += sumBaseCred;
                 totalDebitoGeral += totalMinutosDebito;
 
+                // 👇 ALIMENTA O MAPA DE UNIDADES 👇
+                if (!saldosPorUnidade[c.unidade]) {
+                    saldosPorUnidade[c.unidade] = { saldo: 0, vencido: 0, credito: 0, debito: 0 };
+                }
+                saldosPorUnidade[c.unidade].saldo += saldoFinal;
+                saldosPorUnidade[c.unidade].vencido += somaMinutosVencidos;
+                saldosPorUnidade[c.unidade].credito += sumBaseCred;
+                saldosPorUnidade[c.unidade].debito += totalMinutosDebito;
+
                 dadosTabelaBH.push({
                     nome: c.nome, unidade: c.unidade,
                     creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito,
@@ -9728,12 +9758,11 @@ window.gerarDadosBI = async function() {
             });
 
             containerGrafico.style.display = 'none';
-            rankDiv.parentElement.style.display = 'none'; 
-            containerTabela.parentElement.style.gridColumn = 'span 2'; 
+            // Removidas as linhas antigas que escondiam o Ranking! Vamos usá-lo para as unidades.
             containerCardsTopo.style.gridTemplateColumns = 'repeat(4, 1fr)';
 
             let htmlCardsBI = '';
-            htmlCardsBI += criarCardBI('bi-vis-bh-saldo', 'Saldo Total (Unidade)', minToHr(totalSaldoGeral), 'fa-scale-balanced', '#8b5cf6');
+            htmlCardsBI += criarCardBI('bi-vis-bh-saldo', 'Saldo Total Global', minToHr(totalSaldoGeral), 'fa-scale-balanced', '#8b5cf6');
             htmlCardsBI += criarCardBI('bi-vis-bh-vencido', 'Horas Vencidas', minToHr(totalVencidoGeral), 'fa-triangle-exclamation', '#dc3545');
             htmlCardsBI += criarCardBI('bi-vis-bh-cred', 'Total Acumulado (+)', minToHr(totalCreditoGeral), 'fa-plus-circle', '#4fc3f7');
             htmlCardsBI += criarCardBI('bi-vis-bh-deb', 'Total Abatido (-)', minToHr(totalDebitoGeral), 'fa-minus-circle', '#ff9800');
@@ -9748,6 +9777,39 @@ window.gerarDadosBI = async function() {
                 </div>
             `;
             document.getElementById('bi-cards-container').innerHTML = htmlCardsBI + inputsOcultosPDF;
+
+            // 👇 RENDERIZA O RANKING POR UNIDADE 👇
+            rankDiv.parentElement.style.display = 'block'; // Garante que a área lateral está visível
+            rankDiv.previousElementSibling.innerHTML = `<i class="fa-solid fa-building"></i> Saldo Consolidado por Unidade`;
+            rankDiv.innerHTML = '';
+            
+            // Ordena as unidades da que tem o maior saldo para a menor
+            const unidadesArr = Object.entries(saldosPorUnidade).sort((a,b) => b[1].saldo - a[1].saldo);
+            
+            if (unidadesArr.length === 0) {
+                rankDiv.innerHTML = '<p style="color:var(--cor-texto-secundario); font-size:0.85rem; text-align:center; padding:10px;">Sem dados suficientes no período.</p>';
+            } else {
+                unidadesArr.forEach((item) => {
+                    const nomeUni = item[0];
+                    const dadosUni = item[1];
+                    let corSaldo = dadosUni.saldo >= 0 ? '#28a745' : '#dc3545';
+                    
+                    rankDiv.innerHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 6px; border-left: 3px solid ${corSaldo}; margin-bottom: 8px;">
+                        <div style="flex: 1; padding-right: 10px;">
+                            <strong style="color: var(--cor-texto-principal); font-size: 0.9rem; display: block;">${nomeUni}</strong>
+                            <div style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-top: 4px;">
+                                <span style="color:#4fc3f7">+ ${minToHr(dadosUni.credito)}</span> &nbsp;|&nbsp; 
+                                <span style="color:#ff9800">- ${minToHr(dadosUni.debito)}</span>
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <span style="display: block; font-size: 1.1rem; font-weight: bold; color: ${corSaldo};">${minToHr(dadosUni.saldo)}</span>
+                            ${dadosUni.vencido > 0 ? `<span style="font-size: 0.7rem; color: #dc3545; display: block; margin-top: 2px;">⚠️ Venc: ${minToHr(dadosUni.vencido)}</span>` : ''}
+                        </div>
+                    </div>`;
+                });
+            }
 
             theadTr.innerHTML = `
                 <th style="text-align: left; padding: 10px;">Colaborador</th>
