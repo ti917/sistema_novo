@@ -9636,16 +9636,25 @@ window.gerarDadosBI = async function() {
 
                 asHoras.forEach(f => {
                     let txtObs = (f.observacao || '').toUpperCase();
+                    let txtMotivo = (f.motivo || '').toUpperCase();
+                    
                     if (txtObs.includes('[ABATE_BANCO]')) {
                         const matchM = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                         if (matchM) totalMinutosDebito += parseInt(matchM[1]);
-                    } else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
+                    } 
+                    else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                        
+                        // 🛡️ ESCUDO ANTI-FANTASMA: Ignora o espelho de gráfico para regras antigas resolvidas
+                        if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
+                            return;
+                        }
+
                         if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
                             const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
                             if (matchesLote) {
                                 matchesLote.forEach(m => {
                                     let dec = parseFloat(m.replace('(','').replace(')',''));
-                                    arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
+                                    arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
                                     sumBaseCred += Math.round(dec * 60);
                                 });
                             }
@@ -9653,7 +9662,7 @@ window.gerarDadosBI = async function() {
                             const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                             if (matchDec) {
                                 let dec = parseFloat(matchDec[1]);
-                                arrayCreditos.push({ data: f.data_inicio, minutos: Math.round(dec * 60) });
+                                arrayCreditos.push({ data: f.data_inicio, minutes: Math.round(dec * 60) });
                                 sumBaseCred += Math.round(dec * 60);
                             }
                         }
@@ -21988,18 +21997,16 @@ window.removerExcecaoPontual = async function(idColab, dataIso) {
     });
 };
 
-     // ========================================================
-// MÁGICA H+ MULTIPLOS DIAS: UI E BOTÕES (BLINDADO)
-// ========================================================
-
+     // =========================================================================
+// 1. ATUALIZAÇÃO DA INTERFACE DE H+ (REMOVENDO COMPENSAÇÃO DIRETA PRO GESTOR)
+// =========================================================================
 window.uiNovoHplus = function(perfil) {
-    // Se for o Admin lançando direto, ele tem as opções de Pagamento. Se for Gestor, só Banco.
+    // Gestor agora SÓ TEM a opção de Acumular no Banco!
     const opcoesDestino = perfil === 'admin' 
         ? `<option value="Banco">🟢 Acumular no Banco de Horas</option>
            <option value="Pagamento">💵 Pagar no Holerite (Dinheiro no Mês)</option>
            <option value="Folga">📅 Trocar por Folga Programada (Agendar)</option>`
-        : `<option value="Banco">🟢 Acumular no Banco de Horas</option>
-           <option value="Folga">📅 Trocar por Folga Programada (Agendar Data)</option>`;
+        : `<option value="Banco">🟢 Acumular no Banco de Horas</option>`;
 
     return `
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
@@ -22031,6 +22038,249 @@ window.uiNovoHplus = function(perfil) {
         </div>
     </div>
     `;
+};
+
+// Remove as opções antigas dos selects estáticos ao carregar a página
+document.addEventListener('DOMContentLoaded', () => {
+    const selFtPagamento = document.getElementById('ft-pagamento');
+    if (selFtPagamento) {
+        Array.from(selFtPagamento.options).forEach(opt => {
+            if (opt.value === 'Folga Programada') opt.remove();
+        });
+    }
+
+    const selHeCompensacao = document.getElementById('he-tipo-compensacao');
+    if (selHeCompensacao) {
+        Array.from(selHeCompensacao.options).forEach(opt => {
+            if (opt.value === 'Descanso') opt.remove();
+        });
+    }
+});
+
+// =========================================================================
+// 📊 PAINEL DE SALDOS DO GESTOR SINCRO - CORREÇÃO DE CRÉDITOS E ANTI-FANTASMA
+// =========================================================================
+window.carregarPainelSaldosGestor = async function() {
+    const container = document.getElementById('lista-saldos-gestor-container');
+    container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Consolidando extratos de banco de horas...</p>';
+
+    const unidadeSelecionada = document.getElementById('ft-saldos-unidade').value;
+    
+    if (!unidadeSelecionada) {
+        container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;"><i class="fa-solid fa-building-circle-exclamation fa-2x" style="color:#ff9800; margin-bottom:10px;"></i><br>Selecione a Unidade acima para carregar o painel da equipe!</p>';
+        return;
+    }
+
+    try {
+        const { data: colabs, error: errC } = await supabaseClient.from('perfis')
+            .select('id, nome, empresa, unidade, dados_admissao, status, dados_rescisao')
+            .eq('perfil', 'Colaborador')
+            .eq('unidade', unidadeSelecionada);
+
+        if (errC) throw errC;
+
+        const ativosReais = window.filtrarAtivosE_AvisoPrevio(colabs || []);
+
+        if (ativosReais.length === 0) {
+            container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;">Nenhum funcionario ativo alocado nesta unidade.</p>';
+            return;
+        }
+
+        const idsColabs = ativosReais.map(c => c.id);
+        const { data: fts, error: errF } = await supabaseClient.from('horas_extras_ft')
+            .select('*')
+            .eq('status', 'Aprovado')
+            .in('colaborador_id', idsColabs);
+
+        if (errF) throw errF;
+
+        let htmlAcumulado = '';
+
+        ativosReais.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(colab => {
+            const adm = colab.dados_admissao || {};
+            const asHorasDesteColab = fts.filter(f => f.colaborador_id === colab.id);
+
+            let minutosCredito = 0;
+            let minutosDebito = 0;
+
+            asHorasDesteColab.forEach(f => {
+                let txtObs = (f.observacao || '').toUpperCase();
+                let txtMotivo = (f.motivo || '').toUpperCase(); // 🌟 Normaliza o motivo para maiúsculo
+                
+                // FLUXO DE DÉBITO
+                if (txtObs.includes('[ABATE_BANCO]')) {
+                    const matchMinutos = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
+                    if (matchMinutos) minutosDebito += parseInt(matchMinutos[1]);
+                } 
+                // FLUXO DE CRÉDITO (SINCRONIZADO: Checa motivo E observação sem quebrar)
+                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                    
+                    // 🛡️ ESCUDO ANTI-FANTASMA: Corta lançamentos legados com compensação em texto
+                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
+                        return; // Age como continue no loop forEach
+                    }
+
+                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
+                        const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                        if (matchesLote) {
+                            matchesLote.forEach(m => minutosCredito += parseFloat(m.replace('(','').replace(')','')) * 60);
+                        }
+                    } else {
+                        const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
+                        if (matchDec) {
+                            let dec = parseFloat(matchDec[1]);
+                            minutosCredito += parseFloat(dec) * 60;
+                        }
+                    }
+                }
+            });
+
+            let saldoMinutosFinal = minutosCredito - minutosDebito;
+            let isNegativo = saldoMinutosFinal < 0;
+            
+            const totalAbs = Math.abs(saldoMinutosFinal);
+            const hrsLegivel = Math.floor(totalAbs / 60);
+            const minLegivel = Math.round(totalAbs % 60);
+            const stringSaldo = `${isNegativo ? '-' : ''}${String(hrsLegivel).padStart(2,'0')}h ${String(minLegivel).padStart(2,'0')}m`;
+
+            let corSaldo = saldoMinutosFinal > 0 ? '#28a745' : (saldoMinutosFinal < 0 ? '#dc3545' : 'var(--cor-texto-secundario)');
+            let bgPilula = saldoMinutosFinal > 0 ? 'rgba(40,167,69,0.15)' : (saldoMinutosFinal < 0 ? 'rgba(220,53,69,0.15)' : 'rgba(255,255,255,0.05)');
+
+            const nomeSeguro = colab.nome.replace(/'/g, "\\'");
+            const cargo = adm.cargo || 'Sem Cargo';
+
+            let btnPagarNegativoHtml = '';
+            if (isNegativo) {
+                btnPagarNegativoHtml = `
+                <button type="button" class="btn-danger-mini" style="background: #dc3545; color: #fff; border: none; font-weight: bold; padding: 10px 15px; font-size: 0.85rem; width: 100%; justify-content: center; margin-top: 5px;" 
+                    onclick="abrirModalPagarHorasNegativas('${colab.id}', '${nomeSeguro}', ${totalAbs}, '${unidadeSelecionada}', '${colab.empresa}')">
+                    <i class="fa-solid fa-hand-holding-dollar"></i> Pagar Horas Devidas
+                </button>`;
+            }
+
+            htmlAcumulado += `
+                <div class="admissao-card card-saldo-gestor" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${colab.nome}</strong><br>
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-briefcase"></i> ${cargo}</span>
+                    </div>
+                    
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <div style="text-align: center; background: ${bgPilula}; border: 1px solid ${corSaldo}50; padding: 6px 15px; border-radius: 20px; min-width: 110px;">
+                            <span style="font-size: 0.65rem; color: var(--cor-texto-secundario); display: block; font-weight: bold; text-transform: uppercase;">Saldo Atual</span>
+                            <strong style="color: ${corSaldo}; font-size: 1.2rem;">${stringSaldo}</strong>
+                        </div>
+                        
+                        <div style="display: flex; flex-direction: column; width: 180px;">
+                            <button type="button" class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 15px; font-size: 0.85rem; width: 100%; justify-content: center;" 
+                                onclick="abrirModalLancarAbate('${colab.id}', '${nomeSeguro}', '${unidadeSelecionada}', '${colab.empresa}')">
+                                <i class="fa-solid fa-calendar-minus"></i> Lançar Abate
+                            </button>
+                            ${btnPagarNegativoHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+
+        container.innerHTML = htmlAcumulado;
+
+    } catch (e) {
+        container.innerHTML = '<p style="color:var(--cor-perigo); text-align:center;">Erro ao processar painel.</p>';
+    }
+};
+
+// =========================================================================
+// 3. NOVO MODAL PARA PAGAR HORAS NEGATIVAS (LIQUIDAÇÃO DE DÍVIDA)
+// =========================================================================
+window.abrirModalPagarHorasNegativas = function(idColab, nome, minutosNegativos, unidade, empresa) {
+    const hrs = Math.floor(minutosNegativos / 60);
+    const mins = minutosNegativos % 60;
+    const stringExibicao = `${hrs}h ${String(mins).padStart(2,'0')}m`;
+
+    const modalHtml = `
+    <div id="modal-pagar-negativo" class="modal-arquivo-overlay" style="z-index: 100025; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid #dc3545; position: relative;">
+            <button onclick="document.getElementById('modal-pagar-negativo').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+
+            <h3 style="color: #dc3545; margin-bottom: 5px;"><i class="fa-solid fa-hand-holding-dollar"></i> Quitar Horas Negativas</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 20px;">Colaborador: <b style="color: #fff;">${nome}</b></p>
+
+            <div style="background: rgba(220,53,69,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545; margin-bottom: 20px; text-align: center;">
+                <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); text-transform: uppercase; font-weight: bold;">O colaborador deve ao Banco</span><br>
+                <strong style="font-size: 1.8rem; color: #dc3545;">- ${stringExibicao}</strong>
+            </div>
+
+            <form id="form-pagar-negativo">
+                <div class="form-group">
+                    <label>Como essas horas serão quitadas? <span style="color: var(--cor-perigo);">*</span></label>
+                    <select id="pagar-neg-metodo" required style="width: 100%; padding: 12px; border-radius: 8px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);">
+                        <option value="Desconto em Folha de Pagamento">Desconto em Folha de Pagamento</option>
+                        <option value="Trabalhou a mais para compensar a dívida">Trabalhou a mais para compensar a dívida</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Justificativa / Observação <span style="color: var(--cor-perigo);">*</span></label>
+                    <textarea id="pagar-neg-obs" required placeholder="Explique os detalhes da quitação para o RH..." style="width: 100%; padding: 12px; border-radius: 8px; min-height: 80px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda);"></textarea>
+                </div>
+
+                <button type="button" class="btn-success" style="width: 100%; height: 50px; background: #dc3545; color: #fff; border: none; font-weight: bold; margin-top: 10px;" 
+                    onclick="confirmarPagamentoNegativo('${idColab}', '${nome.replace(/'/g, "\\'")}', ${minutosNegativos}, '${unidade}', '${empresa}')">
+                    <i class="fa-solid fa-paper-plane"></i> Enviar Solicitação para o RH
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+window.confirmarPagamentoNegativo = async function(idColab, nome, minutosNegativos, unidade, empresa) {
+    const metodo = document.getElementById('pagar-neg-metodo').value;
+    const obs = document.getElementById('pagar-neg-obs').value.trim();
+
+    if(!obs) return mostrarAlerta("Preencha a justificativa detalhando a operação!", "aviso");
+
+    const btn = document.querySelector('#modal-pagar-negativo .btn-success');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando...';
+    btn.disabled = true;
+
+    const horasDecimais = (minutosNegativos / 60).toFixed(2);
+    const dataHojeIso = new Date().toISOString().split('T')[0];
+
+    // MÁGICA CONTÁBIL: Para anular um débito (negativo), lançamos um crédito (H+) com valor exato.
+    // Assim, o cálculo vai somar o crédito ao débito e o saldo final ficará 0h 00m (Quitado).
+    const objCreditoCompensacao = {
+        colaborador_id: idColab,
+        nome: nome,
+        unidade: unidade,
+        sigla: 'H+',
+        data_inicio: dataHojeIso,
+        data_fim: dataHojeIso,
+        motivo: `Liquidação de Horas Negativas`,
+        observacao: `(${horasDecimais}). BANCO. [LIQUIDAÇÃO NEGATIVA] Método: ${metodo}. Justificativa: ${obs}`,
+        status: 'Pendente', // Gestor manda pro RH aprovar
+        criado_por: usuarioAtual.nome
+    };
+
+    try {
+        const { data: novaFT, error } = await supabaseClient.from('horas_extras_ft').insert([objCreditoCompensacao]).select('id').single();
+        if (error) throw error;
+
+        // Notifica o Admin na Central de Solicitações
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: nome, unidade: unidade, lida: false,
+            tipo: 'FT_Admin', referencia_id: novaFT.id
+        }]);
+
+        mostrarAlerta("Solicitação enviada ao RH para liquidar o saldo negativo!", "sucesso");
+        document.getElementById('modal-pagar-negativo').remove();
+        
+    } catch (e) {
+        mostrarAlerta("Erro ao salvar liquidação: " + e.message, "erro");
+        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação para o RH';
+        btn.disabled = false;
+    }
 };
 
 window.addDiaQuebra = function(perfil) {
@@ -22772,6 +23022,23 @@ window.reprovarERemoverFT = async function(idFT) {
         </div>
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+      // =========================================================================
+// CORREÇÃO: WRAPPER PARA INTERCEPTAR O CLIQUE DE RECUSAR NO MODAL DE FT
+// =========================================================================
+window.reprovarERemoverFTModal = async function(idFT) {
+    // 1. Remove o modal da tela imediatamente para dar feedback visual fluido
+    const modal = document.getElementById('modal-ficha-ft');
+    if (modal) modal.remove();
+
+    // 2. Encaminha o ID para a função contábil real que limpa o banco de dados
+    if (typeof window.reprovarERemoverFT === 'function') {
+        await window.reprovarERemoverFT(idFT);
+    } else {
+        console.error("🛑 Erro: A função base 'window.reprovarERemoverFT' não foi encontrada no script.");
+        mostrarAlerta("Erro interno ao processar a exclusão.", "erro");
+    }
 };
 
 window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeColab, isAbate) {
@@ -43098,127 +43365,7 @@ window.obterHorasJornadaAtual = function(dadosAdmissao, dataIso) {
         return 8.8; // Fallback padrão de 44h semanais (8h48m por dia)
     }
 };
-
-// =========================================================================
-// 📊 CARREGADOR DO PAINEL DE SALDOS DO GESTOR (CONSOLIDADOR EM BACKEND)
-// =========================================================================
-window.carregarPainelSaldosGestor = async function() {
-    const container = document.getElementById('lista-saldos-gestor-container');
-    container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Consolidando extratos de banco de horas...</p>';
-
-    // 👇 A MÁGICA AQUI: Puxa do NOVO select da própria aba
-    const unidadeSelecionada = document.getElementById('ft-saldos-unidade').value;
-    
-    if (!unidadeSelecionada) {
-        // 👇 Aviso atualizado para refletir a mudança
-        container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;"><i class="fa-solid fa-building-circle-exclamation fa-2x" style="color:#ff9800; margin-bottom:10px;"></i><br>Selecione a Unidade acima para carregar o painel da equipe!</p>';
-        return;
-    }
-
-    try {
-        // 1. Busca os colaboradores da unidade
-        const { data: colabs, error: errC } = await supabaseClient.from('perfis')
-            .select('id, nome, empresa, unidade, dados_admissao, status, dados_rescisao')
-            .eq('perfil', 'Colaborador')
-            .eq('unidade', unidadeSelecionada);
-
-        if (errC) throw errC;
-
-        const ativosReais = window.filtrarAtivosE_AvisoPrevio(colabs || []);
-
-        if (ativosReais.length === 0) {
-            container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding:20px;">Nenhum funcionário ativo alocado nesta unidade.</p>';
-            return;
-        }
-
-        // 2. Busca todas as horas extras (créditos) e folgas do banco (débitos) aprovadas
-        const idsColabs = ativosReais.map(c => c.id);
-        const { data: fts, error: errF } = await supabaseClient.from('horas_extras_ft')
-            .select('*')
-            .eq('status', 'Aprovado')
-            .in('colaborador_id', idsColabs);
-
-        if (errF) throw errF;
-
-        // Processa o extrato de cada um na memória
-        let htmlAcumulado = '';
-
-        ativosReais.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(colab => {
-            const adm = colab.dados_admissao || {};
-            const asHorasDesteColab = fts.filter(f => f.colaborador_id === colab.id);
-
-            let minutosCredito = 0;
-            let minutosDebito = 0;
-
-            asHorasDesteColab.forEach(f => {
-                // Inteligência de quebra de string para ler o total de horas
-                let textoObs = (f.observacao || '').toUpperCase();
-                
-                // Se for um abate cadastrado pelo gestor
-                if (textoObs.includes('[ABATE_BANCO]')) {
-                    const matchMinutos = textoObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
-                    if (matchMinutos) minutosDebito += parseInt(matchMinutos[1]);
-                } 
-                // Se for um acúmulo enviado pro banco
-                else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
-                    // Mapeia H+ múltiplo ou HE normal
-                    if (textoObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        // Varre os minutos de H+ múltiplos
-                        const matchesMinutosLote = textoObs.match(/\((\d+\.\d+)\)/g);
-                        if (matchesMinutosLote) {
-                            matchesMinutosLote.forEach(m => minutosCredito += parseFloat(m.replace('(','').replace(')','')) * 60);
-                        }
-                    } else {
-                        // HE individual
-                        const matchDecimal = textoObs.match(/\((\d+\.\d+)\)/);
-                        if (matchDecimal) minutosCredito += parseFloat(matchDecimal[1]) * 60;
-                    }
-                }
-            });
-
-            let saldoMinutosFinal = minutosCredito - minutosDebito;
-            let isNegativo = saldoMinutosFinal < 0;
-            
-            const totalAbs = Math.abs(saldoMinutosFinal);
-            const hrsLegivel = Math.floor(totalAbs / 60);
-            const minLegivel = Math.round(totalAbs % 60);
-            const stringSaldo = `${isNegativo ? '-' : ''}${String(hrsLegivel).padStart(2,'0')}h ${String(minLegivel).padStart(2,'0')}m`;
-
-            let corSaldo = saldoMinutosFinal > 0 ? '#28a745' : (saldoMinutosFinal < 0 ? '#dc3545' : 'var(--cor-texto-secundario)');
-            let bgPilula = saldoMinutosFinal > 0 ? 'rgba(40,167,69,0.15)' : (saldoMinutosFinal < 0 ? 'rgba(220,53,69,0.15)' : 'rgba(255,255,255,0.05)');
-
-            const nomeSeguro = colab.nome.replace(/'/g, "\\'");
-            const cargo = adm.cargo || 'Sem Cargo';
-
-            htmlAcumulado += `
-                <div class="admissao-card card-saldo-gestor" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${colab.nome}</strong><br>
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-briefcase"></i> ${cargo}</span>
-                    </div>
-                    
-                    <div style="display: flex; align-items: center; gap: 20px;">
-                        <div style="text-align: center; background: ${bgPilula}; border: 1px solid ${corSaldo}50; padding: 6px 15px; border-radius: 20px; min-width: 100px;">
-                            <span style="font-size: 0.65rem; color: var(--cor-texto-secundario); display: block; font-weight: bold; text-transform: uppercase;">Saldo Atual</span>
-                            <strong style="color: ${corSaldo}; font-size: 1.2rem;">${stringSaldo}</strong>
-                        </div>
-                        
-                        <button type="button" class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 15px; font-size: 0.85rem;" 
-                            onclick="abrirModalLancarAbate('${colab.id}', '${nomeSeguro}', '${unidadeSelecionada}', '${colab.empresa}')">
-                            <i class="fa-solid fa-calendar-minus"></i> Lançar Folga/Abate
-                        </button>
-                    </div>
-                </div>
-            `;
-        });
-
-        container.innerHTML = htmlAcumulado;
-
-    } catch (e) {
-        container.innerHTML = '<p style="color:var(--cor-perigo); text-align:center;">Erro ao processar painel.</p>';
-    }
-};
-
+  
 window.filtrarSaldosPainelGestor = function() {
     const termo = window.removerAcentos(document.getElementById('busca-saldo-gestor').value.toLowerCase());
     document.querySelectorAll('.card-saldo-gestor').forEach(card => {
@@ -43820,7 +43967,7 @@ window.carregarConfigBHUnidade = function() {
 };
 
 // =========================================================================
-// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (FIFO + MEMÓRIA DE VENCIDOS)
+// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS (FIFO COM SUPORTE A SALDO NEGATIVO)
 // =========================================================================
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -43832,7 +43979,6 @@ window.carregarExtratoBancoHorasAdmin = async function() {
     try {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
         
-        // Busca regras do banco de horas
         const { data: configsBH } = await supabaseClient.from('config_banco_horas').select('*');
         configsBancoHorasGlobais = configsBH || [];
 
@@ -43855,21 +44001,33 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         hoje.setHours(0,0,0,0);
 
         colabs.forEach(c => {
+            // 🔴 ADICIONE ESTE LOG AQUI PARA RASTREAR NO NAVEGADOR:
+            console.log(`🔍 Analisando ${c.nome}:`, {
+                unidade: c.unidade,
+                horasFiltradasNoBanco: fts.filter(f => f.colaborador_id === c.id).length
+            });
+
             const configUnidade = configsBancoHorasGlobais.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
-            if (!configUnidade.usa_banco) return;
+            if (!configUnidade.usa_banco) {
+                console.warn(`⚠️ ${c.nome} ocultado porque a unidade desativou o banco.`);
+                return;
+            }
 
             const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
-            if (asHorasDesteColab.length === 0) return; 
-
+            if (asHorasDesteColab.length === 0) {
+                console.warn(`⚠️ ${c.nome} ocultado porque não tem nenhuma hora APROVADA na unidade filtrada.`);
+                return;
+            }
+            
             let arrayCreditos = []; 
-            let historicoDebitos = []; // 👈 Guarda as folgas/abates
+            let historicoDebitos = []; 
             let totalMinutosDebito = 0;
-
             let sumBaseCred = 0;
-            let historicoCreditos = []; // 👈 Guarda os créditos originais
+            let historicoCreditos = []; 
 
             asHorasDesteColab.forEach(f => {
                 let txtObs = (f.observacao || '').toUpperCase();
+                let txtMotivo = (f.motivo || '').toUpperCase();
                 
                 // FLUXO DE DÉBITO
                 if (txtObs.includes('[ABATE_BANCO]')) {
@@ -43882,14 +44040,21 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     }
                 } 
                 // FLUXO DE CRÉDITO
-                else if (f.motivo && (f.motivo.includes('Banco') || f.motivo.includes('Quebra'))) {
+                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                    
+                    // 🛡️ ESCUDO ANTI-FANTASMA: Se o registro antigo já tem folga casada no texto, ignora do saldo acumulado
+                    if (txtObs.includes('COMPENSAÇÃO') || txtObs.includes('COMPENSACAO')) {
+                        return; 
+                    }
+
                     if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
                         const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
                         if (matchesLote) {
                             matchesLote.forEach(m => {
                                 let dec = parseFloat(m.replace('(','').replace(')',''));
-                                arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: Math.round(dec * 60), obs: f.observacao });
-                                sumBaseCred += Math.round(dec * 60);
+                                let mins = Math.round(dec * 60);
+                                arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
+                                sumBaseCred += mins;
                                 historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
                             });
                         }
@@ -43897,15 +44062,16 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                         const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
                         if (matchDec) {
                             let dec = parseFloat(matchDec[1]);
-                            arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: Math.round(dec * 60), obs: f.observacao });
-                            sumBaseCred += Math.round(dec * 60);
+                            let mins = Math.round(dec * 60);
+                            arrayCreditos.push({ sigla: f.sigla, data: f.data_inicio, minutos: mins, minutosOriginais: mins, obs: f.observacao });
+                            sumBaseCred += mins;
                             historicoCreditos.push({ sigla: f.sigla, horas: dec, data: f.data_inicio, obs: f.observacao });
                         }
                     }
                 }
             });
 
-            // FIFO - Ordena os créditos dos mais antigos para os mais novos
+            // FIFO Contábil: Ordena créditos dos mais antigos para os mais novos
             arrayCreditos.sort((a, b) => new Date(a.data + 'T00:00:00') - new Date(b.data + 'T00:00:00'));
             
             let debitoRestante = totalMinutosDebito;
@@ -43921,12 +44087,11 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 }
             });
 
-            let somaMinutosCreditoTotal = 0;
             let somaMinutosVencidos = 0;
-            let historicoVencidos = []; // 👈 Guarda APENAS o que sobrou e venceu
+            let historicoVencidos = [];
 
+            // Varre o que sobrou na fila para descobrir o que venceu baseado na regra de dias da unidade
             arrayCreditos.forEach(cred => {
-                somaMinutosCreditoTotal += cred.minutos;
                 if (cred.minutos > 0) {
                     const dCred = new Date(cred.data + 'T00:00:00');
                     const diffDias = Math.floor((hoje - dCred) / (1000 * 3600 * 24));
@@ -43943,7 +44108,8 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 }
             });
 
-            let saldoFinal = somaMinutosCreditoTotal; 
+            // 👇 CORREÇÃO MATEMÁTICA: Saldo real pode ser negativo se os débitos superarem os créditos!
+            let saldoFinal = sumBaseCred - totalMinutosDebito; 
             if (saldoFinal <= 0) {
                 somaMinutosVencidos = 0; 
                 historicoVencidos = [];
@@ -43962,7 +44128,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 vencido: somaMinutosVencidos,
                 historicoCreditos: historicoCreditos,
                 historicoDebitos: historicoDebitos,
-                historicoVencidos: historicoVencidos // 👈 INJETADO NO OBJETO!
+                historicoVencidos: historicoVencidos 
             });
         });
 
@@ -43972,6 +44138,94 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         console.error(e);
         tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-perigo);">Erro crítico ao computar extratos.</td></tr>';
     }
+};
+
+// =========================================================================
+// 🔍 RENDERIZADOR VISUAL DO EXTRATO DO ADMIN (SUPORTE A SALDOS NEGATIVOS)
+// =========================================================================
+window.filtrarExtratoBHAdminVisual = function() {
+    const termo = window.removerAcentos(document.getElementById('busca-extrato-bh-admin').value.toLowerCase());
+    const tbody = document.getElementById('lista-extrato-bh-admin-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    const filtrados = window.todosSaldosBHAdmin.filter(u => 
+        window.removerAcentos(u.nome.toLowerCase()).includes(termo) || 
+        window.removerAcentos(u.unidade.toLowerCase()).includes(termo)
+    );
+
+    if (filtrados.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 30px;">Nenhum colaborador encontrado com os filtros atuais.</td></tr>';
+        return;
+    }
+
+    const minToHr = (mins) => {
+        const isNeg = mins < 0;
+        const absMins = Math.abs(mins);
+        const h = Math.floor(absMins / 60);
+        const m = Math.round(absMins % 60);
+        return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
+    };
+
+    filtrados.forEach((u, i) => {
+        let bgRow = i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent';
+        let corSaldo = u.saldo >= 0 ? '#28a745' : '#dc3545';
+        let bgPilula = u.saldo >= 0 ? 'rgba(40,167,69,0.15)' : 'rgba(220,53,69,0.15)';
+        
+        let stringVencido = minToHr(u.vencido);
+        let areaAcaoHtml = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;">Regular</span>';
+
+        // Se tiver horas vencidas (Positivas acumuladas sem uso)
+        if (u.vencido > 0) {
+            stringVencido = `
+                <b style="color: #ff4d4d;">⚠️ ${minToHr(u.vencido)}</b>
+                <br>
+                <button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #dc3545; color: #dc3545; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'" onclick="abrirModalExtratoBH('${u.id}', 'vencidos')" title="Ver a origem das horas vencidas">
+                    <i class="fa-solid fa-eye"></i> Detalhes
+                </button>
+            `;
+            
+            areaAcaoHtml = `
+                <button class="btn-success" style="background: rgba(40,167,69,0.15); border: 1px solid #28a745; color: #28a745; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
+                    onclick="pagarHorasVencidasAdmin('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${u.vencido}, '${u.unidade}', '${u.empresa}')">
+                    <i class="fa-solid fa-money-bill-wave"></i> Liquidar Vencidas
+                </button>
+            `;
+        }
+
+        // 👇 SE O SALDO ATUAL FOR NEGATIVO, PERMITE LIQUIDAR A DÍVIDA DO COLABORADOR DIRETO DAQUI 👇
+        if (u.saldo < 0) {
+            areaAcaoHtml = `
+                <button class="btn-success" style="background: rgba(220,53,69,0.15); border: 1px solid #dc3545; color: #ff4d4d; font-size: 0.8rem; font-weight: bold; padding: 6px 12px;" 
+                    onclick="window.abrirModalPagarHorasNegativas('${u.id}', '${u.nome.replace(/'/g, "\\'")}', ${Math.abs(u.saldo)}, '${u.unidade}', '${u.empresa}')">
+                    <i class="fa-solid fa-hand-holding-dollar"></i> Descontar Dívida
+                </button>
+            `;
+        }
+
+        tbody.innerHTML += `
+            <tr style="background: ${bgRow}; border-bottom: 1px solid var(--cor-borda);">
+                <td style="padding: 15px; text-align: left;"><strong style="color:var(--cor-acento); font-size:1rem;">${u.nome}</strong></td>
+                <td style="padding: 15px; text-align: left; color: var(--cor-texto-secundario); font-size:0.85rem;">${u.unidade}<br><small style="opacity:0.7;">${u.empresa}</small></td>
+                
+                <td style="padding: 15px; text-align: center; color: #4fc3f7; vertical-align: middle;">
+                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.creditoTotal)}</span>
+                    ${u.creditoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #4fc3f7; color: #4fc3f7; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" onclick="abrirModalExtratoBH('${u.id}', 'creditos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
+                </td>
+                
+                <td style="padding: 15px; text-align: center; color: #a6b0cf; vertical-align: middle;">
+                    <span style="font-weight: bold; font-size: 1.05rem;">${minToHr(u.debitoTotal)}</span>
+                    ${u.debitoTotal > 0 ? `<br><button class="btn-secondary" style="margin-top: 5px; padding: 3px 8px; font-size: 0.7rem; border-color: #a6b0cf; color: #a6b0cf; border-radius: 6px; transition: 0.2s;" onmouseover="this.style.background='#a6b0cf'; this.style.color='#000'" onmouseout="this.style.background='transparent'; this.style.color='#a6b0cf'" onclick="abrirModalExtratoBH('${u.id}', 'debitos')"><i class="fa-solid fa-eye"></i> Detalhes</button>` : ''}
+                </td>
+
+                <td style="padding: 15px; text-align: center; font-weight: bold; font-size:1.05rem; color: ${corSaldo}; vertical-align: middle;">
+                    <span style="background: ${bgPilula}; padding: 4px 10px; border-radius: 12px; border: 1px solid ${corSaldo}40;">${minToHr(u.saldo)}</span>
+                </td>
+                <td style="padding: 15px; text-align: center; vertical-align: middle;">${stringVencido}</td>
+                <td style="padding: 15px; text-align: right; padding-right: 25px; vertical-align: middle;">${areaAcaoHtml}</td>
+            </tr>
+        `;
+    });
 };
       
         // Memória para saber se o número aumentou
