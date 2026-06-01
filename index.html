@@ -14884,137 +14884,127 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     loading.classList.remove('hidden');
 
     try {
-        const partesMesAno = mesAno.split('-');
-        const anoSelecionado = parseInt(partesMesAno[0]);
-        const mesSelecionado = parseInt(partesMesAno[1]); 
-        
-        // 👇 As duas datas de referência para o filtro inteligente 👇
-        const primeiroDiaDoMesVisivel = new Date(anoSelecionado, mesSelecionado - 1, 1, 0, 0, 0);
-        const ultimoDiaDoMesVisivel = new Date(anoSelecionado, mesSelecionado, 0, 23, 59, 59);
+            const partesMesAno = mesAno.split('-');
+            const anoSelecionado = parseInt(partesMesAno[0]);
+            const mesSelecionado = parseInt(partesMesAno[1]); 
+            
+            const primeiroDiaDoMesVisivel = new Date(anoSelecionado, mesSelecionado - 1, 1, 0, 0, 0);
+            const ultimoDiaDoMesVisivel = new Date(anoSelecionado, mesSelecionado, 0, 23, 59, 59);
 
-        let anoAnterior = anoSelecionado;
-        let mesAnterior = mesSelecionado - 1;
-        if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
-        const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
+            let anoAnterior = anoSelecionado;
+            let mesAnterior = mesSelecionado - 1;
+            if(mesAnterior === 0) { mesAnterior = 12; anoAnterior -= 1; }
+            const mesAnteriorStr = `${anoAnterior}-${String(mesAnterior).padStart(2, '0')}`;
 
-        const dataHoje = new Date();
-        const anoHoje = dataHoje.getFullYear();
-        const mesHoje = dataHoje.getMonth() + 1;
-        
-        const isMesAnteriorNoPassado = (anoAnterior < anoHoje) || (anoAnterior === anoHoje && mesAnterior < mesHoje);
+            const dataHoje = new Date();
+            const anoHoje = dataHoje.getFullYear();
+            const mesHoje = dataHoje.getMonth() + 1;
+            
+            const isMesAnteriorNoPassado = (anoAnterior < anoHoje) || (anoAnterior === anoHoje && mesAnterior < mesHoje);
 
-        const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
+            const { count } = await supabaseClient.from('escalas_mensais').select('*', { count: 'exact', head: true }).eq('unidade', unidade);
+            
+            if (usuarioAtual.perfil === 'Gestor' && count > 0 && isMesAnteriorNoPassado) {
+                const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).maybeSingle();
+                if (escAnt && !escAnt.fechada) { 
+                    await mostrarAvisoModal(`A escala do mês passado <b>(${mesAnteriorStr})</b> encerrou e não foi fechada definitivamente.<br><br>O sistema vai retornar para o mês pendente.`, '⛔ Acesso Bloqueado');
+                    document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
+                    loading.classList.add('hidden');
+                    processarEscala(); 
+                    return;
+                }
+            }
 
-// 👇 A MÁGICA: Adicionamos a trava para que o bloqueio de tela só aconteça com o Gestor!
-if (usuarioAtual.perfil === 'Gestor' && count > 0 && isMesAnteriorNoPassado) {
-    const { data: escAnt } = await supabaseClient.from('escalas_mensais').select('fechada').eq('mes_ano', mesAnteriorStr).eq('unidade', unidade).maybeSingle();
-    if (escAnt && !escAnt.fechada) { 
-        await mostrarAvisoModal(`A escala do mês passado <b>(${mesAnteriorStr})</b> encerrou e não foi fechada definitivamente.<br><br>O sistema vai retornar para o mês pendente.`, '⛔ Acesso Bloqueado');
-        document.getElementById('filtro-mes-escala').value = mesAnteriorStr;
-        loading.classList.add('hidden');
-        processarEscala(); 
-        return;
-    }
-}
+            // 1. Busca se já existe registro dessa escala no banco (para saber se está fechada ou não)
+            const { data: escalasSalvas } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).order('created_at', { ascending: false }).limit(1);
+            const escalaSalva = (escalasSalvas && escalasSalvas.length > 0) ? escalasSalvas[0] : null;
 
-        const { data: escalasSalvas } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).order('created_at', { ascending: false }).limit(1);
-        const escalaSalva = (escalasSalvas && escalasSalvas.length > 0) ? escalasSalvas[0] : null;
-
-        if (escalaSalva && escalaSalva.fechada) {
-            escalaMesAtualGerada = escalaSalva.dados_escala;
-            assinaturaEscalaAtual = escalaSalva.assinatura;
-            window.nomeAssinaturaEscala = escalaSalva.assinado_por || 'Responsável não identificado';
-            window.atualizarFiltroCargosPorUnidade(escalaSalva.dados_escala);
-            renderizarTabelaHTML(escalaSalva.dados_escala, mesAno, true);
-            grupoBotoes.classList.remove('hidden'); 
-        }
-        else {
-            assinaturaEscalaAtual = null;
-            window.nomeAssinaturaEscala = null; 
+            // 2. SEMPRE BUSCA OS DADOS ATUALIZADOS DO BANCO (Ocorrências, Trocas, Atestados do RH)
             const { data: todosColaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
 
             const colaboradores = (todosColaboradores || []).filter(c => {
-                // 👇 BLOQUEIA EXCLUÍDOS, CANCELADOS E QUEM TÁ AGUARDANDO ASO! 👇
                 if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false; 
-                
                 const adm = c.dados_admissao || {};
                 const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
                 if (!dataInicioStr) return false;
 
                 const dInicio = new Date(dataInicioStr + 'T00:00:00');
-                
-                // 👇 1. BLOQUEIA QUEM SÓ COMEÇA EM MÊS FUTURO AO QUE ESTAMOS VENDO 👇
                 if (dInicio > ultimoDiaDoMesVisivel) return false;
 
-                // 👇 2. A MÁGICA NOVA AQUI: Bloqueia quem foi desligado ANTES do mês que estamos vendo 👇
                 if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                     const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
                         const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]), 23, 59, 59);
-                        
-                        // Se a data de desligamento for menor que o 1º dia do mês que estamos olhando na tela, tchau!
                         if (dataDesligamento < primeiroDiaDoMesVisivel) return false;
                     }
                 }
+                return (c.unidade === unidade) || (adm.historico_transferencias && adm.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade));
+            }).sort((a, b) => a.nome.localeCompare(b.nome));
 
-                const pertenceAUnidade = (c.unidade === unidade) || (adm.historico_transferencias && adm.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade));
-                
-                return pertenceAUnidade;
-           }).sort((a, b) => a.nome.localeCompare(b.nome));
-
-            // Mantenha essa variável porque FTs, Férias e Ponto ainda precisam dela!
             const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(new Date(anoSelecionado, mesSelecionado, 0).getDate()).padStart(2, '0')}`;
 
-            // 👇 MUDANÇA: Buscando 65 dias para trás para calcular o CID corretamente
             const dataBuscaRetroativa = new Date(anoSelecionado, mesSelecionado - 1, 1);
             dataBuscaRetroativa.setDate(dataBuscaRetroativa.getDate() - 65);
             const dataBuscaStr = dataBuscaRetroativa.toISOString().split('T')[0];
 
-            // Puxa as ausências desde 65 dias atrás (dataBuscaStr), e o resto continua normal (dataInicioMes)
-            const { data: ausenciasAprovadas } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataBuscaStr);
-            const { data: ftsAprovadas } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
-            const { data: feriasAprovadas } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
-            const { data: ocorrenciasPonto } = await supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes);
-            const { data: ocorrenciasPlantao } = await supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes);
-            
-            // 👇 A MÁGICA: BUSCA AS TROCAS DIRETAMENTE DO BANCO OFICIAL PARA ESMAGAR O LÁPIS 👇
-            const { data: trocasAprovadas } = await supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or(`dia_solicitante_ira.gte.${dataBuscaStr},dia_substituto_ira.gte.${dataBuscaStr}`);
+            const [resAusencias, resFts, resFerias, resPonto, resPlantao, resTrocas] = await Promise.all([
+                supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataBuscaStr),
+                supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes),
+                supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes),
+                supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes),
+                supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes),
+                supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or(`dia_solicitante_ira.gte.${dataBuscaStr},dia_substituto_ira.gte.${dataBuscaStr}`)
+            ]);
 
             if(!colaboradores || colaboradores.length === 0){
                 containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador encontrado para este mês.</p>';
                 return;
             }
 
-            const ocorrenciasMescladas = [...(ausenciasAprovadas || []), ...(ftsAprovadas || [])];
+            const ocorrenciasMescladas = [...(resAusencias.data || []), ...(resFts.data || [])];
             
-            // Injeta a lista de trocas no algoritmo!
-            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, ocorrenciasPonto || [], feriasAprovadas || [], ocorrenciasPlantao || [], trocasAprovadas || []);
-
+            // 3. GERA A ESCALA DINAMICAMENTE ATUALIZADA
+            escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, resPonto.data || [], resFerias.data || [], resPlantao.data || [], resTrocas.data || []);
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
-            
-            if (escalaSalva) {
-                await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
-            } else {
-                await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
-            }
 
-            renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
-            btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
-            btnSalvar.disabled = false;
-            
-            if (usuarioAtual.perfil === 'Gestor') {
-                btnSalvar.classList.remove('hidden');
-            } else {
-                btnSalvar.classList.add('hidden');
+            // 4. VERIFICA SE A ESCALA JÁ ESTAVA FECHADA/ASSINADA
+            if (escalaSalva && escalaSalva.fechada) {
+                // Se já estava assinada, mantém as credenciais de assinatura intactas
+                assinaturaEscalaAtual = escalaSalva.assinatura;
+                window.nomeAssinaturaEscala = escalaSalva.assinado_por || 'Responsável não identificado';
+                
+                // MÁGICA: Atualiza silenciosamente os dados salvos com as novas aprovações do RH
+                await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
+                
+                // Renderiza a tabela no modo Trancado (Visual de leitura)
+                renderizarTabelaHTML(escalaMesAtualGerada, mesAno, true);
+                grupoBotoes.classList.remove('hidden'); 
+            } 
+            else {
+                // Se estava aberta, salva ou insere normalmente
+                if (escalaSalva) {
+                    await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
+                } else {
+                    await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
+                }
+
+                renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
+                btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
+                btnSalvar.disabled = false;
+                
+                if (usuarioAtual.perfil === 'Gestor') {
+                    btnSalvar.classList.remove('hidden');
+                } else {
+                    btnSalvar.classList.add('hidden');
+                }
+                grupoBotoes.classList.remove('hidden');
             }
-            grupoBotoes.classList.remove('hidden');
+        } catch (error) {
+            console.error("Erro na escala:", error); 
+        } finally { 
+            loading.classList.add('hidden'); 
         }
-    } catch (error) {
-        console.error("Erro na escala:", error); 
-    } finally { 
-        loading.classList.add('hidden'); 
-    }
 };
         
   // ==========================================
