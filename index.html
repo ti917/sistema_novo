@@ -29101,7 +29101,7 @@ window.calcularVRAgora = async function() {
             unidadesProcessar = [unidadeSelecionada];
         }
 
-        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD', 'FER']; 
+        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD', 'FER', 'FRD'];
         const consolidados = {};
 
         unidadesProcessar.forEach(u => {
@@ -31929,7 +31929,7 @@ window.calcularVTAgora = async function() {
         return mostrarAlerta("Preencha o Mês e a Unidade corretamente!", "aviso");
     }
 
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando o calendário real, valores e retroativos com carência...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando o calendário real, valores e retroativos com carência...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vtCalculadoPorUnidade = {};
 
@@ -31955,56 +31955,43 @@ window.calcularVTAgora = async function() {
             .select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
         const { data: feriasDB } = await supabaseClient.from('solicitacoes_ferias')
             .select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
+        const { data: resFt } = await supabaseClient.from('horas_extras_ft')
+            .select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
 
-        const faltasPorColab = {};
-        if (ausenciasDB) {
-            ausenciasDB.forEach(a => {
-                if (['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM'].includes(a.sigla)) {
-                    if(!faltasPorColab[a.colaborador_id]) faltasPorColab[a.colaborador_id] = 0;
-                    
-                    const d1 = new Date(a.data_inicio + 'T00:00:00');
-                    const d2 = new Date(a.data_fim + 'T00:00:00');
-                    
-                    let tempD = new Date(d1);
-                    while(tempD <= d2) {
-                        if(tempD.getMonth() + 1 === mesAtual && tempD.getFullYear() === anoAtual) {
-                            faltasPorColab[a.colaborador_id]++;
-                        }
-                        tempD.setDate(tempD.getDate() + 1);
-                    }
-                }
+        const ocorrenciasGlobais = [...(ausenciasDB || []), ...(resFt || [])];
+
+        const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
+
+        let unidadesProcessar = [];
+        if (unidadeSelecionada === 'Todas') {
+            const uSet = new Set();
+            colabsAtivos.forEach(c => {
+                if(c.unidade) c.unidade.split(',').forEach(u => uSet.add(u.trim()));
             });
-        }
-        
-        if (feriasDB) {
-            feriasDB.forEach(f => {
-                if(!faltasPorColab[f.colaborador_id]) faltasPorColab[f.colaborador_id] = 0;
-                
-                const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
-                const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
-                
-                let tempD = new Date(d1);
-                while(tempD <= d2) {
-                    if(tempD.getMonth() + 1 === mesAtual && tempD.getFullYear() === anoAtual) {
-                        faltasPorColab[f.colaborador_id]++;
-                    }
-                    tempD.setDate(tempD.getDate() + 1);
-                }
-            });
+            unidadesProcessar = Array.from(uSet).filter(u => u !== '');
+        } else {
+            unidadesProcessar = [unidadeSelecionada];
         }
 
-        // 👇 MESMA LÓGICA DE EXCLUSÃO DE DESLIGADOS ANTIGOS 👇
-        const colabsAtivos = (resPerfis || []).filter(c => {
-            if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
-            
-            if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
-                const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                if (match) {
-                    const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]), 23, 59, 59);
-                    if (dataUltimoDia < dI) return false; 
+        // 👇 FRD E TODAS AS OUTRAS SIGLAS INCLUÍDAS AQUI 👇
+        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD', 'FER', 'FRD']; 
+        const consolidados = {};
+
+        // Roda a escala no fundo para descobrir o que é feriado e o que não é
+        unidadesProcessar.forEach(u => {
+            const escGerada = algoritmoGeradorDeEscala(colabsAtivos, mesAno, ocorrenciasGlobais, u, [], feriasDB || []);
+            escGerada.forEach(cEsc => {
+                if (!consolidados[cEsc.id_colaborador]) {
+                    consolidados[cEsc.id_colaborador] = { diasGerais: {} };
                 }
-            }
-            return true;
+                Object.keys(cEsc.dias).forEach(d => {
+                    const sigla = cEsc.dias[d].sigla;
+                    if (sigla !== 'TR' && sigla !== 'AL' && sigla !== '-') {
+                        const diaFormatado = `${anoAtual}-${String(mesAtual).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                        consolidados[cEsc.id_colaborador].diasGerais[diaFormatado] = sigla;
+                    }
+                });
+            });
         });
 
         let html = '';
@@ -32049,13 +32036,13 @@ window.calcularVTAgora = async function() {
 
             const tipoJornada = jornadaVisor.tipo || '12x36';
             
-            // 👇 BLOCO 1: DIAS PADRÃO PROPORCIONAIS 👇
             let diasBase = tipoJornada.toLowerCase().includes('12x36') ? 15.5 : 21.5;
 
             let retroativoCalculado = 0;
-            let ausencias = faltasPorColab[colab.id] || 0;
+            let abatimentosCalculado = 0;
             let labelExtra = '';
 
+            // 👇 PROJEÇÃO DE RESCISÃO 👇
             if (colab.status === 'Desligado' && colab.dados_rescisao && colab.dados_rescisao.ultimo_dia) {
                 const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
@@ -32076,7 +32063,7 @@ window.calcularVTAgora = async function() {
                 }
             }
 
-            // 👇 BLOCO 2: RETROATIVO BLINDADO 👇
+            // 👇 CÁLCULO DE RETROATIVO DE ADMISSÃO 👇
             if (dAdm >= dI && dAdm <= dF) {
                 let tempD = new Date(dAdm);
                 while (tempD <= dF) {
@@ -32092,7 +32079,24 @@ window.calcularVTAgora = async function() {
                 }
             }
 
-            let diasAPagar = (diasBase + retroativoCalculado) - ausencias;
+            // 👇 ABATIMENTOS (MÁGICA: Só desconta se a ausência foi DEPOIS da admissão) 👇
+            if (consolidados[colab.id] && consolidados[colab.id].diasGerais) {
+                let tempD = new Date(dI);
+                while(tempD <= dF) {
+                    if (tempD >= dAdm) { // <-- A trava do retroativo aqui!
+                        const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
+                        const siglaDia = consolidados[colab.id].diasGerais[iso];
+                        
+                        // FRD, FA, ATM, FER... entra tudo aqui
+                        if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
+                            abatimentosCalculado++;
+                        }
+                    }
+                    tempD.setDate(tempD.getDate() + 1);
+                }
+            }
+
+            let diasAPagar = (diasBase + retroativoCalculado) - abatimentosCalculado;
             if (diasAPagar < 0) diasAPagar = 0;
 
             let qtdPassagens = adm.vt.quantidade || 2;
@@ -32116,7 +32120,7 @@ window.calcularVTAgora = async function() {
                 jornada: tipoJornada,
                 diasBase: diasBase,
                 retroativo: retroativoCalculado,
-                ausencias: ausencias,
+                ausencias: abatimentosCalculado,
                 diasAPagar: diasAPagar,
                 valorDiario: valorDiario,
                 valorTotal: valorTotal
@@ -32137,7 +32141,7 @@ window.calcularVTAgora = async function() {
                     ${diasBase.toFixed(1)}
                 </td>
                 <td style="color: #20c997; font-weight: bold;">+ ${retroativoCalculado.toFixed(1)}</td>
-                <td style="color: var(--cor-perigo); font-weight: bold;">- ${ausencias}</td>
+                <td style="color: var(--cor-perigo); font-weight: bold;">- ${abatimentosCalculado}</td>
                 <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagar.toFixed(1)}</td>
                 <td>
                     <small style="color: var(--cor-sucesso);">${valorDiario.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} / dia</small>
