@@ -29017,7 +29017,6 @@ window.calcularVRAgora = async function() {
             return;
         }
 
-        // 👇 MÁGICA 1: Gera as escalas necessárias cobrindo desde 1 mês ANTES do filtro (para pegar os admitidos retroativos)
         const mesesParaGerar = new Set();
         let dTempGen = new Date(dI);
         dTempGen.setMonth(dTempGen.getMonth() - 1); 
@@ -29027,12 +29026,11 @@ window.calcularVRAgora = async function() {
             mesesParaGerar.add(`${dTempGen.getFullYear()}-${String(dTempGen.getMonth()+1).padStart(2,'0')}`);
             dTempGen.setMonth(dTempGen.getMonth() + 1);
         }
-        mesesParaGerar.add(`${dF.getFullYear()}-${String(dF.getMonth()+1).padStart(2,'0')}`); // Garante o mês final
+        mesesParaGerar.add(`${dF.getFullYear()}-${String(dF.getMonth()+1).padStart(2,'0')}`);
 
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
-        // Busca ausências cobrindo desde o mês passado até o fim do filtro
         let dataBuscaBanco = new Date(dI);
         dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 1);
         const dBuscaStr = dataBuscaBanco.toISOString().split('T')[0];
@@ -29045,15 +29043,20 @@ window.calcularVRAgora = async function() {
 
         const ocorrenciasGlobais = [...(resAus.data || []), ...(resFt.data || [])];
         
-        // Filtra Ativos e Desligados que ainda trabalharam dentro do período
+        // 👇 A MÁGICA DOS DESLIGADOS AQUI 👇
         const colabsAtivos = (resPerfis.data || []).filter(c => {
             if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
+            
             if (c.status === 'Ativo') return true;
+            
+            // Se ele for desligado, avalia o último dia dele
             if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                 const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
-                    if (dataUltimoDia >= dI) return true; // Conta se o último dia foi dentro do filtro
+                    // Só recebe o VR se o último dia dele for ESTRITAMENTE DEPOIS do fechamento (dF).
+                    // Ex: Se dF é 25/05 e ele sai dia 25/05, ele NÃO recebe VR de Junho.
+                    if (dataUltimoDia > dF) return true; 
                 }
             }
             return false;
@@ -29075,7 +29078,6 @@ window.calcularVRAgora = async function() {
 
         const consolidados = {};
 
-        // Roda o Gerador de Escalas para mapear dia por dia
         unidadesProcessar.forEach(u => {
             Array.from(mesesParaGerar).forEach(mesAnoGerar => {
                 const escGerada = algoritmoGeradorDeEscala(colabsAtivos, mesAnoGerar, ocorrenciasGlobais, u);
@@ -29127,7 +29129,7 @@ window.calcularVRAgora = async function() {
             if (!dataInicioAdmStr) continue;
             const dAdm = new Date(dataInicioAdmStr + 'T00:00:00');
 
-            // Ignora quem foi admitido DEPOIS da data fim do filtro
+            // Ignora quem foi admitido DEPOIS da data fim do filtro (Eles não recebem VR nessa folha)
             if (dAdm > dF) continue; 
 
             let jornada = adm.jornada || { tipo: '12x36' };
@@ -29147,13 +29149,12 @@ window.calcularVRAgora = async function() {
             let statusExcel = '';
             let labelExtra = '';
 
-            // 👇 MÁGICA 2: A JANELA DE 45 DIAS DE RETROATIVO 👇
             let janelaRetroativa = new Date(dF);
             janelaRetroativa.setDate(janelaRetroativa.getDate() - 45);
 
-            // SE ELE FOI ADMITIDO HÁ POUCO TEMPO (Retroativo Ativo)
+            // 👇 A MÁGICA DA ADMISSÃO E RETROATIVO AQUI 👇
             if (dAdm >= janelaRetroativa && dAdm <= dF) {
-                // Conta exatamente os dias trabalhados desde a Admissão até a Data Fim do Filtro
+                // Colaborador é novo! Conta quantos dias ele TRABALHOU DE VERDADE da admissão até a data fim (dF)
                 let tempD = new Date(dAdm);
                 while (tempD <= dF) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
@@ -29168,7 +29169,7 @@ window.calcularVRAgora = async function() {
                 statusExcel = 'Novo (Com Retroativo)';
                 statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
             } 
-            // SE ELE É ANTIGO (Conta Faltas dentro do filtro)
+            // SE É FUNCIONÁRIO ANTIGO (Apenas abate as faltas e atestados do período)
             else {
                 let tempD = new Date(dI);
                 while(tempD <= dF) {
@@ -29194,7 +29195,6 @@ window.calcularVRAgora = async function() {
 
             const valorVRBruto = diasAPagarCalculado * valorDiariaUnidade;
 
-            // Bônus Customizados
             let beneficiosExtrasDesseColab = [];
             if (regraUnidade.beneficios_extras) {
                 let extrasArr = typeof regraUnidade.beneficios_extras === 'string' ? JSON.parse(regraUnidade.beneficios_extras) : regraUnidade.beneficios_extras;
@@ -29217,7 +29217,9 @@ window.calcularVRAgora = async function() {
             totalFinanceiroGeral += valorLiquidoFinal;
 
             const nomeDaUnidade = regraUnidade.unidade.trim();
-            if (!window.vrCalculadoPorUnidade[nomeDaUnidade]) window.vrCalculadoPorUnidade[nomeDaUnidade] = [];
+            if (!window.vrCalculadoPorUnidade[nomeDaUnidade]) {
+                window.vrCalculadoPorUnidade[nomeDaUnidade] = [];
+            }
             
             window.vrCalculadoPorUnidade[nomeDaUnidade].push({
                 nome: colab.nome,
