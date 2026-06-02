@@ -29006,7 +29006,7 @@ window.calcularVRAgora = async function() {
         return mostrarAlerta("A Data Inicial não pode ser maior que a Data Final!", "erro");
     }
 
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando escalas virtuais...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando retroativo do mês cheio...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vrCalculadoPorUnidade = {}; 
 
@@ -29017,9 +29017,10 @@ window.calcularVRAgora = async function() {
             return;
         }
 
+        // Garante que o gerador de escala gere desde o mês da admissão retroativa
         const mesesParaGerar = new Set();
         let dTempGen = new Date(dI);
-        dTempGen.setMonth(dTempGen.getMonth() - 1); 
+        dTempGen.setMonth(dTempGen.getMonth() - 2); // Busca até 2 meses para trás por garantia
         dTempGen.setDate(1);
 
         while(dTempGen <= dF) {
@@ -29029,10 +29030,10 @@ window.calcularVRAgora = async function() {
         mesesParaGerar.add(`${dF.getFullYear()}-${String(dF.getMonth()+1).padStart(2,'0')}`);
 
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
+        if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
         let dataBuscaBanco = new Date(dI);
-        dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 1);
+        dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 2);
         const dBuscaStr = dataBuscaBanco.toISOString().split('T')[0];
 
         const [resPerfis, resAus, resFt] = await Promise.all([
@@ -29050,7 +29051,7 @@ window.calcularVRAgora = async function() {
                 const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
-                    if (dataUltimoDia >= dI) return true; 
+                    if (dataUltimoDia > dF) return true; 
                 }
             }
             return false;
@@ -29067,8 +29068,9 @@ window.calcularVRAgora = async function() {
             unidadesProcessar = [unidadeSelecionada];
         }
 
+        // 👇 A MÁGICA: "FT" FOI REMOVIDA DOS ABATIMENTOS E DOS DIAS TRABALHADOS 👇
         const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD']; 
-        const CODIGOS_TRABALHADOS = ['D', 'N', 'FT', 'TP', 'LDP']; 
+        const CODIGOS_TRABALHADOS = ['D', 'N', 'TP', 'LDP']; 
 
         const consolidados = {};
 
@@ -29107,7 +29109,7 @@ window.calcularVRAgora = async function() {
         for (let id in consolidados) {
             const colab = consolidados[id];
             
-            if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && colab.empresaReal !== empresaSelecionadaFiltro) continue;
+            if (empresaSelecionadaFiltro !== 'Todas' && colab.empresaReal !== empresaSelecionadaFiltro) continue;
             if (unidadeSelecionada !== 'Todas' && !(colab.unidadeReal || '').includes(unidadeSelecionada)) continue;
 
             let regraUnidade;
@@ -29121,6 +29123,7 @@ window.calcularVRAgora = async function() {
             if (!regraUnidade || String(regraUnidade.recebe_vr) === 'false') continue;
 
             const valorDiariaUnidade = parseFloat(regraUnidade.valor_diaria) || 0;
+
             const adm = colab.dados_admissao;
             const dataInicioAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
             
@@ -29170,32 +29173,33 @@ window.calcularVRAgora = async function() {
                 statusAviso = `<span style="color: #ff9800;"><i class="fa-solid fa-user-clock"></i> Sai em ${colab.dados_rescisao.ultimo_dia.split(' ')[0]}</span>`;
             }
 
-            // 👇 MÁGICA 4: RETROATIVO PARA NOVATOS BLINDADO 👇
-            // Verifica se a admissão ocorreu *exatamente* dentro da janela do filtro atual
-            if (dAdm >= dI && dAdm <= dF) {
+            // 👇 MÁGICA DO RETROATIVO: MÊS CHEIO INDEPENDENTE DO FILTRO 👇
+            let janelaRetroativa = new Date(dF);
+            janelaRetroativa.setDate(janelaRetroativa.getDate() - 45);
+
+            if (dAdm >= janelaRetroativa && dAdm <= dF) {
+                // Ao invés de ir só até o dF (data do filtro), ele vai até o Último Dia do Mês Alvo
+                let fimDoMesAlvo = new Date(anoAtual, mesAtual, 0, 23, 59, 59);
+                
                 let tempD = new Date(dAdm);
-                while (tempD <= dF) {
+                while (tempD <= fimDoMesAlvo) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
                     const siglaDia = colab.diasGerais[iso];
                     
-                    // Incrementa o retroativo para cada dia de Escala que ele tinha obrigação de trabalhar
-                    if (siglaDia && (CODIGOS_TRABALHADOS.includes(siglaDia) || CODIGOS_ABATIMENTO.includes(siglaDia))) {
+                    // Soma como Retroativo tudo que foi trabalhado de verdade (A ausência/falta simplesmente não pontua)
+                    if (siglaDia && CODIGOS_TRABALHADOS.includes(siglaDia)) {
                         retroativoCalculado++;
-                    }
-                    // Se ele faltou nesse dia, também conta o abatimento para ficar visível!
-                    if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
-                        abatimentosCalculado++;
                     }
                     tempD.setDate(tempD.getDate() + 1);
                 }
                 
                 if (colab.statusReal !== 'Desligado') {
-                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo admissão</span>';
-                    statusExcel = 'Novo (Com Retroativo)';
+                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo mês cheio</span>';
+                    statusExcel = 'Novo (Mês Cheio)';
                     statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
                 }
             } 
-            // SE É FUNCIONÁRIO VETERANO (Já passou do primeiro mês)
+            // SE É FUNCIONÁRIO VETERANO (Apenas abate as faltas e atestados)
             else {
                 let tempD = new Date(dI);
                 while(tempD <= dF) {
@@ -29223,6 +29227,7 @@ window.calcularVRAgora = async function() {
 
             const valorVRBruto = diasAPagarCalculado * valorDiariaUnidade;
 
+            // Bônus Customizados
             let beneficiosExtrasDesseColab = [];
             if (regraUnidade.beneficios_extras) {
                 let extrasArr = typeof regraUnidade.beneficios_extras === 'string' ? JSON.parse(regraUnidade.beneficios_extras) : regraUnidade.beneficios_extras;
