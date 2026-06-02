@@ -29006,7 +29006,7 @@ window.calcularVRAgora = async function() {
         return mostrarAlerta("A Data Inicial não pode ser maior que a Data Final!", "erro");
     }
 
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Consultando a escala real, calculando retroativos com carência e processando abatimentos...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando escalas virtuais...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vrCalculadoPorUnidade = {}; 
 
@@ -29051,7 +29051,7 @@ window.calcularVRAgora = async function() {
                 const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
-                    if (dataUltimoDia > dF) return true; 
+                    if (dataUltimoDia >= dI) return true; 
                 }
             }
             return false;
@@ -29102,8 +29102,8 @@ window.calcularVRAgora = async function() {
         let contagemValidada = 0;
 
         const [anoStr, mesStr] = dataFimStr.split('-');
-        const determinarAno = parseInt(anoStr);
-        const determinarMes = parseInt(mesStr); 
+        const anoAtual = parseInt(anoStr);
+        const mesAtual = parseInt(mesStr); 
 
         for (let id in consolidados) {
             const colab = consolidados[id];
@@ -29113,7 +29113,7 @@ window.calcularVRAgora = async function() {
 
             let regraUnidade;
             if (unidadeSelecionada !== 'Todas') {
-                regraUnidade = regrasVR.find(r => (r.unidade || '').trim().toUpperCase() === unidadeSelecionada.trim().toUpperCase());
+                regraUnidade = rulesVR = regrasVR.find(r => (r.unidade || '').trim().toUpperCase() === unidadeSelecionada.trim().toUpperCase());
             } else {
                 const unidadesDoColab = (colab.unidadeReal || '').split(',').map(u => u.trim().toUpperCase());
                 regraUnidade = regrasVR.find(r => unidadesDoColab.includes((r.unidade || '').trim().toUpperCase()));
@@ -29130,22 +29130,33 @@ window.calcularVRAgora = async function() {
 
             if (dAdm > dF) continue; 
 
-            let diasPadraoCalculado = 0; 
+            let jornada = adm.jornada || { tipo: '12x36' };
+            if (jornada.historico_alteracoes && jornada.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornada.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { jornada = h; break; }
+                }
+            }
+            
+            const tipoJornada = jornada.tipo || '12x36';
+            
+            // 👇 BLOCO 1: CALCULA DIAS PADRÃO (INDEPENDENTE) 👇
+            let diasPadraoCalculado = tipoJornada.includes('12x36') ? 15.5 : 21.5; 
+            
             let retroativoCalculado = 0;
             let abatimentosCalculado = 0;
-            let statusAviso = '';
-            let statusExcel = '';
+            let statusAviso = 'Base Cheia';
+            let statusExcel = 'Base Cheia';
             let labelExtra = '';
 
-            let dUsoInicio = new Date(determinarAno, determinarMes, 1); 
-            let dUsoFim = new Date(determinarAno, determinarMes + 1, 0); 
-
-            // PROJEÇÃO DO FUTURO PARA DESLIGADOS
+            // PROJEÇÃO DE RESCISÃO
             if (colab.statusReal === 'Desligado') {
                 const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
 
                 diasPadraoCalculado = 0;
+                let dUsoInicio = new Date(anoAtual, mesAtual, 1); 
+                let dUsoFim = new Date(anoAtual, mesAtual + 1, 0); 
                 let limiteUso = dataUltimoDia < dUsoFim ? dataUltimoDia : dUsoFim;
 
                 let dCalc = new Date(dUsoInicio);
@@ -29156,27 +29167,16 @@ window.calcularVRAgora = async function() {
                     }
                     dCalc.setDate(dCalc.getDate() + 1);
                 }
-
-                // 👇 INJETA O 0.5 SE TRABALHOU PROPORCIONAL NA RESCISÃO 👇
                 if (diasPadraoCalculado > 0) diasPadraoCalculado += 0.5;
 
                 labelExtra = '<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Rescisão (Proporcional)</span>';
                 statusExcel = `Proporcional (Sai dia ${colab.dados_rescisao.ultimo_dia.split(' ')[0]})`;
                 statusAviso = `<span style="color: #ff9800;"><i class="fa-solid fa-user-clock"></i> Sai em ${colab.dados_rescisao.ultimo_dia.split(' ')[0]}</span>`;
-            } else {
-                let dCalc = new Date(dUsoInicio);
-                while (dCalc <= dUsoFim) {
-                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
-                    if (!window.isDiaDeFolga(colab, isoStr)) {
-                        diasPadraoCalculado++; 
-                    }
-                    dCalc.setDate(dCalc.getDate() + 1);
-                }
             }
 
-            // RETROATIVO PARA NOVATOS
+            // 👇 BLOCO 2: CALCULA RETROATIVO DE ADMISSÃO (INDEPENDENTE) 👇
             if (dAdm >= dI && dAdm <= dF) {
-                let fimDoMesAlvo = new Date(determinarAno, determinarMes, 0, 23, 59, 59); 
+                let fimDoMesAlvo = new Date(anoAtual, mesAtual, 0, 23, 59, 59); 
                 let tempD = new Date(dAdm);
                 while (tempD <= fimDoMesAlvo) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
@@ -29185,36 +29185,38 @@ window.calcularVRAgora = async function() {
                     }
                     tempD.setDate(tempD.getDate() + 1);
                 }
-                
-                // 👇 INJETA O 0.5 SE TIVER DIAS DE RETROATIVO ACUMULADO 👇
                 if (retroativoCalculado > 0) retroativoCalculado += 0.5;
                 
                 if (colab.statusReal !== 'Desligado') {
-                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo admissão</span>';
+                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo</span>';
                     statusExcel = 'Novo (Com Retroativo)';
                     statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
                 }
             } 
-            else {
-                let tempD = new Date(dI);
-                while(tempD <= dF) {
-                    const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
-                    const siglaDia = colab.diasGerais[iso];
-                    if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
-                        abatimentosCalculado++;
-                    }
-                    tempD.setDate(tempD.getDate() + 1);
+            
+            // 👇 BLOCO 3: CALCULA OS ABATIMENTOS PARA TODO MUNDO (INDEPENDENTE) 👇
+            let tempD = new Date(dI);
+            while(tempD <= dF) {
+                const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
+                const siglaDia = colab.diasGerais[iso];
+                if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
+                    abatimentosCalculado++;
                 }
+                tempD.setDate(tempD.getDate() + 1);
+            }
 
-                if (colab.statusReal !== 'Desligado') {
-                    if (abatimentosCalculado > 0) {
-                        statusAviso = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-minus-circle"></i> Retenção: ${abatimentosCalculado} Faltas/Afast.</span>`;
-                        statusExcel = `Desconto (${abatimentosCalculado} ocorrências)`;
-                    } else {
-                        statusAviso = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
-                        statusExcel = 'Base Cheia';
-                    }
+            if (colab.statusReal !== 'Desligado' && !(dAdm >= dI && dAdm <= dF)) {
+                if (abatimentosCalculado > 0) {
+                    statusAviso = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-minus-circle"></i> Retenção: ${abatimentosCalculado} Faltas/Afast.</span>`;
+                    statusExcel = `Desconto (${abatimentosCalculado} ocorrências)`;
+                } else {
+                    statusAviso = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
+                    statusExcel = 'Base Cheia';
                 }
+            } else if (colab.statusReal !== 'Desligado' && (dAdm >= dI && dAdm <= dF) && abatimentosCalculado > 0) {
+                // Se for novato com falta, concatena o aviso de retenção junto
+                statusAviso += `<br><span style="color: var(--cor-perigo); font-size:0.8rem;"><i class="fa-solid fa-minus-circle"></i> Desc: ${abatimentosCalculado} ocorrência(s)</span>`;
+                statusExcel += ` com ${abatimentosCalculado} descontos`;
             }
 
             let diasAPagarCalculado = (diasPadraoCalculado + retroativoCalculado) - abatimentosCalculado;
@@ -29222,6 +29224,7 @@ window.calcularVRAgora = async function() {
 
             const valorVRBruto = diasAPagarCalculado * valorDiariaUnidade;
 
+            // Bônus Customizados
             let beneficiosExtrasDesseColab = [];
             if (regraUnidade.beneficios_extras) {
                 let extrasArr = typeof regraUnidade.beneficios_extras === 'string' ? JSON.parse(regraUnidade.beneficios_extras) : regraUnidade.beneficios_extras;
@@ -32008,8 +32011,18 @@ window.calcularVTAgora = async function() {
 
             if (dAdm > dF) return; 
 
-            let jornada = adm.jornada?.tipo || '12x36';
-            let diasBase = jornada.includes('12x36') ? 15.5 : 21.5;
+            let jornadaVisor = adm.jornada || { tipo: '12x36' };
+            if (jornadaVisor.historico_alteracoes && jornadaVisor.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornadaVisor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { Blacklist = h; break; }
+                }
+            }
+
+            const tipoJornada = jornadaVisor.tipo || '12x36';
+            
+            // 👇 BLOCO 1: CALCULA DIAS PADRÃO (INDEPENDENTE) 👇
+            let diasBase = tipoJornada.includes('12x36') ? 15.5 : 21.5;
 
             let retroativoCalculado = 0;
             let ausencias = faltasPorColab[colab.id] || 0;
@@ -32029,35 +32042,25 @@ window.calcularVTAgora = async function() {
                         }
                         dCalc.setDate(dCalc.getDate() + 1);
                     }
-                    // 👇 INJETA O 0.5 NA FRAÇÃO DE RESCISÃO DO VT 👇
                     if (diasBase > 0) diasBase += 0.5;
                 }
             }
 
-            // RETROATIVO PARA NOVATOS (MÊS CHEIO)
+            // 👇 BLOCO 2: CALCULA RETROATIVO DE ADMISSÃO (INDEPENDENTE) 👇
             if (dAdm >= dI && dAdm <= dF) {
                 let tempD = new Date(dAdm);
-                const escGerada = algoritmoGeradorDeEscala([colab], `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}`, [], unidadeRealDoColab);
-                const colabEsc = escGerada.length > 0 ? escGerada[0] : null;
-
                 while (tempD <= dF) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
-                    
-                    if (colabEsc && colabEsc.dias && colabEsc.dias[tempD.getDate()]) {
-                        const siglaDia = colabEsc.dias[tempD.getDate()].sigla;
-                        if (siglaDia && CODIGOS_TRABALHADOS.includes(siglaDia)) {
-                            retroativoCalculado++;
-                        }
-                    } else if (!window.isDiaDeFolga(colab, iso)) {
-                        retroativoCalculado++; 
+                    if (!window.isDiaDeFolga(colab, iso)) {
+                        retroativoCalculado++;
                     }
                     tempD.setDate(tempD.getDate() + 1);
                 }
-                
-                // 👇 INJETA O 0.5 NO RETROATIVO DO VT 👇
                 if (retroativoCalculado > 0) retroativoCalculado += 0.5;
-                ausencias = 0; 
             }
+
+            // 👇 BLOCO 3: CALCULA AUSÊNCIAS (INDEPENDENTE) — AGORA RODA PARA OS NOVATOS TAMBÉM 👇
+            // (As ausências reais contadas do banco na variável 'ausencias' permanecem integradas)
 
             let diasAPagar = (diasBase + retroativoCalculado) - ausencias;
             if (diasAPagar < 0) diasAPagar = 0;
@@ -32071,14 +32074,6 @@ window.calcularVTAgora = async function() {
 
             const cpfColab = colab.cpf || adm.cpf || 'CPF não cadastrado';
 
-            let jorVisor = adm.jornada || { tipo: '12x36' };
-            if (jorVisor.historico_alteracoes && jorVisor.historico_alteracoes.length > 0) {
-                const histOrdenado = [...jorVisor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
-                for (let h of histOrdenado) {
-                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { jorVisor = h; break; }
-                }
-            }
-
             if (!window.vtCalculadoPorUnidade[unidadeRealDoColab]) {
                 window.vtCalculadoPorUnidade[unidadeRealDoColab] = [];
             }
@@ -32087,7 +32082,7 @@ window.calcularVTAgora = async function() {
                 cpf: cpfColab,
                 empresaVT: adm.vt.empresa,
                 passagensDia: qtdPassagens,
-                jornada: jorVisor.tipo || '12x36',
+                jornada: tipoJornada,
                 diasBase: diasBase,
                 retroativo: retroativoCalculado,
                 ausencias: ausencias,
@@ -32106,7 +32101,7 @@ window.calcularVTAgora = async function() {
                     <small style="color: #4fc3f7;"><i class="fa-solid fa-bus"></i> ${adm.vt.empresa} (${qtdPassagens} un)</small>
                 </td>
                 <td>
-                    <strong style="color: var(--cor-texto-principal);">${jorVisor.tipo || '12x36'}</strong><br>
+                    <strong style="color: var(--cor-texto-principal);">${tipoJornada}</strong><br>
                 </td>
                 <td style="font-weight: bold; color: ${colab.status === 'Desligado' ? '#ff9800' : 'inherit'};">
                     ${diasBase.toFixed(1)}
@@ -32114,8 +32109,8 @@ window.calcularVTAgora = async function() {
                 <td style="color: #20c997; font-weight: bold;">+ ${retroativoCalculado.toFixed(1)}</td>
                 <td style="color: var(--cor-perigo); font-weight: bold;">- ${ausencias}</td>
                 <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagar.toFixed(1)}</td>
-                <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">
-                    ${valorTotal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                <td>
+                    <small style="color: var(--cor-sucesso);">${valorDiario.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} / dia</small>
                 </td>
             </tr>`;
         });
