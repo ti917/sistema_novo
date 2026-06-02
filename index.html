@@ -29006,7 +29006,7 @@ window.calcularVRAgora = async function() {
         return mostrarAlerta("A Data Inicial não pode ser maior que a Data Final!", "erro");
     }
 
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando retroativo do mês cheio...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Consultando a escala real, calculando retroativos e processando abatimentos...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vrCalculadoPorUnidade = {}; 
 
@@ -29017,10 +29017,9 @@ window.calcularVRAgora = async function() {
             return;
         }
 
-        // Garante que o gerador de escala gere desde o mês da admissão retroativa
         const mesesParaGerar = new Set();
         let dTempGen = new Date(dI);
-        dTempGen.setMonth(dTempGen.getMonth() - 2); // Busca até 2 meses para trás por garantia
+        dTempGen.setMonth(dTempGen.getMonth() - 1); 
         dTempGen.setDate(1);
 
         while(dTempGen <= dF) {
@@ -29033,13 +29032,14 @@ window.calcularVRAgora = async function() {
         if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
         let dataBuscaBanco = new Date(dI);
-        dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 2);
+        dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 1);
         const dBuscaStr = dataBuscaBanco.toISOString().split('T')[0];
 
-        const [resPerfis, resAus, resFt] = await Promise.all([
+        const [resPerfis, resAus, resFt, resFer] = await Promise.all([
             queryPerfis,
             supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimStr).gte('data_fim', dBuscaStr),
-            supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimStr).gte('data_fim', dBuscaStr)
+            supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimStr).gte('data_fim', dBuscaStr),
+            supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimStr).gte('data_fim_ferias', dBuscaStr)
         ]);
 
         const ocorrenciasGlobais = [...(resAus.data || []), ...(resFt.data || [])];
@@ -29068,15 +29068,15 @@ window.calcularVRAgora = async function() {
             unidadesProcessar = [unidadeSelecionada];
         }
 
-        // 👇 A MÁGICA: "FT" FOI REMOVIDA DOS ABATIMENTOS E DOS DIAS TRABALHADOS 👇
-        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD']; 
-        const CODIGOS_TRABALHADOS = ['D', 'N', 'TP', 'LDP']; 
+        // 👇 A MÁGICA: Códigos que geram desconto (Incluindo Férias)
+        const CODIGOS_ABATIMENTO = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD', 'FER']; 
 
         const consolidados = {};
 
         unidadesProcessar.forEach(u => {
             Array.from(mesesParaGerar).forEach(mesAnoGerar => {
-                const escGerada = algoritmoGeradorDeEscala(colabsAtivos, mesAnoGerar, ocorrenciasGlobais, u);
+                // Injeta as Férias na renderização da escala virtual
+                const escGerada = algoritmoGeradorDeEscala(colabsAtivos, mesAnoGerar, ocorrenciasGlobais, u, [], resFer.data || []);
                 escGerada.forEach(cEsc => {
                     if (!consolidados[cEsc.id_colaborador]) {
                         const pReal = colabsAtivos.find(c => c.id === cEsc.id_colaborador);
@@ -29123,7 +29123,6 @@ window.calcularVRAgora = async function() {
             if (!regraUnidade || String(regraUnidade.recebe_vr) === 'false') continue;
 
             const valorDiariaUnidade = parseFloat(regraUnidade.valor_diaria) || 0;
-
             const adm = colab.dados_admissao;
             const dataInicioAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
             
@@ -29132,33 +29131,25 @@ window.calcularVRAgora = async function() {
 
             if (dAdm > dF) continue; 
 
-            let jornada = adm.jornada || { tipo: '12x36' };
-            if (jornada.historico_alteracoes && jornada.historico_alteracoes.length > 0) {
-                const histOrdenado = [...jornada.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
-                for (let h of histOrdenado) {
-                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { jornada = h; break; }
-                }
-            }
-            
-            const tipoJornada = jornada.tipo || '12x36';
-            let diasPadraoCalculado = tipoJornada.includes('12x36') ? 15.5 : 21.5; 
-            
+            let diasPadraoCalculado = 0; 
             let retroativoCalculado = 0;
             let abatimentosCalculado = 0;
             let statusAviso = '';
             let statusExcel = '';
             let labelExtra = '';
 
-            // PROJEÇÃO DO FUTURO PARA DESLIGADOS
+            // O Mês base de Pagamento (Mês seguinte ao fechamento do Filtro)
+            let dUsoInicio = new Date(anoAtual, mesAtual, 1); 
+            let dUsoFim = new Date(anoAtual, mesAtual + 1, 0); 
+
+            // ========================================================
+            // 1️⃣ MÁGICA DO MOTOR DE ESCALA: CONTA OS DIAS BASE DO MÊS FUTURO
+            // ========================================================
             if (colab.statusReal === 'Desligado') {
                 const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
 
-                diasPadraoCalculado = 0;
-                let dUsoInicio = new Date(anoAtual, mesAtual, 1); 
-                let dUsoFim = new Date(anoAtual, mesAtual + 1, 0); 
                 let limiteUso = dataUltimoDia < dUsoFim ? dataUltimoDia : dUsoFim;
-
                 let dCalc = new Date(dUsoInicio);
                 while (dCalc <= limiteUso) {
                     const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
@@ -29171,54 +29162,62 @@ window.calcularVRAgora = async function() {
                 labelExtra = '<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Rescisão (Proporcional)</span>';
                 statusExcel = `Proporcional (Sai dia ${colab.dados_rescisao.ultimo_dia.split(' ')[0]})`;
                 statusAviso = `<span style="color: #ff9800;"><i class="fa-solid fa-user-clock"></i> Sai em ${colab.dados_rescisao.ultimo_dia.split(' ')[0]}</span>`;
+            } else {
+                // Colaborador Ativo Normal: Conta todos os dias que ele deveria trabalhar no mês de uso (Ex: Junho)
+                let dCalc = new Date(dUsoInicio);
+                while (dCalc <= dUsoFim) {
+                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                    if (!window.isDiaDeFolga(colab, isoStr)) {
+                        diasPadraoCalculado++; 
+                    }
+                    dCalc.setDate(dCalc.getDate() + 1);
+                }
             }
 
-            // 👇 MÁGICA DO RETROATIVO: MÊS CHEIO INDEPENDENTE DO FILTRO 👇
-            let janelaRetroativa = new Date(dF);
-            janelaRetroativa.setDate(janelaRetroativa.getDate() - 45);
-
-            if (dAdm >= janelaRetroativa && dAdm <= dF) {
-                // Ao invés de ir só até o dF (data do filtro), ele vai até o Último Dia do Mês Alvo
-                let fimDoMesAlvo = new Date(anoAtual, mesAtual, 0, 23, 59, 59);
-                
+            // ========================================================
+            // 2️⃣ MÁGICA DO RETROATIVO: CONTA OS DIAS TRABALHADOS DO NOVATO NO FILTRO
+            // ========================================================
+            if (dAdm >= dI && dAdm <= dF) {
+                // Ele entrou DENTRO da data do filtro. Então contamos os dias que ele deveria ter trabalhado do dia de entrada até o fim do mês base.
+                let fimDoMesAlvo = new Date(anoAtual, mesAtual, 0, 23, 59, 59); // Ex: 31/05
                 let tempD = new Date(dAdm);
                 while (tempD <= fimDoMesAlvo) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
-                    const siglaDia = colab.diasGerais[iso];
-                    
-                    // Soma como Retroativo tudo que foi trabalhado de verdade (A ausência/falta simplesmente não pontua)
-                    if (siglaDia && CODIGOS_TRABALHADOS.includes(siglaDia)) {
+                    // Conta o dia se ele estava escalado na base de dados
+                    if (!window.isDiaDeFolga(colab, iso)) {
                         retroativoCalculado++;
                     }
                     tempD.setDate(tempD.getDate() + 1);
                 }
                 
                 if (colab.statusReal !== 'Desligado') {
-                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo mês cheio</span>';
-                    statusExcel = 'Novo (Mês Cheio)';
+                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo admissão</span>';
+                    statusExcel = 'Novo (Com Retroativo)';
                     statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
                 }
             } 
-            // SE É FUNCIONÁRIO VETERANO (Apenas abate as faltas e atestados)
-            else {
-                let tempD = new Date(dI);
-                while(tempD <= dF) {
-                    const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
-                    const siglaDia = colab.diasGerais[iso];
-                    if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
-                        abatimentosCalculado++;
-                    }
-                    tempD.setDate(tempD.getDate() + 1);
+            
+            // ========================================================
+            // 3️⃣ MÁGICA DOS ABATIMENTOS: CONTA AS FALTAS OCORRIDAS NO FILTRO
+            // ========================================================
+            let tempD = new Date(dI);
+            while(tempD <= dF) {
+                const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
+                const siglaDia = colab.diasGerais[iso];
+                
+                if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
+                    abatimentosCalculado++;
                 }
+                tempD.setDate(tempD.getDate() + 1);
+            }
 
-                if (colab.statusReal !== 'Desligado') {
-                    if (abatimentosCalculado > 0) {
-                        statusAviso = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-minus-circle"></i> Retenção: ${abatimentosCalculado} Faltas/Afast.</span>`;
-                        statusExcel = `Desconto (${abatimentosCalculado} ocorrências)`;
-                    } else {
-                        statusAviso = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
-                        statusExcel = 'Base Cheia';
-                    }
+            if (colab.statusReal !== 'Desligado' && !(dAdm >= dI && dAdm <= dF)) {
+                if (abatimentosCalculado > 0) {
+                    statusAviso = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-minus-circle"></i> Retenção: ${abatimentosCalculado} Faltas/Afast.</span>`;
+                    statusExcel = `Desconto (${abatimentosCalculado} ocorrências)`;
+                } else {
+                    statusAviso = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
+                    statusExcel = 'Base Cheia';
                 }
             }
 
@@ -29254,10 +29253,19 @@ window.calcularVRAgora = async function() {
                 window.vrCalculadoPorUnidade[nomeDaUnidade] = [];
             }
             
+            // Pega a jornada atual apenas para fins de exibição na tela
+            let jornadaVisor = adm.jornada || { tipo: '12x36' };
+            if (jornadaVisor.historico_alteracoes && jornadaVisor.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornadaVisor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { jornadaVisor = h; break; }
+                }
+            }
+
             window.vrCalculadoPorUnidade[nomeDaUnidade].push({
                 nome: colab.nome,
-                cpf: colab.cpf || 'Não Cadastrado',
-                jornada: tipoJornada,
+                cpf: colab.cpf || adm.cpf || 'Não Cadastrado',
+                jornada: jornadaVisor.tipo || '12x36',
                 diaria: valorDiariaUnidade,
                 diasPadrao: diasPadraoCalculado,
                 retroativo: retroativoCalculado,
@@ -29277,13 +29285,13 @@ window.calcularVRAgora = async function() {
                     <strong>${colab.nome}</strong>${tagCpf}${labelExtra}${labelsBeneficiosHtml}
                 </td>
                 <td>
-                    <span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda); margin-bottom: 5px;">${tipoJornada}</span><br>
+                    <span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda); margin-bottom: 5px;">${jornadaVisor.tipo || '12x36'}</span><br>
                     <small style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${regraUnidade.unidade} (R$ ${valorDiariaUnidade.toFixed(2).replace('.', ',')})</small>
                 </td>
-                <td style="font-weight: bold; color: ${colab.statusReal === 'Desligado' ? '#ff9800' : 'inherit'};">${diasPadraoCalculado.toFixed(1)}</td>
-                <td style="color: #20c997; font-weight: bold;">+ ${retroativoCalculado.toFixed(1)}</td>
+                <td style="font-weight: bold; color: ${colab.statusReal === 'Desligado' ? '#ff9800' : 'inherit'};">${diasPadraoCalculado}</td>
+                <td style="color: #20c997; font-weight: bold;">+ ${retroativoCalculado}</td>
                 <td style="color: var(--cor-perigo); font-weight: bold;">- ${abatimentosCalculado}</td>
-                <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagarCalculado.toFixed(1)}</td>
+                <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagarCalculado}</td>
                 <td style="color: var(--cor-sucesso); font-weight: bold; font-size: 1.1rem;">${valorLiquidoFinal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
         }
@@ -31894,7 +31902,7 @@ window.calcularVTDinâmicoAdmissao = function() {
     }
 };
 
-       window.vtCalculadoPorUnidade = {}; // Guarda a conta em memória pro Excel
+       window.vtCalculadoPorUnidade = {}; 
 
 window.calcularVTAgora = async function() {
     const mesAno = document.getElementById('vt-mes').value;
@@ -31906,12 +31914,11 @@ window.calcularVTAgora = async function() {
         return mostrarAlerta("Preencha o Mês e a Unidade corretamente!", "aviso");
     }
 
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando jornadas, valores e ausências...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #4fc3f7; margin-bottom: 10px;"></i><br>Analisando o calendário real, valores e ausências...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vtCalculadoPorUnidade = {};
 
     try {
-        // Busca os valores oficiais de VT nas unidades
         const { data: unidadesOficiais, error: errUni } = await supabaseClient.from('unidades_oficiais').select('*');
         if (errUni) throw errUni;
 
@@ -31919,37 +31926,62 @@ window.calcularVTAgora = async function() {
         const anoAtual = parseInt(anoStr);
         const mesAtual = parseInt(mesStr);
 
-        // Busca Colaboradores
-        let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao').eq('perfil', 'Colaborador');
-        if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
+        let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
         
         const { data: resPerfis } = await queryPerfis;
-        const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
+        
+        // As fronteiras do Mês Alvo
+        const dI = new Date(`${anoAtual}-${String(mesAtual).padStart(2,'0')}-01T00:00:00`);
+        const dF = new Date(anoAtual, mesAtual, 0, 23, 59, 59);
+        const dataInicioMes = dI.toISOString().split('T')[0];
+        const dataFimMes = dF.toISOString().split('T')[0];
+
+        // Busca Férias
+        const { data: feriasDB } = await supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes);
 
         // Busca Ausências do mês alvo
-        const dataInicioMes = `${anoAtual}-${String(mesAtual).padStart(2,'0')}-01`;
-        const dataFimMes = `${anoAtual}-${String(mesAtual).padStart(2,'0')}-${new Date(anoAtual, mesAtual, 0).getDate()}`;
-        const { data: ausenciasDB } = await supabaseClient.from('ausencias')
-            .select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
+        const { data: ausenciasDB } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes);
 
-        // Conta quantos dias de falta o cara tem dentro do mês
         const faltasPorColab = {};
         if (ausenciasDB) {
             ausenciasDB.forEach(a => {
-                if(!faltasPorColab[a.colaborador_id]) faltasPorColab[a.colaborador_id] = 0;
+                if (['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM'].includes(a.sigla)) {
+                    if(!faltasPorColab[a.colaborador_id]) faltasPorColab[a.colaborador_id] = 0;
+                    
+                    const d1 = new Date(a.data_inicio + 'T00:00:00');
+                    const d2 = new Date(a.data_fim + 'T00:00:00');
+                    
+                    let tempD = new Date(d1);
+                    while(tempD <= d2) {
+                        if(tempD.getMonth() + 1 === mesAtual && tempD.getFullYear() === anoAtual) {
+                            faltasPorColab[a.colaborador_id]++;
+                        }
+                        tempD.setDate(tempD.getDate() + 1);
+                    }
+                }
+            });
+        }
+        
+        // Inclui férias nas deduções de VT!
+        if (feriasDB) {
+            feriasDB.forEach(f => {
+                if(!faltasPorColab[f.colaborador_id]) faltasPorColab[f.colaborador_id] = 0;
                 
-                const d1 = new Date(a.data_inicio + 'T00:00:00');
-                const d2 = new Date(a.data_fim + 'T00:00:00');
+                const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
+                const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
                 
                 let tempD = new Date(d1);
                 while(tempD <= d2) {
                     if(tempD.getMonth() + 1 === mesAtual && tempD.getFullYear() === anoAtual) {
-                        faltasPorColab[a.colaborador_id]++;
+                        faltasPorColab[f.colaborador_id]++;
                     }
                     tempD.setDate(tempD.getDate() + 1);
                 }
             });
         }
+
+        const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
 
         let html = '';
         let totalGeral = 0;
@@ -31959,9 +31991,8 @@ window.calcularVTAgora = async function() {
             if (unidadeSelecionada !== 'Todas' && !(colab.unidade || '').includes(unidadeSelecionada)) return;
 
             const adm = colab.dados_admissao || {};
-            if (!adm.vt || adm.vt.precisa !== 'Sim') return; // Pula quem não tem VT
+            if (!adm.vt || adm.vt.precisa !== 'Sim') return; 
 
-            // Cruzamento para achar o R$ do VT
             let valorPassagem = 0;
             const unidadeRealDoColab = colab.unidade.split(',')[0].trim();
             const configUnidade = unidadesOficiais.find(u => u.nome === unidadeRealDoColab);
@@ -31976,15 +32007,59 @@ window.calcularVTAgora = async function() {
                 });
             }
 
-            if (valorPassagem === 0) return; // Se a empresa de ônibus sumiu do mapa, pula
+            if (valorPassagem === 0) return;
 
-            // As variáveis da matemática
-            let jornada = adm.jornada?.tipo || '12x36';
-            let diasBase = jornada.includes('12x36') ? 15.5 : 21.5;
+            const dataInicioAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
+            if (!dataInicioAdmStr) return;
+            const dAdm = new Date(dataInicioAdmStr + 'T00:00:00');
 
+            if (dAdm > dF) return; // Só quem já estava na empresa nesse mês recebe
+
+            let diasPadraoCalculado = 0;
+            let retroativoCalculado = 0;
             let ausencias = faltasPorColab[colab.id] || 0;
-            let diasAPagar = diasBase - ausencias;
-            if (diasAPagar < 0) diasAPagar = 0; // Impede descontar do salário do cara rs
+
+            // ========================================================
+            // 1️⃣ MÁGICA: PROJEÇÃO DO FUTURO PARA QUEM FOI DESLIGADO
+            // ========================================================
+            if (colab.status === 'Desligado' && colab.dados_rescisao && colab.dados_rescisao.ultimo_dia) {
+                const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                if (match) {
+                    const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
+                    let limiteUso = dataUltimoDia < dF ? dataUltimoDia : dF;
+                    
+                    let dCalc = new Date(dI);
+                    while (dCalc <= limiteUso) {
+                        if (!window.isDiaDeFolga(colab, `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`)) {
+                            diasPadraoCalculado++; 
+                        }
+                        dCalc.setDate(dCalc.getDate() + 1);
+                    }
+                }
+            } 
+            // ========================================================
+            // 2️⃣ MÁGICA: CONTA OS DIAS PARA FUNCIONÁRIOS NORMAIS E NOVATOS
+            // ========================================================
+            else {
+                // Conta do dia 1 do Mês até o final dele (ou a partir da data de admissão se o cara for novato)
+                let dCalc = new Date(dI);
+                
+                // Se a admissão for no meio desse mês, começa a contar do dia que ele entrou!
+                if (dAdm >= dI && dAdm <= dF) {
+                    dCalc = new Date(dAdm);
+                }
+
+                while (dCalc <= dF) {
+                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                    if (!window.isDiaDeFolga(colab, isoStr)) {
+                        diasPadraoCalculado++; 
+                    }
+                    dCalc.setDate(dCalc.getDate() + 1);
+                }
+            }
+
+            let diasAPagar = diasPadraoCalculado - ausencias;
+            if (diasAPagar < 0) diasAPagar = 0;
 
             let qtdPassagens = adm.vt.quantidade || 2;
             let valorDiario = qtdPassagens * valorPassagem;
@@ -31995,7 +32070,14 @@ window.calcularVTAgora = async function() {
 
             const cpfColab = colab.cpf || adm.cpf || 'CPF não cadastrado';
 
-            // ALIMENTA A MEMÓRIA PARA O EXCEL
+            let jornadaVisor = adm.jornada || { tipo: '12x36' };
+            if (jornadaVisor.historico_alteracoes && jornadaVisor.historico_alteracoes.length > 0) {
+                const histOrdenado = [...jornadaVisor.historico_alteracoes].sort((a,b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+                for (let h of histOrdenado) {
+                    if (dF >= new Date(h.data_inicio + 'T00:00:00')) { jornadaVisor = h; break; }
+                }
+            }
+
             if (!window.vtCalculadoPorUnidade[unidadeRealDoColab]) {
                 window.vtCalculadoPorUnidade[unidadeRealDoColab] = [];
             }
@@ -32004,8 +32086,9 @@ window.calcularVTAgora = async function() {
                 cpf: cpfColab,
                 empresaVT: adm.vt.empresa,
                 passagensDia: qtdPassagens,
-                jornada: jornada,
-                diasBase: diasBase,
+                jornada: jornadaVisor.tipo || '12x36',
+                diasBase: diasPadraoCalculado,
+                retroativo: retroativoCalculado,
                 ausencias: ausencias,
                 diasAPagar: diasAPagar,
                 valorDiario: valorDiario,
@@ -32022,8 +32105,10 @@ window.calcularVTAgora = async function() {
                     <small style="color: #4fc3f7;"><i class="fa-solid fa-bus"></i> ${adm.vt.empresa} (${qtdPassagens} un)</small>
                 </td>
                 <td>
-                    <strong style="color: var(--cor-texto-principal);">${jornada}</strong><br>
-                    <small style="color: var(--cor-texto-secundario);">${diasBase} dias fixos</small>
+                    <strong style="color: var(--cor-texto-principal);">${jornadaVisor.tipo || '12x36'}</strong><br>
+                </td>
+                <td style="font-weight: bold; color: ${colab.status === 'Desligado' ? '#ff9800' : 'inherit'};">
+                    ${diasPadraoCalculado}
                 </td>
                 <td style="color: var(--cor-perigo); font-weight: bold;">
                     - ${ausencias}
@@ -32041,22 +32126,21 @@ window.calcularVTAgora = async function() {
         });
 
         if (html === '' || contagemValidada === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador com VT elegível encontrado nesta busca.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador com VT elegível encontrado nesta busca.</td></tr>';
         } else {
             html += `<tr style="background: rgba(79, 195, 247, 0.15);">
-                <td colspan="6" style="text-align: right; color: #4fc3f7; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VT A PAGAR:</strong></td>
+                <td colspan="7" style="text-align: right; color: #4fc3f7; font-size: 1.2rem; padding: 15px;"><strong>TOTAL DE VT A PAGAR:</strong></td>
                 <td style="color: var(--cor-sucesso); font-size: 1.3rem; font-weight: 900; padding: 15px;">${totalGeral.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
             tbody.innerHTML = html;
-            btnExcel.classList.remove('hidden'); // Exibe o botão milagroso
+            btnExcel.classList.remove('hidden'); 
         }
 
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--cor-perigo);">Erro crítico: ${err.message}</td></tr>`;
         console.error(err);
     }
 };
-
         window.exportarExcelVT = async function() {
     if (!window.vtCalculadoPorUnidade || Object.keys(window.vtCalculadoPorUnidade).length === 0) {
         return mostrarAlerta("Nenhum dado encontrado. Calcule o VT primeiro.", "aviso");
