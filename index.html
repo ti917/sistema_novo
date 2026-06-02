@@ -29006,7 +29006,7 @@ window.calcularVRAgora = async function() {
         return mostrarAlerta("A Data Inicial não pode ser maior que a Data Final!", "erro");
     }
 
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando escalas virtuais...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas, projetando aviso prévio e processando escalas...</td></tr>';
     btnExcel.classList.add('hidden');
     window.vrCalculadoPorUnidade = {}; 
 
@@ -29043,19 +29043,18 @@ window.calcularVRAgora = async function() {
 
         const ocorrenciasGlobais = [...(resAus.data || []), ...(resFt.data || [])];
         
-        // 👇 A MÁGICA DOS DESLIGADOS AQUI 👇
+        // 👇 A MÁGICA DOS DESLIGADOS (FILTRO) 👇
         const colabsAtivos = (resPerfis.data || []).filter(c => {
             if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
             
             if (c.status === 'Ativo') return true;
             
-            // Se ele for desligado, avalia o último dia dele
+            // Se está Desligado, checa se o último dia entra na folha atual ou futura
             if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                 const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
-                    // Só recebe o VR se o último dia dele for ESTRITAMENTE DEPOIS do fechamento (dF).
-                    // Ex: Se dF é 25/05 e ele sai dia 25/05, ele NÃO recebe VR de Junho.
+                    // Só recebe VR se o último dia for ESTRITAMENTE DEPOIS da data final do filtro
                     if (dataUltimoDia > dF) return true; 
                 }
             }
@@ -29086,7 +29085,8 @@ window.calcularVRAgora = async function() {
                         const pReal = colabsAtivos.find(c => c.id === cEsc.id_colaborador);
                         consolidados[cEsc.id_colaborador] = {
                             id: cEsc.id_colaborador, nome: cEsc.nome, cpf: pReal?.cpf || pReal?.dados_admissao?.cpf,
-                            empresaReal: pReal?.empresa, unidadeReal: pReal?.unidade,
+                            empresaReal: pReal?.empresa, unidadeReal: pReal?.unidade, statusReal: pReal?.status,
+                            dados_rescisao: pReal?.dados_rescisao || {},
                             diasGerais: {}, dados_admissao: pReal?.dados_admissao || {}
                         };
                     }
@@ -29104,6 +29104,10 @@ window.calcularVRAgora = async function() {
         let html = '';
         let totalFinanceiroGeral = 0;
         let contagemValidada = 0;
+
+        const [anoStr, mesStr] = dataFimStr.split('-');
+        const anoAtual = parseInt(anoStr);
+        const mesAtual = parseInt(mesStr); // Mês que fecha o filtro (ex: 5 = Maio)
 
         for (let id in consolidados) {
             const colab = consolidados[id];
@@ -29149,12 +29153,47 @@ window.calcularVRAgora = async function() {
             let statusExcel = '';
             let labelExtra = '';
 
+            // ========================================================
+            // 👇 MÁGICA 3: PROJEÇÃO DO FUTURO PARA QUEM FOI DESLIGADO 👇
+            // ========================================================
+            if (colab.statusReal === 'Desligado') {
+                const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
+
+                // Zera os dias padrão porque ele não vai trabalhar o mês todo
+                diasPadraoCalculado = 0;
+
+                // O mês de Uso do VR é o mês seguinte ao dF (Ex: Fechou em Maio, VR de Junho)
+                let dUsoInicio = new Date(anoAtual, mesAtual, 1); 
+                let dUsoFim = new Date(anoAtual, mesAtual + 1, 0); 
+                
+                // O limite é o final do mês ou o último dia dele (o que vier primeiro)
+                let limiteUso = dataUltimoDia < dUsoFim ? dataUltimoDia : dUsoFim;
+
+                // Calcula os dias exatos que ele vai trabalhar no mês que vem
+                let diasFuturos = 0;
+                let dCalc = new Date(dUsoInicio);
+                while (dCalc <= limiteUso) {
+                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                    // Se não for dia de folga no algoritmo da escala, ele ganha a diária de VR!
+                    if (!window.isDiaDeFolga(colab, isoStr)) {
+                        diasPadraoCalculado++; 
+                    }
+                    dCalc.setDate(dCalc.getDate() + 1);
+                }
+
+                labelExtra = '<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Rescisão (Proporcional)</span>';
+                statusExcel = `Proporcional (Sai dia ${colab.dados_rescisao.ultimo_dia.split(' ')[0]})`;
+                statusAviso = `<span style="color: #ff9800;"><i class="fa-solid fa-user-clock"></i> Sai em ${colab.dados_rescisao.ultimo_dia.split(' ')[0]}</span>`;
+            }
+
+            // ========================================================
+            // 👇 MÁGICA 4: RETROATIVO PARA NOVATOS 👇
+            // ========================================================
             let janelaRetroativa = new Date(dF);
             janelaRetroativa.setDate(janelaRetroativa.getDate() - 45);
 
-            // 👇 A MÁGICA DA ADMISSÃO E RETROATIVO AQUI 👇
             if (dAdm >= janelaRetroativa && dAdm <= dF) {
-                // Colaborador é novo! Conta quantos dias ele TRABALHOU DE VERDADE da admissão até a data fim (dF)
                 let tempD = new Date(dAdm);
                 while (tempD <= dF) {
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
@@ -29165,22 +29204,27 @@ window.calcularVRAgora = async function() {
                     tempD.setDate(tempD.getDate() + 1);
                 }
                 
-                labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo admissão</span>';
-                statusExcel = 'Novo (Com Retroativo)';
-                statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
-            } 
-            // SE É FUNCIONÁRIO ANTIGO (Apenas abate as faltas e atestados do período)
-            else {
-                let tempD = new Date(dI);
-                while(tempD <= dF) {
-                    const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
-                    const siglaDia = colab.diasGerais[iso];
-                    if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
-                        abatimentosCalculado++;
-                    }
-                    tempD.setDate(tempD.getDate() + 1);
+                if (colab.statusReal !== 'Desligado') {
+                    labelExtra = '<br><span style="color: #20c997; font-size: 0.75rem; background: rgba(32, 201, 151, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock-rotate-left"></i> Inclui retroativo admissão</span>';
+                    statusExcel = 'Novo (Com Retroativo)';
+                    statusAviso = '<span style="color: #20c997;"><i class="fa-solid fa-user-plus"></i> Novo Colab. (Retroativo)</span>';
                 }
+            } 
+            
+            // ========================================================
+            // 👇 MÁGICA 5: ABATIMENTOS DE FALTAS PARA TODOS 👇
+            // ========================================================
+            let tempD = new Date(dI);
+            while(tempD <= dF) {
+                const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
+                const siglaDia = colab.diasGerais[iso];
+                if (siglaDia && CODIGOS_ABATIMENTO.includes(siglaDia)) {
+                    abatimentosCalculado++;
+                }
+                tempD.setDate(tempD.getDate() + 1);
+            }
 
+            if (colab.statusReal !== 'Desligado' && dAdm < janelaRetroativa) {
                 if (abatimentosCalculado > 0) {
                     statusAviso = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-minus-circle"></i> Retenção: ${abatimentosCalculado} Faltas/Afast.</span>`;
                     statusExcel = `Desconto (${abatimentosCalculado} ocorrências)`;
@@ -29195,6 +29239,7 @@ window.calcularVRAgora = async function() {
 
             const valorVRBruto = diasAPagarCalculado * valorDiariaUnidade;
 
+            // Bônus Customizados
             let beneficiosExtrasDesseColab = [];
             if (regraUnidade.beneficios_extras) {
                 let extrasArr = typeof regraUnidade.beneficios_extras === 'string' ? JSON.parse(regraUnidade.beneficios_extras) : regraUnidade.beneficios_extras;
@@ -29247,7 +29292,7 @@ window.calcularVRAgora = async function() {
                     <span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda); margin-bottom: 5px;">${tipoJornada}</span><br>
                     <small style="color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${regraUnidade.unidade} (R$ ${valorDiariaUnidade.toFixed(2).replace('.', ',')})</small>
                 </td>
-                <td style="font-weight: bold;">${diasPadraoCalculado.toFixed(1)}</td>
+                <td style="font-weight: bold; color: ${colab.statusReal === 'Desligado' ? '#ff9800' : 'inherit'};">${diasPadraoCalculado.toFixed(1)}</td>
                 <td style="color: #20c997; font-weight: bold;">+ ${retroativoCalculado.toFixed(1)}</td>
                 <td style="color: var(--cor-perigo); font-weight: bold;">- ${abatimentosCalculado}</td>
                 <td style="font-weight: bold; font-size: 1.1rem;">${diasAPagarCalculado.toFixed(1)}</td>
