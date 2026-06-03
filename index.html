@@ -10228,9 +10228,9 @@ window.gerarDadosBI = async function() {
                                </small>
                                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
                                    ${infoCargo.nomesInss.map(av => `
-                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 4px 8px; border-radius: 4px;">
-                                           <span style="color: #ff9800; font-size: 0.8rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;" title="${av.nome}">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
-                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Volta: ${av.data}</span>
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 152, 0, 0.08); border-left: 2px solid #ff9800; padding: 6px 8px; border-radius: 4px; gap: 10px;">
+                                           <span style="color: #ff9800; font-size: 0.8rem; font-weight: bold; line-height: 1.2;">${av.nome}</span>
+                                           <span style="background: rgba(255, 152, 0, 0.15); color: #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px; white-space: nowrap;">Volta: ${av.data}</span>
                                        </div>
                                    `).join('')}
                                </div>
@@ -10244,9 +10244,9 @@ window.gerarDadosBI = async function() {
                                </small>
                                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
                                    ${infoCargo.nomesAviso.map(av => `
-                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(220, 53, 69, 0.08); border-left: 2px solid #dc3545; padding: 4px 8px; border-radius: 4px;">
-                                           <span style="color: #ffc107; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;">${av.nome.split(' ')[0]} ${av.nome.split(' ').pop()}</span>
-                                           <span style="background: rgba(220, 53, 69, 0.15); color: #dc3545; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px;">Até ${av.data}</span>
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(220, 53, 69, 0.08); border-left: 2px solid #dc3545; padding: 6px 8px; border-radius: 4px; gap: 10px;">
+                                           <span style="color: #ffc107; font-size: 0.8rem; font-weight: bold; line-height: 1.2;">${av.nome}</span>
+                                           <span style="background: rgba(220, 53, 69, 0.15); color: #dc3545; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px; white-space: nowrap;">Até ${av.data}</span>
                                        </div>
                                    `).join('')}
                                </div>
@@ -13418,7 +13418,6 @@ window.deletarUnidadeOficial = async function(id) {
     const container = document.getElementById('lista-admissoes-container');
     const scrollAnterior = window.scrollY;
 
-    // SÓ mostra o spinner se NÃO for uma atualização silenciosa
     if (!silencioso && container) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-acento); padding: 30px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando colaboradores ativos...</p>';
     }
@@ -13427,60 +13426,103 @@ window.deletarUnidadeOficial = async function(id) {
     let query = supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
     if (empresaSelecionadaFiltro !== 'Todas') query = query.eq('empresa', empresaSelecionadaFiltro);
     
-    const { data, error } = await query;
-    if (error) {
+    // 👇 A MÁGICA DO AFASTAMENTO: Busca ausências ativas HOJE para colocar nos cards 👇
+    const hojeIso = new Date().toISOString().split('T')[0];
+    const [resPerfis, resAusencias, resFerias] = await Promise.all([
+        query,
+        supabaseClient.from('ausencias').select('colaborador_id, sigla').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+    ]);
+
+    if (resPerfis.error) {
         if (container) container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro de conexão.</p>';
         return;
     }
 
-    data.sort((a, b) => new Date(b.dados_admissao?.data_envio || 0).getTime() - new Date(a.dados_admissao?.data_envio || 0).getTime());
-    todasAdmissoesAprovadas = data;
+    // Mapeia quem está de fora hoje
+    const mapaAfastamentos = {};
+    if (resAusencias.data) resAusencias.data.forEach(a => mapaAfastamentos[a.colaborador_id] = { tipo: a.sigla });
+    if (resFerias.data) resFerias.data.forEach(f => mapaAfastamentos[f.colaborador_id] = { tipo: 'FER' });
+
+    // Injeta os dados
+    const dadosCompletos = resPerfis.data.map(u => {
+        if (mapaAfastamentos[u.id]) u.ausencia_atual = mapaAfastamentos[u.id];
+        return u;
+    });
+
+    dadosCompletos.sort((a, b) => new Date(b.dados_admissao?.data_envio || 0).getTime() - new Date(a.dados_admissao?.data_envio || 0).getTime());
+    todasAdmissoesAprovadas = dadosCompletos;
     filtrarAdmissoes();
-if (silencioso) {
+    
+    if (silencioso) {
         setTimeout(() => window.scrollTo(0, scrollAnterior), 10);
     }
 }
 
         function filtrarAdmissoes() {
     const termoBusca = window.removerAcentos(document.getElementById('busca-admissoes').value);
-    const statusFiltro = document.getElementById('filtro-status-admissoes').value;
+    
+    // 👇 A MÁGICA DO SELECT: Se as novas opções ainda não existirem, o sistema injeta elas! 👇
+    const selectFiltro = document.getElementById('filtro-status-admissoes');
+    if (selectFiltro && !selectFiltro.innerHTML.includes('Afastado')) {
+        selectFiltro.innerHTML = `
+            <option value="Todos">Todos (Ativos + Desligados + ASO)</option>
+            <option value="Ativo" selected>Somente Ativos (Trabalhando)</option>
+            <option value="Afastado">Afastados ou Férias</option>
+            <option value="Aviso">Em Processo Rescisório (Aviso)</option>
+            <option value="Desligado">Somente Desligados</option>
+        `;
+    }
+    const statusFiltro = selectFiltro.value;
+    const mesFiltro = document.getElementById('filtro-mes-adm').value; 
 
-    // 1. Faz as contagens
-    const totalAtivos = todasAdmissoesAprovadas.filter(c => (c.status || 'Ativo') === 'Ativo').length;
-    const totalDesligados = todasAdmissoesAprovadas.filter(c => c.status === 'Desligado' || c.status === 'Cancelado(a)').length;
+    const listaAtivosReais = window.filtrarAtivosE_AvisoPrevio(todasAdmissoesAprovadas);
+
+    const totalAtivos = listaAtivosReais.length;
+    const totalDesligados = todasAdmissoesAprovadas.filter(c => (c.status === 'Desligado' || c.status === 'Cancelado(a)') && !listaAtivosReais.some(ativo => ativo.id === c.id)).length;
     const totalGeral = todasAdmissoesAprovadas.length;
 
-    // 2. Atualiza a Badge dinamicamente (Texto e Cor)
     const badgeContador = document.getElementById('contador-ativos');
-    if (statusFiltro === 'Ativo') {
-        badgeContador.innerText = `${totalAtivos} Ativo(s)`;
-        badgeContador.className = 'badge ativo';
-    } else if (statusFiltro === 'Desligado') {
-        badgeContador.innerText = `${totalDesligados} Desligado(s)/Cancelado(s)`;
-        badgeContador.className = 'badge desligado'; // Fica vermelho
-    } else {
-        badgeContador.innerText = `${totalGeral} No Total`;
-        badgeContador.className = 'badge admin'; // Fica amarelinho/neutro
-    }
+    if (statusFiltro === 'Ativo') { badgeContador.innerText = `${totalAtivos} Ativo(s)`; badgeContador.className = 'badge ativo'; } 
+    else if (statusFiltro === 'Desligado') { badgeContador.innerText = `${totalDesligados} Desligado(s)/Cancelado(s)`; badgeContador.className = 'badge desligado'; } 
+    else { badgeContador.innerText = `${totalGeral} No Total`; badgeContador.className = 'badge admin'; }
 
-    // 3. Aplica o filtro na lista
-    admissoesFiltradas = todasAdmissoesAprovadas.filter(colab => {
-        const matchTexto = window.removerAcentos(colab.nome).includes(termoBusca) || (colab.cpf && colab.cpf.includes(termoBusca));
-        const statusColab = colab.status || 'Ativo';
-        
-        let matchStatus = false;
-        if (statusFiltro === 'Todos') {
-            matchStatus = true;
-        } else if (statusFiltro === 'Ativo') {
-            matchStatus = (statusColab === 'Ativo');
-        } else if (statusFiltro === 'Desligado') {
-            matchStatus = (statusColab === 'Desligado' || statusColab === 'Cancelado(a)');
-        }
-        
-        return matchTexto && matchStatus;
+    // Ordenação do Sininho
+    todasAdmissoesAprovadas.sort((a, b) => {
+        const nA = notificacoesGlobais.find(n => n.colaborador_id === a.id && n.tipo.includes('Admissão'));
+        const nB = notificacoesGlobais.find(n => n.colaborador_id === b.id && n.tipo.includes('Admissão'));
+        const lidaA = nA ? nA.lida : true; const lidaB = nB ? nB.lida : true;
+        if (lidaA !== lidaB) return lidaA ? 1 : -1; 
+        const dataA = new Date(a.dados_admissao?.data_envio || 0).getTime();
+        const dataB = new Date(b.dados_admissao?.data_envio || 0).getTime();
+        return dataB - dataA; 
     });
 
-    // 4. Volta para página 1 e renderiza
+    admissoesFiltradas = todasAdmissoesAprovadas.filter(colab => {
+        const adm = colab.dados_admissao || {};
+        const matchTexto = window.removerAcentos(colab.nome).includes(termoBusca) || (colab.cpf && colab.cpf.includes(termoBusca)) || (colab.unidade && window.removerAcentos(colab.unidade).includes(termoBusca)); 
+        
+        const statusColab = colab.status || 'Ativo';
+        const taNaListaDeAtivos = listaAtivosReais.some(ativo => ativo.id === colab.id);
+        const isEmAviso = (colab.status_aprovacao === 'Rescisão Pendente' || colab.status_aprovacao === 'Aguardando Assinatura');
+        const isAfastado = !!colab.ausencia_atual;
+        
+        let matchStatus = false;
+        if (statusFiltro === 'Todos') { matchStatus = (statusColab !== 'Excluído'); } 
+        else if (statusFiltro === 'Ativo') { matchStatus = taNaListaDeAtivos && !isEmAviso && !isAfastado; } 
+        else if (statusFiltro === 'Aviso') { matchStatus = isEmAviso; } 
+        else if (statusFiltro === 'Afastado') { matchStatus = taNaListaDeAtivos && isAfastado && !isEmAviso; } 
+        else if (statusFiltro === 'Desligado') { matchStatus = (statusColab === 'Desligado' || statusColab === 'Cancelado(a)') && !taNaListaDeAtivos; }
+        
+        let matchData = true;
+        if (mesFiltro) {
+            const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
+            if (!dataInicioColab.startsWith(mesFiltro)) matchData = false;
+        }
+
+        return matchTexto && matchStatus && matchData;
+    });
+
     paginaAtualAdmissoes = 1; 
     renderizarPaginacaoAdmissoes();
 }
@@ -13549,28 +13591,29 @@ if (silencioso) {
             dataEnvio = dateObj.toLocaleDateString('pt-BR') + ' às ' + dateObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         }
 
-        // Lógica de Cores e Status
+        // 👇 A MÁGICA DAS CORES E STATUS REFINADOS AQUI 👇
         let corBadge = 'ativo';
         let textoStatusCard = a.status || 'Ativo';
         let corDestaqueCard = '#28a745'; // Verde por padrão
 
         if(a.status === 'Desligado') {
-            corBadge = 'desligado';
-            corDestaqueCard = 'var(--cor-perigo)';
+            corBadge = 'desligado'; corDestaqueCard = 'var(--cor-perigo)';
         } else if(a.status === 'Cancelado(a)') {
-            corBadge = 'reprovado';
-            corDestaqueCard = '#64748b'; // Cinza Escuro
+            corBadge = 'reprovado'; corDestaqueCard = '#64748b'; 
         } else if (a.status_aprovacao === 'Rescisão Pendente' || a.status_aprovacao === 'Aguardando Assinatura') {
             corBadge = 'pendente'; 
-            textoStatusCard = 'Aviso Prévio';
-            corDestaqueCard = '#ff9800'; // Laranja
+            textoStatusCard = 'Em Processo Rescisório';
+            corDestaqueCard = '#ff9800'; 
+        } else if (a.ausencia_atual) {
+            corBadge = 'advertencia'; // Traz a cor Roxo clarinho do seu CSS
+            textoStatusCard = a.ausencia_atual.tipo === 'FER' ? 'Férias / Descanso' : `Afastamento (${a.ausencia_atual.tipo})`;
+            corDestaqueCard = '#8b5cf6'; // Roxo no canto do card
         } else if (a.status === 'Aguardando ASO') {
             corBadge = 'pendente'; 
             textoStatusCard = 'Falta Exame ASO';
-            corDestaqueCard = '#00bcd4'; // Ciano
+            corDestaqueCard = '#00bcd4'; 
         }
 
-        // Botões de Ação
         let btnCancelar = '';
         if((a.status || 'Ativo') === 'Ativo') {
             btnCancelar = `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="cancelarContratacao('${a.id}')" title="Cancelar Contratação"><i class="fa-solid fa-user-xmark"></i> Cancelar</button>`;
@@ -13587,11 +13630,9 @@ if (silencioso) {
             `;
         }
 
-        // Montagem do Novo Card de Alta Performance
         containerLista.innerHTML += `
             <div class="admissao-card" id="card-adm-${a.id}" style="border-left: 4px solid ${corDestaqueCard}; flex-direction: column; align-items: stretch; padding: 0; overflow: hidden; margin-bottom: 15px;">
                 
-                <!-- 1. Cabeçalho do Card (Avatar, Nome e Status) -->
                 <div style="background: rgba(0,0,0,0.2); padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cor-borda); flex-wrap: wrap; gap: 10px;">
                     <div style="display: flex; align-items: center; gap: 15px;">
                         <div style="width: 45px; height: 45px; border-radius: 50%; background: ${corDestaqueCard}22; display: flex; justify-content: center; align-items: center; border: 1px solid ${corDestaqueCard}55; flex-shrink: 0;">
@@ -13607,7 +13648,6 @@ if (silencioso) {
                     <span class="badge ${corBadge}" style="font-size: 0.8rem; padding: 6px 12px; letter-spacing: 0.5px; text-transform: uppercase;">${textoStatusCard}</span>
                 </div>
 
-                <!-- 2. Corpo do Card (Grid de Informações Úteis) -->
                 <div style="padding: 15px 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; background: rgba(255,255,255,0.01);">
                     
                     <div style="border-left: 2px solid #a6b0cf; padding-left: 10px;">
@@ -13636,7 +13676,6 @@ if (silencioso) {
 
                 </div>
 
-                <!-- 3. Rodapé de Ações (Aprovações e Botões) -->
                 <div style="background: rgba(0,0,0,0.15); padding: 12px 20px; border-top: 1px dashed var(--cor-borda); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
                     <div style="font-size: 0.75rem; color: var(--cor-texto-secundario); line-height: 1.6;">
                         <span><i class="fa-solid fa-paper-plane" style="color: #a6b0cf;"></i> Solicitado em: <b>${dataEnvio}</b></span><br>
@@ -18612,8 +18651,14 @@ window.filtrarUsuariosCadastrados = function() {
         let dataDesligamentoHtml = ''; 
         let estiloExtraBadge = '';
 
-        // Lógica de Datas para Desligados e Aviso Prévio
-        if (statusTexto === 'Desligado' || statusTexto === 'Cancelado(a)' || statusTexto === 'Excluído') {
+        // 👇 A MÁGICA AQUI: Checa primeiro se ele está em Processo Rescisório! 👇
+        if (u.status_aprovacao === 'Rescisão Pendente' || u.status_aprovacao === 'Aguardando Assinatura') {
+            statusTexto = 'Em Processo Rescisório';
+            statusBadge = 'badge pendente'; // Tag Laranja padrão do CSS
+            estiloExtraBadge = '';
+        } 
+        // Lógica de Datas para Desligados e Aviso Prévio (Caso já tenha sido concluído)
+        else if (statusTexto === 'Desligado' || statusTexto === 'Cancelado(a)' || statusTexto === 'Excluído') {
             const hoje = new Date();
             hoje.setHours(0,0,0,0);
             
