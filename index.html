@@ -42282,6 +42282,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('[data-target="tela-desempenho"]')?.addEventListener('click', checarPendenciasDesempenho);
 });
 
+// =========================================================================
+// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA ATÉ O FIM
+// =========================================================================
+
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
@@ -42301,6 +42305,18 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             .in('unidade', unids);
 
         if (error) throw error; 
+
+        // 👇 MÁGICA: Busca também quem já está com avaliação presa nas etapas do meio 👇
+        const { data: avaliacoesAndamento } = await supabaseClient
+            .from('avaliacoes_desempenho')
+            .select('colaborador_id, status')
+            .in('unidade', unids)
+            .in('status', ['Aguardando Assinatura', 'Aguardando Feedback']);
+
+        const mapaAndamento = {};
+        if (avaliacoesAndamento) {
+            avaliacoesAndamento.forEach(a => mapaAndamento[a.colaborador_id] = a.status);
+        }
 
         if (!colabs || colabs.length === 0) {
             if (containerLista) {
@@ -42329,35 +42345,40 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             if (diffDiasEmpresa <= 90) return;
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
+            let taAtrasado = false;
+            let diasAtraso = diffDiasEmpresa;
             
             if (ultimaDataAvaliacaoStr) {
                 const dUltima = new Date(ultimaDataAvaliacaoStr + 'T00:00:00');
                 const diffDiasDesdeUltima = Math.floor((hoje - dUltima) / (1000 * 60 * 60 * 24));
                 
                 if (diffDiasDesdeUltima >= 90) {
-                    window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diffDiasDesdeUltima });
+                    taAtrasado = true;
+                    diasAtraso = diffDiasDesdeUltima;
                 }
             } else {
-                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diffDiasEmpresa });
+                taAtrasado = true;
+            }
+
+            // 👇 A MÁGICA DO BLOQUEIO DEFINITIVO: Se o colaborador tá atrasado OU preso na fase de assinatura/feedback, o Gestor NÃO escapa! 👇
+            if (mapaAndamento[c.id]) {
+                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: mapaAndamento[c.id] });
+            } else if (taAtrasado) {
+                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: null });
             }
         });
 
-        // 👇 A MÁGICA DO BLOQUEIO ENTRA AQUI 👇
         const menuSidebar = document.querySelector('.sidebar');
         const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
         const btnMenuDes = document.querySelector('button[data-target="tela-desempenho"]');
 
         if (window.avaliacoesDesempenhoPendentes.length > 0) {
             if (!avisoTravaDes) {
-                document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: ${document.getElementById('aviso-bloqueio-exp') ? '40px' : '0'}; left: 0; width: 100%; background: #00bcd4; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${window.avaliacoesDesempenhoPendentes.length} Avaliação(ões) de DESEMPENHO atrasada(s). O sistema está bloqueado até o preenchimento.</div>`);
+                document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: ${document.getElementById('aviso-bloqueio-exp') ? '40px' : '0'}; left: 0; width: 100%; background: #00bcd4; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${window.avaliacoesDesempenhoPendentes.length} Avaliação(ões) de DESEMPENHO pendente(s). O sistema ficará bloqueado até a conclusão total do Feedback.</div>`);
             } else {
-                avisoTravaDes.innerHTML = `<i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${window.avaliacoesDesempenhoPendentes.length} Avaliação(ões) de DESEMPENHO atrasada(s). O sistema está bloqueado até o preenchimento.`;
+                avisoTravaDes.innerHTML = `<i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${window.avaliacoesDesempenhoPendentes.length} Avaliação(ões) de DESEMPENHO pendente(s). O sistema ficará bloqueado até a conclusão total do Feedback.`;
                 avisoTravaDes.style.top = document.getElementById('aviso-bloqueio-exp') ? '40px' : '0';
             }
-
-            // ==========================================
-            // 🛑 TRAVAS REATIVADAS 🛑
-            // ==========================================
             
             menuSidebar.classList.add('sidebar-bloqueada');
             
@@ -42372,23 +42393,19 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 btnMenuDes.style.display = '';
                 btnMenuDes.style.pointerEvents = 'auto'; 
                 
-                // 👇 A MÁGICA DO REDIRECIONAMENTO AUTOMÁTICO REATIVADA 👇
                 if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp')) {
                     btnMenuDes.click(); 
                 }
             }
 
         } else {
-            // SE NÃO TIVER PENDÊNCIA NENHUMA: TIRA A TARJA E LIBERA
             if (avisoTravaDes) avisoTravaDes.remove();
             
-            // Só libera o sistema de verdade se a trava de Experiência também não estiver segurando
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
         }
-        // 👆 FIM DO BLOQUEIO 👆
 
         if(typeof renderizarListaDesempenhoPendentes === 'function') renderizarListaDesempenhoPendentes();
 
@@ -42397,13 +42414,11 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     }
 };
 
-// Transformamos ela em window. para ficar global e ler a memória correta!
 window.renderizarListaDesempenhoPendentes = function() {
     const container = document.getElementById('lista-desempenho-pendente');
     if(!container) return;
     container.innerHTML = '';
 
-    // 👇 A MÁGICA: Adicionado o "window." aqui para ler a lista que o sistema encheu!
     if (window.avaliacoesDesempenhoPendentes.length === 0) {
         container.innerHTML = `
             <div style="text-align: center; padding: 40px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px dashed var(--cor-borda);">
@@ -42414,8 +42429,22 @@ window.renderizarListaDesempenhoPendentes = function() {
         return;
     }
 
-    // 👇 A MÁGICA AQUI TAMBÉM: "window." adicionado no foreach!
     window.avaliacoesDesempenhoPendentes.forEach((item, index) => {
+        let badgeExtra = '';
+        let btnAcao = '';
+
+        if (item.statusAndamento) {
+            badgeExtra = `<span style="font-size: 0.8rem; color: #ff9800; display: block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Pendência Atual: <b>${item.statusAndamento}</b></span>`;
+            
+            btnAcao = `<button class="btn-secondary" style="border-color: #00bcd4; color: #00bcd4; font-weight: bold; padding: 10px 20px;" onclick="document.querySelector('[data-aba=\\'aba-desempenho-andamento\\']').click();">
+                <i class="fa-solid fa-arrow-right"></i> Continuar Etapa
+            </button>`;
+        } else {
+            btnAcao = `<button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="abrirFormularioDesempenho(${index})">
+                <i class="fa-solid fa-pen-to-square"></i> Iniciar Avaliação
+            </button>`;
+        }
+
         container.innerHTML += `
             <div class="admissao-card" style="border-left: 4px solid #00bcd4; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
                 <div>
@@ -42423,10 +42452,9 @@ window.renderizarListaDesempenhoPendentes = function() {
                     <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
                         <i class="fa-solid fa-building"></i> ${item.colab.unidade} | Ciclo Atrasado em: <b style="color: #ff9800;">${item.dias} dias</b>
                     </span>
+                    ${badgeExtra}
                 </div>
-                <button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="abrirFormularioDesempenho(${index})">
-                    <i class="fa-solid fa-pen-to-square"></i> Preencher Avaliação
-                </button>
+                ${btnAcao}
             </div>
         `;
     });
@@ -42568,7 +42596,6 @@ window.abrirFormularioDesempenho = function(indexCache) {
             let c2 = nota === "2" ? '<b style="color: #000000; font-size:14px;">X</b>' : '';
             let c3 = nota === "3" ? '<b style="color: #000000; font-size:14px;">X</b>' : '';
 
-            // 👇 A MÁGICA DA QUEBRA DE PÁGINA (page-break-inside: avoid) 👇
             tbodyPdf += `
                 <tr style="page-break-inside: avoid; break-inside: avoid;">
                     <td style="border: 1px solid #64748b; padding: 4px 6px; text-align: left; color: #000000; font-weight: 500;">${crit}</td>
@@ -42619,24 +42646,20 @@ window.abrirFormularioDesempenho = function(indexCache) {
             const pdfFile = new File([pdfWorker], `Notas_${nomeColab.replace(/ /g, '_')}.pdf`, { type: 'application/pdf' });
             const caminhoBase = `${formatarNomePasta(empresa)}/${formatarNomePasta(unidade)}/${formatarNomePasta(nomeColab)}/Desempenho`;
             
-            // Upload do PDF inicial de Notas
             const urlsFinal = await subirDocumentos(caminhoBase, [pdfFile], `Avaliacao_Notas_${hashAvaliacao}`);
             const urlPdf = urlsFinal[0];
 
-            // 👇 MÁGICA NOVA AQUI: FAZ O UPLOAD DA ASSINATURA DO GESTOR E GUARDA O LINK ESCONDIDO 👇
             const resAss = await fetch(cDes.toDataURL('image/png'));
             const blobAss = await resAss.blob();
             const fileAss = new File([blobAss], "assinatura_gestor.png", { type: "image/png" });
             const urlsAss = await subirDocumentos(caminhoBase, [fileAss], `Assin_Gestor_${hashAvaliacao}`);
             const urlAssinaturaGestor = urlsAss[0];
 
-            // Injeta o link da assinatura do gestor para usar depois!
             const pontos_melhorar_db = `[AUTENTICAÇÃO: ${hashAvaliacao}] \n[CLASSIFICAÇÃO: ${classificacaoFinal}] \n[ASSINATURA_GESTOR: ${urlAssinaturaGestor}] \n\n` + pontosMelhorar;
 
             let statusInicial = 'Aguardando Assinatura';
             let tipoNotificacaoAdmin = null;
 
-            // Se for INSATISFATÓRIO, pula tudo e trava na hora!
             if (classificacaoFinal === 'INSATISFATÓRIO') {
                 statusInicial = 'Alerta_RH'; 
                 tipoNotificacaoAdmin = 'Avaliacao_Alerta_Ruim';
@@ -42650,12 +42673,8 @@ window.abrirFormularioDesempenho = function(indexCache) {
 
             if (dbError) throw dbError;
 
-            const hojeIso = new Date().toISOString().split('T')[0];
-            const { data: pAtual } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
-            let admAtual = pAtual.dados_admissao || {};
-            admAtual.ultima_aval_desempenho = hojeIso;
-            await supabaseClient.from('perfis').update({ dados_admissao: admAtual }).eq('id', idColab);
-
+            // Retirado o update na coluna `ultima_aval_desempenho` aqui para o bloqueio do gestor não soltar!
+            
             if (tipoNotificacaoAdmin) {
                 await supabaseClient.from('notificacoes').insert([{
                     colaborador_id: idColab, nome: `🚨 MÁ AVALIAÇÃO: ${nomeColab}`, unidade: unidade, lida: false, 
@@ -42663,7 +42682,7 @@ window.abrirFormularioDesempenho = function(indexCache) {
                 }]);
                 mostrarAlerta("Avaliação registrada! Como o resultado foi INSATISFATÓRIO, o processo foi travado e um alerta foi enviado à Diretoria.", "aviso");
             } else {
-                mostrarAlerta("Folha de notas gerada! Chame o colaborador para assinar na tela.", "sucesso");
+                mostrarAlerta("Folha de notas gerada! Vá na aba de Acompanhamento para finalizar o processo com a assinatura do colaborador.", "sucesso");
             }
 
             document.getElementById('modal-form-desempenho').remove();
@@ -42674,7 +42693,6 @@ window.abrirFormularioDesempenho = function(indexCache) {
             mostrarAlerta("Erro ao salvar: " + err.message, "erro");
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Salvar e Gerar Folha de Notas';
         } finally {
-            // 👇 A MÁGICA DA LIMPEZA AQUI (ANTI-VAZAMENTO) 👇
             document.getElementById('pdf-des-assinatura-gestor').src = '';
             document.getElementById('pdf-des-nome-gestor').innerText = '';
             document.getElementById('pdf-des-assinatura-colab-img').src = '';
@@ -43064,6 +43082,10 @@ window.abrirModalFeedbackFinal = function(idAval, nome, unidade, empresa, authCo
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
+// =========================================================================
+// ETAPA 2: DIGITAR FEEDBACK E GERAR TERMO DE CIÊNCIA (DESTRAVA O SISTEMA)
+// =========================================================================
+
 window.salvarFeedbackEGerarTermo = async function(idAval, nome, unidade, empresa, authCode, dataAvaliacao) {
     const txtConsideracoes = document.getElementById('termo-consideracoes').value.trim();
     if (!txtConsideracoes) return mostrarAlerta("Preencha as Considerações Finais do feedback!", "aviso");
@@ -43097,7 +43119,7 @@ window.salvarFeedbackEGerarTermo = async function(idAval, nome, unidade, empresa
         }
         pontosBd = pontosBd.trim();
 
-        // 👇 A MÁGICA: Guarda o link da foto do colaborador ANTES do banco ser sobrescrito com o PDF!
+        // Guarda o link da foto do colaborador ANTES do banco ser sobrescrito com o PDF!
         const linkPngColaborador = aval.documento_assinado || '';
 
         // Atualiza o banco escondendo as DUAS assinaturas no texto
@@ -43209,6 +43231,15 @@ window.salvarFeedbackEGerarTermo = async function(idAval, nome, unidade, empresa
             tipo: tipoNotificacaoAdmin, referencia_id: idAval
         }]);
 
+        // 👇 A MÁGICA DO DESTRAVAMENTO: Atualizamos a data da última avaliação DO COLABORADOR AQUI 👇
+        const hojeIso = new Date().toISOString().split('T')[0];
+        const { data: pAtual } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', aval.colaborador_id).single();
+        if (pAtual) {
+            let admAtual = pAtual.dados_admissao || {};
+            admAtual.ultima_aval_desempenho = hojeIso;
+            await supabaseClient.from('perfis').update({ dados_admissao: admAtual }).eq('id', aval.colaborador_id);
+        }
+
         if (classificacao === 'INSATISFATÓRIO') {
             mostrarAlerta("Avaliação registrada! Como o resultado foi INSATISFATÓRIO, o processo foi travado e um alerta foi enviado à Diretoria.", "aviso");
         } else {
@@ -43216,7 +43247,11 @@ window.salvarFeedbackEGerarTermo = async function(idAval, nome, unidade, empresa
         }
 
         document.getElementById('modal-feedback-des').remove();
-        carregarDesempenhosAndamento();
+        
+        // 👇 Roda a checagem pra SOLTAR a trava do sistema, já que o colaborador foi atualizado 👇
+        if (typeof window.checarPendenciasDesempenho === 'function') {
+            window.checarPendenciasDesempenho();
+        }
 
     } catch (e) {
         mostrarAlerta("Erro ao processar: " + e.message, "erro");
