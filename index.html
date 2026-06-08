@@ -40648,11 +40648,7 @@ function atualizarBadgeChat(numero) {
     const btn = document.getElementById(`btn-ler-atestado-${tipoTela}`);
     const selectUnidade = document.getElementById(`${prefixo}-unidade`);
 
-    // Validações Iniciais
-    if (!selectUnidade.value) {
-        return mostrarAlerta("Por favor, selecione a Unidade primeiro para carregar a lista de colaboradores!", "aviso");
-    }
-
+    // 👇 TRAVA DA UNIDADE REMOVIDA! Agora só exige o arquivo 👇
     if (!fileInput.files || fileInput.files.length === 0) {
         return mostrarAlerta("Anexe a foto ou PDF do atestado/laudo médico!", "aviso");
     }
@@ -40716,23 +40712,22 @@ function atualizarBadgeChat(numero) {
         ]);
 
         if (response.error) {
-    let mensagemReal = "Erro na IA ao tentar ler o documento médico.";
-    
-    // Tenta capturar a mensagem de erro exata que a Edge Function ou o Supabase devolveu
-    if (response.error.context) {
-        try {
-            const erroDetalhado = await response.error.context.json();
-            if (erroDetalhado.erro) mensagemReal = erroDetalhado.erro;
-            else if (erroDetalhado.error) mensagemReal = JSON.stringify(erroDetalhado.error);
-        } catch(e) {
-            mensagemReal = response.error.message || mensagemReal;
+            let mensagemReal = "Erro na IA ao tentar ler o documento médico.";
+            
+            if (response.error.context) {
+                try {
+                    const erroDetalhado = await response.error.context.json();
+                    if (erroDetalhado.erro) mensagemReal = erroDetalhado.erro;
+                    else if (erroDetalhado.error) mensagemReal = JSON.stringify(erroDetalhado.error);
+                } catch(e) {
+                    mensagemReal = response.error.message || mensagemReal;
+                }
+            } else if (response.error.message) {
+                mensagemReal = response.error.message;
+            }
+            
+            throw new Error(mensagemReal);
         }
-    } else if (response.error.message) {
-        mensagemReal = response.error.message;
-    }
-    
-    throw new Error(mensagemReal);
-}
 
         const data = response.data;
         console.log("Dados do Atestado lidos:", data);
@@ -40764,21 +40759,20 @@ function atualizarBadgeChat(numero) {
             const mes = String(dataObj.getMonth() + 1).padStart(2, '0');
             const dia = String(dataObj.getDate()).padStart(2, '0');
             
-            // Injeta a data fim perfeita calculada pela máquina, ignorando qualquer erro da IA
             data.data_fim = `${ano}-${mes}-${dia}`;
         }
         
         if (data.data_fim) {
             const inputFim = document.getElementById(`${prefixo}-data-fim`);
             inputFim.value = data.data_fim;
-            inputFim.dispatchEvent(new Event('change')); // Dispara gatilho do seu sistema
+            inputFim.dispatchEvent(new Event('change')); 
             travarCampo(`${prefixo}-data-fim`);
         } else if (data.parecer_medico) {
             document.getElementById(`${prefixo}-data-fim`).value = ""; 
             mostrarAlerta("⚠️ Atestado sem Data Fim! O documento parece ser um Laudo Indeterminado.", "aviso");
         }
 
-        // 3. PREENCHE O CID (Abre a caixa sozinho e injeta múltiplos CIDs com vírgula)
+        // 3. PREENCHE O CID 
         if (data.cid && data.cid.trim() !== "") {
             const selectCid = document.getElementById(`${prefixo}-possui-cid`);
             selectCid.value = "Sim";
@@ -40804,42 +40798,45 @@ function atualizarBadgeChat(numero) {
             travarCampo(`${prefixo}-observacao`);
         }
 
-        // 5. ENCONTRAR O COLABORADOR NA LISTA DINÂMICA (Sistema Blindado Anti-Acentos)
+        // 👇 5. A NOVA MÁGICA: BUSCA GLOBAL DO COLABORADOR 👇
         if (data.nome_paciente) {
-            const selectColaborador = document.getElementById(`${prefixo}-colaborador`);
-            
-            const normalizarTexto = (texto) => {
-                return texto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
-            };
-
+            const normalizarTexto = (texto) => texto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
             const nomeLido = normalizarTexto(data.nome_paciente);
-            
-            // Tenta buscar o nome completo primeiro
-            let optionEncontrada = Array.from(selectColaborador.options).find(opt => {
-                const textoOption = normalizarTexto(opt.text);
-                return textoOption.includes(nomeLido) || nomeLido.includes(textoOption);
-            });
+            const partesNome = nomeLido.split(' ');
 
-            // Se falhar, pega apenas o 1º e 2º nome da pessoa para tentar achar (Ex: "GEOVANA SOARES")
-            if (!optionEncontrada) {
-                const partesNome = nomeLido.split(' ');
-                if (partesNome.length > 1) {
-                    const nomeCurto = `${partesNome[0]} ${partesNome[1]}`;
-                    optionEncontrada = Array.from(selectColaborador.options).find(opt => 
-                        normalizarTexto(opt.text).includes(nomeCurto)
-                    );
-                }
+            // Busca no banco TODOS os colaboradores com o primeiro nome lido (Ativos ou cumprindo aviso)
+            const { data: colabsBuscados } = await supabaseClient
+                .from('perfis')
+                .select('id, nome, unidade')
+                .eq('perfil', 'Colaborador')
+                .ilike('nome', `%${partesNome[0]}%`)
+                .in('status', ['Ativo', 'Desligado']);
+
+            let colabEncontrado = null;
+            
+            if (colabsBuscados && colabsBuscados.length > 0) {
+                // Filtra no Javascript para ter certeza que bate o segundo nome também (se houver)
+                colabEncontrado = colabsBuscados.find(c => normalizarTexto(c.nome).includes(partesNome.length > 1 ? partesNome[1] : partesNome[0]));
+                if (!colabEncontrado) colabEncontrado = colabsBuscados[0]; // Pega o mais próximo se o filtro falhar
             }
 
-           if (optionEncontrada) {
-                // 1. Atualiza o valor nativo do HTML
-                selectColaborador.value = optionEncontrada.value;
+            if (colabEncontrado) {
+                // 1. SETA A UNIDADE AUTOMATICAMENTE
+                selectUnidade.value = colabEncontrado.unidade;
+                selectUnidade.dispatchEvent(new Event('change'));
+                travarCampo(`${prefixo}-unidade`);
+
+                // 2. Dá 800ms pro sistema carregar a lista de colaboradores dessa unidade no select
+                await new Promise(r => setTimeout(r, 800));
+
+                // 3. SETA O COLABORADOR AUTOMATICAMENTE
+                const selectColaborador = document.getElementById(`${prefixo}-colaborador`);
+                selectColaborador.value = colabEncontrado.id;
                 
-                // 2. 👇 A MÁGICA: Atualiza o visual da biblioteca TomSelect 👇
+                // Trata visualmente a biblioteca TomSelect se estiver ativa
                 if (selectColaborador.tomselect) {
-                    selectColaborador.tomselect.setValue(optionEncontrada.value);
+                    selectColaborador.tomselect.setValue(colabEncontrado.id);
                     
-                    // Deixa a caixinha de busca verde pra mostrar que a IA agiu ali
                     const tsControl = selectColaborador.tomselect.wrapper.querySelector('.ts-control');
                     if (tsControl) {
                         tsControl.style.backgroundColor = 'rgba(40, 167, 69, 0.05)';
@@ -40851,7 +40848,7 @@ function atualizarBadgeChat(numero) {
                 travarCampo(`${prefixo}-colaborador`);
                 
             } else {
-                mostrarAlerta(`A IA leu o nome "${data.nome_paciente}" no atestado, mas não achou esse colaborador na unidade selecionada. Selecione manualmente.`, "aviso");
+                mostrarAlerta(`A IA leu o nome "${data.nome_paciente}" no atestado, mas não achou esse colaborador na base de dados. Por favor, selecione a unidade e o colaborador manualmente.`, "aviso");
             }
         }
 
@@ -40860,7 +40857,7 @@ function atualizarBadgeChat(numero) {
         Array.from(fileInput.files).forEach(file => dataTransfer.items.add(file));
         document.getElementById(`${prefixo}-documento`).files = dataTransfer.files;
 
-        mostrarAlerta("Documento médico processado com sucesso!", "sucesso");
+        mostrarAlerta("Documento médico lido e preenchido com sucesso!", "sucesso");
 
     } catch (err) {
         console.error("Erro ao ler atestado:", err);
