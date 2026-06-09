@@ -39929,7 +39929,7 @@ function voltarParaListaChamados() {
 // ==========================================
 // 1. ABRIR NOVA CONVERSA (MOTOR DE BUSCA INTELIGENTE)
 // ==========================================
-async function abrirNovaConversa() {
+window.abrirNovaConversa = async function() {
     document.getElementById('tela-lista-chamados').classList.add('hidden');
     document.getElementById('tela-novo-chamado').classList.remove('hidden');
     
@@ -39940,10 +39940,19 @@ async function abrirNovaConversa() {
         // 1. Busca todas as regras de roteamento ativas
         const { data: regras } = await supabaseClient.from('config_chamados').select('*');
 
+        // 👇 A MÁGICA 1: Blindagem de segurança contra letras minúsculas ou espaços no banco
+        const perfilUser = String(usuarioAtual.perfil).trim().toUpperCase();
+        const idUser = String(usuarioAtual.id).trim().toUpperCase();
+
         // 2. Filtra apenas as regras que se aplicam a MIM (meu perfil ou meu usuario específico)
-        const minhasRegras = regras.filter(r => {
-            if (r.origem_tipo === 'Perfil' && (r.origem_valor === usuarioAtual.perfil || r.origem_valor === 'Todos')) return true;
-            if (r.origem_tipo === 'Usuario' && r.origem_valor === usuarioAtual.id) return true;
+        const minhasRegras = (regras || []).filter(r => {
+            const oTipo = String(r.origem_tipo).trim().toUpperCase();
+            const oVal = String(r.origem_valor).trim().toUpperCase();
+
+            // Se for REGRA DE PERFIL (Ex: "Todos") ou REGRA DE USUÁRIO (Ex: Meu ID)
+            if (oTipo === 'PERFIL' && (oVal === perfilUser || oVal === 'TODOS')) return true;
+            if (oTipo === 'USUARIO' && oVal === idUser) return true;
+            
             return false;
         });
 
@@ -39952,33 +39961,50 @@ async function abrirNovaConversa() {
             return;
         }
 
-        // 3. Busca todos os Admins e Gestores do sistema
-        const { data: pessoas } = await supabaseClient.from('perfis').select('id, nome, perfil').in('perfil', ['Admin', 'Gestor']).neq('id', usuarioAtual.id);
+        // 3. Busca todos os usuários do sistema para cruzar com as regras
+        // 👇 A MÁGICA 2: Removemos a trava fixa de perfil na busca, deixando as regras da Engrenagem decidirem quem aparece! 👇
+        const { data: pessoas } = await supabaseClient.from('perfis').select('id, nome, perfil').neq('id', usuarioAtual.id);
 
         if (!pessoas || pessoas.length === 0) {
-            select.innerHTML = '<option value="">Nenhum atendente disponível.</option>';
+            select.innerHTML = '<option value="">Nenhum atendente encontrado no banco de dados.</option>';
             return;
         }
 
-        // 4. Cruza as regras com as pessoas para saber quem eu posso ver na lista
-        let destinatariosPermitidos = new Set();
-        let htmlOptions = '<option value="">Selecione o Atendente...</option>';
+        // 4. Cruza as regras com as pessoas (Usando Objeto em vez de Set para blindar contra duplicação de memória)
+        let destinatariosPermitidos = {};
 
         minhasRegras.forEach(regra => {
+            const dTipo = String(regra.destino_tipo).trim().toUpperCase();
+            const dVal = String(regra.destino_valor).trim().toUpperCase();
+
             pessoas.forEach(p => {
-                if (regra.destino_tipo === 'Usuario' && regra.destino_valor === p.id) {
-                    destinatariosPermitidos.add(p);
-                } else if (regra.destino_tipo === 'Perfil' && (regra.destino_valor === p.perfil || regra.destino_valor === 'Todos')) {
-                    destinatariosPermitidos.add(p);
+                const pId = String(p.id).trim().toUpperCase();
+                const pPerfil = String(p.perfil).trim().toUpperCase();
+
+                // Se a regra manda para um Usuário específico (Ex: Ítalo) e o ID bate
+                if (dTipo === 'USUARIO' && dVal === pId) {
+                    destinatariosPermitidos[p.id] = p;
+                } 
+                // Se a regra manda para um Grupo (Ex: Todos os Admins) e o perfil do cara bate
+                else if (dTipo === 'PERFIL' && (dVal === pPerfil || dVal === 'TODOS')) {
+                    destinatariosPermitidos[p.id] = p;
                 }
             });
         });
 
-        // Dentro da função abrirNovaConversa, no loop que gera as opções:
-destinatariosPermitidos.forEach(p => {
-    // Adicionamos o data-perfil para o banco não dar erro de nulo
-    htmlOptions += `<option value="${p.id}" data-nome="${p.nome}" data-perfil="${p.perfil}">${p.nome} (${p.perfil})</option>`;
-});
+        const listaFinal = Object.values(destinatariosPermitidos);
+
+        if (listaFinal.length === 0) {
+            select.innerHTML = '<option value="">Ninguém atende a sua regra de chamado.</option>';
+            return;
+        }
+
+        let htmlOptions = '<option value="">Selecione o Atendente...</option>';
+        
+        // 5. Monta a lista em ordem alfabética para o usuário escolher
+        listaFinal.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(p => {
+            htmlOptions += `<option value="${p.id}" data-nome="${p.nome}" data-perfil="${p.perfil}">${p.nome} (${p.perfil})</option>`;
+        });
 
         select.innerHTML = htmlOptions;
 
@@ -39986,14 +40012,18 @@ destinatariosPermitidos.forEach(p => {
         select.innerHTML = '<option value="">Erro ao carregar lista.</option>';
         console.error("Erro ao abrir nova conversa:", err);
     }
-}
+};
 
 
 // ==========================================
 // 5. CONFIGURAÇÕES AVANÇADAS DO SUPER ADMIN (MOTOR DE REGRAS)
 // ==========================================
-async function carregarPessoasNoModal() {
-    const { data: pessoas } = await supabaseClient.from('perfis').select('id, nome, perfil').in('perfil', ['Admin', 'Gestor']).order('nome', { ascending: true });
+window.carregarPessoasNoModal = async function() {
+    // 👇 A MÁGICA: Em vez de cravar 'Admin' e 'Gestor', pegamos todo mundo que NÃO é Colaborador 👇
+    const { data: pessoas } = await supabaseClient.from('perfis')
+        .select('id, nome, perfil')
+        .neq('perfil', 'Colaborador')
+        .order('nome', { ascending: true });
     
     const optOrigem = document.getElementById('optgroup-origem-pessoas');
     const optDestino = document.getElementById('optgroup-destino-pessoas');
@@ -40006,7 +40036,7 @@ async function carregarPessoasNoModal() {
             optDestino.innerHTML += html;
         });
     }
-}
+};
 
 async function atualizarListaDeRegras() {
     const lista = document.getElementById('lista-regras-chamados');
