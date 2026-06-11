@@ -3602,8 +3602,8 @@ function gerarPDFPropostaCRM() {
         modal.style.display = 'flex';
     }
 
-   // ====================================================================
-// 2. CORREÇÃO DO CRM (Contar Metas ao Editar um Cliente Existente)
+  // ====================================================================
+// 2. SALVAR NOVO CLIENTE / WIZARD (Agora espera o banco responder)
 // ====================================================================
 async function salvarNovoCliente(e) {
     e.preventDefault();
@@ -3658,10 +3658,14 @@ async function salvarNovoCliente(e) {
         user_id: usuarioAtual ? usuarioAtual.id : null
     };
 
+    // 👇 TRAVA DE FUSO HORÁRIO PARA REGISTRO DE META 👇
     const dataHj = new Date();
-    // 👇 CRIA O HISTÓRICO PARA COMPUTAR NAS METAS 👇
+    const anoLocal = dataHj.getFullYear();
+    const mesLocal = String(dataHj.getMonth() + 1).padStart(2, '0');
+    const diaLocal = String(dataHj.getDate()).padStart(2, '0');
+    
     const objHistorico = {
-        data_registro: dataHj.toISOString().split('T')[0],
+        data_registro: `${anoLocal}-${mesLocal}-${diaLocal}`,
         hora_registro: String(dataHj.getHours()).padStart(2,'0') + ':' + String(dataHj.getMinutes()).padStart(2,'0'),
         tipo_acao: acao,
         empresa: payload.empresa,
@@ -3680,22 +3684,28 @@ async function salvarNovoCliente(e) {
             const { error } = await supabaseClient.from('comercial_clientes_crm').update(payload).eq('id', id);
             if (error) throw error;
             
-            // 👇 AGORA SIM: Registra na tabela de metas, mesmo quando edita um cliente 👇
-            await supabaseClient.from('comercial_metas').insert([objHistorico]);
+            // Grava na meta com log de erro se falhar
+            const resMeta = await supabaseClient.from('comercial_metas').insert([objHistorico]);
+            if (resMeta.error) throw resMeta.error;
             
             mostrarAlerta("Cliente atualizado e Meta Computada!", "sucesso");
         } else {
             const { error } = await supabaseClient.from('comercial_clientes_crm').insert([payload]);
             if (error) throw error;
             
-            await supabaseClient.from('comercial_metas').insert([objHistorico]);
+            const resMeta = await supabaseClient.from('comercial_metas').insert([objHistorico]);
+            if (resMeta.error) throw resMeta.error;
+
             mostrarAlerta("Cliente criado e Meta Computada!", "sucesso");
         }
         
         fecharModalNovoCliente();
-        carregarMetasECRM();
+        
+        // 👇 ESTE É O SEGREDO: Só atualiza a tela DEPOIS que o banco confirmar que salvou tudo 👇
+        await carregarMetasECRM();
+        
     } catch (err) {
-        mostrarAlerta("Erro ao salvar cliente: " + err.message, "erro");
+        mostrarAlerta("Erro ao salvar cliente/meta: " + err.message, "erro");
     } finally {
         document.getElementById('crm-btn-salvar-cliente').disabled = false;
         document.getElementById('crm-btn-salvar-cliente').innerHTML = '<i class="fa-solid fa-save"></i> Salvar Cliente';
@@ -3852,7 +3862,7 @@ function mudarMesAgenda(direcao) {
 }
 
 // ====================================================================
-// 1. CORREÇÃO DA TELA DE METAS E CONTAGEM (Tratamento de Data e Texto)
+// 1. CORREÇÃO DA TELA DE METAS E CONTAGEM (Filtro à prova de falhas)
 // ====================================================================
 function atualizarTelaMetas(metas, crm = []) {
     const tbody = document.getElementById('tabela-metas-body');
@@ -3869,34 +3879,34 @@ function atualizarTelaMetas(metas, crm = []) {
     if (document.getElementById('mes-ano-display')) document.getElementById('mes-ano-display').textContent = txtMesAno;
     if (document.getElementById('cal-metas-mes-ano')) document.getElementById('cal-metas-mes-ano').textContent = txtMesAno;
 
-    // --- 1. HISTÓRICOS FIXOS DA BANCO ---
+    // --- 1. HISTÓRICOS FIXOS DO BANCO ---
     metas.forEach(item => {
         if (!item.data_registro) return;
         
-        // Garantir leitura correta da data seja DD/MM/YYYY ou YYYY-MM-DD
+        // Garantir leitura correta da data
         let mesRegistro, anoRegistro, diaRegistro;
         if (item.data_registro.includes('/')) {
             const parts = item.data_registro.split('/');
-            diaRegistro = parseInt(parts[0]);
-            mesRegistro = parseInt(parts[1]) - 1;
-            anoRegistro = parseInt(parts[2]);
+            diaRegistro = parseInt(parts[0], 10);
+            mesRegistro = parseInt(parts[1], 10) - 1;
+            anoRegistro = parseInt(parts[2], 10);
         } else {
             const parts = item.data_registro.split('-');
-            diaRegistro = parseInt(parts[2]);
-            mesRegistro = parseInt(parts[1]) - 1;
-            anoRegistro = parseInt(parts[0]);
+            diaRegistro = parseInt(parts[2], 10);
+            mesRegistro = parseInt(parts[1], 10) - 1;
+            anoRegistro = parseInt(parts[0], 10);
         }
 
         if (mesRegistro === mesAgenda && anoRegistro === anoAgenda) {
             
             const ehFalha = item.observacoes && item.observacoes.includes('[Não Conseguiu]');
             
-            // 👇 CORREÇÃO: Tratamento para ignorar letras maiúsculas e espaços 👇
+            // 👇 FILTRO BLINDADO CONTRA LETRAS MAIÚSCULAS/ESPAÇOS 👇
             if (!ehFalha) {
-                const tipoAcao = item.tipo_acao ? item.tipo_acao.trim().toLowerCase() : '';
-                if (tipoAcao === 'contato') contatosMes++;
-                else if (tipoAcao === 'visita') visitasMes++;
-                else if (tipoAcao === 'proposta') propostasMes++;
+                const tipoAcao = item.tipo_acao ? item.tipo_acao.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : '';
+                if (tipoAcao.includes('contato')) contatosMes++;
+                else if (tipoAcao.includes('visita')) visitasMes++;
+                else if (tipoAcao.includes('proposta')) propostasMes++;
             }
 
             cacheMetasMes.push({
@@ -3945,12 +3955,12 @@ function atualizarTelaMetas(metas, crm = []) {
             let mesRegistro, anoRegistro;
             if (item.data_agendamento.includes('/')) {
                 const parts = item.data_agendamento.split('/');
-                mesRegistro = parseInt(parts[1]) - 1;
-                anoRegistro = parseInt(parts[2]);
+                mesRegistro = parseInt(parts[1], 10) - 1;
+                anoRegistro = parseInt(parts[2], 10);
             } else {
                 const parts = item.data_agendamento.split('-');
-                mesRegistro = parseInt(parts[1]) - 1;
-                anoRegistro = parseInt(parts[0]);
+                mesRegistro = parseInt(parts[1], 10) - 1;
+                anoRegistro = parseInt(parts[0], 10);
             }
 
             if (mesRegistro === mesAgenda && anoRegistro === anoAgenda) {
@@ -3991,7 +4001,7 @@ function atualizarTelaMetas(metas, crm = []) {
 
     if (tbody.innerHTML === '') tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;">Nenhuma atividade agendada neste mês.</td></tr>';
 
-    // Atualiza Caixas KPI
+    // 👇 ATUALIZA OS NÚMEROS DAS CAIXAS LÁ EM CIMA 👇
     const kpiContato = document.getElementById('kpi-contatos');
     const kpiVisita = document.getElementById('kpi-visitas');
     const kpiProposta = document.getElementById('kpi-propostas');
@@ -4143,6 +4153,9 @@ function abrirDetalhesHistorico(itemStr) {
     modal.style.display = 'flex';
 }
 
+// ====================================================================
+// 3. SALVAR ATIVIDADE AVULSA (Botão Amarelo de Registrar Atividade)
+// ====================================================================
 async function salvarEdicaoHistorico(e) {
     e.preventDefault();
     
@@ -4165,16 +4178,18 @@ async function salvarEdicaoHistorico(e) {
     document.getElementById('modal-detalhes-historico').classList.add('hidden');
     mostrarAlerta(id ? "Atualizando registro histórico..." : "Registrando nova atividade...", "aviso");
 
-    if (id) { // ATUALIZAÇÃO
+    if (id) {
         const { error } = await supabaseClient.from('comercial_metas').update(payload).eq('id', id);
         if (error) { mostrarAlerta("Erro ao atualizar: " + error.message, "erro"); }
         else { mostrarAlerta("Histórico corrigido!", "sucesso"); }
-    } else { // CRIAÇÃO DIRETA PELO BOTÃO AMARELO
+    } else {
         const { error } = await supabaseClient.from('comercial_metas').insert([payload]);
         if (error) { mostrarAlerta("Erro ao registrar: " + error.message, "erro"); }
         else { mostrarAlerta("Atividade salva nas Metas!", "sucesso"); }
     }
-    carregarMetasECRM();
+    
+    // 👇 Espera recarregar os dados do banco antes de montar a tela 👇
+    await carregarMetasECRM();
 }
 
 // ====================================================================
