@@ -3251,15 +3251,17 @@ async function carregarMetasECRM() {
     const resMetas = await supabaseClient.from('comercial_metas').select('*').order('created_at', { ascending: false });
     if (!resMetas.error) {
         dadosMetasGlobal = resMetas.data || [];
-        atualizarTelaMetas(dadosMetasGlobal);
     }
 
-    // 2. Carrega a Carteira de Clientes (Kanban)
+    // 2. Carrega a Carteira de Clientes (Kanban / CRM)
     const resCrm = await supabaseClient.from('comercial_clientes_crm').select('*').order('created_at', { ascending: false });
     if (!resCrm.error) {
         dadosCrmGlobal = resCrm.data || [];
-        renderizarKanban(dadosCrmGlobal);
     }
+
+    // 3. Manda TUDO para a tela de Metas e Agenda processar junto
+    atualizarTelaMetas(dadosMetasGlobal, dadosCrmGlobal);
+    renderizarKanban(dadosCrmGlobal);
 }
 
 // ---------------------------------------------------------
@@ -3267,7 +3269,7 @@ async function carregarMetasECRM() {
 // ---------------------------------------------------------
 let cacheMetasMes = []; // Usado para o calendário
 
-function atualizarTelaMetas(dados) {
+function atualizarTelaMetas(metas, crm = []) {
     const tbody = document.getElementById('tabela-metas-body');
     if(!tbody) return;
     tbody.innerHTML = '';
@@ -3282,24 +3284,26 @@ function atualizarTelaMetas(dados) {
     // Limpa o cache para o calendário e repovoa
     cacheMetasMes = [];
 
-    dados.forEach(item => {
+    // --- 1. LÓGICA DAS METAS MANUAIS (Registrar Atividade) ---
+    metas.forEach(item => {
+        if (!item.data_registro) return;
         const dataAtiv = new Date(item.data_registro + 'T12:00:00');
-        
-        // Verifica se a atividade é do mês atual para os KPIs e Calendário
+
+        // Verifica se a atividade é do mês atual para preencher as caixas (KPIs)
         if (dataAtiv.getMonth() === mesAtual && dataAtiv.getFullYear() === anoAtual) {
             if (item.tipo_acao === 'Contato') contatosMes++;
             if (item.tipo_acao === 'Visita') visitasMes++;
             if (item.tipo_acao === 'Proposta') propostasMes++;
-            
-            // Guarda pro Calendário poder usar
-            cacheMetasMes.push({
-                id: item.id,
-                tipo: item.tipo_acao,
-                empresa: item.empresa,
-                obs: item.observacoes,
-                dataIso: item.data_registro // "YYYY-MM-DD"
-            });
         }
+
+        // Joga pro Calendário
+        cacheMetasMes.push({
+            id: item.id,
+            tipo: item.tipo_acao,
+            empresa: item.empresa,
+            obs: item.observacoes,
+            dataIso: item.data_registro // "YYYY-MM-DD"
+        });
 
         let badgeTipo = '';
         if (item.tipo_acao === 'Contato') badgeTipo = `<span style="background:rgba(52,152,219,0.2); color:#3498db; padding:4px 8px; border-radius:4px; font-size:0.8em; font-weight:bold;"><i class="fa-solid fa-phone"></i> Contato</span>`;
@@ -3322,9 +3326,40 @@ function atualizarTelaMetas(dados) {
         `;
     });
 
-    if (dados.length === 0) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;">Nenhuma atividade registrada.</td></tr>';
+    // --- 2. LÓGICA DO CRM PARA A AGENDA E METAS ---
+    crm.forEach(item => {
+        // A regra: usa a data de AGENDAMENTO para metas e agenda. 
+        // Se não tiver agendamento futuro, cai de volta na data de criação.
+        let dataAcaoStr = item.data_agendamento ? item.data_agendamento : (item.created_at ? item.created_at.split('T')[0] : null);
 
-    // Proteções caso os IDs não existam no HTML atual
+        if (dataAcaoStr) {
+            const dataAtiv = new Date(dataAcaoStr + 'T12:00:00');
+
+            // Conta nas Metas baseado EXATAMENTE na data em que a ação vai ocorrer
+            if (dataAtiv.getMonth() === mesAtual && dataAtiv.getFullYear() === anoAtual) {
+                if (item.ultima_interacao === 'Contato') contatosMes++;
+                if (item.ultima_interacao === 'Visita') visitasMes++;
+                if (item.ultima_interacao === 'Proposta') propostasMes++;
+            }
+        }
+
+        // Injeta a visita/contato no Calendário se houver uma data de agendamento configurada
+        if (item.data_agendamento) {
+            cacheMetasMes.push({
+                id: item.id,
+                tipo: item.ultima_interacao || 'Agendamento',
+                empresa: item.empresa,
+                obs: 'Via CRM: ' + (item.proximo_passo || 'Acompanhamento agendado'),
+                dataIso: item.data_agendamento
+            });
+        }
+    });
+
+    if (metas.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;">Nenhuma atividade registrada manualmente.</td></tr>';
+    }
+
+    // --- 3. ATUALIZA OS CONTADORES NA TELA ---
     const kpiContato = document.getElementById('kpi-contatos');
     const kpiVisita = document.getElementById('kpi-visitas');
     const kpiProposta = document.getElementById('kpi-propostas');
@@ -3335,12 +3370,12 @@ function atualizarTelaMetas(dados) {
     if (kpiContato) kpiContato.innerHTML = `${contatosMes} <span style="font-size: 0.5em; color: #7f8c8d;">/ 20</span>`;
     if (kpiVisita) kpiVisita.innerHTML = `${visitasMes} <span style="font-size: 0.5em; color: #7f8c8d;">/ 4</span>`;
     if (kpiProposta) kpiProposta.innerHTML = `${propostasMes} <span style="font-size: 0.5em; color: #7f8c8d;">/ 1</span>`;
-    
+
     if (cardContato) cardContato.style.borderTopColor = contatosMes >= 20 ? '#2ecc71' : '#3498db';
     if (cardVisita) cardVisita.style.borderTopColor = visitasMes >= 4 ? '#2ecc71' : '#f1c40f';
     if (cardProposta) cardProposta.style.borderTopColor = propostasMes >= 1 ? '#2ecc71' : '#2ecc71';
 
-    // ATUALIZA O CALENDÁRIO SEMPRE QUE A TABELA É RENDERIZADA
+    // RENDERIZA O CALENDÁRIO COM TUDO INTEGRADO
     renderizarCalendarioMetas();
 }
 
