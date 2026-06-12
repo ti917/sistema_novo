@@ -23359,7 +23359,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // =========================================================================
-// 📊 PAINEL DE SALDOS DO GESTOR SINCRO - CORREÇÃO DE CRÉDITOS E ANTI-FANTASMA
+// 📊 PAINEL DE SALDOS DO GESTOR SINCRO - LENDO AUSÊNCIAS E FTS
 // =========================================================================
 window.carregarPainelSaldosGestor = async function() {
     const container = document.getElementById('lista-saldos-gestor-container');
@@ -23388,33 +23388,40 @@ window.carregarPainelSaldosGestor = async function() {
         }
 
         const idsColabs = ativosReais.map(c => c.id);
-        const { data: fts, error: errF } = await supabaseClient.from('horas_extras_ft')
-            .select('*')
-            .eq('status', 'Aprovado')
-            .in('colaborador_id', idsColabs);
+        
+        // 👇 A MÁGICA: Busca tanto nas FTs quanto nas Ausências 👇
+        const [resF, resA] = await Promise.all([
+            supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').in('colaborador_id', idsColabs),
+            supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').in('colaborador_id', idsColabs)
+        ]);
 
-        if (errF) throw errF;
+        if (resF.error) throw resF.error;
+        if (resA.error) throw resA.error;
+
+        const fts = resF.data || [];
+        const aus = resA.data || [];
+        const ocorrenciasBH = [...fts, ...aus]; // Junta tudo no mesmo liquidificador
 
         let htmlAcumulado = '';
 
         ativosReais.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(colab => {
             const adm = colab.dados_admissao || {};
-            const asHorasDesteColab = fts.filter(f => f.colaborador_id === colab.id);
+            const asHorasDesteColab = ocorrenciasBH.filter(f => f.colaborador_id === colab.id);
 
             let minutosCredito = 0;
             let minutosDebito = 0;
 
             asHorasDesteColab.forEach(f => {
                 let txtObs = (f.observacao || '').toUpperCase();
-                let txtMotivo = (f.motivo || '').toUpperCase(); // 🌟 Normaliza o motivo para maiúsculo
+                let txtMotivo = (f.motivo || '').toUpperCase(); 
                 
-                // FLUXO DE DÉBITO
+                // FLUXO DE DÉBITO (Puxa das duas tabelas, desde que tenha a tag)
                 if (txtObs.includes('[ABATE_BANCO]')) {
                     const matchMinutos = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
                     if (matchMinutos) minutosDebito += parseInt(matchMinutos[1]);
                 } 
-                // FLUXO DE CRÉDITO (SINCRONIZADO: Checa motivo E observação sem quebrar)
-                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                // FLUXO DE CRÉDITO (Travado só para o que é de fato hora extra)
+                else if (['H+', 'HE', 'FT'].includes(f.sigla) && (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO'))) {
                     
                     // 🛡️ ESCUDO ANTI-FANTASMA ALINHADO COM O ADMIN
                     if (txtObs.includes('TROCAR POR DESCANSO')) {
@@ -23422,7 +23429,6 @@ window.carregarPainelSaldosGestor = async function() {
                     }
 
                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
-                        // 👇 MÁGICA DEFINITIVA PARA O GESTOR 👇
                         const regexDias = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
                         let matchDia;
                         let achouHorario = false;
@@ -46707,7 +46713,7 @@ window.carregarConfigBHUnidade = function() {
 };
 
 // =========================================================================
-// 🔄 MOTOR CENTRAL: EXTRATO COM FILA FIFO (CORRIGIDO: FILTRO ANTI-FANTASMA REFINADO)
+// 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS COM ESTRUTURA FIFO E AUSÊNCIAS (ADMIN)
 // =========================================================================
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
@@ -46728,15 +46734,24 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         }
 
         let queryFts = supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado');
+        let queryAus = supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado');
+
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas' && unidsFiltro) {
             queryFts = queryFts.in('unidade', unidsFiltro);
+            queryAus = queryAus.in('unidade', unidsFiltro);
         }
 
-        const [resPerf, resFts] = await Promise.all([queryPerfis, queryFts]);
+        // 👇 A MÁGICA DA BUSCA SIMULTÂNEA 👇
+        const [resPerf, resFts, resAus] = await Promise.all([queryPerfis, queryFts, queryAus]);
         if (resPerf.error) throw resPerf.error;
 
         const colabs = resPerf.data || [];
         const fts = resFts.data || [];
+        const aus = resAus.data || [];
+        
+        // Junta tudo num balde só
+        const ocorrenciasBH = [...fts, ...aus];
+
         const hoje = new Date();
         hoje.setHours(0,0,0,0);
 
@@ -46744,7 +46759,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
             const configUnidade = configsBancoHorasGlobais.find(cfg => cfg.unidade === c.unidade) || { usa_banco: true, dias_validade: 60 };
             if (!configUnidade.usa_banco) return;
 
-            const asHorasDesteColab = fts.filter(f => f.colaborador_id === c.id);
+            const asHorasDesteColab = ocorrenciasBH.filter(f => f.colaborador_id === c.id);
             
             let listCreditos = [];
             let listDebitos = [];
@@ -46759,11 +46774,15 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                     if (matchM) {
                         let mins = parseInt(matchM[1]);
                         let obsLimpa = (f.observacao || '').replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
-                        listDebitos.push({ data: f.data_inicio, minutos: mins, minutosOriginais: mins, motivo: f.motivo || 'Folga / Abate', obs: obsLimpa });
+                        
+                        // Adiciona a sigla para melhorar a leitura do histórico do admin
+                        let prefixoMotivo = f.sigla === 'ATR' ? 'Atraso: ' : (f.sigla === 'ABD' ? 'Abandono: ' : '');
+
+                        listDebitos.push({ data: f.data_inicio, minutos: mins, minutosOriginais: mins, motivo: prefixoMotivo + (f.motivo || 'Folga / Abate'), obs: obsLimpa });
                     }
                 } 
                 // FLUXO DE CRÉDITO
-                else if (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO')) {
+                else if (['H+', 'HE', 'FT'].includes(f.sigla) && (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO'))) {
                     
                     // 🛡️ REFINAMENTO ANTI-FANTASMA: Alvo alterado para ignorar apenas strings legadas reais
                     if (txtObs.includes('TROCAR POR DESCANSO')) {
