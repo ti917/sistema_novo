@@ -20703,7 +20703,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     return null; // Caminho Livre!
 };
 
-        document.getElementById('form-ausencia').addEventListener('submit', async (e) => {
+       document.getElementById('form-ausencia').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = document.getElementById('btn-salvar-ausencia');
     const msg = document.getElementById('aus-msg');
@@ -20714,7 +20714,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     const colabNome = document.getElementById('aus-colaborador').options[document.getElementById('aus-colaborador').selectedIndex].text;
     
     const motivoCru = document.getElementById('aus-motivo').value;
-    const [sigla, tipoExtensoBase] = motivoCru.split('|'); // Adiciona o 'Base' aqui
+    const [sigla, tipoExtensoBase] = motivoCru.split('|');
     let tipoExtensoFinal = tipoExtensoBase;
 
     // Se for DECL, empacota a hora junto!
@@ -20739,29 +20739,30 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         return mostrarAlerta("A Data Final não pode ser menor que a Data Inicial!", "aviso");
     }
 
-    // 👇 Correção: Atraso e Abandono (ATR e ABD) também não exigem anexo obrigatório
+    // Atraso e Abandono (ATR e ABD) também não exigem anexo obrigatório
     if (sigla !== 'FA' && sigla !== 'FE' && sigla !== 'ATR' && sigla !== 'ABD' && fileInput.files.length === 0) {
         return mostrarAlerta("Para atestados e licenças, anexar o documento é obrigatório!", "aviso");
     }
 
     const colabObj = listaColaboradoresAtivosAusencia.find(c => c.id === idColab);
-    if (sigla === 'FA' && colabObj) {
+    if ((sigla === 'FA' || sigla === 'ATR' || sigla === 'ABD') && colabObj) {
         if (window.isDiaDeFolga(colabObj, dataInicio)) {
-            return mostrarAlerta("Ação Bloqueada: Não é possível lançar Falta Injustificada (FA) em um dia de Folga do colaborador!", "erro", "Dia de Folga");
+            return mostrarAlerta("Ação Bloqueada: Não é possível lançar Faltas ou Atrasos em um dia de Folga do colaborador na escala!", "erro", "Dia de Folga");
         }
     }
 
-    // 👇 MÁGICA: CÁLCULO DE MINUTOS DEVIDOS PARA ATRASO/ABANDONO 👇
+    // 👇 MÁGICA CORRIGIDA: LÊ AS LINHAS DE BATIDAS E CALCULA OS MINUTOS 👇
     let observacaoFinal = observacao;
 
     if (sigla === 'ATR' || sigla === 'ABD') {
-        const horaEvento = document.getElementById('aus-hora-evento').value;
-        if (!horaEvento) return mostrarAlerta("Preencha o horário do evento!", "aviso");
+        let minutosDevidos = 0;
+        let descBatidas = [];
         
-        tipoExtensoFinal = sigla === 'ATR' ? `Atraso (Chegou às ${horaEvento})` : `Abandono (Saiu às ${horaEvento})`;
-
         // Vamos buscar a jornada atual do colaborador para calcular o débito!
         const { data: cData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let horaEntradaPadrao = '06:00';
+        let horaSaidaPadrao = '18:00';
+        
         if (cData) {
             let jor = cData.dados_admissao.jornada || {};
             if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
@@ -20772,9 +20773,6 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     }
                 }
             }
-
-            let horaEntradaPadrao = '06:00';
-            let horaSaidaPadrao = '18:00';
 
             if (jor.tipo === '12x36' && jor.horario) {
                 const m = jor.horario.match(/(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
@@ -20787,34 +20785,51 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     if(m) { horaEntradaPadrao = m[1]; horaSaidaPadrao = m[2]; }
                 }
             }
+        }
 
-            // Função auxiliar para converter "HH:MM" em minutos
-            const timeToMins = (t) => { const [h, m] = t.split(':').map(Number); return (h * 60) + m; };
-            
-            let minutosDevidos = 0;
-            
-            if (sigla === 'ATR') {
-                // Atraso: Chegou DEPOIS da hora de entrada
-                minutosDevidos = timeToMins(horaEvento) - timeToMins(horaEntradaPadrao);
-                if (minutosDevidos < 0) minutosDevidos += 1440; // Cruzou meia noite
-            } else {
-                // Abandono: Saiu ANTES da hora de saída
-                minutosDevidos = timeToMins(horaSaidaPadrao) - timeToMins(horaEvento);
-                if (minutosDevidos < 0) minutosDevidos += 1440; // Cruzou meia noite
-            }
+        const timeToMins = (t) => { const [h, m] = t.split(':').map(Number); return (h * 60) + m; };
 
-            // Injeta a tag [ABATE_BANCO] se existir dívida real de horas
-            if (minutosDevidos > 0 && minutosDevidos < 1440) {
-                observacaoFinal = `[ABATE_BANCO] DEDUÇÃO: ${minutosDevidos} MINUTOS. Motivo: ${observacao}`;
+        // Varre as linhas que o Gestor preencheu na tela
+        document.querySelectorAll('#lista-batidas-ausencia .linha-batida-ausencia').forEach(linha => {
+            const b = linha.querySelector('.aus-atraso-batida').value;
+            const h = linha.querySelector('.aus-atraso-hora').value;
+            if (b && h) {
+                descBatidas.push(`${b}: ${h}`);
+                
+                if (b === 'Entrada') {
+                    let diff = timeToMins(h) - timeToMins(horaEntradaPadrao);
+                    if (diff < 0) diff += 1440; // Cruzou meia noite
+                    if (diff > 0 && diff < 720) minutosDevidos += diff; // Tolerância máxima de 12h
+                } else if (b === 'Saída' || sigla === 'ABD') {
+                    // No Abandono, a pessoa saiu cedo e não voltou
+                    let diff = timeToMins(horaSaidaPadrao) - timeToMins(h);
+                    if (diff < 0) diff += 1440; // Cruzou meia noite
+                    if (diff > 0 && diff < 720) minutosDevidos += diff;
+                }
             }
+        });
+
+        // Trava se o Gestor tentou enviar sem preencher as horas
+        if (descBatidas.length === 0) {
+            return mostrarAlerta("Preencha pelo menos um horário de batida para o evento!", "aviso");
+        }
+
+        tipoExtensoFinal = sigla === 'ATR' ? `Atraso` : `Abandono de Plantão`;
+        
+        // Empacota tudo para a Folha ler
+        let relatoBatidas = descBatidas.length > 0 ? ` (Batidas Afetadas: ${descBatidas.join(' | ')})` : '';
+        if (minutosDevidos > 0 && minutosDevidos < 1440) {
+            observacaoFinal = `[ABATE_BANCO] DEDUÇÃO: ${minutosDevidos} MINUTOS. Motivo: ${observacao}${relatoBatidas}`;
+        } else {
+            observacaoFinal = `${observacao}${relatoBatidas}`;
         }
     }
     // 👆 FIM DA MÁGICA 👆
 
-    // 👇 RADAR ANTI-CONFLITO: AUSÊNCIAS 👇
     btn.disabled = true; 
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando datas...';
 
+    // Anti-conflito global na escala
     const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim);
     
     if (motivoConflito) {
@@ -20822,11 +20837,9 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação de Ausência';
         return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>Já existe um registro de <b>${motivoConflito}</b> cruzando com este período.<br>Verifique a Escala ou a Central.`, "erro", "⛔ Conflito de Datas");
     }
-    // 👆 FIM DO RADAR 👆
 
     const confirmado = await mostrarConfirmacao(`Deseja enviar o registro de <b>${sigla}</b> para <b>${colabNome}</b>?`, "Confirmar Ausência");
     
-    // 👇 A CORREÇÃO: Se ele cancelar, destrava o botão antes de parar!
     if (!confirmado) {
         btn.disabled = false; 
         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação de Ausência';
@@ -20843,11 +20856,6 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
             
             const urls = await subirDocumentos(caminhoBase, fileInput.files);
             urlAnexo = urls[0]; 
-        }
-
-        let cidFinal = null;
-        if (sigla === 'ATM' && document.getElementById('aus-possui-cid').value === 'Sim') {
-            cidFinal = document.getElementById('aus-cid').value.trim();
         }
 
         const { data: ausenciaData, error: errAusencia } = await supabaseClient.from('ausencias').insert([{
@@ -20867,8 +20875,18 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
 
         if (errAusencia) throw errAusencia;
 
-        await mostrarAlerta("Ausência lançada com sucesso! Aguardando o RH validar.", "sucesso");
+        await mostrarAlerta("Lançamento efetuado com sucesso! Aguardando o RH validar.", "sucesso");
+        
+        // Reseta o formulário e a lista dinâmica
         abrirAbaAusencias(); 
+        const containerListaBatidas = document.getElementById('lista-batidas-ausencia');
+        if(containerListaBatidas) {
+            containerListaBatidas.innerHTML = `
+            <div class="linha-batida-ausencia" style="display: flex; gap: 10px; align-items: center;">
+                <select class="aus-atraso-batida" style="flex: 1;" required><option value="">Selecione...</option><option value="Entrada">Entrada</option><option value="Ida da Refeição">Ida para Refeição</option><option value="Volta da Refeição">Volta da Refeição</option><option value="Saída">Saída</option></select>
+                <div class="input-wrapper" style="flex: 1; margin: 0;"><i class="fa-regular fa-clock"></i><input type="text" class="aus-atraso-hora" readonly onclick="abrirTimePicker(this)" style="cursor: pointer; text-align: center; padding-left: 35px; width: 100%;" placeholder="Horário" required></div>
+            </div>`;
+        }
 
     } catch (err) {
         await mostrarAlerta("Erro ao salvar ausência: " + err.message, "erro");
