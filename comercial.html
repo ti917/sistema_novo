@@ -1889,9 +1889,10 @@ Além do reajuste salarial, também tivemos reajuste em todos os benefícios, no
                 <thead>
                     <tr style="background: rgba(0,0,0,0.3);">
                         <th style="padding: 12px;">Membro da Equipe</th>
-                        <th style="padding: 12px; text-align: center;">Pode ver minha Agenda</th>
-                        <th style="padding: 12px; text-align: center;">Pode ver minha Carteira (CRM)</th>
-                        <th style="padding: 12px; text-align: center;">Pode ver minhas Tarefas</th>
+                        <th style="padding: 12px; text-align: center;">Agenda</th>
+                        <th style="padding: 12px; text-align: center;">Carteira (CRM)</th>
+                        <th style="padding: 12px; text-align: center;">Tarefas</th>
+                        <th style="padding: 12px; text-align: center;">Propostas</th>
                     </tr>
                 </thead>
                 <tbody id="tabela-permissoes-perfis-body">
@@ -2168,17 +2169,38 @@ Além do reajuste salarial, também tivemos reajuste em todos os benefícios, no
         // 4. LÓGICA DE DADOS (SUPABASE)
         // ==========================================
         async function carregarTabelaSolicitacoes() {
-            const tbody = document.getElementById('tabela-solicitacoes-body');
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</td></tr>';
-            const { data, error } = await supabaseClient.from('comercial_propostas').select('*').order('created_at', { ascending: false });
+    const tbody = document.getElementById('tabela-solicitacoes-body');
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando dados...</td></tr>';
+    
+    let query = supabaseClient.from('comercial_propostas').select('*').order('created_at', { ascending: false });
 
-            if (error) {
-                tbody.innerHTML = '<tr><td colspan="5" style="color:red; text-align:center;">Erro de conexão com banco de dados.</td></tr>';
-                return;
-            }
-            todasPropostas = data || [];
-            renderizarTabela();
+    // Lógica de bloqueio e compartilhamento para quem não é Diretoria
+    if (nivelAcessoComercial !== 'Diretoria') {
+        let idsPermitidosPropostas = [usuarioAtual.id];
+
+        const { data: equipe } = await supabaseClient.rpc('obter_equipe_comercial');
+        if (equipe) {
+            equipe.forEach(p => {
+                // Se o colega me liberou na lista de Propostas, pego o ID dele
+                if (p.permissoes && p.permissoes.propostas_liberadas_para && p.permissoes.propostas_liberadas_para.includes(usuarioAtual.id)) {
+                    idsPermitidosPropostas.push(p.id);
+                }
+            });
         }
+        
+        // Filtra para trazer só as minhas propostas e de quem compartilhou comigo
+        query = query.in('user_id', idsPermitidosPropostas);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+        tbody.innerHTML = '<tr><td colspan="5" style="color:red; text-align:center;">Erro de conexão com banco de dados.</td></tr>';
+        return;
+    }
+    todasPropostas = data || [];
+    renderizarTabela();
+}
 
        function renderizarTabela() {
             const tbody = document.getElementById('tabela-solicitacoes-body');
@@ -3090,7 +3112,13 @@ async function salvarSolicitacao(statusDefinido) {
     } else {
         const { error } = await supabaseClient
             .from('comercial_propostas')
-            .insert([{ empresa: empresa, status: statusDefinido, dados_proposta: dadosProposta, criado_por: usuarioAtual.nome }]);
+            .insert([{ 
+                empresa: empresa, 
+                status: statusDefinido, 
+                dados_proposta: dadosProposta, 
+                criado_por: usuarioAtual.nome,
+                user_id: usuarioAtual.id // <--- GARANTA QUE ESSA LINHA EXISTA
+            }]);
 
         if (error) mostrarAlerta("Erro ao salvar: " + error.message, "erro");
         else {
@@ -5897,18 +5925,19 @@ window.abrirModalPermissoes = async function() {
             return;
         }
 
-       // Resgata o que eu (usuário logado) já compartilhei no passado
+      // Resgata o que eu (usuário logado) já compartilhei no passado
         const minhasPermissoes = usuarioAtual.permissoes || {};
         const agendaLiberadaPara = minhasPermissoes.agenda_liberada_para || [];
         const tarefasLiberadasPara = minhasPermissoes.tarefas_liberadas_para || [];
-        const crmLiberadoPara = minhasPermissoes.crm_liberado_para || []; // NOVA VARIÁVEL
+        const crmLiberadoPara = minhasPermissoes.crm_liberado_para || [];
+        const propostasLiberadasPara = minhasPermissoes.propostas_liberadas_para || []; // NOVA VARIÁVEL
 
         tbody.innerHTML = '';
         equipeComercial.forEach(p => {
-            // Verifica se o ID desse colega está na minha lista de compartilhamento
             const verAgenda = agendaLiberadaPara.includes(p.id);
             const verTarefas = tarefasLiberadasPara.includes(p.id);
-            const verCrm = crmLiberadoPara.includes(p.id); // NOVA VERIFICAÇÃO
+            const verCrm = crmLiberadoPara.includes(p.id);
+            const verPropostas = propostasLiberadasPara.includes(p.id); // NOVA VERIFICAÇÃO
 
             tbody.innerHTML += `
                 <tr style="border-bottom: 1px solid var(--cor-borda);">
@@ -5917,19 +5946,16 @@ window.abrirModalPermissoes = async function() {
                         <br><small style="color: var(--cor-texto-secundario); font-weight: normal;">${p.perfil || 'Usuário'}</small>
                     </td>
                     <td style="padding: 12px; text-align: center;">
-                        <input type="checkbox" ${verAgenda ? 'checked' : ''} 
-                            style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;"
-                            onchange="atualizarCompartilhamento('${p.id}', 'agenda_liberada_para', this.checked)">
+                        <input type="checkbox" ${verAgenda ? 'checked' : ''} style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;" onchange="atualizarCompartilhamento('${p.id}', 'agenda_liberada_para', this.checked)">
                     </td>
                     <td style="padding: 12px; text-align: center;">
-                        <input type="checkbox" ${verCrm ? 'checked' : ''} 
-                            style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;"
-                            onchange="atualizarCompartilhamento('${p.id}', 'crm_liberado_para', this.checked)">
+                        <input type="checkbox" ${verCrm ? 'checked' : ''} style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;" onchange="atualizarCompartilhamento('${p.id}', 'crm_liberado_para', this.checked)">
                     </td>
                     <td style="padding: 12px; text-align: center;">
-                        <input type="checkbox" ${verTarefas ? 'checked' : ''} 
-                            style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;"
-                            onchange="atualizarCompartilhamento('${p.id}', 'tarefas_liberadas_para', this.checked)">
+                        <input type="checkbox" ${verTarefas ? 'checked' : ''} style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;" onchange="atualizarCompartilhamento('${p.id}', 'tarefas_liberadas_para', this.checked)">
+                    </td>
+                    <td style="padding: 12px; text-align: center;">
+                        <input type="checkbox" ${verPropostas ? 'checked' : ''} style="width:18px; height:18px; accent-color:#f1c40f; cursor:pointer;" onchange="atualizarCompartilhamento('${p.id}', 'propostas_liberadas_para', this.checked)">
                     </td>
                 </tr>
             `;
