@@ -32577,31 +32577,43 @@ window.verificarPisInput = function(input) {
 // ==========================================
 let avaliacoesPendentesCache = [];
 
-// ==========================================
-// MÓDULO: PERÍODO DE EXPERIÊNCIA (45 + 45)
-// ==========================================
-async function checarTravaExperiencia(foiCliqueManual = false) {
+// =========================================================================
+// MÓDULO: PERÍODO DE EXPERIÊNCIA (TRAVA 45 e 90 DIAS - IGNORANDO AFASTADOS)
+// =========================================================================
+window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
-    // Se foi clique manual, já mostra carregando
     const containerLista = document.getElementById('lista-experiencia-pendente');
     if (foiCliqueManual && containerLista) {
         containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de experiência...</p>';
     }
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    const hojeIso = new Date().toISOString().split('T')[0];
     
-    // Busca todos os colaboradores ativos dessas unidades
-    const { data: colabs } = await supabaseClient.from('perfis')
-        .select('id, nome, empresa, unidade, dados_admissao')
-        .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo')
-        .in('unidade', unids);
+    // 👇 A MÁGICA 1: Busca perfis, atestados e férias do dia de HOJE simultaneamente! 👇
+    const [resColabs, resAusencias, resFerias] = await Promise.all([
+        supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
+        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+    ]);
 
-    if (!colabs) {
+    if (resColabs.error) {
         if(containerLista) containerLista.innerHTML = '<p style="color: var(--cor-perigo); text-align: center;">Erro de conexão.</p>';
         return;
     }
+
+    // Mapeia quem está ausente hoje (Férias ou Atestado/Licença)
+    const setAfastados = new Set();
+    if (resAusencias.data) resAusencias.data.forEach(a => setAfastados.add(a.colaborador_id));
+    if (resFerias.data) resFerias.data.forEach(f => setAfastados.add(f.colaborador_id));
+
+    // 👇 A MÁGICA 2: Corta fora quem tá em rescisão OU quem está afastado hoje! 👇
+    const colabs = (resColabs.data || []).filter(c => {
+        const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+        const taAfastado = setAfastados.has(c.id);
+        return !emRescisao && !taAfastado;
+    });
 
     avaliacoesPendentesCache = [];
     const hoje = new Date();
@@ -32615,19 +32627,13 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
         const dIni = new Date(dataInicioStr + 'T00:00:00');
         const diffDias = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
         
-        // Se o cara já tem mais de 90 dias de empresa, o sistema ignora ele
         if (diffDias > 90) return;
 
-        // Objeto que rastreia o que já foi feito (salvo no JSON da admissão)
         const expTracker = adm.avaliacoes_exp || { p1_done: false, p2_done: false };
 
-        // 👇 A MÁGICA: NOVAS REGRAS DE 45 + 45 👇
-
-        // REGRA 1: Chegou em 35 dias -> Cobra o 1º Período (Avaliação de 45 dias)
         if (diffDias >= 35 && !expTracker.p1_done) {
             avaliacoesPendentesCache.push({ colab: c, periodoStr: '1º Período (45 Dias)', periodoKey: 'p1_done', dias: diffDias });
         }
-        // REGRA 2: Chegou em 80 dias -> Cobra o 2º Período (Avaliação Final de 90 Dias)
         else if (diffDias >= 80 && !expTracker.p2_done) {
             avaliacoesPendentesCache.push({ colab: c, periodoStr: '2º Período (90 Dias)', periodoKey: 'p2_done', dias: diffDias });
         }
@@ -32635,13 +32641,11 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
 
     const menuSidebar = document.querySelector('.sidebar');
     const avisoTrava = document.getElementById('aviso-bloqueio-exp');
-    
     const btnMenuExp = document.querySelector('button[data-target="tela-experiencia"]'); 
 
-    // SE TIVER PENDÊNCIA: BLOQUEIA TUDO!
     if (avaliacoesPendentesCache.length > 0) {
         if (!avisoTrava) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-exp"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.</div>`);
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-exp" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.</div>`);
         } else {
             avisoTrava.innerText = `ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.`;
         }
@@ -32657,15 +32661,13 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
             if (!foiCliqueManual) btnMenuExp.click(); 
         }
         
-        renderizarListaExperiencia();
+        if(typeof renderizarListaExperiencia === 'function') renderizarListaExperiencia();
     } else {
-        // LIBERA TUDO (Respeitando a trava de Desempenho)
         if (avisoTrava) avisoTrava.remove();
         
         const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
-        if (avisoTravaDes) avisoTravaDes.style.top = '0'; // Se o Desempenho ainda estiver travado, joga a tarja dele pro topo
+        if (avisoTravaDes) avisoTravaDes.style.top = '0'; 
 
-        // Só libera o menu se a trava de Desempenho também estiver resolvida
         if (!document.getElementById('aviso-bloqueio-des')) {
             menuSidebar.classList.remove('sidebar-bloqueada');
             document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
@@ -32673,15 +32675,15 @@ async function checarTravaExperiencia(foiCliqueManual = false) {
         
         if (containerLista) {
             containerLista.innerHTML = `
-                <div style="text-align: center; padding: 40px;">
+                <div style="text-align: center; padding: 40px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px dashed var(--cor-borda);">
                     <i class="fa-solid fa-check-circle fa-4x" style="color: var(--cor-sucesso); margin-bottom: 20px;"></i>
-                    <h2 style="color: var(--cor-texto-principal);">Tudo em dia!</h2>
+                    <h3 style="color: #fff;">Tudo em dia!</h3>
                     <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Não há nenhuma avaliação de período de experiência pendente nas suas unidades.</p>
                 </div>
             `;
         }
     }
-}
+};
 
 function renderizarListaExperiencia() {
     const container = document.getElementById('lista-experiencia-pendente');
@@ -38011,7 +38013,7 @@ window.buscarColaboradoresParaAusenciaAdmin = async function() {
 };
       
 // ==========================================
-// CÁLCULO DE DIAS - ADMIN
+// CÁLCULO DE DIAS E TRAVAS - ADMIN (CORRIGIDO)
 // ==========================================
 window.calcularDiasAusenciaAdmin = function() {
     const siglaCru = document.getElementById('aus-admin-motivo').value;
@@ -38038,10 +38040,14 @@ window.calcularDiasAusenciaAdmin = function() {
         document.getElementById('aus-admin-decl-ent').required = false;
         document.getElementById('aus-admin-decl-sai').required = false;
 
-        // Esconde Atraso/Abandono
-        const boxAtrasoAbandonoAdmin = document.getElementById('box-horario-atraso-abandono-admin');
+        // Esconde Atraso/Abandono e LIMPA A OBRIGATORIEDADE (Trava do erro Focusable)
+        const boxesAtrasoAbandonoAdmin = document.querySelectorAll('#box-horario-atraso-abandono-admin');
+        boxesAtrasoAbandonoAdmin.forEach(box => {
+            box.classList.add('hidden');
+            box.querySelectorAll('.aus-atraso-batida, .aus-atraso-hora').forEach(inp => inp.required = false);
+        });
+        
         const inputHoraEventoAdmin = document.getElementById('aus-admin-hora-evento');
-        if(boxAtrasoAbandonoAdmin) boxAtrasoAbandonoAdmin.classList.add('hidden');
         if(inputHoraEventoAdmin) {
             inputHoraEventoAdmin.required = false;
             inputHoraEventoAdmin.value = '';
@@ -38075,12 +38081,16 @@ window.calcularDiasAusenciaAdmin = function() {
     }
 
     // 3. LÓGICA DO HORÁRIO ATRASO/ABANDONO (ADMIN)
-    const boxAtrasoAbandonoAdmin = document.getElementById('box-horario-atraso-abandono-admin');
+    const boxesAtrasoAbandonoAdmin = document.querySelectorAll('#box-horario-atraso-abandono-admin');
     const inputHoraEventoAdmin = document.getElementById('aus-admin-hora-evento');
     const lblAtrasoAbandonoAdmin = document.getElementById('lbl-atraso-abandono-admin');
 
     if (sigla === 'ATR' || sigla === 'ABD') {
-        if(boxAtrasoAbandonoAdmin) boxAtrasoAbandonoAdmin.classList.remove('hidden');
+        boxesAtrasoAbandonoAdmin.forEach(box => {
+            box.classList.remove('hidden');
+            box.querySelectorAll('.aus-atraso-batida, .aus-atraso-hora').forEach(inp => inp.required = true);
+        });
+        
         if(inputHoraEventoAdmin) inputHoraEventoAdmin.required = true;
         if(lblAtrasoAbandonoAdmin) {
             lblAtrasoAbandonoAdmin.innerHTML = sigla === 'ATR' 
@@ -38088,7 +38098,11 @@ window.calcularDiasAusenciaAdmin = function() {
                 : 'Que horas o colaborador saiu? (Abandono) <span style="color: var(--cor-perigo);">*</span>';
         }
     } else {
-        if(boxAtrasoAbandonoAdmin) boxAtrasoAbandonoAdmin.classList.add('hidden');
+        // 👇 A MÁGICA DA CORREÇÃO AQUI: Remove o "required" dos campos invisíveis 👇
+        boxesAtrasoAbandonoAdmin.forEach(box => {
+            box.classList.add('hidden');
+            box.querySelectorAll('.aus-atraso-batida, .aus-atraso-hora').forEach(inp => inp.required = false);
+        });
         if(inputHoraEventoAdmin) {
             inputHoraEventoAdmin.required = false;
             inputHoraEventoAdmin.value = '';
@@ -43568,9 +43582,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // =========================================================================
-// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA ATÉ O FIM
+// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA DE 48H E IGNORANDO AFASTADOS
 // =========================================================================
-
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
@@ -43582,26 +43595,35 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
 
     try {
         const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
-        const { data: colabs, error } = await supabaseClient
-            .from('perfis')
-            .select('id, nome, empresa, unidade, dados_admissao')
-            .eq('perfil', 'Colaborador')
-            .eq('status', 'Ativo')
-            .in('unidade', unids);
+        const hojeIso = new Date().toISOString().split('T')[0];
+        
+        // 👇 A MÁGICA 1: Faz todas as buscas simultâneas para otimizar a velocidade 👇
+        const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
+            supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
+            supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
+            supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+        ]);
 
-        if (error) throw error; 
+        if (resColabs.error) throw resColabs.error; 
 
-        // 👇 MÁGICA: Busca também quem já está com avaliação presa nas etapas do meio 👇
-        const { data: avaliacoesAndamento } = await supabaseClient
-            .from('avaliacoes_desempenho')
-            .select('colaborador_id, status')
-            .in('unidade', unids)
-            .in('status', ['Aguardando Assinatura', 'Aguardando Feedback']);
+        const colabsDB = resColabs.data || [];
+        const avaliacoesAndamento = resAndamento.data || [];
+        
+        // Mapeia quem está ausente hoje (Férias ou Atestado)
+        const setAfastados = new Set();
+        if (resAusencias.data) resAusencias.data.forEach(a => setAfastados.add(a.colaborador_id));
+        if (resFerias.data) resFerias.data.forEach(f => setAfastados.add(f.colaborador_id));
 
         const mapaAndamento = {};
-        if (avaliacoesAndamento) {
-            avaliacoesAndamento.forEach(a => mapaAndamento[a.colaborador_id] = a.status);
-        }
+        avaliacoesAndamento.forEach(a => mapaAndamento[a.colaborador_id] = a.status);
+
+        // 👇 A MÁGICA 2: Corta quem tá em rescisão OU quem está afastado/férias hoje 👇
+        const colabs = colabsDB.filter(c => {
+            const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+            const taAfastado = setAfastados.has(c.id);
+            return !emRescisao && !taAfastado;
+        });
 
         if (!colabs || colabs.length === 0) {
             if (containerLista) {
@@ -43612,10 +43634,26 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                     <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Você não possui colaboradores ativos para avaliar.</p>
                 </div>`;
             }
+            
+            // Se zerou, limpa a tela de bloqueios
+            window.avaliacoesDesempenhoPendentes = [];
+            const avisoTravaDesAntigo = document.getElementById('aviso-bloqueio-des');
+            const avisoAlertaDesAntigo = document.getElementById('aviso-alerta-des');
+            if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
+            if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
+            
+            if (!document.getElementById('aviso-bloqueio-exp')) {
+                const menuSidebar = document.querySelector('.sidebar');
+                if (menuSidebar) menuSidebar.classList.remove('sidebar-bloqueada');
+                document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
+            }
             return;
         }
 
         window.avaliacoesDesempenhoPendentes = [];
+        let deveBloquearSistema = false;
+        let temAlerta = false;
+
         const hoje = new Date();
         hoje.setHours(0,0,0,0);
 
@@ -43627,7 +43665,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             const dIni = new Date(dataInicioStr + 'T00:00:00');
             const diffDiasEmpresa = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
             
-            if (diffDiasEmpresa <= 90) return;
+            if (diffDiasEmpresa < 90) return;
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
             let taAtrasado = false;
@@ -43645,53 +43683,73 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 taAtrasado = true;
             }
 
-            // 👇 A MÁGICA DO BLOQUEIO DEFINITIVO: Se o colaborador tá atrasado OU preso na fase de assinatura/feedback, o Gestor NÃO escapa! 👇
-            if (mapaAndamento[c.id]) {
-                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: mapaAndamento[c.id] });
-            } else if (taAtrasado) {
-                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: null });
+            // 👇 A MÁGICA DA TRAVA 48H 👇
+            if (taAtrasado || mapaAndamento[c.id]) {
+                window.avaliacoesDesempenhoPendentes.push({ 
+                    colab: c, 
+                    dias: diasAtraso, 
+                    statusAndamento: mapaAndamento[c.id] || null 
+                });
+
+                if (diasAtraso >= 92) {
+                    deveBloquearSistema = true;
+                } else {
+                    temAlerta = true;
+                }
             }
         });
 
         const menuSidebar = document.querySelector('.sidebar');
-        const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
+        const avisoTravaDesAntigo = document.getElementById('aviso-bloqueio-des');
+        const avisoAlertaDesAntigo = document.getElementById('aviso-alerta-des');
         const btnMenuDes = document.querySelector('button[data-target="tela-desempenho"]');
 
-       // 👇 SUBSTITUA ESTE BLOCO DENTRO DA FUNÇÃO checarPendenciasDesempenho 👇
-        if (window.avaliacoesDesempenhoPendentes.length > 0) {
+        if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
+        if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
+
+        // 1. TRAVA MÁXIMA (Prazo >= 48h)
+        if (deveBloquearSistema) {
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 48h esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o envio do Feedback Final ao RH.</div>`);
             
-            // 🚨 TODAS AS TARJAS VISUAIS DESLIGADAS TEMPORARIAMENTE
-            const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
-            const avisoAlertaDes = document.getElementById('aviso-alerta-des');
-            if (avisoTravaDes) avisoTravaDes.remove();
-            if (avisoAlertaDes) avisoAlertaDes.remove();
+            document.querySelectorAll('.nav-btn').forEach(b => {
+                if (b.dataset.target !== 'tela-desempenho') b.style.display = 'none';
+            });
+            menuSidebar.classList.add('sidebar-bloqueada');
             
-            // 🔓 MENU TOTALMENTE LIBERADO
+            if (btnMenuDes) {
+                btnMenuDes.classList.remove('hidden');
+                btnMenuDes.style.display = '';
+                btnMenuDes.style.pointerEvents = 'auto';
+                if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp')) btnMenuDes.click();
+            }
+        } 
+        // 2. APENAS ALERTA (Dentro das 48h)
+        else if (temAlerta) {
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);"><i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Conclua todas as etapas em até 48h para evitar o bloqueio do sistema.</div>`);
+            
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
-
-            // Apenas garante que o botão do módulo de desempenho fique visível caso eles queiram acessar
-            if (btnMenuDes) {
-                btnMenuDes.classList.remove('hidden');
-                btnMenuDes.style.display = '';
-                btnMenuDes.style.pointerEvents = 'auto'; 
-            }
-
-        } else {
-            if (document.getElementById('aviso-alerta-des')) document.getElementById('aviso-alerta-des').remove();
-            const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
-            if (avisoTravaDes) avisoTravaDes.remove();
-            
-            // Só libera o menu se não houver avaliação de Experiência (45/90 dias) prendendo a tela
+        } 
+        // 3. TUDO LIMPO
+        else {
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
         }
 
-        if(typeof renderizarListaDesempenhoPendentes === 'function') renderizarListaDesempenhoPendentes();
+        const avisoTravaExp = document.getElementById('aviso-bloqueio-exp');
+        const avisoDesNovo = document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des');
+        
+        if (avisoTravaExp && avisoDesNovo) {
+            avisoDesNovo.style.top = '38px'; 
+        }
+
+        if (typeof renderizarListaDesempenhoPendentes === 'function') {
+            renderizarListaDesempenhoPendentes();
+        }
 
     } catch (e) {
         console.error("Erro na busca de desempenho:", e);
