@@ -49346,6 +49346,273 @@ window.exportarPDFPrevista = function() {
     // Mantém a seleção se o usuário já tinha clicado em um cargo antes
     if (cargosUnicos.has(valorAntigo)) selectCargo.value = valorAntigo;
 };
+
+      // =========================================================================
+// MÓDULO: COBRANÇA E GESTÃO DE FOTO PARA CRACHÁ (RH)
+// =========================================================================
+
+window.dadosFotoAtuais = [];
+
+// 1. Carrega as unidades ao selecionar a empresa na aba de Fotos
+window.carregarUnidadesFoto = async function() {
+    const empresa = document.getElementById('foto-empresa').value;
+    const selectUnidade = document.getElementById('foto-unidade');
+    const selectColab = document.getElementById('foto-colaborador');
+
+    selectColab.innerHTML = '<option value="Todos">Selecione a Unidade primeiro...</option>';
+    selectColab.disabled = true;
+
+    if (!empresa) {
+        selectUnidade.innerHTML = '<option value="">Selecione a Empresa primeiro...</option>';
+        return;
+    }
+
+    selectUnidade.innerHTML = '<option value="">Carregando...</option>';
+    const { data } = await supabaseClient.from('unidades_oficiais').select('nome').eq('empresa', empresa).order('nome');
+    
+    let optHtml = '<option value="">Selecione a Unidade</option><option value="Todas">🏢 TODAS AS UNIDADES</option>';
+    if (data) data.forEach(u => optHtml += `<option value="${u.nome}">${u.nome}</option>`);
+    selectUnidade.innerHTML = optHtml;
+};
+
+// 2. Carrega os colaboradores ao selecionar a unidade
+window.carregarColabsFoto = async function() {
+    carregarStatusFoto(); // Atualiza a lista lateral de status
+    
+    const empresa = document.getElementById('foto-empresa').value;
+    const unidade = document.getElementById('foto-unidade').value;
+    const selectColab = document.getElementById('foto-colaborador');
+
+    if (!unidade || unidade === 'Todas') {
+        selectColab.innerHTML = '<option value="Todos">Envio em Lote (Todos sem foto aprovada)</option>';
+        selectColab.disabled = true;
+        return;
+    }
+
+    selectColab.innerHTML = '<option value="">Buscando...</option>';
+    selectColab.disabled = true;
+
+    const { data } = await supabaseClient.from('perfis')
+        .select('id, nome, dados_admissao, status, dados_rescisao')
+        .eq('perfil', 'Colaborador')
+        .eq('empresa', empresa)
+        .eq('unidade', unidade)
+        .order('nome');
+        
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
+    let options = '<option value="Todos" selected>✅ Enviar para Todos sem foto (Lote)</option>';
+    ativosReais.forEach(c => options += `<option value="${c.id}">${c.nome}</option>`);
+    
+    selectColab.innerHTML = options;
+    selectColab.disabled = false;
+};
+
+// 3. Disparo em Massa ou Individual via Clara (WhatsApp)
+window.dispararFotoMassa = async function() {
+    const empresa = document.getElementById('foto-empresa').value;
+    const unidade = document.getElementById('foto-unidade').value;
+    const colabId = document.getElementById('foto-colaborador').value;
+    
+    if(!empresa || !unidade) return mostrarAlerta("Selecione a Empresa e a Unidade!", "aviso");
+
+    const btn = document.querySelector('button[onclick="dispararFotoMassa()"]');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Processando disparos...';
+
+    try {
+        let query = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo').eq('empresa', empresa);
+        if (unidade !== 'Todas') query = query.eq('unidade', unidade);
+        if (colabId !== 'Todos') query = query.eq('id', colabId); 
+        
+        const { data: colabs } = await query;
+        if (!colabs || colabs.length === 0) throw new Error("Nenhum colaborador válido encontrado.");
+
+        let sucessos = 0;
+        let falhas = 0;
+
+        for (let c of colabs) {
+            const fone = c.dados_admissao?.telefone;
+            if (!fone) continue;
+
+            // Verifica se o cara já tem foto no banco
+            const { data: fotoExistente } = await supabaseClient.from('fotos_cracha').select('id, status, token').eq('colaborador_id', c.id).maybeSingle();
+            
+            // Só manda cobrança se não existir OU se a foto atual foi recusada/ainda aguarda
+            if (!fotoExistente || fotoExistente.status === 'Aguardando Colaborador' || fotoExistente.status === 'Recusado') {
+                const tokenUnico = fotoExistente?.token || crypto.randomUUID();
+                
+                // Se não existe, cria a gaveta no banco
+                if (!fotoExistente) {
+                    await supabaseClient.from('fotos_cracha').insert([{
+                        colaborador_id: c.id, nome: c.nome, unidade: c.unidade, empresa: c.empresa, telefone: fone, token: tokenUnico
+                    }]);
+                }
+
+                // Payload Criptografado para o site externo ler
+                const payload = btoa(encodeURIComponent(JSON.stringify({ t: tokenUnico })));
+                const parametrosDaURL = "?p=" + payload;
+
+                const primeiroNome = c.nome.split(' ')[0];
+                const ok = await enviarMensagemGraphAPI(fone, 'cobranca_foto_cracha', [primeiroNome], null, parametrosDaURL);
+                if (ok) sucessos++; else falhas++;
+                
+                await new Promise(r => setTimeout(r, 600)); // Anti-spam
+            }
+        }
+
+        mostrarAlerta(`Disparo concluído! <b>${sucessos}</b> cobranças enviadas.`, "sucesso");
+        carregarStatusFoto();
+
+    } catch (err) {
+        mostrarAlerta(err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Disparar Cobrança no WhatsApp';
+    }
+};
+
+// 4. Carrega a lista de status de fotos na tela
+window.carregarStatusFoto = async function() {
+    const empresa = document.getElementById('foto-empresa').value;
+    const unidade = document.getElementById('foto-unidade').value;
+    const lista = document.getElementById('lista-status-foto');
+    
+    if(!empresa) return;
+
+    lista.innerHTML = '<p style="text-align:center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Buscando banco de imagens...</p>';
+
+    let query = supabaseClient.from('fotos_cracha').select('*').eq('empresa', empresa).order('criado_em', { ascending: false });
+    if (unidade !== 'Todas') query = query.eq('unidade', unidade);
+
+    const { data } = await query;
+    window.dadosFotoAtuais = data || [];
+    
+    document.getElementById('busca-foto-status').value = '';
+    filtrarStatusFotoVisual();
+};
+
+window.filtrarStatusFotoVisual = function() {
+    const termo = window.removerAcentos(document.getElementById('busca-foto-status').value);
+    const lista = document.getElementById('lista-status-foto');
+    
+    const filtrados = window.dadosFotoAtuais.filter(r => window.removerAcentos(r.nome).includes(termo));
+
+    let html = '';
+    let cAguardando = 0, cPendente = 0, cAprovada = 0;
+
+    filtrados.forEach(r => {
+        let st = r.status || 'Aguardando Colaborador';
+        let cor = '#ff9800'; let icone = 'fa-clock';
+        
+        if (st === 'Aprovado') { cor = '#28a745'; icone = 'fa-check-double'; cAprovada++; }
+        else if (st === 'Pendente') { cor = '#4fc3f7'; icone = 'fa-user-magnifying-glass'; cPendente++; }
+        else if (st === 'Recusado') { cor = '#dc3545'; icone = 'fa-xmark'; }
+        else { cAguardando++; }
+
+        let acaoBtn = '';
+        if (st === 'Pendente') {
+            acaoBtn = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; background: #4fc3f7; color: #000; border: none; font-weight: bold;" onclick="abrirModalAnalisarFoto('${r.id}')"><i class="fa-solid fa-magnifying-glass"></i> Analisar Foto</button>`;
+        } else if (st === 'Aprovado') {
+            acaoBtn = `<a href="${r.url_foto}" target="_blank" class="badge ativo" style="padding: 6px 12px; text-decoration: none;"><i class="fa-solid fa-download"></i> Baixar Foto</a>`;
+        } else if (st === 'Recusado') {
+            acaoBtn = `<span style="color: #dc3545; font-size: 0.75rem;"><b>Motivo:</b> ${r.motivo_recusa}</span>`;
+        }
+
+        html += `
+            <div style="background: rgba(0,0,0,0.2); border-left: 4px solid ${cor}; padding: 12px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--cor-borda); border-bottom: 1px solid var(--cor-borda); border-right: 1px solid var(--cor-borda);">
+                <div>
+                    <strong style="color: #fff; font-size: 1rem;">${r.nome}</strong><br>
+                    <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${r.unidade}</span>
+                </div>
+                <div style="text-align: right;">
+                    <span class="badge" style="background: ${cor}22; color: ${cor}; border: 1px solid ${cor}; margin-bottom: 8px;"><i class="fa-solid ${icone}"></i> ${st}</span><br>
+                    ${acaoBtn}
+                </div>
+            </div>`;
+    });
+
+    lista.innerHTML = html || '<p style="text-align:center; color: #888; padding: 20px;">Nenhum registro encontrado.</p>';
+
+    document.getElementById('count-foto-aguardando').innerText = cAguardando;
+    document.getElementById('count-foto-pendente').innerText = cPendente;
+    document.getElementById('count-foto-aprovada').innerText = cAprovada;
+};
+
+// 5. Modal para o RH Analisar a Foto Recebida
+window.abrirModalAnalisarFoto = function(idFoto) {
+    const f = window.dadosFotoAtuais.find(x => x.id === idFoto);
+    if (!f) return;
+
+    const modalHtml = `
+    <div id="modal-analisar-foto" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid #4fc3f7; position: relative; text-align: center;">
+            <button onclick="document.getElementById('modal-analisar-foto').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #4fc3f7; margin-bottom: 15px;"><i class="fa-solid fa-image-portrait"></i> Análise de Crachá</h3>
+            <p style="color: #fff; font-weight: bold; margin-bottom: 15px;">${f.nome}</p>
+
+            <div style="background: rgba(0,0,0,0.4); padding: 10px; border-radius: 12px; margin-bottom: 20px; display: inline-block;">
+                <img src="${f.url_foto}" style="max-width: 100%; max-height: 400px; border-radius: 8px; object-fit: contain;">
+            </div>
+
+            <div style="display: flex; gap: 10px; justify-content: center;">
+                <button class="btn-success" style="flex: 1; height: 50px; font-weight: bold;" onclick="aprovarFoto('${f.id}')">
+                    <i class="fa-solid fa-thumbs-up"></i> Aprovar Foto
+                </button>
+                <button class="btn-danger-mini" style="flex: 1; height: 50px; font-weight: bold;" onclick="recusarFoto('${f.id}', '${f.telefone}', '${f.nome}', '${f.token}')">
+                    <i class="fa-solid fa-thumbs-down"></i> Recusar e Cobrar Nova
+                </button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+window.aprovarFoto = async function(id) {
+    const btn = document.querySelector('#modal-analisar-foto .btn-success');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; btn.disabled = true;
+
+    await supabaseClient.from('fotos_cracha').update({ status: 'Aprovado' }).eq('id', id);
+    mostrarAlerta("Foto aprovada e arquivada com sucesso!", "sucesso");
+    
+    document.getElementById('modal-analisar-foto').remove();
+    carregarStatusFoto(); // Atualiza a tela
+};
+
+window.recusarFoto = async function(id, telefone, nome, token) {
+    const motivo = await pedirMotivoDevolucao(nome); // Usa a mesma janelinha bonita que já existe no sistema!
+    if (!motivo) return;
+
+    const btn = document.querySelector('#modal-analisar-foto .btn-danger-mini');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; btn.disabled = true;
+
+    // Remove a foto do Supabase Storage para liberar espaço, já que estava ruim
+    const fInfo = window.dadosFotoAtuais.find(x => x.id === id);
+    if (fInfo && fInfo.url_foto) {
+        const path = fInfo.url_foto.split('/storage/v1/object/public/documentos/')[1];
+        if (path) await supabaseClient.storage.from('documentos').remove([decodeURIComponent(path)]);
+    }
+
+    // Atualiza o banco
+    await supabaseClient.from('fotos_cracha').update({ 
+        status: 'Recusado', 
+        motivo_recusa: motivo, 
+        url_foto: null 
+    }).eq('id', id);
+
+    // Manda mensagem no Zap dele avisando da recusa e pedindo outra
+    const payload = btoa(encodeURIComponent(JSON.stringify({ t: token })));
+    const parametrosDaURL = "?p=" + payload;
+    const primeiroNome = nome.split(' ')[0];
+
+    // ATENÇÃO: Cadastre esse template na Meta!
+    // Template: foto_cracha_recusada | Variáveis: {{1}} Nome, {{2}} Motivo
+    await enviarMensagemGraphAPI(telefone, 'foto_cracha_recusada', [primeiroNome, motivo], null, parametrosDaURL);
+
+    mostrarAlerta("Foto recusada! O colaborador foi notificado no WhatsApp.", "sucesso");
+    document.getElementById('modal-analisar-foto').remove();
+    carregarStatusFoto();
+};
       
         window.ultimoContadorSino = 0;
 
