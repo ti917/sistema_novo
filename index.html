@@ -43568,7 +43568,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // =========================================================================
-// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA ATÉ O FIM
+// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA DE 48H
 // =========================================================================
 
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
@@ -43591,12 +43591,12 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
 
         if (error) throw error; 
 
-        // 👇 MÁGICA: Busca também quem já está com avaliação presa nas etapas do meio 👇
+        // 👇 MÁGICA: Busca também quem já começou a avaliação mas não enviou pro RH 👇
         const { data: avaliacoesAndamento } = await supabaseClient
             .from('avaliacoes_desempenho')
             .select('colaborador_id, status')
             .in('unidade', unids)
-            .in('status', ['Aguardando Assinatura', 'Aguardando Feedback']);
+            .in('status', ['Aguardando Assinatura', 'Aguardando Feedback']); // 'Pendente' não entra, pois já está no RH!
 
         const mapaAndamento = {};
         if (avaliacoesAndamento) {
@@ -43616,6 +43616,9 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         }
 
         window.avaliacoesDesempenhoPendentes = [];
+        let deveBloquearSistema = false;
+        let temAlerta = false;
+
         const hoje = new Date();
         hoje.setHours(0,0,0,0);
 
@@ -43627,7 +43630,8 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             const dIni = new Date(dataInicioStr + 'T00:00:00');
             const diffDiasEmpresa = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
             
-            if (diffDiasEmpresa <= 90) return;
+            // Se tem menos de 90 dias, o ciclo ainda não bateu
+            if (diffDiasEmpresa < 90) return;
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
             let taAtrasado = false;
@@ -43645,53 +43649,79 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 taAtrasado = true;
             }
 
-            // 👇 A MÁGICA DO BLOQUEIO DEFINITIVO: Se o colaborador tá atrasado OU preso na fase de assinatura/feedback, o Gestor NÃO escapa! 👇
-            if (mapaAndamento[c.id]) {
-                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: mapaAndamento[c.id] });
-            } else if (taAtrasado) {
-                window.avaliacoesDesempenhoPendentes.push({ colab: c, dias: diasAtraso, statusAndamento: null });
+            // 👇 A MÁGICA DA TRAVA: Se já deu o prazo ou se está preso em alguma fase com o Gestor 👇
+            if (taAtrasado || mapaAndamento[c.id]) {
+                window.avaliacoesDesempenhoPendentes.push({ 
+                    colab: c, 
+                    dias: diasAtraso, 
+                    statusAndamento: mapaAndamento[c.id] || null 
+                });
+
+                // Verifica a carência de 48h (90 + 2 = 92 dias). A partir de 92 dias o bicho pega!
+                if (diasAtraso >= 92) {
+                    deveBloquearSistema = true;
+                } else {
+                    temAlerta = true;
+                }
             }
         });
 
         const menuSidebar = document.querySelector('.sidebar');
-        const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
+        const avisoTravaDesAntigo = document.getElementById('aviso-bloqueio-des');
+        const avisoAlertaDesAntigo = document.getElementById('aviso-alerta-des');
         const btnMenuDes = document.querySelector('button[data-target="tela-desempenho"]');
 
-       // 👇 SUBSTITUA ESTE BLOCO DENTRO DA FUNÇÃO checarPendenciasDesempenho 👇
-        if (window.avaliacoesDesempenhoPendentes.length > 0) {
+        // Limpa as tarjas antigas para atualizar a tela
+        if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
+        if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
+
+        // 1. TRAVA MÁXIMA (Prazo > 48h)
+        if (deveBloquearSistema) {
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 48h esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o envio do Feedback Final ao RH.</div>`);
             
-            // 🚨 TODAS AS TARJAS VISUAIS DESLIGADAS TEMPORARIAMENTE
-            const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
-            const avisoAlertaDes = document.getElementById('aviso-alerta-des');
-            if (avisoTravaDes) avisoTravaDes.remove();
-            if (avisoAlertaDes) avisoAlertaDes.remove();
+            // Oculta os outros botões do menu
+            document.querySelectorAll('.nav-btn').forEach(b => {
+                if (b.dataset.target !== 'tela-desempenho') b.style.display = 'none';
+            });
+            menuSidebar.classList.add('sidebar-bloqueada');
             
-            // 🔓 MENU TOTALMENTE LIBERADO
+            if (btnMenuDes) {
+                btnMenuDes.classList.remove('hidden');
+                btnMenuDes.style.display = '';
+                btnMenuDes.style.pointerEvents = 'auto';
+                if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp')) btnMenuDes.click(); // Abre a tela à força
+            }
+        } 
+        // 2. APENAS ALERTA (Dentro das 48h)
+        else if (temAlerta) {
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);"><i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Conclua todas as etapas em até 48h para evitar o bloqueio do sistema.</div>`);
+            
+            // Restaura o menu se não tiver a trava de Experiência ativa
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
-
-            // Apenas garante que o botão do módulo de desempenho fique visível caso eles queiram acessar
-            if (btnMenuDes) {
-                btnMenuDes.classList.remove('hidden');
-                btnMenuDes.style.display = '';
-                btnMenuDes.style.pointerEvents = 'auto'; 
-            }
-
-        } else {
-            if (document.getElementById('aviso-alerta-des')) document.getElementById('aviso-alerta-des').remove();
-            const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
-            if (avisoTravaDes) avisoTravaDes.remove();
-            
-            // Só libera o menu se não houver avaliação de Experiência (45/90 dias) prendendo a tela
+        } 
+        // 3. TUDO LIMPO
+        else {
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
         }
 
-        if(typeof renderizarListaDesempenhoPendentes === 'function') renderizarListaDesempenhoPendentes();
+        // Posiciona a tarja do desempenho abaixo da tarja da experiência caso ambas existam
+        const avisoTravaExp = document.getElementById('aviso-bloqueio-exp');
+        const avisoDesNovo = document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des');
+        
+        if (avisoTravaExp && avisoDesNovo) {
+            avisoDesNovo.style.top = '38px'; 
+        }
+
+        // Renderiza a listinha de quem ele tem que avaliar
+        if (typeof renderizarListaDesempenhoPendentes === 'function') {
+            renderizarListaDesempenhoPendentes();
+        }
 
     } catch (e) {
         console.error("Erro na busca de desempenho:", e);
