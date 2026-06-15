@@ -4672,19 +4672,47 @@ let dadosMetasGlobal = [];
 let dadosCrmGlobal = [];
 
 async function carregarMetasECRM() {
-    // 1. Carrega as Metas Manuais
-    const resMetas = await supabaseClient.from('comercial_metas').select('*').order('created_at', { ascending: false });
+    // 1. Prepara as consultas
+    let queryMetas = supabaseClient.from('comercial_metas').select('*').order('created_at', { ascending: false });
+    let queryCrm = supabaseClient.from('comercial_clientes_crm').select('*').order('created_at', { ascending: false });
+    let queryTarefas = supabaseClient.from('comercial_tarefas').select('*').order('created_at', { ascending: false });
+
+    // 2. Se não for Diretoria, descobre quem liberou acesso para mim
+    if (nivelAcessoComercial !== 'Diretoria') {
+        let idsPermitidosAgenda = [usuarioAtual.id];
+        let idsPermitidosTarefas = [usuarioAtual.id];
+
+        const { data: equipe } = await supabaseClient.rpc('obter_equipe_comercial');
+        if (equipe) {
+            equipe.forEach(p => {
+                // Quem me liberou na Agenda e CRM
+                if (p.permissoes && p.permissoes.agenda_liberada_para && p.permissoes.agenda_liberada_para.includes(usuarioAtual.id)) {
+                    idsPermitidosAgenda.push(p.id);
+                }
+                // Quem me liberou nas Tarefas
+                if (p.permissoes && p.permissoes.tarefas_liberadas_para && p.permissoes.tarefas_liberadas_para.includes(usuarioAtual.id)) {
+                    idsPermitidosTarefas.push(p.id);
+                }
+            });
+        }
+        
+        // Aplica os filtros nas buscas
+        queryMetas = queryMetas.in('user_id', idsPermitidosAgenda);
+        queryCrm = queryCrm.in('user_id', idsPermitidosAgenda);
+        queryTarefas = queryTarefas.in('user_id', idsPermitidosTarefas);
+    }
+
+    // 3. Executa as buscas
+    const resMetas = await queryMetas;
     if (!resMetas.error) dadosMetasGlobal = resMetas.data || [];
 
-    // 2. Carrega a Carteira de Clientes (CRM)
-    const resCrm = await supabaseClient.from('comercial_clientes_crm').select('*').order('created_at', { ascending: false });
+    const resCrm = await queryCrm;
     if (!resCrm.error) dadosCrmGlobal = resCrm.data || [];
 
-    // 👇 3. Carrega as Tarefas para a Agenda
-    const resTarefas = await supabaseClient.from('comercial_tarefas').select('*').order('created_at', { ascending: false });
+    const resTarefas = await queryTarefas;
     if (!resTarefas.error) tarefasGlobal = resTarefas.data || [];
 
-    // Manda TUDO para a tela de Metas e Agenda se fundir
+    // Manda os dados permitidos para a tela
     atualizarTelaMetas(dadosMetasGlobal, dadosCrmGlobal, tarefasGlobal);
     renderizarKanban(dadosCrmGlobal);
 }
@@ -5609,13 +5637,36 @@ window.processarRotaPorHash = function() {
 // Escuta se o usuário clicar nos botões de voltar/avançar do próprio navegador
 window.addEventListener('hashchange', window.processarRotaPorHash);
 
-// 2. Carregar do Banco
 async function carregarTarefas() {
-    const { data, error } = await supabaseClient.from('comercial_tarefas').select('*').order('created_at', { ascending: false });
+    // 1. Monta a busca padrão
+    let query = supabaseClient.from('comercial_tarefas').select('*').order('created_at', { ascending: false });
+
+    // 2. Se o usuário não for Diretoria, ele só vê o dele + os colegas que compartilharam com ele
+    if (nivelAcessoComercial !== 'Diretoria') {
+        let idsPermitidos = [usuarioAtual.id]; // Eu sempre vejo as minhas próprias tarefas
+        
+        // Puxa a equipe e verifica as permissões
+        const { data: equipe } = await supabaseClient.rpc('obter_equipe_comercial');
+        if (equipe) {
+            equipe.forEach(p => {
+                // Se o colega me colocou na lista de "Tarefas Liberadas", eu pego o ID dele
+                if (p.permissoes && p.permissoes.tarefas_liberadas_para && p.permissoes.tarefas_liberadas_para.includes(usuarioAtual.id)) {
+                    idsPermitidos.push(p.id);
+                }
+            });
+        }
+        
+        // Aplica o filtro no banco de dados para trazer apenas os IDs autorizados
+        query = query.in('user_id', idsPermitidos);
+    }
+
+    // 3. Executa a busca
+    const { data, error } = await query;
     if (error) {
         mostrarAlerta("Erro ao carregar tarefas.", "erro");
         return;
     }
+    
     tarefasGlobal = data || [];
     renderizarTarefas();
 }
