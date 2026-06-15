@@ -43582,12 +43582,24 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // =========================================================================
-// MÓDULO: AVALIAÇÃO DE DESEMPENHO (3 EM 3 MESES) - COM TRAVA DE 48H E IGNORANDO AFASTADOS
+// MÓDULO: AVALIAÇÃO DE DESEMPENHO (COM TRAVA DE 48H, FILTRO DE PLANTÃO REAL E IGNORANDO AFASTADOS)
 // =========================================================================
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
     const containerLista = document.getElementById('lista-desempenho-pendente');
+    const abaPendentes = document.getElementById('aba-desempenho-pendentes');
+    
+    // Injeta a barra de pesquisa na aba de Pendentes se ela não existir
+    if (abaPendentes && !document.getElementById('busca-desempenho-pendentes')) {
+        const searchHtml = `
+            <div class="input-wrapper" style="margin-bottom: 20px;">
+                <i class="fa-solid fa-search"></i>
+                <input type="text" id="busca-desempenho-pendentes" placeholder="Buscar colaborador para avaliar..." oninput="renderizarListaDesempenhoPendentes()">
+            </div>
+        `;
+        abaPendentes.insertAdjacentHTML('afterbegin', searchHtml);
+    }
     
     if (foiCliqueManual && containerLista) {
         containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de avaliações...</p>';
@@ -43596,33 +43608,64 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     try {
         const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
         const hojeIso = new Date().toISOString().split('T')[0];
+        const doisDiasAtras = new Date();
+        doisDiasAtras.setDate(doisDiasAtras.getDate() - 2);
+        const doisDiasAtrasIso = doisDiasAtras.toISOString().split('T')[0];
         
-        // 👇 A MÁGICA 1: Faz todas as buscas simultâneas para otimizar a velocidade 👇
+        // 1. Faz todas as buscas simultâneas para otimizar a performance
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
             supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
-            supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
-            supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').gte('data_fim', doisDiasAtrasIso),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', doisDiasAtrasIso)
         ]);
 
         if (resColabs.error) throw resColabs.error; 
 
         const colabsDB = resColabs.data || [];
-        const avaliacoesAndamento = resAndamento.data || [];
+        const templatesAndamento = resAndamento.data || [];
         
-        // Mapeia quem está ausente hoje (Férias ou Atestado)
-        const setAfastados = new Set();
-        if (resAusencias.data) resAusencias.data.forEach(a => setAfastados.add(a.colaborador_id));
-        if (resFerias.data) resFerias.data.forEach(f => setAfastados.add(f.colaborador_id));
+        // Mapeia os afastamentos e o prazo de retorno
+        const mapaAfastamentos = {};
+        if (resAusencias.data) resAusencias.data.forEach(a => {
+            if (!mapaAfastamentos[a.colaborador_id]) mapaAfastamentos[a.colaborador_id] = [];
+            mapaAfastamentos[a.colaborador_id].push({ ini: a.data_inicio, fim: a.data_fim });
+        });
+        if (resFerias.data) resFerias.data.forEach(f => {
+            if (!mapaAfastamentos[f.colaborador_id]) mapaAfastamentos[f.colaborador_id] = [];
+            mapaAfastamentos[f.colaborador_id].push({ ini: f.data_inicio_ferias, fim: f.data_fim_ferias });
+        });
 
         const mapaAndamento = {};
-        avaliacoesAndamento.forEach(a => mapaAndamento[a.colaborador_id] = a.status);
+        templatesAndamento.forEach(a => mapaAndamento[a.colaborador_id] = a.status);
 
-        // 👇 A MÁGICA 2: Corta quem tá em rescisão OU quem está afastado/férias hoje 👇
+        // 2. FILTRAGEM INTELIGENTE DE EXCLUSÃO (Rescisão, Afastamento ou Folga hoje)
         const colabs = colabsDB.filter(c => {
             const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
-            const taAfastado = setAfastados.has(c.id);
-            return !emRescisao && !taAfastado;
+            if (emRescisao) return false;
+
+            let taAfastadoHoje = false;
+            let emRespiro = false;
+
+            if (mapaAfastamentos[c.id]) {
+                mapaAfastamentos[c.id].forEach(af => {
+                    if (hojeIso >= af.ini && hojeIso <= af.fim) {
+                        taAfastadoHoje = true;
+                    } 
+                    else if (af.fim >= doisDiasAtrasIso && af.fim < hojeIso) {
+                        emRespiro = true;
+                    }
+                });
+            }
+
+            if (taAfastadoHoje) return false; 
+
+            // 👇 A MÁGICA: Só entra no radar se HOJE for dia de plantão normal de trabalho dele!
+            const ehDiaDeFolgaHoje = window.isDiaDeFolga(c, hojeIso);
+            if (ehDiaDeFolgaHoje) return false; // Se for folga hoje, pula e não cobra o gestor!
+            
+            c.emRespiro = emRespiro; 
+            return true;
         });
 
         if (!colabs || colabs.length === 0) {
@@ -43631,11 +43674,9 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 <div style="text-align: center; padding: 40px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px dashed var(--cor-borda);">
                     <i class="fa-solid fa-check-circle fa-4x" style="color: #28a745; margin-bottom: 20px;"></i>
                     <h3 style="color: #fff;">Tudo em dia!</h3>
-                    <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Você não possui colaboradores ativos para avaliar.</p>
+                    <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Não há nenhum colaborador de plantão hoje que necessite de avaliação.</p>
                 </div>`;
             }
-            
-            // Se zerou, limpa a tela de bloqueios
             window.avaliacoesDesempenhoPendentes = [];
             const avisoTravaDesAntigo = document.getElementById('aviso-bloqueio-des');
             const avisoAlertaDesAntigo = document.getElementById('aviso-alerta-des');
@@ -43654,8 +43695,8 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         let deveBloquearSistema = false;
         let temAlerta = false;
 
-        const hoje = new Date();
-        hoje.setHours(0,0,0,0);
+        const hojeCalculo = new Date();
+        hojeCalculo.setHours(0,0,0,0);
 
         colabs.forEach(c => {
             const adm = c.dados_admissao || {};
@@ -43663,7 +43704,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             if (!dataInicioStr) return;
 
             const dIni = new Date(dataInicioStr + 'T00:00:00');
-            const diffDiasEmpresa = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
+            const diffDiasEmpresa = Math.floor((hojeCalculo - dIni) / (1000 * 60 * 60 * 24));
             
             if (diffDiasEmpresa < 90) return;
 
@@ -43673,7 +43714,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             
             if (ultimaDataAvaliacaoStr) {
                 const dUltima = new Date(ultimaDataAvaliacaoStr + 'T00:00:00');
-                const diffDiasDesdeUltima = Math.floor((hoje - dUltima) / (1000 * 60 * 60 * 24));
+                const diffDiasDesdeUltima = Math.floor((hojeCalculo - dUltima) / (1000 * 60 * 60 * 24));
                 
                 if (diffDiasDesdeUltima >= 90) {
                     taAtrasado = true;
@@ -43683,15 +43724,15 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 taAtrasado = true;
             }
 
-            // 👇 A MÁGICA DA TRAVA 48H 👇
             if (taAtrasado || mapaAndamento[c.id]) {
                 window.avaliacoesDesempenhoPendentes.push({ 
                     colab: c, 
                     dias: diasAtraso, 
-                    statusAndamento: mapaAndamento[c.id] || null 
+                    statusAndamento: mapaAndamento[c.id] || null,
+                    emRespiro: c.emRespiro 
                 });
 
-                if (diasAtraso >= 92) {
+                if (diasAtraso >= 92 && !c.emRespiro) {
                     deveBloquearSistema = true;
                 } else {
                     temAlerta = true;
@@ -43707,9 +43748,8 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
         if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
 
-        // 1. TRAVA MÁXIMA (Prazo >= 48h)
         if (deveBloquearSistema) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 48h esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o envio do Feedback Final ao RH.</div>`);
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo limite esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o envio do Feedback Final ao RH.</div>`);
             
             document.querySelectorAll('.nav-btn').forEach(b => {
                 if (b.dataset.target !== 'tela-desempenho') b.style.display = 'none';
@@ -43723,16 +43763,14 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp')) btnMenuDes.click();
             }
         } 
-        // 2. APENAS ALERTA (Dentro das 48h)
         else if (temAlerta) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);"><i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Conclua todas as etapas em até 48h para evitar o bloqueio do sistema.</div>`);
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);"><i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo ou em prazo de retorno de férias/atestado.</div>`);
             
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
         } 
-        // 3. TUDO LIMPO
         else {
             if (!document.getElementById('aviso-bloqueio-exp')) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
@@ -43742,7 +43780,6 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
 
         const avisoTravaExp = document.getElementById('aviso-bloqueio-exp');
         const avisoDesNovo = document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des');
-        
         if (avisoTravaExp && avisoDesNovo) {
             avisoDesNovo.style.top = '38px'; 
         }
@@ -43758,18 +43795,64 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
 
 window.renderizarListaDesempenhoPendentes = function() {
     const container = document.getElementById('lista-desempenho-pendente');
+    const inputBusca = document.getElementById('busca-desempenho-pendentes');
     if(!container) return;
     container.innerHTML = '';
 
-    if (window.avaliacoesDesempenhoPendentes.length === 0) {
-        container.innerHTML = `
-            <div style="text-align: center; padding: 40px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px dashed var(--cor-borda);">
-                <i class="fa-solid fa-check-circle fa-4x" style="color: #28a745; margin-bottom: 20px;"></i>
-                <h3 style="color: #fff;">Tudo em dia!</h3>
-                <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Nenhum colaborador da sua unidade atingiu o ciclo trimestral de desempenho ainda.</p>
-            </div>`;
+    const termo = inputBusca ? window.removerAcentos(inputBusca.value.toLowerCase()) : '';
+
+    // Filtra pelo nome digitado
+    const filtrados = window.avaliacoesDesempenhoPendentes.filter(item => {
+        return window.removerAcentos(item.colab.nome.toLowerCase()).includes(termo);
+    });
+
+    if (filtrados.length === 0) {
+        if (termo) {
+            container.innerHTML = `<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador encontrado na busca.</p>`;
+        } else {
+            container.innerHTML = `
+                <div style="text-align: center; padding: 40px; background: rgba(0,0,0,0.2); border-radius: 12px; border: 1px dashed var(--cor-borda);">
+                    <i class="fa-solid fa-check-circle fa-4x" style="color: #28a745; margin-bottom: 20px;"></i>
+                    <h3 style="color: #fff;">Tudo em dia!</h3>
+                    <p style="color: var(--cor-texto-secundario); margin-top: 10px;">Nenhum colaborador da sua unidade atingiu o ciclo trimestral de desempenho ainda.</p>
+                </div>`;
+        }
         return;
     }
+
+    filtrados.forEach((item, index) => {
+        let badgeExtra = '';
+        let btnAcao = '';
+
+        if (item.statusAndamento) {
+            badgeExtra = `<span style="font-size: 0.8rem; color: #ff9800; display: block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Pendência Atual: <b>${item.statusAndamento}</b></span>`;
+            
+            btnAcao = `<button class="btn-secondary" style="border-color: #00bcd4; color: #00bcd4; font-weight: bold; padding: 10px 20px;" onclick="document.querySelector('[data-aba=\\'aba-desempenho-andamento\\']').click();">
+                <i class="fa-solid fa-arrow-right"></i> Continuar Etapa
+            </button>`;
+        } else {
+            btnAcao = `<button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="abrirFormularioDesempenho(${window.avaliacoesDesempenhoPendentes.indexOf(item)})">
+                <i class="fa-solid fa-pen-to-square"></i> Iniciar Avaliação
+            </button>`;
+        }
+
+        // Tag que mostra que ele tá no período de respiro
+        const tagRespiro = item.emRespiro ? `<span class="badge" style="background: rgba(255,152,0,0.15); color: #ff9800; border: 1px solid #ff9800; margin-left: 10px; font-size: 0.7rem;"><i class="fa-solid fa-clock-rotate-left"></i> Respiro Pós-Retorno (48h)</span>` : '';
+
+        container.innerHTML += `
+            <div class="admissao-card" style="border-left: 4px solid #00bcd4; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
+                <div>
+                    <strong style="font-size: 1.15rem; color: #00bcd4;"><i class="fa-solid fa-user-tie"></i> ${item.colab.nome}</strong> ${tagRespiro}<br>
+                    <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
+                        <i class="fa-solid fa-building"></i> ${item.colab.unidade} | Ciclo Atrasado em: <b style="color: #ff9800;">${item.dias} dias</b>
+                    </span>
+                    ${badgeExtra}
+                </div>
+                ${btnAcao}
+            </div>
+        `;
+    });
+};
 
     window.avaliacoesDesempenhoPendentes.forEach((item, index) => {
         let badgeExtra = '';
@@ -44048,6 +44131,19 @@ window.avaliacoesAndamentoGlobais = []; // Variável de memória local
 
 window.carregarDesempenhosAndamento = async function() {
     const container = document.getElementById('lista-desempenho-andamento');
+    const abaAndamento = document.getElementById('aba-desempenho-andamento');
+    
+    // 👇 Injeta a barra de pesquisa se ela não existir
+    if (abaAndamento && !document.getElementById('busca-desempenho-andamento')) {
+        const searchHtml = `
+            <div class="input-wrapper" style="margin-bottom: 20px;">
+                <i class="fa-solid fa-search"></i>
+                <input type="text" id="busca-desempenho-andamento" placeholder="Buscar por nome do colaborador..." oninput="filtrarDesempenhosAndamento()">
+            </div>
+        `;
+        abaAndamento.querySelector('p').insertAdjacentHTML('afterend', searchHtml);
+    }
+
     container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando andamento...</p>';
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
@@ -44063,11 +44159,30 @@ window.carregarDesempenhosAndamento = async function() {
         return;
     }
 
-    // Salva os dados na memória para os modais lerem de forma instantânea
+    // Salva os dados na memória global para filtro e modais
     window.avaliacoesAndamentoGlobais = data;
+    filtrarDesempenhosAndamento(); // Chama a função que desenha na tela
+};
 
-    // Organização de prioridades
-    data.sort((a, b) => {
+      window.filtrarDesempenhosAndamento = function() {
+    const container = document.getElementById('lista-desempenho-andamento');
+    const inputBusca = document.getElementById('busca-desempenho-andamento');
+    const termo = inputBusca ? window.removerAcentos(inputBusca.value.toLowerCase()) : '';
+    
+    if (!container) return;
+    container.innerHTML = '';
+
+    const filtrados = window.avaliacoesAndamentoGlobais.filter(d => {
+        return window.removerAcentos(d.nome_colaborador.toLowerCase()).includes(termo);
+    });
+
+    if (filtrados.length === 0) {
+        container.innerHTML = `<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador encontrado na busca.</p>`;
+        return;
+    }
+
+    // Organização de prioridades (Assinatura primeiro)
+    filtrados.sort((a, b) => {
         const peso = (st) => {
             if (st === 'Aguardando Assinatura') return 1;
             if (st === 'Aguardando Feedback') return 2;
@@ -44078,7 +44193,7 @@ window.carregarDesempenhosAndamento = async function() {
     });
 
     let html = '';
-    data.forEach(d => {
+    filtrados.forEach(d => {
         const dataEnvio = new Date(d.created_at).toLocaleDateString('pt-BR');
         let corCard = '#ff9800';
         let badgeTxt = d.status;
@@ -44097,7 +44212,6 @@ window.carregarDesempenhosAndamento = async function() {
         if (d.status === 'Pendente') {
             botoesHtml = `<span style="color:var(--cor-texto-secundario); font-size:0.8rem; font-style:italic;"><i class="fa-solid fa-lock"></i> Aguardando o RH auditar a papelada.</span>`;
         } else if (d.status === 'Aguardando Assinatura') {
-            // 👇 COLOCADOS OS DOIS BOTÕES LADO A LADO DO LADO DE FORA 👇
             botoesHtml = `
                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                     <button class="btn-secondary" style="padding: 8px 12px; font-size: 0.8rem; border-color: #00bcd4; color: #00bcd4; background: transparent; font-weight: bold;" onclick="abrirModalVisualizarNotas('${d.id}')">
@@ -44132,7 +44246,7 @@ window.carregarDesempenhosAndamento = async function() {
     });
     container.innerHTML = html;
 };
-
+  
       window.abrirModalVisualizarNotas = function(idAval) {
     const aval = window.avaliacoesAndamentoGlobais.find(x => x.id === idAval);
     if (!aval) return mostrarAlerta("Avaliação não encontrada na memória.", "erro");
