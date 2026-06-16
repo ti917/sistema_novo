@@ -6126,7 +6126,7 @@ window.atualizarPermissaoBanco = async function(perfilId, campo, valor) {
     }
 };
 
-       // =========================================================
+      // =========================================================
 // CONFIGURAÇÃO DA CLARA - SUPER ADMIN
 // =========================================================
 window.abrirModalConfigClara = async function() {
@@ -6141,7 +6141,7 @@ window.abrirModalConfigClara = async function() {
         const { data: todosPerfis, error } = await supabaseClient.from('perfis').select('*').order('nome', { ascending: true });
         if (error) throw error;
 
-        // Filtra apenas quem tem acesso ao Comercial e perfis válidos
+        // Filtra apenas quem tem acesso ao Comercial
         const equipeComercial = todosPerfis.filter(p => {
             const permissoes = p.permissoes || {};
             const sistemas = permissoes.sistemas_permitidos || 'RH';
@@ -6162,15 +6162,18 @@ window.abrirModalConfigClara = async function() {
         equipeComercial.forEach(p => {
             const permissoes = p.permissoes || {};
             const papelClara = permissoes.papel_clara || '';
+            
+            // 👇 AQUI: Lê o telefone de dentro do alertas_clara no JSON 👇
+            const alertasClara = permissoes.alertas_clara || {};
+            const telefoneClara = alertasClara.telefone || '';
 
-            // 👇 AQUI MUDAMOS O TEXTO FIXO PARA UM INPUT EDITÁVEL 👇
             tbody.innerHTML += `
                 <tr style="border-bottom: 1px solid var(--cor-borda);">
                     <td style="padding: 12px; font-weight: bold; color: #fff;">
                         <i class="fa-solid fa-user" style="color: var(--cor-acento); margin-right: 8px;"></i>${p.nome}
                         <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
-                            <i class="fa-solid fa-phone" style="color: var(--cor-texto-secundario); font-size: 0.8em;"></i>
-                            <input type="text" class="modern-input-file" style="width: 140px; padding: 4px 8px; font-size: 0.8em; height: 28px; border-color: rgba(46, 204, 113, 0.5);" placeholder="DDD + Número" value="${p.telefone || ''}" onchange="salvarTelefoneClara('${p.id}', this.value)" title="Digite o número e clique fora para salvar">
+                            <i class="fa-brands fa-whatsapp" style="color: #2ecc71; font-size: 0.9em;"></i>
+                            <input type="text" class="modern-input-file" style="width: 140px; padding: 4px 8px; font-size: 0.8em; height: 28px; border-color: rgba(46, 204, 113, 0.5);" placeholder="Ex: +55 (19) 99999-9999" value="${telefoneClara}" onchange="salvarTelefoneClara('${p.id}', this.value)" title="Digite o número e clique fora para salvar">
                             <small style="color: var(--cor-texto-secundario); font-weight: normal;">| ${p.perfil || 'Usuário'}</small>
                         </div>
                     </td>
@@ -6200,26 +6203,32 @@ window.salvarPapelClara = async function(perfilId, novoPapel) {
         const { error: updateErr } = await supabaseClient.from('perfis').update({ permissoes: novasPermissoes }).eq('id', perfilId);
         if (updateErr) throw updateErr;
 
-        mostrarAlerta("Configuração da Clara atualizada!", "sucesso");
+        mostrarAlerta("Papel na Clara atualizado!", "sucesso");
     } catch (err) {
         mostrarAlerta("Erro ao salvar configuração: " + err.message, "erro");
     }
 };
 
-        // 👇 NOVA FUNÇÃO PARA SALVAR O TELEFONE DIRETO NO BANCO 👇
+      // 👇 AQUI: Salva o telefone exatamente dentro de permissoes -> alertas_clara -> telefone 👇
 window.salvarTelefoneClara = async function(perfilId, novoTelefone) {
     try {
-        // Limpa formatações, deixando só os números para evitar erro na Clara
-        let telefoneLimpo = novoTelefone.replace(/\D/g, '');
+        const { data: perfil, error: fetchErr } = await supabaseClient.from('perfis').select('permissoes').eq('id', perfilId).single();
+        if (fetchErr) throw fetchErr;
+
+        let novasPermissoes = perfil.permissoes || {};
         
-        const { error } = await supabaseClient.from('perfis').update({ telefone: telefoneLimpo }).eq('id', perfilId);
-        if (error) throw error;
-        
-        if (telefoneLimpo) {
-            mostrarAlerta("Telefone atualizado com sucesso!", "sucesso");
-        } else {
-            mostrarAlerta("Telefone removido do cadastro.", "aviso");
+        // Garante que o objeto alertas_clara exista
+        if (!novasPermissoes.alertas_clara) {
+            novasPermissoes.alertas_clara = {};
         }
+
+        // Atualiza apenas o telefone, preservando lotacao_excedida, etc.
+        novasPermissoes.alertas_clara.telefone = novoTelefone;
+
+        const { error: updateErr } = await supabaseClient.from('perfis').update({ permissoes: novasPermissoes }).eq('id', perfilId);
+        if (updateErr) throw updateErr;
+        
+        mostrarAlerta("Telefone da Clara salvo com sucesso!", "sucesso");
     } catch (err) {
         mostrarAlerta("Erro ao atualizar o telefone: " + err.message, "erro");
     }
@@ -6237,14 +6246,16 @@ async function notificarClaraProposta(status, nomeEmpresa, nomeComercial) {
 
     try {
         if (status === 'Em Análise') {
-            // 🎯 STATUS: EM ANÁLISE -> Notifica TODOS que estiverem configurados como "Diretoria"
+            // 🎯 STATUS: EM ANÁLISE -> Notifica a "Diretoria"
             const { data: equipe, error } = await supabaseClient.rpc('obter_equipe_comercial');
             if (error) throw error;
 
-            const diretores = equipe.filter(p => p.permissoes && p.permissoes.papel_clara === 'Diretoria' && p.telefone);
+            // Filtra quem é Diretoria E tem telefone cadastrado no alertas_clara
+            const diretores = equipe.filter(p => p.permissoes && p.permissoes.papel_clara === 'Diretoria' && p.permissoes.alertas_clara && p.permissoes.alertas_clara.telefone);
 
             diretores.forEach(diretor => {
-                let telefoneLimpo = diretor.telefone.replace(/\D/g, '');
+                let telefoneSujo = diretor.permissoes.alertas_clara.telefone;
+                let telefoneLimpo = telefoneSujo.replace(/\D/g, ''); // Tira parênteses, espaços e traços
                 if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
                 const payloadEnvio = {
@@ -6261,18 +6272,20 @@ async function notificarClaraProposta(status, nomeEmpresa, nomeComercial) {
             });
         } 
         else if (status === 'Aprovada') {
-            // 🎯 STATUS: APROVADA -> Notifica o Comercial que criou a proposta (Desde que ele esteja habilitado)
+            // 🎯 STATUS: APROVADA -> Notifica o "Comercial"
             const { data: consultor, error } = await supabaseClient
                 .from('perfis')
-                .select('nome, telefone, permissoes')
+                .select('nome, permissoes')
                 .eq('nome', nomeComercial)
                 .single();
             
             if (error) throw error;
 
-            // Só envia se ele tiver um telefone cadastrado e o papel dele na Clara for "Comercial"
-            if (consultor && consultor.telefone && consultor.permissoes && consultor.permissoes.papel_clara === 'Comercial') {
-                let telefoneLimpo = consultor.telefone.replace(/\D/g, '');
+            // Só envia se o papel for Comercial E tiver o telefone no alertas_clara
+            if (consultor && consultor.permissoes && consultor.permissoes.papel_clara === 'Comercial' && consultor.permissoes.alertas_clara && consultor.permissoes.alertas_clara.telefone) {
+                
+                let telefoneSujo = consultor.permissoes.alertas_clara.telefone;
+                let telefoneLimpo = telefoneSujo.replace(/\D/g, '');
                 if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
                 const payloadEnvio = {
