@@ -6489,19 +6489,24 @@ function fecharLembrete() {
     document.getElementById('modal-lembrete').classList.add('hidden');
 }
 
-       window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa) {
+      window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa) {
     try {
-        console.log("Iniciando Clara Agenda/Tarefas para:", tituloTarefa);
-        
-        // 1. CORREÇÃO: Usando a RPC original do seu sistema que sabemos que funciona e tem permissão
+        // 1. Busca a equipe
         const { data: equipeValida, error: errRpc } = await supabaseClient.rpc('obter_equipe_comercial');
         
         if (errRpc || !equipeValida || equipeValida.length === 0) {
-            console.error("Erro ao buscar equipe na RPC ou equipe vazia:", errRpc);
+            mostrarAlerta("Clara: Erro ao ler equipe do banco de dados.", "erro");
             return;
         }
 
-        // 2. Garante a leitura das permissões do dono (quem está logado)
+        // 🔍 TESTE DO CACHE: Verifica se a API entregou a coluna nova
+        const alguemComConfig = equipeValida.find(p => p.config_clara !== undefined);
+        if (!alguemComConfig) {
+            mostrarAlerta("Clara: O Banco não está entregando a coluna de telefone. Recarregue o Schema Cache no Supabase!", "erro", "Erro de API");
+            return;
+        }
+
+        // 2. Extrai Permissões do Dono (Bruno)
         let permissoesDono = {};
         if (usuarioAtual && usuarioAtual.id === idDonoDaTarefa) {
             permissoesDono = usuarioAtual.permissoes || {};
@@ -6510,41 +6515,32 @@ function fecharLembrete() {
             if (dono) permissoesDono = dono.permissoes || {};
         }
 
-        // Adiciona o dono na lista de disparo
-        let idsParaNotificar = [idDonoDaTarefa]; 
+        // 3. Monta a lista de IDs permitidos (Dono + Quem ele marcou na agenda/tarefa)
+        let idsParaNotificar = [idDonoDaTarefa, ...(permissoesDono.agenda_liberada_para || []), ...(permissoesDono.tarefas_liberadas_para || [])];
+        idsParaNotificar = [...new Set(idsParaNotificar)]; // Remove repetidos
 
-        // 3. Puxa quem você marcou na caixinha de compartilhamento (Ex: Jéssica)
-        const pessoasAgenda = permissoesDono.agenda_liberada_para || [];
-        const pessoasTarefas = permissoesDono.tarefas_liberadas_para || [];
-        
-        idsParaNotificar = [...idsParaNotificar, ...pessoasAgenda, ...pessoasTarefas];
-        idsParaNotificar = [...new Set(idsParaNotificar)]; // Remove duplicatas
-
-        // 4. Mapeia os dados de contato ignorando completamente o "Papel"
+        // 4. Mapeia quem tem o telefone preenchido
         const pessoasParaNotificar = [];
         idsParaNotificar.forEach(idTarget => {
             const encontrou = equipeValida.find(p => p.id === idTarget);
-            // Confirma se o usuário existe, tem configuração da Clara e um telefone salvo
             if (encontrou && encontrou.config_clara && encontrou.config_clara.telefone) {
                 pessoasParaNotificar.push(encontrou);
             }
         });
 
-        console.log("A Clara vai disparar para os seguintes nomes:", pessoasParaNotificar.map(p => p.nome));
-
         if (pessoasParaNotificar.length === 0) {
-            console.log("Ninguém com telefone configurado foi encontrado na lista.");
+            mostrarAlerta("Clara: Nenhuma pessoa marcada na sua agenda possui telefone salvo nas configurações.", "aviso", "Sem Destinatários");
             return;
         }
 
-        // 5. Dispara a mensagem via WhatsApp usando o Edge Function 'smooth-service'
+        // 5. Dispara a mensagem
+        let nomesEnviados = [];
         for (const pessoa of pessoasParaNotificar) {
             let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
-            if (!telefoneLimpo.startsWith('55')) {
-                telefoneLimpo = '55' + telefoneLimpo;
-            }
+            if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
             const primeiroNome = (pessoa.nome || '').split(' ')[0];
+            nomesEnviados.push(primeiroNome);
 
             await supabaseClient.functions.invoke('smooth-service', {
                 body: {
@@ -6555,9 +6551,12 @@ function fecharLembrete() {
                 }
             });
         }
+        
+        // 🚀 Aviso de sucesso na sua tela!
+        mostrarAlerta(`Aviso no WhatsApp enviado para: ${nomesEnviados.join(', ')}`, "sucesso", "Clara Ativada!");
 
     } catch (err) {
-        console.error("Erro crítico na Clara Agenda:", err);
+        mostrarAlerta("Erro interno na Clara: " + err.message, "erro");
     }
 };
 
