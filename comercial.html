@@ -6559,29 +6559,46 @@ async function notificarClaraProposta(status, nomeEmpresa, nomeComercial) {
 // =========================================================
 window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa) {
     try {
-        // 1. Busca os dados do dono da tarefa para saber com quem ele compartilha
+        // 1. Busca os dados do dono da tarefa para saber o perfil e com quem ele compartilha
         const { data: dono, error } = await supabaseClient.from('perfis')
-            .select('id, nome, permissoes, config_clara')
+            .select('id, nome, perfil, permissoes, config_clara') // Adicionado 'perfil' na busca
             .eq('id', idDonoDaTarefa)
             .single();
 
         if (error || !dono) return;
 
-        // 2. Monta a lista de quem deve receber (Dono + Quem tem a agenda liberada)
         let idsParaNotificar = [idDonoDaTarefa]; // O dono sempre recebe (se tiver Zap ativado)
-        
-        const permissoesDono = dono.permissoes || {};
-        
-        // Pega as listas de quem pode ver a agenda e as tarefas dele
-        const pessoasAgenda = permissoesDono.agenda_liberada_para || [];
-        const pessoasTarefas = permissoesDono.tarefas_liberadas_para || [];
-        
-        // Junta todo mundo e remove os IDs duplicados
-        const compartilhados = [...new Set([...pessoasAgenda, ...pessoasTarefas])];
-        
-        if (compartilhados.length > 0) {
-            idsParaNotificar = [...idsParaNotificar, ...compartilhados];
+
+        const perfilDono = (dono.perfil || '').toLowerCase();
+        // Verifica se é o Super Admin, Admin comum ou Gestor
+        const ehGestorOuAdmin = perfilDono.includes('admin') || perfilDono.includes('gestor') || perfilDono.includes('diretor') || dono.id === "fa338e33-18c9-467e-bf3e-34880fd9324e";
+
+        if (ehGestorOuAdmin) {
+            // Se for Gestor/Admin, busca TODA a equipe que tem acesso ao Comercial
+            const { data: equipeComercial } = await supabaseClient.from('perfis').select('id, permissoes');
+            if (equipeComercial) {
+                equipeComercial.forEach(p => {
+                    const sis = (p.permissoes && p.permissoes.sistemas_permitidos) ? p.permissoes.sistemas_permitidos : '';
+                    if (sis === 'Comercial' || sis === 'Ambos') {
+                        idsParaNotificar.push(p.id);
+                    }
+                });
+            }
+        } else {
+            // Se for consultor normal, notifica apenas quem ele liberou manualmente no cadeado
+            const permissoesDono = dono.permissoes || {};
+            const pessoasAgenda = permissoesDono.agenda_liberada_para || [];
+            const pessoasTarefas = permissoesDono.tarefas_liberadas_para || [];
+            
+            // Junta todo mundo e remove os IDs duplicados
+            const compartilhados = [...new Set([...pessoasAgenda, ...pessoasTarefas])];
+            if (compartilhados.length > 0) {
+                idsParaNotificar = [...idsParaNotificar, ...compartilhados];
+            }
         }
+
+        // Garante que não tenha IDs repetidos na lista final
+        idsParaNotificar = [...new Set(idsParaNotificar)];
 
         // 3. Busca o telefone de todo mundo da lista de uma vez só
         const { data: equipe } = await supabaseClient.from('perfis')
@@ -6600,7 +6617,6 @@ window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada
 
                 const primeiroNome = pessoa.nome.split(' ')[0];
 
-                // 👇 A MÁGICA: Usamos o mesmo template, só mudamos o texto da variável 2! 👇
                 await supabaseClient.functions.invoke('smooth-service', {
                     body: {
                         action: 'send_template_proposta', // Reaproveita a mesma rota do webhook
