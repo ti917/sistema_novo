@@ -5393,7 +5393,7 @@ function abrirDetalhesHistorico(itemStr) {
 }
 
 // =========================================================
-// SALVAR O AGENDAMENTO OU HISTÓRICO (CORRIGIDO PARA NOTIFICAR A CLARA)
+// SALVAR O AGENDAMENTO OU HISTÓRICO (CORRIGIDO PARA NOTIFICAR A CLARA E CRM)
 // =========================================================
 window.salvarEdicaoHistorico = async function(e) {
     e.preventDefault();
@@ -5414,6 +5414,24 @@ window.salvarEdicaoHistorico = async function(e) {
 
     document.getElementById('modal-detalhes-historico').classList.add('hidden');
 
+    // 👇 Lógica Inteligente para Avançar o Funil Automaticamente 👇
+    let statusDestino = undefined;
+    if (tipoAcao === 'Visita') statusDestino = 'Visita';
+    else if (tipoAcao === 'Proposta') statusDestino = 'Proposta';
+
+    const clienteCard = dadosCrmGlobal.find(c => c.id === crmId);
+    let avancarFunil = false;
+    
+    // Garante que só avança no funil, não retrocede
+    if (clienteCard && statusDestino) {
+        const statusAtual = clienteCard.status_funil;
+        if (statusAtual === 'Lead' && (statusDestino === 'Visita' || statusDestino === 'Proposta')) {
+            avancarFunil = true;
+        } else if (statusAtual === 'Visita' && statusDestino === 'Proposta') {
+            avancarFunil = true;
+        }
+    }
+
     // ==== SE FOR UM AGENDAMENTO FUTURO ====
     if (resultado === 'Agendar') {
         mostrarAlerta("Agendando na agenda...", "aviso");
@@ -5421,13 +5439,17 @@ window.salvarEdicaoHistorico = async function(e) {
         let sucessoNoAgendamento = false;
 
         if (origem === 'CRM' && crmId) {
-            const { error } = await supabaseClient.from('comercial_clientes_crm').update({
+            let updatePayloadCRM = {
                 data_agendamento: dataReg,
                 hora_agendamento: horaReg,
                 proximo_passo: obs,
                 ultima_interacao: tipoAcao,
                 prioridade: prioridade
-            }).eq('id', crmId);
+            };
+            
+            if (avancarFunil) updatePayloadCRM.status_funil = statusDestino;
+
+            const { error } = await supabaseClient.from('comercial_clientes_crm').update(updatePayloadCRM).eq('id', crmId);
             
             if(error) mostrarAlerta("Erro ao agendar no cliente: " + error.message, "erro");
             else {
@@ -5436,7 +5458,6 @@ window.salvarEdicaoHistorico = async function(e) {
             }
             
         } else if (origem === 'Tarefa' && crmId) {
-            // 👇 Atualiza a Data e a Hora direto no Kanban de Tarefas! 👇
             const { error } = await supabaseClient.from('comercial_tarefas').update({
                 data_tarefa: dataReg,
                 hora_tarefa: horaReg,
@@ -5472,7 +5493,6 @@ window.salvarEdicaoHistorico = async function(e) {
                 if(error) mostrarAlerta("Erro ao atualizar lembrete: " + error.message, "erro");
                 else {
                     mostrarAlerta("Lembrete avulso atualizado!", "sucesso");
-                    // 👇 CORREÇÃO: Garante o aviso da Clara mesmo se for uma edição de agendamento! 👇
                     sucessoNoAgendamento = true; 
                 }
             } else {
@@ -5485,24 +5505,18 @@ window.salvarEdicaoHistorico = async function(e) {
             }
         }
 
-        // 👇 A MÁGICA DA CLARA ENTRA AQUI 👇
-        // Se salvou no banco direitinho e tem uma data definida, manda a notificação!
         if (sucessoNoAgendamento && dataReg) {
             const [ano, mes, dia] = dataReg.split('-');
             let dataParaOZap = `${dia}/${mes}/${ano}`;
             if (horaReg) dataParaOZap += ` às ${horaReg}`;
             
-            // Cria um título com o nome da empresa ou contato
             const alvo = empresa || contato || 'Nova Atividade';
             const tituloAgendamento = `📅 ${tipoAcao} - ${alvo}`;
 
             if (typeof window.notificarClaraNovaTarefa === 'function') {
                 window.notificarClaraNovaTarefa(tituloAgendamento, dataParaOZap, usuarioAtual.id);
-            } else {
-                console.error("A função notificarClaraNovaTarefa não está acessível.");
             }
         }
-        // 👆 FIM DA MÁGICA 👆
     } 
     // ==== SE FOR REGISTRO DE HISTÓRICO PASSADO/ATUAL (META OU CONCLUSÃO DE AVULSO) ====
     else {
@@ -5525,30 +5539,32 @@ window.salvarEdicaoHistorico = async function(e) {
         const isAvulso = document.getElementById('hist-id').dataset.isAvulso === "true";
 
         if (id && !isAvulso && document.getElementById('titulo-modal-historico').innerText.includes('Detalhes da Atividade')) {
-            // Se for EDIÇÃO de uma meta que já existia no histórico
             const { error } = await supabaseClient.from('comercial_metas').update(payload).eq('id', id);
             if (error) mostrarAlerta("Erro ao atualizar: " + error.message, "erro");
             else mostrarAlerta("Histórico corrigido!", "sucesso");
         } else {
-            // Se for um registro novo OU a conclusão de um Lembrete Avulso
             const { error } = await supabaseClient.from('comercial_metas').insert([payload]);
             if (error) mostrarAlerta("Erro ao registrar: " + error.message, "erro");
             else {
                 mostrarAlerta("Atividade concluída e salva no histórico!", "sucesso");
-                // Mágica: Se era um lembrete avulso sendo concluído, ele apaga o rastro pendente da agenda
                 if (isAvulso && id) {
                     await supabaseClient.from('comercial_clientes_crm').delete().eq('id', id);
                 }
             }
         }
         
-        // Limpa a flag de Avulso pro futuro
         document.getElementById('hist-id').dataset.isAvulso = "false";
         
-        // 👇 INTELIGÊNCIA MÁXIMA: Se resolver a Tarefa por aqui, conclui no Kanban! 👇
         if (origem === 'Tarefa' && crmId && resultado === 'Resolvido') {
             await supabaseClient.from('comercial_tarefas').update({ status: 'Concluido' }).eq('id', crmId);
-            if (typeof carregarTarefas === "function") carregarTarefas(); // Atualiza o Kanban no fundo
+            if (typeof carregarTarefas === "function") carregarTarefas(); 
+        }
+
+        // 👇 Atualiza Automaticamente o Cliente no CRM também! 👇
+        if (origem === 'CRM' && crmId) {
+            let updatePayloadCRM = { ultima_interacao: tipoAcao };
+            if (avancarFunil) updatePayloadCRM.status_funil = statusDestino;
+            await supabaseClient.from('comercial_clientes_crm').update(updatePayloadCRM).eq('id', crmId);
         }
     }
     
