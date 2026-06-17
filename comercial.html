@@ -6565,26 +6565,30 @@ async function notificarClaraProposta(status, nomeEmpresa, nomeComercial) {
 // =========================================================
 window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa) {
     try {
-        // 1. Busca os dados do dono da tarefa (o próprio usuário sempre consegue ler seu próprio perfil via RLS)
-        const { data: dono, error } = await supabaseClient.from('perfis')
-            .select('id, nome, perfil, permissoes, config_clara')
-            .eq('id', idDonoDaTarefa)
-            .single();
+        // 1. Busca TODA a equipe através da RPC segura (Isso ignora a trava do RLS!)
+        const { data: equipeComercial, error: errEquipe } = await supabaseClient.rpc('obter_equipe_comercial_clara');
+        if (errEquipe) {
+            console.error("Erro na RPC:", errEquipe);
+            return;
+        }
+        
+        const equipeValida = equipeComercial || [];
+        
+        // 2. Encontra os dados do Dono da Tarefa dentro da lista segura que o banco liberou
+        const dono = equipeValida.find(p => p.id === idDonoDaTarefa);
+        if (!dono) return; // Se não achar o dono, aborta a notificação
 
-        if (error || !dono) return;
-
-        let idsParaNotificar = [idDonoDaTarefa]; // O dono sempre entra na fila (caso queira receber também)
+        let idsParaNotificar = [idDonoDaTarefa]; // O dono sempre entra na fila para receber também
 
         const perfilDono = (dono.perfil || '').toLowerCase();
+        
         // Verifica se é o Super Admin, Admin comum ou Gestor
         const ehGestorOuAdmin = perfilDono.includes('admin') || 
                                perfilDono.includes('gestor') || 
                                perfilDono.includes('diretor') || 
                                dono.id === "fa338e33-18c9-467e-bf3e-34880fd9324e";
 
-        // 2. EXTRAÇÃO DE COMPARTILHAMENTO DE DADOS:
-        // Se no perfil (mesmo não sendo superadmin) estiver configurado o Compartilhamento de Dados para outros perfis,
-        // adicionamos esses perfis para serem notificados pela Clara.
+        // 3. EXTRAÇÃO DE COMPARTILHAMENTO DE DADOS:
         const permissoesDono = dono.permissoes || {};
         const pessoasAgenda = permissoesDono.agenda_liberada_para || [];
         const pessoasTarefas = permissoesDono.tarefas_liberadas_para || [];
@@ -6593,10 +6597,6 @@ window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada
         if (compartilhados.length > 0) {
             idsParaNotificar = [...idsParaNotificar, ...compartilhados];
         }
-
-        // 3. Busca a equipe comercial através da RPC segura para evitar bloqueios de RLS para admins e gestores comuns
-        const { data: equipeComercial, error: errEquipe } = await supabaseClient.rpc('obter_equipe_comercial');
-        const equipeValida = equipeComercial || [];
 
         // Se o dono for Gestor/Admin, ele também notifica toda a equipe comercial ativa
         if (ehGestorOuAdmin) {
@@ -6608,30 +6608,22 @@ window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada
             });
         }
 
-        // Remove IDs duplicados para não enviar mensagens repetidas
+        // Remove IDs duplicados para não enviar o zap duas vezes para a mesma pessoa
         idsParaNotificar = [...new Set(idsParaNotificar)];
 
-        // 4. Mapeia os dados de contato (nome, config_clara) de quem será notificado.
-        // Em vez de fazer um SELECT na tabela 'perfis' (que falharia devido ao RLS),
-        // resgatamos os detalhes dos usuários diretamente do retorno da RPC 'obter_equipe_comercial'.
+        // 4. Mapeia os dados de contato de quem vai receber a mensagem
         const pessoasParaNotificar = [];
-
         idsParaNotificar.forEach(idTarget => {
-            if (idTarget === idDonoDaTarefa) {
-                pessoasParaNotificar.push(dono);
-            } else {
-                const encontrou = equipeValida.find(p => p.id === idTarget);
-                if (encontrou) {
-                    pessoasParaNotificar.push(encontrou);
-                }
+            const encontrou = equipeValida.find(p => p.id === idTarget);
+            if (encontrou) {
+                pessoasParaNotificar.push(encontrou);
             }
         });
 
         if (pessoasParaNotificar.length === 0) return;
 
-        // 5. Dispara a mensagem para cada usuário da lista de forma assíncrona
+        // 5. Dispara a mensagem para cada usuário mapeado de forma assíncrona
         pessoasParaNotificar.forEach(async (pessoa) => {
-            // Só manda se a pessoa tiver configurado a Clara no perfil dela com um telefone ativo
             if (pessoa.config_clara && pessoa.config_clara.telefone) {
                 
                 let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
@@ -6643,7 +6635,7 @@ window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada
 
                 await supabaseClient.functions.invoke('smooth-service', {
                     body: {
-                        action: 'send_template_proposta', // Reaproveita a mesma rota de webhook da Clara
+                        action: 'send_template_proposta', // Template base de WhatsApp
                         numero: telefoneLimpo,
                         var1: primeiroNome,
                         var2: `Você tem um novo compromisso/tarefa comercial agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes na sua agenda do painel!`
@@ -6654,6 +6646,72 @@ window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada
 
     } catch (err) {
         console.error("Erro ao notificar tarefa via Clara: ", err);
+    }
+};
+
+        // =========================================================
+// INTEGRAÇÃO WHATSAPP - CLARA PARA PROPOSTAS E DIRETORIA
+// =========================================================
+window.notificarClaraProposta = async function(status, nomeEmpresa, nomeComercial) {
+    try {
+        // Usa a RPC Segura no lugar da busca direta na tabela para não ser barrado pelo RLS!
+        const { data: todosPerfis, error } = await supabaseClient.rpc('obter_equipe_comercial_clara');
+        if (error || !todosPerfis) throw error;
+
+        if (status === 'Em Análise') {
+            // 🎯 STATUS: EM ANÁLISE -> Notifica a "Diretoria"
+            const diretores = todosPerfis.filter(p => p.config_clara && p.config_clara.papel === 'Diretoria' && p.config_clara.telefone);
+
+            diretores.forEach(async (diretor) => {
+                let telefoneSujo = diretor.config_clara.telefone;
+                let telefoneLimpo = telefoneSujo.replace(/\D/g, ''); 
+                if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
+
+                await supabaseClient.functions.invoke('smooth-service', {
+                    body: {
+                        action: 'send_template_proposta',
+                        numero: telefoneLimpo,
+                        var1: diretor.nome.split(' ')[0], 
+                        var2: `Temos uma nova solicitação de proposta da empresa *${nomeEmpresa}* aguardando sua análise e precificação no painel.`
+                    }
+                });
+            });
+        } 
+        else if (status === 'Aprovada') {
+            // 🎯 STATUS: APROVADA -> Notifica o "Comercial"
+            let consultoresAlvo = todosPerfis.filter(p => 
+                p.config_clara && 
+                p.config_clara.papel === 'Comercial' && 
+                p.config_clara.telefone &&
+                (p.nome || '').includes(nomeComercial)
+            );
+
+            // Se houver divergência de nome, manda para TODOS do Comercial para garantir a venda!
+            if (consultoresAlvo.length === 0) {
+                consultoresAlvo = todosPerfis.filter(p => 
+                    p.config_clara && 
+                    p.config_clara.papel === 'Comercial' && 
+                    p.config_clara.telefone
+                );
+            }
+
+            consultoresAlvo.forEach(async (consultor) => {
+                let telefoneSujo = consultor.config_clara.telefone;
+                let telefoneLimpo = telefoneSujo.replace(/\D/g, '');
+                if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
+
+                await supabaseClient.functions.invoke('smooth-service', {
+                    body: {
+                        action: 'send_template_proposta',
+                        numero: telefoneLimpo,
+                        var1: consultor.nome.split(' ')[0],
+                        var2: `Boas notícias! A sua proposta para a empresa *${nomeEmpresa}* foi precificada e aprovada pela Diretoria. Já está liberada no painel para gerar o PDF oficial!`
+                    }
+                });
+            });
+        }
+    } catch (err) {
+        console.error("Erro na comunicação com a API da Clara: ", err);
     }
 };
 
