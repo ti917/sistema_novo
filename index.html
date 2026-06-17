@@ -38250,20 +38250,21 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
 
     if(new Date(dataI) > new Date(dataF)) return mostrarAlerta("Data final inválida!", "aviso");
     
-    // 👇 ADICIONADO: ATR e ABD não precisam de anexo obrigatório
+    // ATR e ABD não precisam de anexo obrigatório
     if (sigla !== 'FA' && sigla !== 'FE' && sigla !== 'DECL' && sigla !== 'ATR' && sigla !== 'ABD' && fileInput.files.length === 0) return mostrarAlerta("Anexo obrigatório para este tipo de lançamento!", "aviso");
 
     // 👇 MÁGICA: CÁLCULO DE MINUTOS DEVIDOS PARA ATRASO/ABANDONO (ADMIN) 👇
     let observacaoFinal = observacao;
 
     if (sigla === 'ATR' || sigla === 'ABD') {
-        const horaEvento = document.getElementById('aus-admin-hora-evento').value;
-        if (!horaEvento) return mostrarAlerta("Preencha o horário do evento!", "aviso");
+        let minutosDevidos = 0;
+        let descBatidas = [];
         
-        tipoExtensoFinal = sigla === 'ATR' ? `Atraso (Chegou às ${horaEvento})` : `Abandono (Saiu às ${horaEvento})`;
-
         // Vamos buscar a jornada atual do colaborador para calcular o débito!
         const { data: cData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let horaEntradaPadrao = '06:00';
+        let horaSaidaPadrao = '18:00';
+        
         if (cData) {
             let jor = cData.dados_admissao.jornada || {};
             if (jor.historico_alteracoes && jor.historico_alteracoes.length > 0) {
@@ -38274,9 +38275,6 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
                     }
                 }
             }
-
-            let horaEntradaPadrao = '06:00';
-            let horaSaidaPadrao = '18:00';
 
             if (jor.tipo === '12x36' && jor.horario) {
                 const m = jor.horario.match(/(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
@@ -38289,26 +38287,43 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
                     if(m) { horaEntradaPadrao = m[1]; horaSaidaPadrao = m[2]; }
                 }
             }
+        }
 
-            // Função auxiliar para converter "HH:MM" em minutos
-            const timeToMins = (t) => { const [h, m] = t.split(':').map(Number); return (h * 60) + m; };
-            
-            let minutosDevidos = 0;
-            
-            if (sigla === 'ATR') {
-                // Atraso: Chegou DEPOIS da hora de entrada
-                minutosDevidos = timeToMins(horaEvento) - timeToMins(horaEntradaPadrao);
-                if (minutosDevidos < 0) minutosDevidos += 1440; // Cruzou meia noite
-            } else {
-                // Abandono: Saiu ANTES da hora de saída
-                minutosDevidos = timeToMins(horaSaidaPadrao) - timeToMins(horaEvento);
-                if (minutosDevidos < 0) minutosDevidos += 1440; // Cruzou meia noite
-            }
+        const timeToMins = (t) => { const [h, m] = t.split(':').map(Number); return (h * 60) + m; };
 
-            // Injeta a tag [ABATE_BANCO] se existir dívida real de horas
-            if (minutosDevidos > 0 && minutosDevidos < 1440) {
-                observacaoFinal = `[ABATE_BANCO] DEDUÇÃO: ${minutosDevidos} MINUTOS. Motivo: ${observacao}`;
+        // Varre as linhas que o ADMIN preencheu na tela
+        document.querySelectorAll('#lista-batidas-ausencia-admin .linha-batida-ausencia').forEach(linha => {
+            const b = linha.querySelector('.aus-atraso-batida').value;
+            const h = linha.querySelector('.aus-atraso-hora').value;
+            if (b && h) {
+                descBatidas.push(`${b}: ${h}`);
+                
+                if (b === 'Entrada') {
+                    let diff = timeToMins(h) - timeToMins(horaEntradaPadrao);
+                    if (diff < 0) diff += 1440; // Cruzou meia noite
+                    if (diff > 0 && diff < 720) minutosDevidos += diff; // Tolerância máxima de 12h
+                } else if (b === 'Saída' || sigla === 'ABD') {
+                    // No Abandono, a pessoa saiu cedo e não voltou
+                    let diff = timeToMins(horaSaidaPadrao) - timeToMins(h);
+                    if (diff < 0) diff += 1440; // Cruzou meia noite
+                    if (diff > 0 && diff < 720) minutosDevidos += diff;
+                }
             }
+        });
+
+        // Trava se o Admin tentou enviar sem preencher as horas
+        if (descBatidas.length === 0) {
+            return mostrarAlerta("Preencha pelo menos um horário de batida para o evento!", "aviso");
+        }
+
+        tipoExtensoFinal = sigla === 'ATR' ? `Atraso` : `Abandono de Plantão`;
+        
+        // Empacota tudo para a Folha ler
+        let relatoBatidas = descBatidas.length > 0 ? ` (Batidas Afetadas: ${descBatidas.join(' | ')})` : '';
+        if (minutosDevidos > 0 && minutosDevidos < 1440) {
+            observacaoFinal = `[ABATE_BANCO] DEDUÇÃO: ${minutosDevidos} MINUTOS. Motivo: ${observacao}${relatoBatidas}`;
+        } else {
+            observacaoFinal = `${observacao}${relatoBatidas}`;
         }
     }
     // 👆 FIM DA MÁGICA 👆
@@ -38322,7 +38337,7 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
         return mostrarAlerta(`Conflito de datas com: <b>${motivoConflito}</b>`, "erro");
     }
 
-    // 👇 MÁGICA 2: CAPTURA O CID SE FOR ATM OU DECL 👇
+    // CAPTURA O CID SE FOR ATM OU DECL
     let cidFinalAdmin = null;
     if ((sigla === 'ATM' || sigla === 'DECL') && document.getElementById('aus-admin-possui-cid').value === 'Sim') {
         cidFinalAdmin = document.getElementById('aus-admin-cid').value.trim();
@@ -38346,7 +38361,7 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
             motivo: tipoExtensoFinal, // 👈 OLHA ELE AQUI (Leva a hora se for DECL, ATR ou ABD)
             data_inicio: dataI, 
             data_fim: dataF, 
-            cid: cidFinalAdmin,       // 👈 OLHA O CID AQUI
+            cid: cidFinalAdmin,       
             observacao: observacaoFinal, // 👇 Salva a observação blindada com o ABATE!
             documento: urlAnexo, 
             status: 'Aprovado', 
@@ -38367,13 +38382,19 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
 
         mostrarAlerta("Lançamento inserido na escala com sucesso!", "sucesso");
         
-        // Limpa o formulário e o campo de horário especial
+        // Limpa o formulário e o container dinâmico de batidas
         document.getElementById('form-ausencia-admin').reset();
-        const inputHoraEventoAdmin = document.getElementById('aus-admin-hora-evento');
-        if(inputHoraEventoAdmin) inputHoraEventoAdmin.value = '';
+        const containerListaBatidasAdmin = document.getElementById('lista-batidas-ausencia-admin');
+        if(containerListaBatidasAdmin) {
+            containerListaBatidasAdmin.innerHTML = `
+            <div class="linha-batida-ausencia" style="display: flex; gap: 10px; align-items: center;">
+                <select class="aus-atraso-batida" style="flex: 1;" required><option value="">Selecione...</option><option value="Entrada">Entrada</option><option value="Ida da Refeição">Ida para Refeição</option><option value="Volta da Refeição">Volta da Refeição</option><option value="Saída">Saída</option></select>
+                <div class="input-wrapper" style="flex: 1; margin: 0;"><i class="fa-regular fa-clock"></i><input type="text" class="aus-atraso-hora" readonly onclick="abrirTimePicker(this)" style="cursor: pointer; text-align: center; padding-left: 35px; width: 100%;" placeholder="Horário" required></div>
+            </div>`;
+        }
         
-        carregarAusenciasParaAdmin(true); // Atualiza a aba do lado
-        atualizarContador(); // Força a atualização do sino na hora!
+        carregarAusenciasParaAdmin(true); 
+        atualizarContador(); 
         
         if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
     } catch(err) {
