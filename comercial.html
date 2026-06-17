@@ -6494,87 +6494,75 @@ function fecharLembrete() {
 // =========================================================
 window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa) {
     try {
-        // 1. Busca TODA a equipe através da RPC segura (Isso ignora a trava do RLS!)
-        const { data: equipeComercial, error: errEquipe } = await supabaseClient.rpc('obter_equipe_comercial_clara');
-        if (errEquipe) {
-            console.error("Erro na RPC:", errEquipe);
-            return;
+        console.log("Iniciando Clara Agenda/Tarefas para:", tituloTarefa);
+        
+        // 1. Tenta buscar a equipe direto da tabela (Garante que os telefones venham atualizados)
+        let equipeValida = [];
+        const { data: perfisDb, error: errDb } = await supabaseClient.from('perfis').select('*');
+        
+        if (!errDb && perfisDb && perfisDb.length > 0) {
+            equipeValida = perfisDb;
+        } else {
+            // Se o banco bloquear a busca direta, usa a RPC como plano B
+            const { data: equipeRpc } = await supabaseClient.rpc('obter_equipe_comercial_clara');
+            equipeValida = equipeRpc || [];
         }
-        
-        const equipeValida = equipeComercial || [];
-        
-        // 2. Encontra os dados do Dono da Tarefa dentro da lista segura que o banco liberou
-        const dono = equipeValida.find(p => p.id === idDonoDaTarefa);
-        if (!dono) return; // Se não achar o dono, aborta a notificação
 
-        let idsParaNotificar = [idDonoDaTarefa]; // O dono sempre entra na fila para receber também
+        if (equipeValida.length === 0) return;
 
-        const perfilDono = (dono.perfil || '').toLowerCase();
-        
-        // Verifica se é o Super Admin, Admin comum ou Gestor
-        const ehGestorOuAdmin = perfilDono.includes('admin') || 
-                               perfilDono.includes('gestor') || 
-                               perfilDono.includes('diretor') || 
-                               dono.id === "fa338e33-18c9-467e-bf3e-34880fd9324e";
+        // 2. Garante a leitura das permissões (Puxando de quem está logado)
+        let permissoesDono = {};
+        if (usuarioAtual && usuarioAtual.id === idDonoDaTarefa) {
+            permissoesDono = usuarioAtual.permissoes || {};
+        } else {
+            const dono = equipeValida.find(p => p.id === idDonoDaTarefa);
+            if (dono) permissoesDono = dono.permissoes || {};
+        }
 
-        // 3. EXTRAÇÃO DE COMPARTILHAMENTO DE DADOS:
-        const permissoesDono = dono.permissoes || {};
+        let idsParaNotificar = [idDonoDaTarefa]; 
+
+        // 3. Puxa quem você marcou na caixinha de compartilhamento (Ex: Jéssica)
         const pessoasAgenda = permissoesDono.agenda_liberada_para || [];
         const pessoasTarefas = permissoesDono.tarefas_liberadas_para || [];
-        const compartilhados = [...new Set([...pessoasAgenda, ...pessoasTarefas])];
         
-        if (compartilhados.length > 0) {
-            idsParaNotificar = [...idsParaNotificar, ...compartilhados];
-        }
+        // Junta tudo e remove IDs duplicados
+        idsParaNotificar = [...idsParaNotificar, ...pessoasAgenda, ...pessoasTarefas];
+        idsParaNotificar = [...new Set(idsParaNotificar)]; 
 
-        // Se o dono for Gestor/Admin, ele também notifica toda a equipe comercial ativa
-        if (ehGestorOuAdmin) {
-            equipeValida.forEach(p => {
-                const sis = (p.permissoes && p.permissoes.sistemas_permitidos) ? p.permissoes.sistemas_permitidos : '';
-                if (sis === 'Comercial' || sis === 'Ambos') {
-                    idsParaNotificar.push(p.id);
-                }
-            });
-        }
-
-        // Remove IDs duplicados para não enviar o zap duas vezes para a mesma pessoa
-        idsParaNotificar = [...new Set(idsParaNotificar)];
-
-        // 4. Mapeia os dados de contato de quem vai receber a mensagem
+        // 4. Mapeia os dados de contato (AQUI ESTÁ O SEGREDO: IGNORAMOS O "PAPEL")
         const pessoasParaNotificar = [];
         idsParaNotificar.forEach(idTarget => {
             const encontrou = equipeValida.find(p => p.id === idTarget);
-            if (encontrou) {
+            
+            // Só importa ter a configuração da Clara e o Telefone preenchido!
+            if (encontrou && encontrou.config_clara && encontrou.config_clara.telefone) {
                 pessoasParaNotificar.push(encontrou);
             }
         });
 
-        if (pessoasParaNotificar.length === 0) return;
+        console.log("A Clara vai disparar para:", pessoasParaNotificar.map(p => p.nome));
 
-        // 5. Dispara a mensagem para cada usuário mapeado de forma assíncrona
+        // 5. Dispara a mensagem via WhatsApp para todos da lista
         pessoasParaNotificar.forEach(async (pessoa) => {
-            if (pessoa.config_clara && pessoa.config_clara.telefone) {
-                
-                let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
-                if (!telefoneLimpo.startsWith('55')) {
-                    telefoneLimpo = '55' + telefoneLimpo;
-                }
-
-                const primeiroNome = (pessoa.nome || '').split(' ')[0];
-
-                await supabaseClient.functions.invoke('smooth-service', {
-                    body: {
-                        action: 'send_template_proposta', // Template base de WhatsApp
-                        numero: telefoneLimpo,
-                        var1: primeiroNome,
-                        var2: `Você tem um novo compromisso/tarefa comercial agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes na sua agenda do painel!`
-                    }
-                });
+            let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
+            if (!telefoneLimpo.startsWith('55')) {
+                telefoneLimpo = '55' + telefoneLimpo;
             }
+
+            const primeiroNome = (pessoa.nome || '').split(' ')[0];
+
+            await supabaseClient.functions.invoke('smooth-service', {
+                body: {
+                    action: 'send_template_proposta', // Usando o template aprovado
+                    numero: telefoneLimpo,
+                    var1: primeiroNome,
+                    var2: `Você tem um novo compromisso/tarefa agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes no painel!`
+                }
+            });
         });
 
     } catch (err) {
-        console.error("Erro ao notificar tarefa via Clara: ", err);
+        console.error("Erro crítico na Clara Agenda:", err);
     }
 };
 
