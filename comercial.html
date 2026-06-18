@@ -6503,19 +6503,13 @@ function fecharLembrete() {
     document.getElementById('modal-lembrete').classList.add('hidden');
 }
 
-     window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa, tipoModulo = 'ambos') {
+    window.notificarClaraNovaTarefa = async function(tituloTarefa, dataHoraFormatada, idDonoDaTarefa, tipoModulo = 'ambos') {
     try {
         console.log("Iniciando Clara Agenda/Tarefas para:", tituloTarefa);
         
-        // 1. Busca a equipe
         const { data: equipeValida, error: errRpc } = await supabaseClient.rpc('obter_equipe_comercial');
-        
-        if (errRpc || !equipeValida || equipeValida.length === 0) {
-            mostrarAlerta("Clara: Erro ao ler equipe do banco de dados.", "erro");
-            return;
-        }
+        if (errRpc || !equipeValida || equipeValida.length === 0) return;
 
-        // 2. Extrai Permissões do Dono
         let permissoesDono = {};
         if (usuarioAtual && usuarioAtual.id === idDonoDaTarefa) {
             permissoesDono = usuarioAtual.permissoes || {};
@@ -6524,7 +6518,6 @@ function fecharLembrete() {
             if (dono) permissoesDono = dono.permissoes || {};
         }
 
-        // 3. MÁGICA AQUI: Filtra a lista certa baseada na origem da notificação
         let listaCompartilhamento = [];
         if (tipoModulo === 'agenda') {
             listaCompartilhamento = permissoesDono.agenda_liberada_para || [];
@@ -6534,12 +6527,9 @@ function fecharLembrete() {
             listaCompartilhamento = [...(permissoesDono.agenda_liberada_para || []), ...(permissoesDono.tarefas_liberadas_para || [])];
         }
 
-        // Monta a lista de IDs permitidos (Dono + Quem ele marcou na lista específica)
-        let idsParaNotificar = [idDonoDaTarefa, ...listaCompartilhamento];
-        idsParaNotificar = [...new Set(idsParaNotificar)]; // Remove repetidos
-
-        // 4. Mapeia quem tem o telefone preenchido
+        let idsParaNotificar = [...new Set([idDonoDaTarefa, ...listaCompartilhamento])];
         const pessoasParaNotificar = [];
+        
         idsParaNotificar.forEach(idTarget => {
             const encontrou = equipeValida.find(p => p.id === idTarget);
             if (encontrou && encontrou.config_clara && encontrou.config_clara.telefone) {
@@ -6547,12 +6537,8 @@ function fecharLembrete() {
             }
         });
 
-        if (pessoasParaNotificar.length === 0) {
-            console.log("Nenhuma pessoa com telefone configurado para receber a notificação.");
-            return;
-        }
+        if (pessoasParaNotificar.length === 0) return;
 
-        // 5. Dispara a mensagem com o TEMPLATE CORRETO
         let nomesEnviados = [];
         for (const pessoa of pessoasParaNotificar) {
             let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
@@ -6560,30 +6546,34 @@ function fecharLembrete() {
 
             const primeiroNome = (pessoa.nome || '').split(' ')[0];
             nomesEnviados.push(primeiroNome);
+            
+            const msgFinal = `Você tem um novo compromisso/tarefa agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes no painel!`;
 
-           await supabaseClient.functions.invoke('smooth-service', {
-                body: {
-                    action: 'aviso_proposta_interna', // 👈 Mantido o seu template
-                    numero: telefoneLimpo,
-                    var1: primeiroNome,
-                    var2: `Você tem um novo compromisso/tarefa agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes no painel!`
+            // Dispara via Edge Function segura
+            await supabaseClient.functions.invoke('smooth-service', {
+                body: { 
+                    action: 'aviso_proposta_interna', 
+                    numero: telefoneLimpo, 
+                    var1: primeiroNome, 
+                    var2: msgFinal 
                 }
             });
         }
         
-        mostrarAlerta(`Aviso no WhatsApp enviado para: ${nomesEnviados.join(', ')}`, "sucesso", "Clara Ativada!");
+        if (typeof mostrarAlerta === "function") {
+            mostrarAlerta(`Aviso no WhatsApp enviado para: ${nomesEnviados.join(', ')}`, "sucesso", "Clara Ativada!");
+        }
 
     } catch (err) {
-        console.error("Erro interno na Clara:", err);
+        console.error("Erro interno na Clara Agenda/Tarefas:", err);
     }
 };
 
-       // =========================================================
-// INTEGRAÇÃO WHATSAPP - CLARA PARA PROPOSTAS E DIRETORIA
-// =========================================================
+// ---------------------------------------------------------
+// 1. NOTIFICAÇÃO DE PROPOSTA (Diretoria e Comercial)
+// ---------------------------------------------------------
 window.notificarClaraProposta = async function(status, nomeEmpresa, nomeComercial) {
     try {
-        // Usa a RPC Segura correta que atualizamos no banco
         const { data: todosPerfis, error } = await supabaseClient.rpc('obter_equipe_comercial');
         if (error || !todosPerfis) throw error;
 
@@ -6591,22 +6581,23 @@ window.notificarClaraProposta = async function(status, nomeEmpresa, nomeComercia
             // 🎯 STATUS: EM ANÁLISE -> Notifica a "Diretoria"
             const diretores = todosPerfis.filter(p => p.config_clara && p.config_clara.papel === 'Diretoria' && p.config_clara.telefone);
 
-            diretores.forEach(async (diretor) => {
-                let telefoneSujo = diretor.config_clara.telefone;
-                let telefoneLimpo = telefoneSujo.replace(/\D/g, ''); 
+            for (const diretor of diretores) {
+                let telefoneLimpo = diretor.config_clara.telefone.replace(/\D/g, ''); 
                 if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
                 const primeiroNome = (diretor.nome || '').split(' ')[0];
+                const msgFinal = `Temos uma nova solicitação de proposta da empresa *${nomeEmpresa}* aguardando sua análise e precificação no painel.`;
 
+                // Dispara via Edge Function segura
                 await supabaseClient.functions.invoke('smooth-service', {
-                    body: {
-                        action: 'aviso_proposta_interna', // 👈 CORRIGIDO PARA O NOME QUE O ROBÔ ACEITA
-                        numero: telefoneLimpo,
-                        var1: primeiroNome,
-                        var2: `Temos uma nova solicitação de proposta da empresa *${nomeEmpresa}* aguardando sua análise e precificação no painel.`
+                    body: { 
+                        action: 'aviso_proposta_interna', 
+                        numero: telefoneLimpo, 
+                        var1: primeiroNome, 
+                        var2: msgFinal 
                     }
                 });
-            });
+            }
         } 
         else if (status === 'Aprovada') {
             // 🎯 STATUS: APROVADA -> Notifica o "Comercial"
@@ -6617,34 +6608,31 @@ window.notificarClaraProposta = async function(status, nomeEmpresa, nomeComercia
                 (p.nome || '').includes(nomeComercial)
             );
 
-            // Se houver divergência de nome, manda para TODOS do Comercial para garantir a venda!
+            // Fallback caso não ache o consultor exato
             if (consultoresAlvo.length === 0) {
-                consultoresAlvo = todosPerfis.filter(p => 
-                    p.config_clara && 
-                    p.config_clara.papel === 'Comercial' && 
-                    p.config_clara.telefone
-                );
+                consultoresAlvo = todosPerfis.filter(p => p.config_clara && p.config_clara.papel === 'Comercial' && p.config_clara.telefone);
             }
 
-            consultoresAlvo.forEach(async (consultor) => {
-                let telefoneSujo = consultor.config_clara.telefone;
-                let telefoneLimpo = telefoneSujo.replace(/\D/g, '');
+            for (const consultor of consultoresAlvo) {
+                let telefoneLimpo = consultor.config_clara.telefone.replace(/\D/g, '');
                 if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
                 const primeiroNome = (consultor.nome || '').split(' ')[0];
+                const msgFinal = `Boas notícias! A sua proposta para a empresa *${nomeEmpresa}* foi precificada e aprovada pela Diretoria. Já está liberada no painel para gerar o PDF oficial!`;
 
+                // Dispara via Edge Function segura
                 await supabaseClient.functions.invoke('smooth-service', {
-                    body: {
-                        action: 'aviso_proposta_interna', // 👈 CORRIGIDO PARA O NOME QUE O ROBÔ ACEITA
-                        numero: telefoneLimpo,
-                        var1: primeiroNome,
-                        var2: `Boas notícias! A sua proposta para a empresa *${nomeEmpresa}* foi precificada e aprovada pela Diretoria. Já está liberada no painel para gerar o PDF oficial!`
+                    body: { 
+                        action: 'aviso_proposta_interna', 
+                        numero: telefoneLimpo, 
+                        var1: primeiroNome, 
+                        var2: msgFinal 
                     }
                 });
-            });
+            }
         }
     } catch (err) {
-        console.error("Erro na comunicação com a API da Clara: ", err);
+        console.error("Erro na lógica de propostas da Clara: ", err);
     }
 };
 
