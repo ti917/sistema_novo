@@ -36790,6 +36790,7 @@ window.carregarDashboardInicio = async function() {
     const mesAtualStr = String(mesAtual).padStart(2, '0');
     const dataISOInicioMes = `${anoAtual}-${mesAtualStr}-01`;
     const dataISOFimMes = `${anoAtual}-${mesAtualStr}-${new Date(anoAtual, mesAtual, 0).getDate()}`;
+    const hojeIso = dataAtual.toISOString().split('T')[0]; // <-- Usado para achar os afastados de HOJE
 
     try {
         let unidsFiltro = null;
@@ -36802,12 +36803,14 @@ window.carregarDashboardInicio = async function() {
             unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
         }
 
-        // Buscas (Adicionado 'nome', 'unidade' e 'datas' no select das Faltas e Férias para usarmos no Modal)
+        // Buscas Originais
         let qPerfis = supabaseClient.from('perfis').select('id, nome, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         let qFaltas = supabaseClient.from('ausencias').select('id, nome, unidade, data_inicio').eq('sigla', 'FA').eq('status', 'Aprovado').gte('data_inicio', dataISOInicioMes).lte('data_inicio', dataISOFimMes);
-        let qFerias = supabaseClient.from('solicitacoes_ferias').select('id, nome, unidade, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', dataAtual.toISOString().split('T')[0]).gte('data_fim_ferias', dataAtual.toISOString().split('T')[0]);
-        
+        let qFerias = supabaseClient.from('solicitacoes_ferias').select('colaborador_id, id, nome, unidade, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso);
         let qAdvs = supabaseClient.from('advertencias').select('nome, unidade, gravidade, status, empresa').neq('status', 'Reprovado');
+        
+        // 👇 BUSCA NOVA: Procura quem está com Atestado/Licença EXATAMENTE HOJE 👇
+        let qAfastadosHoje = supabaseClient.from('ausencias').select('colaborador_id, sigla').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).neq('sigla', 'FA');
 
         if (empresaFiltro) {
             qPerfis = qPerfis.eq('empresa', empresaFiltro);
@@ -36818,11 +36821,11 @@ window.carregarDashboardInicio = async function() {
             qFaltas = qFaltas.in('unidade', unidsFiltro);
             qFerias = qFerias.in('unidade', unidsFiltro);
             qAdvs = qAdvs.in('unidade', unidsFiltro);
+            qAfastadosHoje = qAfastadosHoje.in('unidade', unidsFiltro);
         }
 
-        const [resPerfis, resFaltas, resFerias, resAdvs] = await Promise.all([qPerfis, qFaltas, qFerias, qAdvs]);
+        const [resPerfis, resFaltas, resFerias, resAdvs, resAfastadosHoje] = await Promise.all([qPerfis, qFaltas, qFerias, qAdvs, qAfastadosHoje]);
 
-        // Limpa as listas globais
         window.dadosDetalhesDash = { ativos: [], admissoes: [], rescisoes: [], faltas: [], ferias: [] };
 
         let countAdmissoesMes = 0;
@@ -36830,12 +36833,20 @@ window.carregarDashboardInicio = async function() {
         let countAtivosGeral = 0;
         let aniversariantes = [];
 
-       if (resPerfis.data) {
+        // 👇 Mapeia a lista de quem está ausente hoje (Férias ou Atestado/Licença) 👇
+        const mapaAfastamentos = {};
+        if (resAfastadosHoje && resAfastadosHoje.data) {
+            resAfastadosHoje.data.forEach(a => mapaAfastamentos[a.colaborador_id] = a.sigla);
+        }
+        if (resFerias && resFerias.data) {
+            resFerias.data.forEach(f => mapaAfastamentos[f.colaborador_id] = 'FER');
+        }
+
+        if (resPerfis.data) {
             resPerfis.data.forEach(c => {
                 const adm = c.dados_admissao || {};
                 const resc = c.dados_rescisao || {};
                 
-                // 👇 A MÁGICA: Sincroniza a contagem com a tela de Admissões (Inclui ASO e Aviso Prévio) 👇
                 let taNoAvisoAinda = false;
                 if (c.status === 'Desligado' && resc.ultimo_dia) {
                     const hoje = new Date(); hoje.setHours(0,0,0,0);
@@ -36849,9 +36860,28 @@ window.carregarDashboardInicio = async function() {
                 
                 if (c.status === 'Ativo' || c.status === 'Aguardando ASO' || taNoAvisoAinda) {
                     countAtivosGeral++;
-                    window.dadosDetalhesDash.ativos.push({ nome: c.nome, unidade: c.unidade, detalhe: adm.cargo || '-' });
+                    
+                    // 👇 A MÁGICA VISUAL: CRIAMOS TAGS QUE SERÃO INJETADAS AO LADO DO NOME 👇
+                    let statusTag = '';
+                    if (taNoAvisoAinda) {
+                        statusTag = ' <span style="background: rgba(255,152,0,0.15); color: #ff9800; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; vertical-align: middle; border: 1px solid rgba(255,152,0,0.3);"><i class="fa-solid fa-clock"></i> Aviso Prévio</span>';
+                    } else if (c.status === 'Aguardando ASO') {
+                        statusTag = ' <span style="background: rgba(0,188,212,0.15); color: #00bcd4; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; vertical-align: middle; border: 1px solid rgba(0,188,212,0.3);"><i class="fa-solid fa-notes-medical"></i> Sem ASO</span>';
+                    } else if (mapaAfastamentos[c.id]) {
+                        const siglaAf = mapaAfastamentos[c.id];
+                        if (siglaAf === 'FER') {
+                            statusTag = ' <span style="background: rgba(255,213,79,0.15); color: #ffd54f; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; vertical-align: middle; border: 1px solid rgba(255,213,79,0.3);"><i class="fa-solid fa-plane-departure"></i> Férias</span>';
+                        } else {
+                            statusTag = ` <span style="background: rgba(139,92,246,0.15); color: #c4b5fd; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; vertical-align: middle; border: 1px solid rgba(139,92,246,0.3);"><i class="fa-solid fa-bed-pulse"></i> Afastado (${siglaAf})</span>`;
+                        }
+                    }
+
+                    window.dadosDetalhesDash.ativos.push({ 
+                        nome: c.nome + statusTag, 
+                        unidade: c.unidade, 
+                        detalhe: adm.cargo || '-' 
+                    });
                 }
-                // 👆 FIM DA MÁGICA 👆
                 
                 const dAdm = adm.jornada?.data_inicio || adm.data_inicio;
                 if (dAdm && dAdm.startsWith(`${anoAtual}-${mesAtualStr}`)) {
@@ -36892,7 +36922,7 @@ window.carregarDashboardInicio = async function() {
         document.getElementById('dash-falta-mes').innerText = resFaltas.data ? resFaltas.data.length : 0;
         document.getElementById('dash-ferias-ativas').innerText = resFerias.data ? resFerias.data.length : 0;
 
-        // --- LÓGICA DO RANKING DISCIPLINAR (MANTIDA IGUAL) ---
+        // --- LÓGICA DO RANKING DISCIPLINAR ---
         const advHtmlContainer = document.getElementById('dash-lista-advertencias');
         if (resAdvs.data && resAdvs.data.length > 0) {
             let mapaInfratores = {};
@@ -36940,7 +36970,7 @@ window.carregarDashboardInicio = async function() {
             advHtmlContainer.innerHTML = '<div style="text-align:center; padding:20px;"><i class="fa-solid fa-face-smile fa-3x" style="color:var(--cor-sucesso); opacity:0.5; margin-bottom:10px;"></i><p style="color:var(--cor-texto-secundario);">Nenhuma ocorrência registrada.</p></div>';
         }
 
-        // Aniversariantes (MANTIDA IGUAL)
+        // Aniversariantes
         const anivHtmlContainer = document.getElementById('dash-lista-aniversarios');
         if (aniversariantes.length > 0) {
             aniversariantes.sort((a, b) => a.dia - b.dia);
