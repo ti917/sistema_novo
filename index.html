@@ -43883,9 +43883,11 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
                 taAfastadoHoje = true; 
             }
 
-            if (taAfastadoHoje && !mapaAndamento[c.id]) {
-                return; 
-            }
+           // Se o cara está de atestado ou férias hoje, pula ele! 
+// Ele não bloqueia o sistema e nem aparece na lista de cobrança.
+if (taAfastadoHoje) {
+    return; 
+}
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
             let taAtrasado = false;
@@ -44313,7 +44315,7 @@ window.carregarDesempenhosAndamento = async function() {
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     
-    // 👇 1. Busca as avaliações
+    // 1. Busca as avaliações
     const { data: avaliacoes, error } = await supabaseClient.from('avaliacoes_desempenho')
         .select('*')
         .in('unidade', unids)
@@ -44325,24 +44327,43 @@ window.carregarDesempenhosAndamento = async function() {
         return;
     }
 
-    // 👇 A MÁGICA ENTRA AQUI: Busca o status ATUAL dos colaboradores na tabela perfis 👇
     const colabIds = [...new Set(avaliacoes.map(a => a.colaborador_id))];
-    const { data: perfisColabs } = await supabaseClient.from('perfis')
-        .select('id, status, status_aprovacao')
-        .in('id', colabIds);
+    if (colabIds.length === 0) {
+        window.avaliacoesAndamentoGlobais = [];
+        window.filtrarDesempenhoAndamento();
+        return;
+    }
 
-    // 👇 2. Filtra removendo quem já está Desligado ou em Processo Rescisório
+    const hojeIso = new Date().toISOString().split('T')[0];
+
+    // 2. Busca status de rescisão E também as ausências/férias de HOJE
+    const [resPerfis, resAusencias, resFerias] = await Promise.all([
+        supabaseClient.from('perfis').select('id, status, status_aprovacao').in('id', colabIds),
+        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).neq('sigla', 'FA'),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+    ]);
+
+    const perfisColabs = resPerfis.data || [];
+    
+    // Cria um "balde" rápido com os IDs de quem está afastado hoje
+    const afastadosHoje = new Set([
+        ...(resAusencias.data || []).map(a => a.colaborador_id),
+        ...(resFerias.data || []).map(f => f.colaborador_id)
+    ]);
+
+    // 3. Filtra as avaliações
     const avaliacoesValidas = avaliacoes.filter(aval => {
-        const perfil = perfisColabs?.find(p => p.id === aval.colaborador_id);
+        const perfil = perfisColabs.find(p => p.id === aval.colaborador_id);
         if (!perfil) return false;
         
-        // Se já foi demitido, cancelado ou excluído, ignora.
+        // REGRA 1: Esconde quem tá de Aviso Prévio ou Desligado
         if (perfil.status === 'Desligado' || perfil.status === 'Cancelado(a)' || perfil.status === 'Excluído') return false;
-        
-        // Se a rescisão foi pedida (Aguardando RH ou Gestor), ignora também!
         if (perfil.status_aprovacao === 'Rescisão Pendente' || perfil.status_aprovacao === 'Aguardando Assinatura') return false;
         
-        return true; // Só passa quem está 100% ativo e sem aviso de rescisão
+        // REGRA 2: Esconde quem está de Férias ou Atestado HOJE
+        if (afastadosHoje.has(aval.colaborador_id)) return false;
+
+        return true; 
     });
 
     window.avaliacoesAndamentoGlobais = avaliacoesValidas;
