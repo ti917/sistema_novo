@@ -3295,6 +3295,35 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
     </div>
 </section>
 
+          <section id="tela-escala-epi" class="view-section hidden">
+    <div class="glass-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h3 style="color: #00bcd4; margin: 0;"><i class="fa-solid fa-helmet-safety"></i> Escala Diária de Entrega de EPIs</h3>
+        </div>
+        
+        <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
+            Clique nos dias na grade abaixo para registrar a entrega de EPIs para o colaborador. Ele receberá a notificação para assinar no celular na mesma hora.
+        </p>
+
+        <div class="controls-escala" style="background: rgba(0, 188, 212, 0.05); border: 1px solid rgba(0, 188, 212, 0.3); display: flex; flex-wrap: wrap; gap: 15px;">
+            <div class="input-wrapper" style="width: 200px;">
+                <i class="fa-regular fa-calendar"></i>
+                <input type="month" id="filtro-mes-escala-epi" onchange="carregarEscalaEpi()" onclick="this.showPicker()">
+            </div>
+            <div class="input-wrapper" style="width: 300px; flex-grow: 1;">
+                <i class="fa-solid fa-map-marker-alt"></i>
+                <select id="filtro-unidade-escala-epi" onchange="carregarEscalaEpi()">
+                    <option value="">Carregando...</option>
+                </select>
+            </div>
+        </div>
+
+        <div style="overflow-x: auto; padding-bottom: 10px; margin-top: 20px;" id="container-escala-epi">
+            <p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Selecione o mês e a unidade acima para gerar a escala de EPI.</p>
+        </div>
+    </div>
+</section>
+
                 <section id="tela-experiencia" class="view-section hidden">
     <div class="glass-card">
         <h3 style="margin-bottom: 20px; color: #ffc107;"><i class="fa-solid fa-star"></i> Avaliações de Período de Experiência</h3>
@@ -12190,6 +12219,10 @@ async function carregarPerfil(id) {
         if (isVisible('tela-ferias')) menu.innerHTML += `<button class="nav-btn" data-target="tela-ferias" style="color: #ffd54f;"><i class="fa-solid fa-plane-departure"></i> <span>Solicitar Férias</span></button>`;
         if (isVisible('tela-rescisao')) menu.innerHTML += `<button class="nav-btn" data-target="tela-rescisao" style="color: var(--cor-perigo);"><i class="fa-solid fa-user-slash"></i> <span>Rescisões</span></button>`;
         if (isVisible('tela-estoque')) menu.innerHTML += `<button class="nav-btn" data-target="tela-estoque" style="color: #00bcd4;"><i class="fa-solid fa-boxes-stacked"></i> <span>Estoque / EPIs</span></button>`;
+        
+        // 👇 A MÁGICA: INJEÇÃO DA NOVA ABA DE ESCALA DE EPIS AQUI 👇
+        if (isVisible('tela-escala-epi')) menu.innerHTML += `<button class="nav-btn" data-target="tela-escala-epi" style="color: #00bcd4;"><i class="fa-solid fa-helmet-safety"></i> <span>Escala de EPIs</span></button>`;
+        
         if (isVisible('tela-captacao')) menu.innerHTML += `<button class="nav-btn" data-target="tela-captacao" style="color: #28a745;"><i class="fa-solid fa-address-book"></i> <span>Site e Currículos</span></button>`;
         
         // APAGUE o atualizarContador(); que ficava aqui!
@@ -50913,6 +50946,318 @@ window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, co
             }
         }
     } catch (e) { console.error("Erro no salvamento duplo (Opção B):", e); }
+};
+
+      // =========================================================================
+// MÓDULO: ESCALA DIÁRIA DE EPI (GESTOR E ADMIN)
+// =========================================================================
+
+let tomSelectEpiItens = null;
+let dadosEpiEscalaAtual = [];
+
+// 1. Gatilho ao clicar no menu lateral
+document.querySelector('[data-target="tela-escala-epi"]')?.addEventListener('click', async () => {
+    const selectUnidade = document.getElementById('filtro-unidade-escala-epi');
+    let options = '<option value="">Selecione a unidade...</option>';
+
+    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
+        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+    } else {
+        const { data } = await supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
+        const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+        uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
+    }
+    
+    selectUnidade.innerHTML = options;
+
+    // Seta o mês atual
+    const dataAtual = new Date();
+    document.getElementById('filtro-mes-escala-epi').value = `${dataAtual.getFullYear()}-${String(dataAtual.getMonth() + 1).padStart(2, '0')}`;
+    document.getElementById('container-escala-epi').innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Selecione o mês e a unidade acima para gerar a escala.</p>';
+});
+
+// 2. Carregar e Desenhar a Grade
+window.carregarEscalaEpi = async function() {
+    const unidade = document.getElementById('filtro-unidade-escala-epi').value;
+    const mesAno = document.getElementById('filtro-mes-escala-epi').value;
+    const containerTabela = document.getElementById('container-escala-epi');
+
+    if (!unidade || !mesAno) return;
+
+    containerTabela.innerHTML = '<p style="text-align:center; color: #00bcd4; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Desenhando grade de EPIs...</p>';
+
+    try {
+        const partesMesAno = mesAno.split('-');
+        const ano = parseInt(partesMesAno[0]);
+        const mes = parseInt(partesMesAno[1]) - 1;
+        const diasNoMes = new Date(ano, mes + 1, 0).getDate();
+        const dataInicioMes = `${ano}-${String(mes + 1).padStart(2, '0')}-01`;
+        const dataFimMes = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(diasNoMes).padStart(2, '0')}`;
+
+        // Busca colaboradores ativos
+        let queryPerfis = supabaseClient.from('perfis').select('id, nome, dados_admissao, empresa, status').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
+        if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+            queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
+        }
+        
+        const { data: colabs } = await queryPerfis;
+        const ativosReais = window.filtrarAtivosE_AvisoPrevio(colabs || []);
+
+        if (ativosReais.length === 0) {
+            containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador ativo nesta unidade.</p>';
+            return;
+        }
+
+        // Busca lançamentos daquele mês
+        const { data: entregas } = await supabaseClient.from('entregas_epi_diario')
+            .select('*')
+            .eq('unidade', unidade)
+            .gte('data_entrega', dataInicioMes)
+            .lte('data_entrega', dataFimMes);
+
+        dadosEpiEscalaAtual = entregas || [];
+
+        // Monta HTML
+        let html = '<table class="tabela-escala"><thead><tr><th style="min-width: 150px; text-align: left;">Colaborador</th><th style="min-width: 100px;">Cargo</th>';
+        for (let d = 1; d <= diasNoMes; d++) { 
+            html += `<th><div style="font-size: 0.9rem;">${String(d).padStart(2, '0')}</div></th>`;
+        }
+        html += '</tr></thead><tbody>';
+
+        ativosReais.forEach(c => {
+            const cargo = c.dados_admissao?.cargo || '-';
+            const fone = c.dados_admissao?.telefone || '';
+            const cpf = c.dados_admissao?.cpf || '';
+            const empresaColab = c.empresa || 'Empresa_Padrao';
+            const nomeSeguro = c.nome.replace(/'/g, "\\'");
+            
+            html += `<tr>
+                <td style="text-align: left; padding: 6px 10px;">
+                    <strong style="white-space: nowrap;">${c.nome}</strong><br>
+                    <span style="font-size:0.7rem; color:var(--cor-texto-secundario);">${fone ? '<i class="fa-brands fa-whatsapp" style="color:#25D366;"></i> OK' : '<i class="fa-solid fa-triangle-exclamation" style="color:#dc3545;"></i> Sem N°'}</span>
+                </td>
+                <td style="font-size:0.8rem; color:var(--cor-texto-secundario);">${cargo}</td>`;
+                
+            for (let d = 1; d <= diasNoMes; d++) {
+                const dataIsoStr = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                
+                // Procura se tem registro nesse dia exato
+                const entregaHoje = dadosEpiEscalaAtual.find(e => String(e.colaborador_id) === String(c.id) && e.data_entrega === dataIsoStr);
+                
+                let conteudoCelula = `<i class="fa-solid fa-plus" style="opacity: 0.3;"></i>`;
+                let corFundo = 'transparent';
+                let onclickEvent = `onclick="abrirModalLancarEPIDiario('${c.id}', '${nomeSeguro}', '${cpf}', '${fone}', '${unidade}', '${empresaColab}', '${dataIsoStr}')"`;
+
+                if (entregaHoje) {
+                    // Já tem entrega! Muda a ação e a cor
+                    onclickEvent = `onclick="abrirModalVisualizarEPIDiario('${entregaHoje.id}')"`;
+                    if (entregaHoje.status === 'Assinado') {
+                        conteudoCelula = `<i class="fa-solid fa-file-signature" style="color: #28a745; font-size: 1.2rem;"></i>`;
+                        corFundo = 'rgba(40,167,69,0.15)';
+                    } else {
+                        conteudoCelula = `<i class="fa-solid fa-clock" style="color: #ff9800; font-size: 1.2rem;"></i>`;
+                        corFundo = 'rgba(255,152,0,0.15)';
+                    }
+                }
+
+                html += `<td style="cursor: pointer; background: ${corFundo}; transition: 0.2s;" onmouseover="this.style.background='rgba(0, 188, 212, 0.2)'" onmouseout="this.style.background='${corFundo}'" ${onclickEvent}>
+                    <div style="display:flex; justify-content:center; align-items:center; height:100%; width:100%;">
+                        ${conteudoCelula}
+                    </div>
+                </td>`;
+            }
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        containerTabela.innerHTML = html;
+
+    } catch (e) {
+        containerTabela.innerHTML = `<p style="color:var(--cor-perigo); text-align:center;">Erro: ${e.message}</p>`;
+    }
+};
+
+// 3. Modal de Lançamento
+window.abrirModalLancarEPIDiario = function(idColab, nome, cpf, telefone, unidade, empresa, dataIso) {
+    if (!telefone) return mostrarAlerta("O colaborador não possui WhatsApp cadastrado!", "erro");
+
+    const listaProdutos = [
+        "Luva Nitrílica", "Luva de Látex", "Luva de Vaqueta", "Luva de Procedimento", 
+        "Máscara Descartável", "Máscara N95 / PFF2", "Óculos de Proteção", "Protetor Auricular", 
+        "Bota de Segurança", "Sapato Antiderrapante", "Avental Impermeável", "Touca Descartável",
+        "Uniforme (Camisa)", "Uniforme (Calça)", "Jaqueta/Blusa de Frio"
+    ];
+
+    let options = '';
+    listaProdutos.forEach(p => options += `<option value="${p}">${p}</option>`);
+
+    const modalHtml = `
+    <div id="modal-lancar-epi-dia" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid #00bcd4; position: relative;">
+            <button onclick="document.getElementById('modal-lancar-epi-dia').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            
+            <h3 style="color: #00bcd4; margin-bottom: 5px;"><i class="fa-solid fa-helmet-safety"></i> Registrar Entrega</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Data: <b style="color: #fff;">${formatarDataBR(dataIso)}</b></p>
+            
+            <div style="background: rgba(0, 188, 212, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #00bcd4; margin-bottom: 20px;">
+                <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${nome}</strong>
+                <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 5px;"><i class="fa-brands fa-whatsapp" style="color: #25D366;"></i> Enviar para: ${telefone}</span>
+            </div>
+            
+            <form id="form-salvar-epi-dia">
+                <div class="form-group">
+                    <label style="color: #00bcd4;">Quais itens ele retirou hoje? <span style="color: var(--cor-perigo);">*</span></label>
+                    <select id="epi-dia-itens-select" multiple required placeholder="Clique ou digite os itens...">
+                        ${options}
+                    </select>
+                </div>
+                
+                <button type="submit" id="btn-salvar-epi-dia" class="btn-success" style="width: 100%; height: 50px; background: #00bcd4; color: #000; border: none; font-weight: bold; margin-top: 10px;">
+                    <i class="fa-brands fa-whatsapp fa-lg"></i> Lançar e Cobrar no WhatsApp
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Liga o TomSelect
+    tomSelectEpiItens = new TomSelect('#epi-dia-itens-select', {
+        plugins: ['remove_button'],
+        create: true, 
+        placeholder: "Selecione ou digite os EPIs..."
+    });
+
+    // Lógica do Submit
+    document.getElementById('form-salvar-epi-dia').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('btn-salvar-epi-dia');
+        const itensSelecionados = tomSelectEpiItens.getValue();
+        
+        if (itensSelecionados.length === 0) return mostrarAlerta("Selecione pelo menos um EPI!", "aviso");
+
+        btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando...';
+
+        try {
+            const tokenUnico = crypto.randomUUID();
+            const itensString = itensSelecionados.join(', ');
+
+            // 1. Salva no banco de dados como pendente
+            const { error: errInsert } = await supabaseClient.from('entregas_epi_diario').insert([{
+                colaborador_id: idColab,
+                nome_colaborador: nome,
+                cpf: cpf || '000.000.000-00',
+                telefone: telefone,
+                unidade: unidade,
+                empresa: empresa,
+                data_entrega: dataIso,
+                itens_entregues: itensSelecionados,
+                token: tokenUnico,
+                status: 'Pendente',
+                criado_por: usuarioAtual.nome
+            }]);
+
+            if (errInsert) throw errInsert;
+
+            // 2. Chama a GraphAPI para enviar o Zap (Payload Criptografado)
+            const primeiroNome = nome.split(' ')[0];
+            const dataFormatada = formatarDataBR(dataIso);
+            
+            const payloadDecodificado = { t: tokenUnico };
+            const parametrosDaURL = "?p=" + btoa(encodeURIComponent(JSON.stringify(payloadDecodificado)));
+            
+            const ok = await enviarMensagemGraphAPI(
+                telefone, 
+                'aviso_entrega_epi_diario', 
+                [primeiroNome, dataFormatada, itensString], 
+                null, 
+                parametrosDaURL 
+            );
+
+            if (!ok) mostrarAlerta("Registrado, mas houve falha de rede no WhatsApp.", "erro");
+            else mostrarAlerta("EPI registrado e cobrança enviada no WhatsApp com sucesso!", "sucesso");
+
+            document.getElementById('modal-lancar-epi-dia').remove();
+            carregarEscalaEpi(); // Recarrega a grade (Atualiza a Pílula pra Amarelo)
+
+        } catch (err) {
+            mostrarAlerta("Erro ao salvar: " + err.message, "erro");
+            btn.disabled = false; btn.innerHTML = '<i class="fa-brands fa-whatsapp fa-lg"></i> Tentar Novamente';
+        }
+    });
+};
+
+// 4. Modal para Visualizar / Excluir / Baixar o PDF
+window.abrirModalVisualizarEPIDiario = function(idEpi) {
+    const e = dadosEpiEscalaAtual.find(x => x.id === idEpi);
+    if (!e) return;
+
+    const dataFormatada = formatarDataBR(e.data_entrega);
+    const itensArray = typeof e.itens_entregues === 'string' ? JSON.parse(e.itens_entregues) : e.itens_entregues;
+    
+    let htmlItens = '';
+    itensArray.forEach(i => htmlItens += `<span style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-borda); padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; margin: 2px;">${i}</span>`);
+
+    let corStatus = e.status === 'Assinado' ? '#28a745' : '#ff9800';
+    let iconStatus = e.status === 'Assinado' ? 'fa-check-double' : 'fa-clock';
+    
+    let botoesAcao = '';
+    if (e.status === 'Assinado') {
+        botoesAcao = `<a href="${e.doc_assinado}" target="_blank" class="btn-success" style="width: 100%; background: #28a745; color: #fff; text-decoration: none; display: flex; align-items: center; justify-content: center; height: 50px; font-weight: bold; border-radius: 8px;"><i class="fa-solid fa-file-pdf"></i> Visualizar PDF Assinado</a>`;
+    } else {
+        botoesAcao = `<button class="btn-secondary" style="width: 100%; border-color: #ff9800; color: #ff9800; height: 50px; font-weight: bold;" onclick="mostrarAlerta('O colaborador já possui o link no WhatsApp. Se excluí-lo, você terá que lançar de novo.', 'aviso')"><i class="fa-solid fa-hourglass-half"></i> Aguardando Colaborador</button>`;
+    }
+
+    const modalHtml = `
+    <div id="modal-ver-epi-dia" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 450px; border: 1px solid ${corStatus}; position: relative;">
+            <button onclick="document.getElementById('modal-ver-epi-dia').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            
+            <h3 style="color: ${corStatus}; margin-bottom: 5px;"><i class="fa-solid ${iconStatus}"></i> Detalhes da Entrega</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Data: <b style="color: #fff;">${dataFormatada}</b></p>
+            
+            <div style="background: rgba(0,0,0,0.1); padding: 15px; border-radius: 8px; border-left: 4px solid ${corStatus}; margin-bottom: 20px;">
+                <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${e.nome_colaborador}</strong>
+                <div style="display: flex; flex-wrap: wrap; margin-top: 10px; gap: 5px;">
+                    ${htmlItens}
+                </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+                ${botoesAcao}
+                <button class="btn-danger-mini" style="height: 45px; font-weight: bold; border-radius: 8px;" onclick="excluirCobrancaEpiDiario('${e.id}')">
+                    <i class="fa-solid fa-trash"></i> Excluir Registro Definitivamente
+                </button>
+            </div>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// 5. Excluir o Lançamento
+window.excluirCobrancaEpiDiario = async function(id) {
+    const confirmado = await mostrarConfirmacao("Deseja apagar este registro? O link enviado para o funcionário ficará inválido e sumirá da escala.", "Excluir Entrega");
+    if (!confirmado) return;
+
+    try {
+        const epiInfo = dadosEpiEscalaAtual.find(x => x.id === id);
+        
+        // Se já tinha assinado, limpa do Storage
+        if (epiInfo && epiInfo.doc_assinado) {
+            const path = epiInfo.doc_assinado.split('/storage/v1/object/public/documentos/')[1];
+            if (path) await supabaseClient.storage.from('documentos').remove([decodeURIComponent(path)]);
+        }
+
+        const { error } = await supabaseClient.from('entregas_epi_diario').delete().eq('id', id);
+        if (error) throw error;
+        
+        mostrarAlerta("Registro de EPI apagado!", "sucesso");
+        document.getElementById('modal-ver-epi-dia').remove();
+        carregarEscalaEpi(); // Recarrega a grade
+    } catch (err) {
+        mostrarAlerta("Erro ao excluir: " + err.message, "erro");
+    }
 };
       
         window.ultimoContadorSino = 0;
