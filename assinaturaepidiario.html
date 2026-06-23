@@ -162,20 +162,13 @@
     </div>
 
     <script>
-        // ==========================================
-        // 1. CONFIGURAÇÕES DO BANCO E VARIÁVEIS GLOBAIS
-        // ==========================================
         const SUPABASE_URL = 'https://kefvwdxebzgedugqeimz.supabase.co';
         const SUPABASE_ANON_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
-        
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
         const URL_EDGE_FUNCTION = 'https://kefvwdxebzgedugqeimz.supabase.co/functions/v1/finalizar-epi-diario';
 
         let registroAtual = null;
 
-       // ==========================================
-        // 2. INICIALIZAÇÃO DA PÁGINA E LEITURA DO TOKEN
-        // ==========================================
         document.addEventListener('DOMContentLoaded', async () => {
             let token = null;
             const urlCompleta = window.location.href;
@@ -185,9 +178,7 @@
                 try {
                     const jsonString = decodeURIComponent(atob(decodeURIComponent(base64)));
                     token = JSON.parse(jsonString).t;
-                } catch(e) {
-                    console.error("Falha ao decodificar P:", e);
-                }
+                } catch(e) {}
             } else {
                 const urlParams = new URLSearchParams(window.location.search);
                 token = urlParams.get('t');
@@ -199,15 +190,28 @@
             }
 
             try {
-                const { data, error } = await supabaseClient.from('entregas_epi_diario')
-                    .select('*')
-                    .eq('token', token)
-                    .maybeSingle();
+                // 👇 A MÁGICA: O site agora pede pra Edge Function buscar os dados. 
+                // Isso dribla o bloqueio de segurança do Supabase para usuários anônimos (RLS)!
+                const response = await fetch(URL_EDGE_FUNCTION, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${SUPABASE_ANON_KEY}` 
+                    },
+                    body: JSON.stringify({
+                        token: token,
+                        action: 'fetch' // Avisa a Edge Function que só queremos LER os dados
+                    })
+                });
 
-                if (error) throw new Error("Erro de conexão com o banco de dados.");
-                if (!data) throw new Error("Documento não encontrado na base de dados ou já foi excluído.");
+                const resData = await response.json();
 
-                registroAtual = data;
+                if (!response.ok || resData.error) {
+                    throw new Error(resData.error || "Documento não encontrado ou já excluído.");
+                }
+
+                registroAtual = resData.epi;
+                const cargoExibicao = resData.cargo; // O cargo já vem liberado pela nuvem!
 
                 if (registroAtual.status === 'Assinado') {
                     document.getElementById('tela-loading').classList.add('hidden');
@@ -219,28 +223,11 @@
                     document.getElementById('logo-empresa').src = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
                 }
 
+                // Injeta os dados na tela
                 document.getElementById('info-nome').innerText = registroAtual.nome_colaborador;
                 document.getElementById('info-data').innerText = formatarDataBR(registroAtual.data_entrega);
-                
-                // 👇 INJETANDO A UNIDADE AQUI 👇
                 document.getElementById('info-unidade').innerText = `${registroAtual.unidade} (${registroAtual.empresa})`;
-
-                // 👇 BUSCA DO CARGO BLINDADA COM JSON.PARSE 👇
-                let cargoExibicao = "Não Informado";
-                if (registroAtual.colaborador_id) {
-                    const { data: colab } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', registroAtual.colaborador_id).maybeSingle();
-                    if (colab && colab.dados_admissao) {
-                        let adm = colab.dados_admissao;
-                        // Se vier como string, força virar Objeto
-                        if (typeof adm === 'string') {
-                            try { adm = JSON.parse(adm); } catch(e) { adm = {}; }
-                        }
-                        if (adm.cargo) {
-                            cargoExibicao = adm.cargo;
-                        }
-                    }
-                }
-                document.getElementById('info-cargo').innerText = cargoExibicao;
+                document.getElementById('info-cargo').innerText = cargoExibicao; // Injeta o Cargo!
 
                 const caixaItens = document.getElementById('lista-itens');
                 caixaItens.innerHTML = '';
@@ -263,9 +250,6 @@
             }
         });
 
-        // ==========================================
-        // 3. LÓGICA DO QUADRO BRANCO (CANVAS DE ASSINATURA)
-        // ==========================================
         const canvas = document.getElementById('canvas-assinatura');
         const ctx = canvas.getContext('2d');
         let desenhando = false;
@@ -298,9 +282,6 @@
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
 
-        // ==========================================
-        // 4. ENVIO FINAL (SUBMIT PARA EDGE FUNCTION)
-        // ==========================================
         async function finalizarAssinatura() {
             const blank = document.createElement('canvas');
             blank.width = canvas.width; blank.height = canvas.height;
@@ -324,7 +305,8 @@
                     },
                     body: JSON.stringify({
                         token: registroAtual.token,
-                        assinaturaBase64: assinaturaBase64
+                        assinaturaBase64: assinaturaBase64,
+                        action: 'sign' // Avisa a Edge Function que agora é a hora de gerar o PDF
                     })
                 });
 
