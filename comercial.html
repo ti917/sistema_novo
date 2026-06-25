@@ -6754,8 +6754,6 @@ function fecharLembrete() {
         console.log("Iniciando Clara Agenda/Tarefas para:", tituloTarefa);
         
         const { data: equipeValida, error: errRpc } = await supabaseClient.rpc('obter_equipe_comercial');
-        
-        // Pega a equipe. Se der erro, pelo menos inicializa uma lista vazia para não quebrar
         const equipe = (!errRpc && equipeValida) ? equipeValida : [];
 
         let permissoesDono = {};
@@ -6778,33 +6776,33 @@ function fecharLembrete() {
         let idsParaNotificar = [...new Set([idDonoDaTarefa, ...listaCompartilhamento])];
         const pessoasParaNotificar = [];
         
-        idsParaNotificar.forEach(idTarget => {
-            let encontrou = equipe.find(p => p.id === idTarget);
-            
-            // 🚀 O SEGREDO ESTÁ AQUI: 
-            // Como a RPC esconde o próprio usuário da lista de "colegas", 
-            // nós forçamos o resgate do usuário atual para ele receber o aviso da própria agenda!
-            if (!encontrou && usuarioAtual && idTarget === usuarioAtual.id) {
-                encontrou = usuarioAtual;
-            }
+        // 👇 A MÁGICA: Fomos no banco puxar o "dados_admissao" fresquinho pra garantir o telefone! 👇
+        const { data: equipeComTelefone } = await supabaseClient
+            .from('perfis')
+            .select('id, nome, config_clara, dados_admissao')
+            .in('id', idsParaNotificar);
 
-            // Checa se encontrou a pessoa e se ela tem um telefone configurado
-            if (encontrou && encontrou.config_clara && encontrou.config_clara.telefone) {
-                pessoasParaNotificar.push(encontrou);
+        if (!equipeComTelefone) return;
+
+        equipeComTelefone.forEach(pessoa => {
+            // Tenta pegar da Clara, senão tenta do RH
+            let telefoneDaPessoa = pessoa.config_clara?.telefone || pessoa.dados_admissao?.telefone;
+            
+            if (telefoneDaPessoa) {
+                // Guarda o telefone descoberto junto da pessoa
+                pessoa.telefone_oficial_envio = telefoneDaPessoa;
+                pessoasParaNotificar.push(pessoa);
             }
         });
 
         if (pessoasParaNotificar.length === 0) {
-            console.log("Clara: Nenhum telefone configurado na Clara para receber este alerta.");
-            if (typeof mostrarAlerta === "function") {
-                mostrarAlerta("Agendamento salvo, mas o WhatsApp não foi enviado pois seu telefone não está configurado na Clara!", "aviso");
-            }
+            console.log("Clara: Nenhum telefone configurado para receber este alerta.");
             return;
         }
 
         let nomesEnviados = [];
         for (const pessoa of pessoasParaNotificar) {
-            let telefoneLimpo = pessoa.config_clara.telefone.replace(/\D/g, '');
+            let telefoneLimpo = pessoa.telefone_oficial_envio.replace(/\D/g, '');
             if (!telefoneLimpo.startsWith('55')) telefoneLimpo = '55' + telefoneLimpo;
 
             const primeiroNome = (pessoa.nome || '').split(' ')[0];
@@ -6812,14 +6810,8 @@ function fecharLembrete() {
             
             const msgFinal = `Você tem um novo compromisso/tarefa agendado: *${tituloTarefa}* para *${dataHoraFormatada}*. Confira os detalhes no painel!`;
 
-            // Dispara via Edge Function segura
             await supabaseClient.functions.invoke('smooth-service', {
-                body: { 
-                    action: 'send_template_proposta', 
-                    numero: telefoneLimpo, 
-                    var1: primeiroNome, 
-                    var2: msgFinal 
-                }
+                body: { action: 'send_template_proposta', numero: telefoneLimpo, var1: primeiroNome, var2: msgFinal }
             });
         }
         
