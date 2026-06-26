@@ -34965,6 +34965,7 @@ window.calcularVTAgora = async function() {
         const { data: unidadesOficiais, error: errUni } = await supabaseClient.from('unidades_oficiais').select('*');
         if (errUni) throw errUni;
 
+        // Pega o Mês e Ano baseados na data final escolhida (como âncora)
         const [anoStr, mesStr] = dataFimStr.split('-');
         const anoAtual = parseInt(anoStr);
         const mesAtual = parseInt(mesStr);
@@ -34974,15 +34975,17 @@ window.calcularVTAgora = async function() {
         
         const { data: resPerfis } = await queryPerfis;
 
+        // MÁGICA: Gera um Array com todos os meses que o filtro pegou (Ex: Janeiro e Fevereiro)
         const mesesParaGerar = new Set();
         let dTempGen = new Date(dI);
-        dTempGen.setDate(1); 
+        dTempGen.setDate(1); // Setamos dia 1 para não pular meses curtos
         while(dTempGen <= dF) {
             mesesParaGerar.add(`${dTempGen.getFullYear()}-${String(dTempGen.getMonth()+1).padStart(2,'0')}`);
             dTempGen.setMonth(dTempGen.getMonth() + 1);
         }
         mesesParaGerar.add(`${dF.getFullYear()}-${String(dF.getMonth()+1).padStart(2,'0')}`);
 
+        // Busca no banco abrangendo um pouco antes do início para não perder cruzamentos
         let dataBuscaBanco = new Date(dI);
         dataBuscaBanco.setMonth(dataBuscaBanco.getMonth() - 1);
         const dBuscaStr = dataBuscaBanco.toISOString().split('T')[0];
@@ -35011,6 +35014,7 @@ window.calcularVTAgora = async function() {
 
         const consolidados = {};
 
+        // Loop pelos meses englobados no filtro
         unidadesProcessar.forEach(u => {
             Array.from(mesesParaGerar).forEach(mesAnoGerar => {
                 const escGerada = algoritmoGeradorDeEscala(colabsAtivos, mesAnoGerar, ocorrenciasGlobais, u, [], feriasDB || []);
@@ -35071,26 +35075,30 @@ window.calcularVTAgora = async function() {
             }
 
             const tipoJornada = jornadaVisor.tipo || '12x36';
-            
-            // 👇 BASE FIXA INTOCÁVEL (Só zera se for rescisão) 👇
             let diasBase = tipoJornada.toLowerCase().includes('12x36') ? 15.5 : 21.5;
 
             let retroativoCalculado = 0;
             let abatimentosCalculado = 0;
             let labelExtra = '';
 
-            // 👇 PROJEÇÃO DE RESCISÃO (Neste caso sim, a base é zerada pois paga só o proporcional) 👇
+            // 👇 1. PROJEÇÃO DE RESCISÃO (Cálculo Direto da Escala) 👇
             if (colab.status === 'Desligado' && colab.dados_rescisao && colab.dados_rescisao.ultimo_dia) {
                 const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]), 23, 59, 59);
 
                     if (dataUltimoDia <= dF) {
-                        diasBase = 0; 
+                        diasBase = 0; // Zera a base para contar só proporcional
                         let limiteUso = dataUltimoDia < dF ? dataUltimoDia : dF;
                         let dCalc = new Date(dI);
                         while (dCalc <= limiteUso) {
-                            if (!window.isDiaDeFolga(colab, `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`)) {
+                            const iso = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                            const siglaDia = consolidados[colab.id]?.diasGerais[iso];
+                            
+                            // 👇 O FRD não está mais aqui, então ele vai ser somado e abatido corretamente!
+                            const diasNaoTrabalhaveis = ['F', 'FP', 'FE', '-', 'DES', 'AD', 'AL', 'TR'];
+                            
+                            if (siglaDia && !diasNaoTrabalhaveis.includes(siglaDia)) {
                                 diasBase++; 
                             }
                             dCalc.setDate(dCalc.getDate() + 1);
@@ -35101,18 +35109,18 @@ window.calcularVTAgora = async function() {
                 }
             }
 
-            // 👇 CÁLCULO DE RETROATIVO DE ADMISSÃO (Não zera mais a base!) 👇
+            // 👇 2. CÁLCULO DE RETROATIVO DE ADMISSÃO (Cálculo Direto da Escala) 👇
             if (dAdm >= dI && dAdm <= dF) {
-                let ultimoDiaDoMesAdm = new Date(dAdm.getFullYear(), dAdm.getMonth() + 1, 0, 23, 59, 59);
+                diasBase = 0; // Zera a base cheia para evitar o bug do 0.0
+                retroativoCalculado = 0;
                 
                 let tempD = new Date(dAdm);
-                while (tempD <= ultimoDiaDoMesAdm) {
+                while (tempD <= dF) { 
                     const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
                     const siglaDia = consolidados[colab.id]?.diasGerais[iso];
                     
+                    // 👇 O FRD não está mais aqui, então ele vai ser somado e abatido corretamente!
                     const diasNaoTrabalhaveis = ['F', 'FP', 'FE', '-', 'DES', 'AD', 'AL', 'TR'];
-                    // Feriado não é dia trabalhável para quem não é 12x36
-                    if (!tipoJornada.toLowerCase().includes('12x36')) diasNaoTrabalhaveis.push('FRD');
 
                     if (siglaDia && !diasNaoTrabalhaveis.includes(siglaDia)) {
                         retroativoCalculado++;
@@ -35125,9 +35133,10 @@ window.calcularVTAgora = async function() {
                 }
             }
 
-            // 👇 O FILTRO DE DATAS DO PAINEL AGE EXCLUSIVAMENTE AQUI PARA CAÇAR AUSÊNCIAS 👇
+            // 👇 3. CÁLCULO DE ABATIMENTOS (Faltas e Atestados) 👇
             let listaAbatimentosDesteColab = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'DES', 'AD', 'FER'];
             
+            // Aqui o FRD continua sendo abatido pra não pagar passagem no Feriado de quem é 44h
             if (!tipoJornada.toLowerCase().includes('12x36')) {
                 listaAbatimentosDesteColab.push('FRD'); 
             }
@@ -35155,6 +35164,7 @@ window.calcularVTAgora = async function() {
                 }
             }
 
+            // INSERÇÃO DAS NOVAS TAGS VISUAIS
             if (teveFerias) {
                 labelExtra += `<br><span style="color: #ffd54f; font-size: 0.75rem; background: rgba(255, 213, 79, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-plane-departure"></i> Mês com Férias</span>`;
             }
@@ -35162,13 +35172,8 @@ window.calcularVTAgora = async function() {
                 labelExtra += `<br><span style="color: #c4b5fd; font-size: 0.75rem; background: rgba(139, 92, 246, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-bed-pulse"></i> Mês com Afastamento</span>`;
             }
 
-            // 👇 A CONTA FINAL PURA: BASE FIXA + RETROATIVO - FALTAS NO PERÍODO DO FILTRO 👇
+            // Matemática Final Pura
             let baseTotalVT = diasBase + retroativoCalculado;
-            
-            if (baseTotalVT % 1 !== 0 && abatimentosCalculado >= Math.floor(baseTotalVT)) {
-                abatimentosCalculado = baseTotalVT; 
-            }
-
             let diasAPagar = baseTotalVT - abatimentosCalculado;
             if (diasAPagar < 0) diasAPagar = 0;
 
