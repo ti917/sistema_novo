@@ -4398,8 +4398,8 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <input type="text" id="busca-saldo-gestor" placeholder="Buscar colaborador..." oninput="window.filtrarSaldosPainelGestor()">
         </div>
 
-        <button class="btn-success" style="background-color: #4fc3f7; color: #000; border: none; font-weight: bold; padding: 12px 20px; border-radius: 8px; height: 45px;" onclick="exportarRelatorioSaldosBH('ft-saldos-unidade')">
-            <i class="fa-solid fa-file-excel"></i> Exportar Relatório
+        <button class="btn-secondary" style="border-color: #4fc3f7; color: #4fc3f7; font-weight: bold; padding: 12px 20px; border-radius: 8px; height: 45px;" onclick="window.exportarSaldosPDF('ft-saldos-unidade')">
+            <i class="fa-solid fa-file-pdf"></i> Exportar PDF Saldo
         </button>
     </div>
 
@@ -6808,8 +6808,8 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <input type="text" id="busca-saldo-admin" placeholder="Buscar colaborador..." oninput="window.filtrarSaldosPainelAdmin()">
         </div>
 
-        <button class="btn-success" style="background-color: #4fc3f7; color: #000; border: none; font-weight: bold; padding: 12px 20px; border-radius: 8px; height: 45px;" onclick="exportarRelatorioSaldosBH('ft-saldos-unidade-admin')">
-            <i class="fa-solid fa-file-excel"></i> Exportar Relatório
+        <button class="btn-secondary" style="border-color: #4fc3f7; color: #4fc3f7; font-weight: bold; padding: 12px 20px; border-radius: 8px; height: 45px;" onclick="window.exportarSaldosPDF('ft-saldos-unidade-admin')">
+            <i class="fa-solid fa-file-pdf"></i> Exportar PDF Saldo
         </button>
     </div>
 
@@ -49141,66 +49141,124 @@ window.abrirModalDetalhesCreditos = function(idColab) {
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
-      // =========================================================================
-// 🖨️ EXPORTADOR EXECUTIVO DE SALDOS DO BANCO DE HORAS (EXCEL)
+     // =========================================================================
+// 🖨️ EMISSÃO DE RELATÓRIO DE SALDOS DE BANCO DE HORAS EM PDF (FILTRO SALDO != 0)
 // =========================================================================
-window.exportarRelatorioSaldosBH = async function(idSelectUnidade) {
-    if (!window.saldosExportacaoAtual || window.saldosExportacaoAtual.length === 0) {
-        return mostrarAlerta("Nenhum dado encontrado para exportar. Aguarde o carregamento da tela.", "aviso");
+window.exportarSaldosPDF = async function(idSelectUnidade) {
+    const unidadeSelecionada = document.getElementById(idSelectUnidade).value;
+    
+    if (!unidadeSelecionada) {
+        return mostrarAlerta("Por favor, selecione uma unidade operacional para exportar o relatório!", "aviso");
     }
 
-    // 👇 A MÁGICA DO FILTRO: Remove quem tem saldo exatamente igual a zero!
-    const dadosParaRelatorio = window.saldosExportacaoAtual.filter(item => item.saldo !== 0);
-
-    if (dadosParaRelatorio.length === 0) {
-        return mostrarAlerta("Todos os colaboradores desta unidade estão com saldo 0h 00m. Não há pendências para exportar.", "sucesso", "Tudo Quitado!");
-    }
-
-    const unidadeSelecionada = document.getElementById(idSelectUnidade).options[document.getElementById(idSelectUnidade).selectedIndex].text || 'Unidade Desconhecida';
-    const dataHoje = new Date().toLocaleDateString('pt-BR');
+    mostrarAlerta("Processando dados e gerando visualização do PDF...", "sucesso");
 
     try {
-        mostrarAlerta("Gerando planilha de saldos ativos...", "sucesso");
+        // 1. Busca os colaboradores ativos alocados na unidade
+        const { data: colabs, error: errC } = await supabaseClient.from('perfis')
+            .select('id, nome, empresa, unidade, dados_admissao, status, dados_rescisao')
+            .eq('perfil', 'Colaborador')
+            .eq('unidade', unidadeSelecionada);
+
+        if (errC) throw errC;
+
+        const ativosReais = window.filtrarAtivosE_AvisoPrevio(colabs || []);
+
+        if (ativosReais.length === 0) {
+            return mostrarAlerta("Nenhum funcionário ativo ou em aviso encontrado nesta unidade.", "aviso");
+        }
+
+        const idsColabs = ativosReais.map(c => c.id);
         
-        const workbook = new ExcelJS.Workbook();
-        workbook.creator = 'RH Portal';
-        
-        let sheetName = unidadeSelecionada.substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '');
-        const sheet = workbook.addWorksheet(sheetName);
+        // 2. Coleta todos os registros aprovados de Banco de Horas e Ausências
+        const [resF, resA] = await Promise.all([
+            supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').in('colaborador_id', idsColabs),
+            supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').in('colaborador_id', idsColabs)
+        ]);
 
-        // --- 1. CABEÇALHO DO RELATÓRIO ---
-        sheet.mergeCells('A1:E1');
-        const titulo = sheet.getCell('A1');
-        titulo.value = 'RELATÓRIO DE SALDOS - BANCO DE HORAS';
-        titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
-        titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
-        titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+        const fts = resF.data || [];
+        const aus = resA.data || [];
+        const ocorrenciasBH = [...fts, ...aus];
 
-        sheet.mergeCells('A2:E2');
-        const subtitulo = sheet.getCell('A2');
-        subtitulo.value = `UNIDADE: ${unidadeSelecionada.toUpperCase()}   |   GERADO EM: ${dataHoje}`;
-        subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
-        subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
-        subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+        let dadosSaldosValidos = [];
+        let totalMinutosCreditoGlobal = 0;
+        let totalMinutosDebitoGlobal = 0;
+        let totalMinutosSaldoGlobal = 0;
 
-        sheet.addRow([]);
+        // 3. Processamento Matemático do Banco de Horas
+        ativosReais.forEach(colab => {
+            const adm = colab.dados_admissao || {};
+            const asHorasDesteColab = ocorrenciasBH.filter(f => f.colaborador_id === colab.id);
 
-        // --- 2. CABEÇALHOS DA TABELA ---
-        const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CARGO", "HORAS ACUMULADAS (+)", "HORAS ABATIDAS (-)", "SALDO FINAL"]); 
-        headerRow.font = { bold: true, color: { argb: 'FF000000' } };
-        headerRow.height = 25;
-        headerRow.eachCell((cell) => {
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4FC3F7' } }; // Azul claro do módulo FT
-            cell.alignment = { vertical: 'middle', horizontal: 'center' };
-            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            let minutosCredito = 0;
+            let minutosDebito = 0;
+
+            asHorasDesteColab.forEach(f => {
+                let txtObs = (f.observacao || '').toUpperCase();
+                let txtMotivo = (f.motivo || '').toUpperCase(); 
+                
+                if (txtObs.includes('[ABATE_BANCO]')) {
+                    const matchMinutos = txtObs.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
+                    if (matchMinutos) minutosDebito += parseInt(matchMinutos[1]);
+                } 
+                else if (['H+', 'HE', 'FT'].includes(f.sigla) && (txtMotivo.includes('BANCO') || txtMotivo.includes('QUEBRA') || txtMotivo.includes('LIQUIDAÇÃO') || txtObs.includes('BANCO'))) {
+                    if (txtObs.includes('TROCAR POR DESCANSO')) return;
+
+                    if (txtObs.includes('DIAS TRABALHADOS A MAIS:')) {
+                        const regexDias = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
+                        let matchDia;
+                        let achouHorario = false;
+                        while ((matchDia = regexDias.exec(txtObs)) !== null) {
+                            achouHorario = true;
+                            const [hE, mE] = matchDia[4].split(':').map(Number);
+                            const [hS, mS] = matchDia[5].split(':').map(Number);
+                            let diff = ((hS * 60) + mS) - ((hE * 60) + mE);
+                            if (diff < 0) diff += 1440;
+                            if (diff > 360) diff -= 60; 
+                            minutosCredito += diff;
+                        }
+                        if (!achouHorario) {
+                            const matchesLote = txtObs.match(/\((\d+\.\d+)\)/g);
+                            if (matchesLote) {
+                                matchesLote.forEach(m => minutosCredito += parseFloat(m.replace('(','').replace(')','')) * 60);
+                            }
+                        }
+                    } else {
+                        const matchDec = txtObs.match(/\((\d+\.\d+)\)/);
+                        if (matchDec) {
+                            let dec = parseFloat(matchDec[1]);
+                            minutosCredito += parseFloat(dec) * 60;
+                        }
+                    }
+                }
+            });
+
+            let saldoMinutosFinal = minutosCredito - minutosDebito;
+
+            // 👇 CRRÍTICO: FILTRA APENAS QUEM TEM SALDO DIFERENTE DE ZERO!
+            if (saldoMinutosFinal !== 0) {
+                totalMinutosCreditoGlobal += minutosCredito;
+                totalMinutosDebitoGlobal += minutosDebito;
+                totalMinutosSaldoGlobal += saldoMinutosFinal;
+
+                dadosSaldosValidos.push({
+                    nome: colab.nome,
+                    cargo: adm.cargo || 'Sem Cargo',
+                    credito: minutosCredito,
+                    debito: minutosDebito,
+                    saldo: saldoMinutosFinal
+                });
+            }
         });
 
-        // Ajuste de largura das colunas
-        sheet.columns = [
-            { width: 45 }, { width: 35 }, { width: 25 }, { width: 25 }, { width: 25 }
-        ];
+        if (dadosSaldosValidos.length === 0) {
+            return mostrarAlerta("Todos os colaboradores desta unidade encontram-se com o saldo zerado (00h 00m).", "sucesso");
+        }
 
-        // Helper para formatar minutos em HH:MM
+        // Ordena por ordem alfabética
+        dadosSaldosValidos.sort((a, b) => a.nome.localeCompare(b.nome));
+
+        // Ferramenta de formatação HH:MM
         const minToHr = (mins) => {
             const isNeg = mins < 0;
             const absMins = Math.abs(mins);
@@ -49209,59 +49267,127 @@ window.exportarRelatorioSaldosBH = async function(idSelectUnidade) {
             return `${isNeg ? '-' : ''}${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m`;
         };
 
-        let currentRow = 5; 
-        
-        // Ordena por nome
-        dadosParaRelatorio.sort((a, b) => a.nome.localeCompare(b.nome));
+        const empresaPDF = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') ? empresaSelecionadaFiltro : (usuarioAtual.empresa ? usuarioAtual.empresa.split(',')[0].trim() : 'RH SOUL');
+        const dataGeracao = new Date().toLocaleString('pt-BR');
 
-        // --- 3. INJEÇÃO DE DADOS ---
-        dadosParaRelatorio.forEach(c => {
-            const row = sheet.addRow([
-                c.nome, 
-                c.cargo, 
-                minToHr(c.credito), 
-                minToHr(c.debito), 
-                minToHr(c.saldo)
-            ]);
-
-            // Estilização das cores baseadas no tipo
-            row.getCell(3).font = { color: { argb: 'FF4FC3F7' }, bold: true }; // Crédito Azul
-            row.getCell(4).font = { color: { argb: 'FFFF9800' }, bold: true }; // Débito Laranja
-
-            // Saldo Verde ou Vermelho
-            if (c.saldo > 0) {
-                row.getCell(5).font = { color: { argb: 'FF28A745' }, bold: true }; // Verde
-            } else {
-                row.getCell(5).font = { color: { argb: 'FFDC3545' }, bold: true }; // Vermelho
-            }
-
-            row.eachCell((cell, colNumber) => {
-                cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
-                if(colNumber > 2) cell.alignment = { horizontal: 'center' };
-            });
-
-            // Efeito Zebrado
-            if (currentRow % 2 === 0) {
-                row.eachCell(cell => cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F9FA' } });
-            }
-
-            currentRow++;
+        // 4. Montagem das linhas da Tabela em HTML
+        let linhasTabelaHtml = '';
+        dadosSaldosValidos.forEach((u, index) => {
+            const bgCor = index % 2 === 0 ? '#ffffff' : '#f8fafc';
+            const corSaldo = u.saldo > 0 ? '#2e7d32' : '#d32f2f'; // Verde ou Vermelho corporativo para impressão
+            
+            linhasTabelaHtml += `
+                <tr style="background-color: ${bgCor}; page-break-inside: avoid;">
+                    <td style="padding: 10px; border: 1px solid #cbd5e1; color: #111; font-weight: bold; font-size: 11px; text-align: left;">${u.nome}</td>
+                    <td style="padding: 10px; border: 1px solid #cbd5e1; color: #444; font-size: 11px; text-align: left;">${u.cargo}</td>
+                    <td style="padding: 10px; border: 1px solid #cbd5e1; color: #0284c7; font-size: 11px; font-weight: bold;">${minToHr(u.credito)}</td>
+                    <td style="padding: 10px; border: 1px solid #cbd5e1; color: #b55d00; font-size: 11px; font-weight: bold;">${minToHr(u.debito)}</td>
+                    <td style="padding: 10px; border: 1px solid #cbd5e1; color: ${corSaldo}; font-size: 12px; font-weight: 900;">${minToHr(u.saldo)}</td>
+                </tr>
+            `;
         });
 
-        // --- 4. SALVAR E BAIXAR O ARQUIVO ---
-        const buffer = await workbook.xlsx.writeBuffer();
-        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        const nomeArquivo = unidadeSelecionada.replace(/ \/ /g, '_').replace(/ /g, '_');
-        link.download = `Saldos_BancoHoras_${nomeArquivo}.xlsx`;
-        link.click();
-        URL.revokeObjectURL(link.href);
+        // 5. Estrutura Estrutural Completa do PDF com a mesma identidade visual das escalas
+        let urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/logo%20soul.png'; 
+        if (empresaPDF.toUpperCase().includes('VILLAC')) {
+            urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
+        }
+
+        const conteudoHTML = `
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head>
+                <meta charset="UTF-8">
+                <title>Relatorio_Saldos_BH_${unidadeSelecionada.replace(/ /g, '_')}</title>
+                <style>
+                    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #111; margin: 0; background: #fff;}
+                    table { width: 100%; border-collapse: collapse; }
+                    th, td { text-align: center; vertical-align: middle; }
+                    @media print {
+                        body { padding: 0; }
+                        @page { margin: 15mm 12mm; size: portrait; }
+                        thead { display: table-header-group; }
+                        tr { page-break-inside: avoid; }
+                        @page :first { margin-top: 0mm; }
+                        .topo-primeira-pagina { padding-top: 12mm !important; }
+                    }
+                    .color-block { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+                </style>
+            </head>
+            <body>
+                <div class="topo-primeira-pagina" style="border-bottom: 2px solid #002347; padding-bottom: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; font-family: sans-serif;">
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <div class="color-block" style="background-color: #002347; color: #ffc107; padding: 10px 15px; font-size: 15px; font-weight: bold; border-radius: 6px; text-align: center; line-height: 1.2;">RH SOUL<br><span style="font-size: 8.5px; color: #fff;">Gestão Inteligente</span></div>
+                        <div>
+                            <h1 style="color: #002347; margin: 0; font-size: 18px; text-transform: uppercase; font-weight: 900; letter-spacing: 0.5px;">Extrato Consolidado de Saldos</h1>
+                            <h2 style="color: #475569; margin: 4px 0 0 0; font-size: 11px; font-weight: 500;">
+                                Empresa: <b style="color: #002347;">${empresaPDF}</b> &nbsp;|&nbsp; Unidade: <b style="color: #002347;">${unidadeSelecionada}</b>
+                            </h2>
+                        </div>
+                    </div>
+                    <div style="text-align: right; color: #475569; font-size: 9px; background: #f8fafc; padding: 5px 10px; border-radius: 5px; border: 1px solid #e2e8f0;">
+                        Emissão do Relatório:<br><b style="color: #0f172a; font-size: 10px;">${dataGeracao}</b>
+                    </div>
+                </div>
+
+                <div style="font-size: 0.85rem; color: #475569; font-family: sans-serif; margin-bottom: 20px; background: #f8fafc; border: 1px solid #cbd5e1; border-left: 4px solid #002347; padding: 10px 15px; border-radius: 6px; line-height: 1.4; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;">
+                    <i class="fa-solid fa-filter"></i> <b>Filtro Aplicado:</b> Exibindo exclusivamente colaboradores com pendências de banco de horas (saldos credores ou devedores ativos). Contas 100% quitadas ou zeradas foram ocultadas automaticamente.
+                </div>
+
+                <div style="display: flex; gap: 15px; margin-bottom: 25px; font-family: sans-serif; page-break-inside: avoid;">
+                    <div class="color-block" style="flex: 1; border: 1px solid #cbd5e1; border-left: 5px solid #4fc3f7; padding: 12px; border-radius: 6px; text-align: center; background: #f0fbff;">
+                        <span style="font-size: 11px; color: #0284c7; font-weight: bold; text-transform: uppercase;">Total Acumulado (+)</span><br>
+                        <b style="font-size: 22px; color: #111;">${minToHr(totalMinutosCreditoGlobal)}</b>
+                    </div>
+                    <div class="color-block" style="flex: 1; border: 1px solid #cbd5e1; border-left: 5px solid #ff9800; padding: 12px; border-radius: 6px; text-align: center; background: #fffaf0;">
+                        <span style="font-size: 11px; color: #b55d00; font-weight: bold; text-transform: uppercase;">Total Abatido (-)</span><br>
+                        <b style="font-size: 22px; color: #111;">${minToHr(totalMinutosDebitoGlobal)}</b>
+                    </div>
+                    <div class="color-block" style="flex: 1; border: 1px solid #cbd5e1; border-left: 5px solid ${totalMinutosSaldoGlobal >= 0 ? '#28a745' : '#dc3545'}; padding: 12px; border-radius: 6px; text-align: center; background: ${totalMinutosSaldoGlobal >= 0 ? '#f8fff9' : '#fff5f6'};">
+                        <span style="font-size: 11px; color: ${totalMinutosSaldoGlobal >= 0 ? '#2e7d32' : '#d32f2f'}; font-weight: bold; text-transform: uppercase;">Saldo Consolidado</span><br>
+                        <b style="font-size: 22px; color: #111;">${minToHr(totalMinutosSaldoGlobal)}</b>
+                    </div>
+                </div>
+
+                <table class="color-block" style="width: 100%; border-collapse: collapse; margin-bottom: 30px; font-family: sans-serif;">
+                    <thead>
+                        <tr style="background-color: #002347; color: #fff;">
+                            <th style="padding: 10px 8px; border: 1px solid #002347; text-align: left; width: 35%; font-size: 11px;">COLABORADOR</th>
+                            <th style="padding: 10px 8px; border: 1px solid #002347; text-align: left; width: 25%; font-size: 11px;">CARGO</th>
+                            <th style="padding: 10px 6px; border: 1px solid #002347; width: 14%; font-size: 11px;">CRÉDITOS (+)</th>
+                            <th style="padding: 10px 6px; border: 1px solid #002347; width: 14%; font-size: 11px;">DÉBITOS (-)</th>
+                            <th style="padding: 10px 6px; border: 1px solid #002347; width: 12%; font-size: 11px;">SALDO FINAL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${linhasTabelaHtml}
+                    </tbody>
+                </table>
+
+                <div style="margin-top: 50px; page-break-inside: avoid; display: flex; justify-content: flex-end; padding-right: 20px; font-family: sans-serif;">
+                    <div style="text-align: center; width: 280px;">
+                        <div style="border-top: 1px solid #002347; width: 100%; margin: 0 auto 5px auto;"></div>
+                        <b style="font-size: 11px; color: #002347; text-transform: uppercase; display: block;">Assinatura do Responsável</b>
+                        <span style="font-size: 8.5px; color: #94a3b8; display: block; margin-top: 3px;">Relatório de Fechamento Operacional</span>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `;
+
+        // 6. Dispara o ambiente de impressão em nova aba limpa
+        const novaJanela = window.open('', '_blank');
+        novaJanela.document.write(conteudoHTML);
+        novaJanela.document.close();
+
+        setTimeout(() => {
+            novaJanela.onafterprint = function() { novaJanela.close(); };
+            novaJanela.print();
+        }, 600);
 
     } catch(err) {
-        console.error(err);
-        mostrarAlerta("Erro ao gerar Excel: " + err.message, "erro");
+        console.error("ERRO FATAL AO EXPORTAR PDF DE SALDOS:", err);
+        mostrarAlerta("Erro de processamento interno ao montar o relatório em PDF.", "erro");
     }
 };
 
