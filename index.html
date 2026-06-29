@@ -43970,43 +43970,70 @@ document.querySelector('[data-target="tela-captacao"]')?.addEventListener('click
 // --- LÓGICA DE CURRÍCULOS ---
 let todosCurriculos = [];
 window.gestorCidadeAtual = '';
-window.gestorUFAtual = '';
+window.gestorCidadesVizinhas = []; // 👈 Nova memória para a vizinhança
 
 window.carregarBancoCurriculos = async function() {
     const container = document.getElementById('lista-curriculos-container');
-    container.innerHTML = '<p style="text-align: center; color: #28a745; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br>Buscando candidatos da sua região...</p>';
+    container.innerHTML = '<p style="text-align: center; color: #28a745; padding: 20px;"><i class="fa-solid fa-satellite-dish fa-beat-fade fa-2x"></i><br><br>Mapeando região e buscando talentos próximos...</p>';
 
     let query = supabaseClient.from('banco_curriculos').select('*');
 
-    // 👇 TRAVA DE SEGURANÇA: FILTRA EXATAMENTE PELA CIDADE DA UNIDADE DO GESTOR 👇
+    // 👇 A MÁGICA DO RADAR DO IBGE 👇
     if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
         const primeiraUnidade = usuarioAtual.unidade.split(',')[0].trim();
-        
-        // Vai no banco ler o endereço completo dessa unidade
         const { data: uniData } = await supabaseClient.from('unidades_oficiais').select('endereco').eq('nome', primeiraUnidade).single();
         
         if (uniData && uniData.endereco) {
-            // Extrai a cidade do endereço (Ex: "RUA A, Nº 123 - CENTRO, AMERICANA/SP - CEP: 13465-000")
             const partesCep = uniData.endereco.split(' - CEP:');
             if (partesCep.length > 0) {
-                const antesDoCep = partesCep[0]; 
-                const partesVirgula = antesDoCep.split(', '); 
-                const cidadeUfBruto = partesVirgula[partesVirgula.length - 1]; // Pega o "AMERICANA/SP"
+                const partesVirgula = partesCep[0].split(', '); 
+                const cidadeUfBruto = partesVirgula[partesVirgula.length - 1]; // "MOGI GUAÇU/SP"
                 
+                let cid = '', uf = '';
                 if (cidadeUfBruto.includes('/')) {
-                    const [cid, uf] = cidadeUfBruto.split('/');
+                    [cid, uf] = cidadeUfBruto.split('/');
+                } else if (cidadeUfBruto.includes('-')) {
+                    [cid, uf] = cidadeUfBruto.split('-');
+                }
+
+                if (cid && uf) {
+                    cid = cid.trim().toUpperCase();
+                    uf = uf.trim().toUpperCase();
+                    window.gestorCidadeAtual = window.removerAcentos(cid.toLowerCase());
                     
-                    // Guarda a cidade normalizada na memória global
-                    window.gestorCidadeAtual = window.removerAcentos(cid.trim().toLowerCase());
-                    
-                    // 👇 TRAVA ABSOLUTA: O Gestor só baixa currículos da EXATA cidade dele (Ex: Americana)
-                    query = query.ilike('cidade_estado', `%${cid.trim()}%`);
+                    try {
+                        // Bate no IBGE para pegar todas as cidades desse estado
+                        const resIBGE = await fetch(`https://servicodados.ibge.gov.br/api/v1/localidades/estados/${uf}/municipios`);
+                        const cidadesEstado = await resIBGE.json();
+                        
+                        // Localiza a cidade do gestor no mapa do IBGE
+                        const cidadeIBGE = cidadesEstado.find(c => window.removerAcentos(c.nome.toUpperCase()) === window.removerAcentos(cid));
+                        
+                        // Inicia a lista de vizinhas já com a cidade principal dentro
+                        window.gestorCidadesVizinhas = [window.gestorCidadeAtual]; 
+
+                        if (cidadeIBGE && cidadeIBGE.microrregiao) {
+                            const idMicro = cidadeIBGE.microrregiao.id;
+                            // Preenche o array só com as cidades vizinhas (da mesma microrregião)
+                            cidadesEstado.forEach(c => {
+                                if (c.microrregiao && c.microrregiao.id === idMicro) {
+                                    window.gestorCidadesVizinhas.push(window.removerAcentos(c.nome.toLowerCase()));
+                                }
+                            });
+                        }
+                    } catch(e) {
+                        console.error("Erro ao rastrear vizinhança no IBGE", e);
+                        // Fallback de segurança: se o IBGE falhar (sem internet), busca só a cidade exata
+                        window.gestorCidadesVizinhas = [window.gestorCidadeAtual];
+                    }
+
+                    // Puxa do Supabase todo mundo do Estado para o JavaScript fatiar na memória (Mais rápido e à prova de quebra)
+                    query = query.ilike('cidade_estado', `%${uf}%`);
                 }
             }
         }
     }
 
-    // Ordena dos currículos mais recentes pros mais velhos
     const { data, error } = await query.order('criado_em', { ascending: false });
     
     if (error) {
@@ -44017,7 +44044,7 @@ window.carregarBancoCurriculos = async function() {
     todosCurriculos = data || [];
     filtrarCurriculos();
 };
-      
+
 window.filtrarCurriculos = function() {
     const termo = window.removerAcentos(document.getElementById('busca-curriculos').value);
     const statusFiltro = document.getElementById('filtro-status-curriculo').value;
@@ -44033,26 +44060,32 @@ window.filtrarCurriculos = function() {
                            
         const matchStatus = statusFiltro === 'Todos' || c.status === statusFiltro;
         
-        return matchBusca && matchStatus;
+        // 👇 A TRAVA DE REGIÃO (Cidade Exata + Cidades Vizinhas) 👇
+        let matchRegiao = true;
+        if (usuarioAtual.perfil === 'Gestor' && window.gestorCidadesVizinhas.length > 0) {
+            // Verifica se a cidade que o candidato digitou está dentro do nosso radar do IBGE
+            matchRegiao = window.gestorCidadesVizinhas.some(cidadeDaRegiao => cidadeColabLimpa.includes(cidadeDaRegiao));
+        }
+
+        return matchBusca && matchStatus && matchRegiao;
     });
 
-    // 👇 A MÁGICA 3: RANKEAMENTO INTELIGENTE (COLOCA QUEM MORA PERTO NO TOPO) 👇
+    // 👇 RANKEAMENTO: Coloca quem é da CIDADE EXATA no topo, as vizinhas ficam embaixo
     if (usuarioAtual.perfil === 'Gestor' && window.gestorCidadeAtual) {
         filtrados.sort((a, b) => {
             const cidA = window.removerAcentos((a.cidade_estado || '').toLowerCase()).includes(window.gestorCidadeAtual);
             const cidB = window.removerAcentos((b.cidade_estado || '').toLowerCase()).includes(window.gestorCidadeAtual);
             
-            if (cidA && !cidB) return -1; // Joga pra cima
-            if (!cidA && cidB) return 1;  // Joga pra baixo
+            if (cidA && !cidB) return -1; // Cidade exata sobe
+            if (!cidA && cidB) return 1;  // Vizinha desce
             
-            // Desempata pela data
             return new Date(b.criado_em) - new Date(a.criado_em);
         });
     }
 
     container.innerHTML = '';
     if (filtrados.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum currículo encontrado com este filtro.</p>';
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum currículo encontrado na sua região com este filtro.</p>';
         return;
     }
 
@@ -44066,12 +44099,16 @@ window.filtrarCurriculos = function() {
         else if (c.status === 'Aprovado / Contratado') corStatus = '#28a745';
         else if (c.status === 'Descartado') corStatus = '#dc3545';
 
-        // 👇 A MÁGICA 4: TAG VISUAL DE DESTAQUE 👇
+        // 👇 TAGS VISUAIS DINÂMICAS: Diferencia Cidade Exata vs Cidade Vizinha 👇
         let tagCidade = '';
         if (usuarioAtual.perfil === 'Gestor' && window.gestorCidadeAtual) {
-            const isMinhaCidade = window.removerAcentos((c.cidade_estado || '').toLowerCase()).includes(window.gestorCidadeAtual);
+            const cidadeCandidatoLimpa = window.removerAcentos((c.cidade_estado || '').toLowerCase());
+            const isMinhaCidade = cidadeCandidatoLimpa.includes(window.gestorCidadeAtual);
+            
             if (isMinhaCidade) {
                 tagCidade = ` <span style="font-size: 0.65rem; color: #28a745; background: rgba(40, 167, 69, 0.1); padding: 2px 6px; border-radius: 4px; border: 1px solid #28a745; font-weight: bold; margin-left: 5px; text-transform: uppercase;"><i class="fa-solid fa-location-crosshairs"></i> Sua Cidade</span>`;
+            } else {
+                tagCidade = ` <span style="font-size: 0.65rem; color: #ff9800; background: rgba(255, 152, 0, 0.1); padding: 2px 6px; border-radius: 4px; border: 1px solid #ff9800; font-weight: bold; margin-left: 5px; text-transform: uppercase;"><i class="fa-solid fa-map-location-dot"></i> Cidade Vizinha</span>`;
             }
         }
 
