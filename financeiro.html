@@ -415,6 +415,11 @@
             <i class="fa-solid fa-infinity"></i>
             <span>Contas Fixas / Mensais</span>
         </div>
+        
+        <div class="sidebar-item" data-target="tela-rescisoes">
+            <i class="fa-solid fa-hand-holding-dollar"></i>
+            <span>Gestão de Rescisões</span>
+        </div>
         <div style="display: flex; flex-direction: column;">
             <div class="sidebar-item" data-target="tela-centro-custos" id="btn-menu-cc" onclick="toggleSubmenuCentros()">
                 <i class="fa-solid fa-building-columns"></i>
@@ -520,6 +525,35 @@
                         </thead>
                         <tbody id="lista-contas-fixas-body">
                             <tr><td colspan="6" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando contas fixas...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="tela-rescisoes" class="view-section hidden">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
+                    <div>
+                        <h2 style="margin: 0; color: var(--cor-texto-principal);"><i class="fa-solid fa-hand-holding-dollar" style="color: var(--cor-acento);"></i> Gestão de Rescisões</h2>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-top: 5px;">Acompanhe os colaboradores desligados pelo RH e os prazos legais para pagamento.</p>
+                    </div>
+                    <button class="btn-secondary" style="border-color: #3498db; color: #3498db; font-weight: bold; background: transparent;" onclick="carregarRescisoesFinanceiro()">
+                        <i class="fa-solid fa-arrows-rotate"></i> Atualizar Dados
+                    </button>
+                </div>
+
+                <div class="glass-card" style="padding: 0; overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                        <thead>
+                            <tr style="background: var(--cor-header-tabela); color: var(--cor-texto-secundario); font-size: 0.85rem; text-transform: uppercase;">
+                                <th style="padding: 15px;">Colaborador</th>
+                                <th style="padding: 15px;">Centro de Custo</th>
+                                <th style="padding: 15px;">Datas (Saída e Pagamento)</th>
+                                <th style="padding: 15px; text-align: center;">Status Financeiro</th>
+                                <th style="padding: 15px; text-align: center; width: 150px;">Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="lista-rescisoes-fin-body">
+                            <tr><td colspan="5" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Sincronizando rescisões com o RH...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1841,6 +1875,141 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
         // Adiciona um gatilho para carregar os fornecedores assim que a aba for clicada
         document.querySelector('.sidebar-item[data-target="tela-fornecedores"]')?.addEventListener('click', () => {
             carregarFornecedores();
+        });
+
+        // ==========================================
+        // MÓDULO: INTEGRAÇÃO RH -> RESCISÕES
+        // ==========================================
+
+        window.carregarRescisoesFinanceiro = async function() {
+            const tbody = document.getElementById('lista-rescisoes-fin-body');
+            if(!tbody) return;
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
+
+            // 1. Busca os colaboradores desligados na tabela do RH
+            let queryRH = supabaseClient.from('perfis').select('id, nome, unidade, empresa, dados_rescisao').eq('status', 'Desligado');
+            if (empresaFinanceiraSelecionada !== 'Todas') {
+                queryRH = queryRH.eq('empresa', empresaFinanceiraSelecionada);
+            }
+            const { data: desligados, error: errRH } = await queryRH;
+            if (errRH) return tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar dados do RH.</td></tr>';
+
+            // 2. Busca os lançamentos financeiros já feitos para saber se o Financeiro já resolveu essa bucha
+            const { data: lancamentos, error: errFin } = await supabaseClient.from('financeiro_lancamentos')
+                .select('descricao, valor_total, status')
+                .like('descricao', '%Rescisão%');
+
+            tbody.innerHTML = '';
+            if (!desligados || desligados.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão pendente encontrada. Uhuul! 🎉</td></tr>';
+                return;
+            }
+
+            // Ordenar da rescisão mais recente para a mais antiga
+            desligados.sort((a, b) => {
+                const dataA = a.dados_rescisao?.data_desligamento || a.dados_rescisao?.data_demissao || '2000-01-01';
+                const dataB = b.dados_rescisao?.data_desligamento || b.dados_rescisao?.data_demissao || '2000-01-01';
+                return new Date(dataB) - new Date(dataA);
+            });
+
+            desligados.forEach(colab => {
+                const dataDesligamentoStr = colab.dados_rescisao?.data_desligamento || colab.dados_rescisao?.data_demissao;
+                let dataDeslFormatada = 'Não informada';
+                let dataPrazoFormatada = 'Sem data';
+                let prazoEstourado = false;
+
+                if (dataDesligamentoStr) {
+                    const [ano, mes, dia] = dataDesligamentoStr.split('-');
+                    dataDeslFormatada = `${dia}/${mes}/${ano}`;
+
+                    // Regra CLT: 10 dias corridos contados do desligamento
+                    const dataObj = new Date(ano, parseInt(mes) - 1, dia);
+                    dataObj.setDate(dataObj.getDate() + 10);
+                    const pDia = String(dataObj.getDate()).padStart(2, '0');
+                    const pMes = String(dataObj.getMonth() + 1).padStart(2, '0');
+                    const pAno = dataObj.getFullYear();
+                    dataPrazoFormatada = `${pDia}/${pMes}/${pAno}`;
+
+                    // Verifica se o prazo já venceu hoje
+                    const hoje = new Date();
+                    hoje.setHours(0,0,0,0);
+                    if (dataObj < hoje) prazoEstourado = true;
+                }
+
+                // Cruza o dado: Será que a descrição de algum lançamento tem "Rescisão - Nome do Cara"?
+                const lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Rescisão - ${colab.nome}`));
+                
+                let statusBadge = '';
+                let botoesAcao = '';
+
+                if (lancamentoFeito) {
+                    const corBadge = lancamentoFeito.status === 'Pago' ? '#2ecc71' : '#f1c40f';
+                    const bgBadge = lancamentoFeito.status === 'Pago' ? 'rgba(46,204,113,0.2)' : 'rgba(241,196,15,0.2)';
+                    statusBadge = `<span style="background: ${bgBadge}; color: ${corBadge}; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">Lançado / ${lancamentoFeito.status}</span><div style="font-size: 0.75rem; margin-top: 5px; color: ${corBadge};">R$ ${lancamentoFeito.valor_total.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</div>`;
+                    botoesAcao = `<button class="btn-secondary" style="border-color: var(--cor-acento); color: var(--cor-acento); opacity: 0.5; cursor: not-allowed; width: 100%;" disabled><i class="fa-solid fa-check"></i> Finalizado</button>`;
+                } else {
+                    statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">A Lançar Valor</span>`;
+                    botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoRescisao('${colab.nome}', '${colab.unidade}', '${dataPrazoFormatada}')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
+                }
+
+                const corPrazo = (prazoEstourado && !lancamentoFeito) ? 'color: var(--cor-perigo); font-weight: bold;' : 'color: var(--cor-texto-secundario);';
+
+                tbody.innerHTML += `
+                    <tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
+                        <td style="padding: 15px;">
+                            <strong style="color: var(--cor-texto-principal); font-size: 1.05rem;">${colab.nome}</strong>
+                        </td>
+                        <td style="padding: 15px; color: var(--cor-texto-secundario);">
+                            <i class="fa-solid fa-building-columns" style="color: var(--cor-acento); margin-right: 5px;"></i> ${colab.unidade || 'Sem unidade'}
+                        </td>
+                        <td style="padding: 15px;">
+                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-secundario);">Desligado em: ${dataDeslFormatada}</span>
+                            <span style="display: block; font-size: 0.85rem; margin-top: 5px; ${corPrazo}"><i class="fa-regular fa-calendar-xmark"></i> Vence em: ${dataPrazoFormatada}</span>
+                        </td>
+                        <td style="padding: 15px; text-align: center;">${statusBadge}</td>
+                        <td style="padding: 15px; text-align: center;">${botoesAcao}</td>
+                    </tr>
+                `;
+            });
+        };
+
+        // Função que joga o financeiro direto pro Centro de Custo correto
+        window.prepararLancamentoRescisao = function(nomeColab, nomeUnidade, dataPrazoStr) {
+            // Verifica se a Unidade do RH existe como Centro de Custo no Financeiro
+            const cc = todosCentrosCustoGlobais.find(c => c.nome_unidade === nomeUnidade);
+            if (!cc) {
+                mostrarAlerta(`A unidade "${nomeUnidade}" ainda não possui um Centro de Custo! Crie a unidade na aba "Centros de Custo" primeiro.`, 'aviso');
+                return;
+            }
+
+            // Joga o cara para a tela do Centro de Custo
+            abrirDetalheUnidade(cc.id);
+
+            // Aguarda a tela carregar e abre o modal de lançamento já mastigado
+            setTimeout(() => {
+                abrirModalLancamento();
+
+                setTimeout(() => {
+                    document.getElementById('lanc-tipo').value = 'Despesa';
+                    toggleFornecedorLancamento('Despesa');
+                    document.getElementById('lanc-fornecedor').value = ''; 
+                    document.getElementById('lanc-descricao').value = `Rescisão - ${nomeColab}`;
+                    
+                    const linhas = document.querySelectorAll('.linha-pagamento');
+                    if(linhas.length > 0 && dataPrazoStr && dataPrazoStr !== 'Sem data') {
+                        linhas[0].querySelector('.data-input').value = dataPrazoStr;
+                    }
+                    
+                    mostrarAlerta("Preencha o valor da rescisão, anexe o comprovante (se já pagou) e clique em Salvar!", "aviso", "Quase lá!");
+                }, 100);
+            }, 300);
+        };
+
+        // Adiciona o gatilho de atualização sempre que clicar na aba
+        document.querySelector('.sidebar-item[data-target="tela-rescisoes"]')?.addEventListener('click', () => {
+            // Garante que os lançamentos e centros de custos globais estejam mapeados
+            if (todosCentrosCustoGlobais.length === 0) carregarCentrosCusto();
+            carregarRescisoesFinanceiro();
         });
 
        window.mudarEmpresaFinanceiro = function(empresa) {
