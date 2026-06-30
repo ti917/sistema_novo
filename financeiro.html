@@ -1923,15 +1923,16 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             select.innerHTML = options;
         };
 
+        // ==========================================
+        // MÓDULO: INTEGRAÇÃO RH -> RESCISÕES
+        // ==========================================
+        window.rescisoesEmMemoria = []; // 🧠 Variável Global pra salvar as rescisões na RAM
+        window.filtroMesRescisaoAguardado = null; // Guarda a escolha do usuário caso ele atualize a tela
+
         window.carregarRescisoesFinanceiro = async function() {
             const tbody = document.getElementById('lista-rescisoes-fin-body');
             if(!tbody) return;
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
-
-            // Carrega o combo de meses se ainda estiver vazio
-            if (document.getElementById('filtro-resc-mes').options.length <= 1) {
-                window.preencherFiltroMesRescisao();
-            }
 
             // 1. Busca os colaboradores desligados no RH
             let queryRH = supabaseClient.from('perfis').select('id, nome, unidade, empresa, dados_rescisao').eq('status', 'Desligado');
@@ -1970,6 +1971,12 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                 return dataEncontrada;
             };
 
+            // Mapeador Inteligente de Meses (Lê o banco e cria o filtro automaticamente)
+            const mesesExistentes = new Set();
+            const hoje = new Date();
+            const mesAtualMascara = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
+            mesesExistentes.add(mesAtualMascara); // Garante que o mês atual sempre vai aparecer no dropdown
+
             // Mastiga e formata os dados antes de salvar na memória
             (desligados || []).forEach(colab => {
                 let rescisaoObj = colab.dados_rescisao || {};
@@ -1997,41 +2004,34 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                     if (ano && mes && dia) {
                         dataDeslFormatada = `${dia}/${mes}/${ano}`;
                         dataOrdenacao = `${ano}-${mes}-${dia}`; 
-                        mesAnoReferencia = `${ano}-${mes}`;
+                        mesAnoReferencia = `${ano}-${mes}`; // Salva YYYY-MM para bater com o filtro
+                        
+                        // Adiciona o mês do desligamento na listinha do Dropdown dinâmico
+                        mesesExistentes.add(mesAnoReferencia);
 
                         // 🚨 REGRA DE SEGURANÇA DA SOUL: 9 DIAS CORRIDOS
                         const dataObj = new Date(ano, parseInt(mes) - 1, dia);
                         dataObj.setDate(dataObj.getDate() + 9);
                         
-                        // 🛡️ ESCUDO DE FINAL DE SEMANA E FERIADOS (Antecipar pagamento)
-                        // Feriados Nacionais Fixos (Mês-Dia)
+                        // 🛡️ ESCUDO DE FINAL DE SEMANA E FERIADOS
                         const feriadosFixos = ['01-01', '04-21', '05-01', '09-07', '10-12', '11-02', '11-15', '11-20', '12-25'];
-                        
-                        // Loop infinito que só para quando a data cair num dia útil comum
                         while (true) {
-                            let diaSemana = dataObj.getDay(); // 0 = Domingo, 6 = Sábado
+                            let diaSemana = dataObj.getDay(); 
                             let mesDiaStr = String(dataObj.getMonth() + 1).padStart(2, '0') + '-' + String(dataObj.getDate()).padStart(2, '0');
                             
-                            if (diaSemana === 0) { // Caiu no Domingo? Volta pra Sexta (-2 dias)
-                                dataObj.setDate(dataObj.getDate() - 2);
-                            } else if (diaSemana === 6) { // Caiu no Sábado? Volta pra Sexta (-1 dia)
-                                dataObj.setDate(dataObj.getDate() - 1);
-                            } else if (feriadosFixos.includes(mesDiaStr)) { // Caiu num Feriado Fixo? Volta pra véspera
-                                dataObj.setDate(dataObj.getDate() - 1);
-                            } else {
-                                break; // Ufa, é um dia útil seguro! Sai do loop.
-                            }
+                            if (diaSemana === 0) dataObj.setDate(dataObj.getDate() - 2);
+                            else if (diaSemana === 6) dataObj.setDate(dataObj.getDate() - 1);
+                            else if (feriadosFixos.includes(mesDiaStr)) dataObj.setDate(dataObj.getDate() - 1);
+                            else break;
                         }
                         
-                        // Formata a data segura final para exibir na tela
                         const pDia = String(dataObj.getDate()).padStart(2, '0');
                         const pMes = String(dataObj.getMonth() + 1).padStart(2, '0');
                         const pAno = dataObj.getFullYear();
                         dataPrazoFormatada = `${pDia}/${pMes}/${pAno}`;
 
-                        const hoje = new Date();
-                        hoje.setHours(0,0,0,0);
-                        if (dataObj < hoje) prazoEstourado = true;
+                        const hrHoje = new Date(); hrHoje.setHours(0,0,0,0);
+                        if (dataObj < hrHoje) prazoEstourado = true;
                     }
                 }
 
@@ -2050,16 +2050,38 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             desligados.sort((a, b) => b._dataOrdenacao - a._dataOrdenacao);
             window.rescisoesEmMemoria = desligados;
 
+            // 🌟 Monta o Dropdown dinâmico com os meses que realmente existem no banco 🌟
+            const selectMes = document.getElementById('filtro-resc-mes');
+            let optionsMes = '<option value="Todos">Todos os Meses (Geral)</option>';
+            
+            // Ordena os meses do mais novo para o mais antigo (ex: 2026-06, 2026-05, etc)
+            const mesesOrdenados = Array.from(mesesExistentes).sort((a, b) => b.localeCompare(a));
+            
+            mesesOrdenados.forEach(m => {
+                if (m === '0000-00') return; // Ignora os que não tem data
+                const [ano, mes] = m.split('-');
+                optionsMes += `<option value="${m}">Mês: ${mes}/${ano}</option>`;
+            });
+            
+            selectMes.innerHTML = optionsMes;
+
+            // Define o Mês Atual como padrão ao abrir a tela (ou mantém o que o usuário escolheu antes de atualizar)
+            if (!window.filtroMesRescisaoAguardado) window.filtroMesRescisaoAguardado = mesAtualMascara;
+            selectMes.value = window.filtroMesRescisaoAguardado;
+
             // Manda desenhar na tela com base nos filtros
             window.filtrarRescisoesLocal();
         };
 
-        // 🧠 Função que filtra e desenha a tabela em milissegundos
+        // 🧠 Função que filtra e desenha a tabela instantaneamente
         window.filtrarRescisoesLocal = function() {
             const tbody = document.getElementById('lista-rescisoes-fin-body');
             const termoNome = document.getElementById('busca-resc-colab').value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             const termoUnid = document.getElementById('busca-resc-unidade').value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            const filtroMes = document.getElementById('filtro-resc-mes').value; // 'Todos' ou '2024-05'
+            
+            // Salva a escolha pra não resetar se ele clicar em "Atualizar Dados"
+            const filtroMes = document.getElementById('filtro-resc-mes').value;
+            window.filtroMesRescisaoAguardado = filtroMes; 
 
             tbody.innerHTML = '';
 
@@ -2077,7 +2099,7 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             });
 
             if (filtrados.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão corresponde a esta busca.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão pendente neste mês/filtro. Limpo! 🎉</td></tr>';
                 return;
             }
 
