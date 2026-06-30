@@ -1881,7 +1881,7 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
         // MÓDULO: INTEGRAÇÃO RH -> RESCISÕES
         // ==========================================
 
-        window.carregarRescisoesFinanceiro = async function() {
+       window.carregarRescisoesFinanceiro = async function() {
             const tbody = document.getElementById('lista-rescisoes-fin-body');
             if(!tbody) return;
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
@@ -1905,45 +1905,65 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                 return;
             }
 
-            // Ordenar da rescisão mais recente para a mais antiga
-            desligados.sort((a, b) => {
-                const dataA = a.dados_rescisao?.data_desligamento || a.dados_rescisao?.data_demissao || '2000-01-01';
-                const dataB = b.dados_rescisao?.data_desligamento || b.dados_rescisao?.data_demissao || '2000-01-01';
-                return new Date(dataB) - new Date(dataA);
-            });
+            // Função Rastreadora de Data (Busca a data em qualquer buraco do JSON)
+            const extrairDataProfunda = (obj) => {
+                if (!obj) return null;
+                let dataEncontrada = null;
+                const buscarRecurso = (item) => {
+                    if (dataEncontrada) return; // Se já achou, para de procurar
+                    if (typeof item === 'object' && item !== null) {
+                        for (let chave in item) {
+                            const val = item[chave];
+                            if (typeof val === 'string') {
+                                // Se a chave tiver "data" no nome E o valor parecer uma data (traço ou barra)
+                                if (chave.toLowerCase().includes('data') && (val.includes('-') || val.includes('/'))) {
+                                    // Bloqueia campos de nascimento, foca só em desligamento/exame/etc
+                                    if (!chave.toLowerCase().includes('nascimento')) {
+                                        dataEncontrada = val;
+                                        return;
+                                    }
+                                }
+                            } else if (typeof val === 'object') {
+                                buscarRecurso(val);
+                            }
+                        }
+                    }
+                };
+                buscarRecurso(obj);
+                return dataEncontrada;
+            };
 
             desligados.forEach(colab => {
-                // 1. Garante que os dados da rescisão são um objeto legível
                 let rescisaoObj = colab.dados_rescisao || {};
                 if (typeof rescisaoObj === 'string') {
                     try { rescisaoObj = JSON.parse(rescisaoObj); } catch(e) { rescisaoObj = {}; }
                 }
 
-                // 2. Procura a data em qualquer campo possível que o RH possa ter salvo
-                const dataRaw = rescisaoObj.data_desligamento || rescisaoObj.data_demissao || rescisaoObj.data_aviso || rescisaoObj.data_saida;
+                // Tenta achar a data usando o Rastreador Universal
+                const dataRaw = extrairDataProfunda(rescisaoObj);
                 
                 let dataDeslFormatada = 'Não informada';
                 let dataPrazoFormatada = 'Sem data';
                 let prazoEstourado = false;
+                let dataOrdenacao = '2000-01-01'; // Data fake para jogar pro final se não achar
 
                 if (dataRaw) {
                     let ano, mes, dia;
                     
-                    // 3. Verifica qual formato a data chegou e corta do jeito certo
                     if (dataRaw.includes('/')) {
-                        // Formato Brasileiro: DD/MM/YYYY
+                        // DD/MM/YYYY
                         [dia, mes, ano] = dataRaw.split('/');
                     } else if (dataRaw.includes('-')) {
-                        // Formato Americano: YYYY-MM-DD
+                        // YYYY-MM-DD
                         [ano, mes, dia] = dataRaw.split('-');
-                        // Evita erro se a data vier com hora grudada (ex: 2024-05-10T15:00:00)
                         dia = dia.substring(0, 2); 
                     }
 
                     if (ano && mes && dia) {
                         dataDeslFormatada = `${dia}/${mes}/${ano}`;
+                        dataOrdenacao = `${ano}-${mes}-${dia}`; // Salva pra gente ordenar a tabela depois
 
-                        // Regra CLT: 10 dias corridos contados do desligamento
+                        // Regra CLT: 10 dias corridos
                         const dataObj = new Date(ano, parseInt(mes) - 1, dia);
                         dataObj.setDate(dataObj.getDate() + 10);
                         
@@ -1952,14 +1972,22 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                         const pAno = dataObj.getFullYear();
                         dataPrazoFormatada = `${pDia}/${pMes}/${pAno}`;
 
-                        // Verifica se o prazo já venceu hoje
                         const hoje = new Date();
                         hoje.setHours(0,0,0,0);
                         if (dataObj < hoje) prazoEstourado = true;
                     }
                 }
 
-                // Cruza o dado: Será que a descrição de algum lançamento tem "Rescisão - Nome do Cara"?
+                colab._dataOrdenacao = new Date(dataOrdenacao).getTime(); // Guarda o timestamp invisível pra ordenar
+                colab._htmlDeslFormatada = dataDeslFormatada;
+                colab._htmlPrazoFormatada = dataPrazoFormatada;
+                colab._prazoEstourado = prazoEstourado;
+            });
+
+            // Ordena os caras: quem tem rescisão mais recente fica no topo
+            desligados.sort((a, b) => b._dataOrdenacao - a._dataOrdenacao);
+
+            desligados.forEach(colab => {
                 const lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Rescisão - ${colab.nome}`));
                 
                 let statusBadge = '';
@@ -1972,10 +2000,10 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                     botoesAcao = `<button class="btn-secondary" style="border-color: var(--cor-acento); color: var(--cor-acento); opacity: 0.5; cursor: not-allowed; width: 100%;" disabled><i class="fa-solid fa-check"></i> Finalizado</button>`;
                 } else {
                     statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">A Lançar Valor</span>`;
-                    botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoRescisao('${colab.nome}', '${colab.unidade}', '${dataPrazoFormatada}')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
+                    botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoRescisao('${colab.nome}', '${colab.unidade}', '${colab._htmlPrazoFormatada}')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
                 }
 
-                const corPrazo = (prazoEstourado && !lancamentoFeito) ? 'color: var(--cor-perigo); font-weight: bold;' : 'color: var(--cor-texto-secundario);';
+                const corPrazo = (colab._prazoEstourado && !lancamentoFeito) ? 'color: var(--cor-perigo); font-weight: bold;' : 'color: var(--cor-texto-secundario);';
 
                 tbody.innerHTML += `
                     <tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
@@ -1986,8 +2014,8 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                             <i class="fa-solid fa-building-columns" style="color: var(--cor-acento); margin-right: 5px;"></i> ${colab.unidade || 'Sem unidade'}
                         </td>
                         <td style="padding: 15px;">
-                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-secundario);">Desligado em: ${dataDeslFormatada}</span>
-                            <span style="display: block; font-size: 0.85rem; margin-top: 5px; ${corPrazo}"><i class="fa-regular fa-calendar-xmark"></i> Vence em: ${dataPrazoFormatada}</span>
+                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-secundario);">Desligado em: ${colab._htmlDeslFormatada}</span>
+                            <span style="display: block; font-size: 0.85rem; margin-top: 5px; ${corPrazo}"><i class="fa-regular fa-calendar-xmark"></i> Vence em: ${colab._htmlPrazoFormatada}</span>
                         </td>
                         <td style="padding: 15px; text-align: center;">${statusBadge}</td>
                         <td style="padding: 15px; text-align: center;">${botoesAcao}</td>
