@@ -2959,6 +2959,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
     <button type="button" id="btn-menu-aviso-global" onclick="abrirModalAvisoGlobal()" style="background: transparent; border: none; color: #00bcd4; text-align: left; cursor: pointer; padding: 10px 5px 5px 5px; border-radius: 4px; transition: 0.2s; font-weight: bold; border-top: 1px dashed var(--cor-borda); margin-top: 5px; display: none;" onmouseover="this.style.background='rgba(0, 188, 212, 0.1)'" onmouseout="this.style.background='transparent'">
         <i class="fa-solid fa-bullhorn" style="width: 20px;"></i> Aviso do Sistema
     </button>
+
+     <button type="button" id="btn-menu-desbloqueio" onclick="abrirModalDesbloqueioAvaliacoes()" style="background: transparent; border: none; color: #ff9800; text-align: left; cursor: pointer; padding: 10px 5px 5px 5px; border-radius: 4px; transition: 0.2s; font-weight: bold; border-top: 1px dashed var(--cor-borda); margin-top: 5px; display: none;" onmouseover="this.style.background='rgba(255, 152, 0, 0.1)'" onmouseout="this.style.background='transparent'">
+        <i class="fa-solid fa-unlock-keyhole" style="width: 20px;"></i> Liberar Avaliações
+    </button>
 </div>
                     
                     <button type="button" id="btnLogout" title="Sair do Sistema">
@@ -12115,11 +12119,20 @@ if (btnClaraFlutuante) btnClaraFlutuante.style.display = 'flex';
                     if (btnCfgChat) btnCfgChat.style.display = 'flex'; 
                     const btnAvisoGlobal = document.getElementById('btn-menu-aviso-global');
                     if (btnAvisoGlobal) btnAvisoGlobal.style.display = 'flex';
+                    
+                    // 👇 ADICIONE ESTA LINHA 👇
+                    const btnDesbloqueio = document.getElementById('btn-menu-desbloqueio');
+                    if (btnDesbloqueio) btnDesbloqueio.style.display = 'flex';
+                    
                 } else {
                     const btnCfgChat = document.getElementById('btn-menu-config-chamados');
                     if (btnCfgChat) btnCfgChat.style.display = 'none';
                     const btnAvisoGlobal = document.getElementById('btn-menu-aviso-global');
                     if (btnAvisoGlobal) btnAvisoGlobal.style.display = 'none';
+                    
+                    // 👇 ADICIONE ESTA LINHA 👇
+                    const btnDesbloqueio = document.getElementById('btn-menu-desbloqueio');
+                    if (btnDesbloqueio) btnDesbloqueio.style.display = 'none';
                 }
                 
                 const dataAtual = new Date();
@@ -13279,20 +13292,28 @@ async function escutarTempoReal() {
     }
     // 👆 FIM DO RADAR ONLINE 👆
 
-    // =========================================================================
-    // RADAR DO AVISO GLOBAL COLOCADO AQUI PARA TODOS OUVIREM
+      // =========================================================================
+    // RADAR DO AVISO GLOBAL E DO DESBLOQUEIO (FORA DOS IFS PARA TODOS OUVIREM)
     // =========================================================================
     supabaseClient
-        .channel('escuta-aviso-global')
+        .channel('escuta-config-sistema')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'config_sistema' }, (payload) => {
+            // Escuta a Tarja de Aviso (Admin, Gestor, todos veem na hora)
             if (payload.new && payload.new.chave === 'aviso_banner') {
                 if (typeof window.carregarAvisoDoBanco === 'function') {
                     window.carregarAvisoDoBanco();
                 }
             }
+            
+            // 👇 Escuta o Desbloqueio Global (Mágica Instantânea - Só afeta o Gestor) 👇
+            if (payload.new && payload.new.chave === 'override_travas') {
+                if (usuarioAtual && usuarioAtual.perfil === 'Gestor') {
+                    if (typeof window.checarTravaExperiencia === 'function') window.checarTravaExperiencia();
+                    if (typeof window.checarPendenciasDesempenho === 'function') window.checarPendenciasDesempenho();
+                }
+            }
         })
         .subscribe();
-    // =========================================================================
 
     if (usuarioAtual.perfil === 'Admin') {
         // Escuta Perfis (Admissão, Rescisão e Mudanças de Horário)
@@ -34086,9 +34107,6 @@ window.verificarPisInput = function(input) {
 // ==========================================
 let avaliacoesPendentesCache = [];
 
-// =========================================================================
-// MÓDULO: PERÍODO DE EXPERIÊNCIA (TRAVA 45 e 90 DIAS - IGNORANDO AFASTADOS)
-// =========================================================================
 window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
@@ -34100,24 +34118,18 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hojeIso = new Date().toISOString().split('T')[0];
     
-    // 👇 A MÁGICA 1: Busca perfis, atestados e férias do dia de HOJE simultaneamente! 👇
     const [resColabs, resAusencias, resFerias] = await Promise.all([
         supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
         supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
         supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
     ]);
 
-    if (resColabs.error) {
-        if(containerLista) containerLista.innerHTML = '<p style="color: var(--cor-perigo); text-align: center;">Erro de conexão.</p>';
-        return;
-    }
+    if (resColabs.error) return;
 
-    // Mapeia quem está ausente hoje (Férias ou Atestado/Licença)
     const setAfastados = new Set();
     if (resAusencias.data) resAusencias.data.forEach(a => setAfastados.add(a.colaborador_id));
     if (resFerias.data) resFerias.data.forEach(f => setAfastados.add(f.colaborador_id));
 
-    // 👇 A MÁGICA 2: Corta fora quem tá em rescisão OU quem está afastado hoje! 👇
     const colabs = (resColabs.data || []).filter(c => {
         const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
         const taAfastado = setAfastados.has(c.id);
@@ -34149,32 +34161,56 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     });
 
     const menuSidebar = document.querySelector('.sidebar');
-    const avisoTrava = document.getElementById('aviso-bloqueio-exp');
+    let avisoTrava = document.getElementById('aviso-bloqueio-exp');
+    const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
+    const avisoAlertaExp = document.getElementById('aviso-alerta-exp');
     const btnMenuExp = document.querySelector('button[data-target="tela-experiencia"]'); 
 
+    // 👇 A MÁGICA: CHECA SE O SUPER ADMIN DEU O PASSE LIVRE 👇
+    const isDesbloqueado = await window.verificarDesbloqueioGlobal();
+
+    if (avisoAlertaExp) avisoAlertaExp.remove(); // Limpa alertas soltos
+
     if (avaliacoesPendentesCache.length > 0) {
-        if (!avisoTrava) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-exp" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.</div>`);
+        
+        if (isDesbloqueado) {
+            // TEM PASSE LIVRE! Só mostra o aviso laranja e não bloqueia nada
+            if (avisoTrava) avisoTrava.remove();
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-exp" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-unlock"></i> O RH liberou o sistema temporariamente! Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). Regularize logo!</div>`);
+            
+            if (avisoTravaDes) avisoTravaDes.style.top = '38px';
+            
+            // Destrava o menu
+            menuSidebar.classList.remove('sidebar-bloqueada');
+            document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
+
         } else {
-            avisoTrava.innerText = `ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.`;
-        }
+            // NORMAL - TRANCADO
+            if (!avisoTrava) {
+                document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-exp" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.</div>`);
+                avisoTrava = document.getElementById('aviso-bloqueio-exp');
+            } else {
+                avisoTrava.innerText = `ATENÇÃO: Você possui ${avaliacoesPendentesCache.length} avaliação(ões) de experiência pendente(s). O sistema está bloqueado até o preenchimento.`;
+            }
 
-        document.querySelectorAll('.nav-btn').forEach(b => {
-            if(b.dataset.target !== 'tela-experiencia') b.style.display = 'none';
-        });
+            if (avisoTravaDes) avisoTravaDes.style.top = '38px';
 
-        menuSidebar.classList.add('sidebar-bloqueada'); 
-        if(btnMenuExp) {
-            btnMenuExp.classList.remove('hidden');
-            btnMenuExp.style.pointerEvents = 'auto'; 
-            if (!foiCliqueManual) btnMenuExp.click(); 
+            document.querySelectorAll('.nav-btn').forEach(b => {
+                if(b.dataset.target !== 'tela-experiencia') b.style.display = 'none';
+            });
+
+            menuSidebar.classList.add('sidebar-bloqueada'); 
+            if(btnMenuExp) {
+                btnMenuExp.classList.remove('hidden');
+                btnMenuExp.style.pointerEvents = 'auto'; 
+                if (!foiCliqueManual) btnMenuExp.click(); 
+            }
         }
         
         if(typeof renderizarListaExperiencia === 'function') renderizarListaExperiencia();
+        
     } else {
         if (avisoTrava) avisoTrava.remove();
-        
-        const avisoTravaDes = document.getElementById('aviso-bloqueio-des');
         if (avisoTravaDes) avisoTravaDes.style.top = '0'; 
 
         if (!document.getElementById('aviso-bloqueio-des')) {
@@ -45466,7 +45502,10 @@ if (taAfastadoHoje) {
         if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
         if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
 
-        if (deveBloquearSistema) {
+        // 👇 A MÁGICA: CHECA SE O SUPER ADMIN DEU O PASSE LIVRE 👇
+        const isDesbloqueado = await window.verificarDesbloqueioGlobal();
+
+        if (deveBloquearSistema && !isDesbloqueado) {
             document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 48h esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o preenchimento.</div>`);
             
             document.querySelectorAll('.nav-btn').forEach(b => {
@@ -45478,11 +45517,16 @@ if (taAfastadoHoje) {
                 btnMenuDes.classList.remove('hidden');
                 btnMenuDes.style.display = '';
                 btnMenuDes.style.pointerEvents = 'auto';
-                if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp')) btnMenuDes.click();
+                if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-alerta-exp')) btnMenuDes.click();
             }
         } 
-        else if (temAlerta) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);"><i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Preencha nos dias em que o colaborador estiver de plantão para evitar o bloqueio do sistema.</div>`);
+        else if ((deveBloquearSistema && isDesbloqueado) || temAlerta) {
+            // TEM PASSE LIVRE OU ESTÁ SÓ NO ALERTA
+            let textoAlerta = deveBloquearSistema 
+                ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema temporariamente! Você tem avaliações de desempenho vencidas. Regularize rápido.`
+                : `<i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Preencha nos dias em que o colaborador estiver de plantão para evitar o bloqueio do sistema.`;
+
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">${textoAlerta}</div>`);
             
             if (!document.getElementById('aviso-bloqueio-exp') && menuSidebar) {
                 menuSidebar.classList.remove('sidebar-bloqueada');
@@ -45496,7 +45540,7 @@ if (taAfastadoHoje) {
             }
         }
 
-        const avisoTravaExp = document.getElementById('aviso-bloqueio-exp');
+        const avisoTravaExp = document.getElementById('aviso-bloqueio-exp') || document.getElementById('aviso-alerta-exp');
         const avisoDesNovo = document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des');
         if (avisoTravaExp && avisoDesNovo) avisoDesNovo.style.top = '38px'; 
 
@@ -52971,6 +53015,93 @@ window.filtrarTabelaEscalaPrevista = function() {
         
         linha.style.display = (matchNome && matchCargo) ? '' : 'none';
     });
+};
+
+      // =========================================================================
+// MÓDULO: DESBLOQUEIO GLOBAL DE AVALIAÇÕES (SUPER ADMIN)
+// =========================================================================
+
+// Verifica silenciosamente se o sistema está em período de perdão (desbloqueado)
+window.verificarDesbloqueioGlobal = async function() {
+    try {
+        const { data } = await supabaseClient.from('config_sistema').select('valor').eq('chave', 'override_travas').maybeSingle();
+        if (data && data.valor) {
+            const config = JSON.parse(data.valor);
+            if (config.expiracao) {
+                const dataExpiracao = new Date(config.expiracao);
+                const agora = new Date();
+                
+                // Se a data de agora for menor que a expiração, o sistema está DESBLOQUEADO!
+                if (agora <= dataExpiracao) {
+                    return true; 
+                }
+            }
+        }
+    } catch(e) { console.error("Erro ao ler trava global:", e); }
+    return false; // Se deu erro, expirou ou não tem data, mantém o bloqueio oficial ativo
+};
+
+window.abrirModalDesbloqueioAvaliacoes = async function() {
+    const dropdown = document.getElementById('theme-dropdown');
+    if (dropdown) dropdown.style.display = 'none'; // Fecha a engrenagem
+    
+    // Puxa do banco a data atual pra mostrar na tela
+    const { data } = await supabaseClient.from('config_sistema').select('valor').eq('chave', 'override_travas').maybeSingle();
+    let dataExpiracao = '';
+    if (data && data.valor) {
+        try { dataExpiracao = JSON.parse(data.valor).expiracao || ''; } catch(e){}
+    }
+
+    const modalHtml = `
+    <div id="modal-override-travas" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid #ff9800; position: relative;">
+            <button onclick="document.getElementById('modal-override-travas').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #ff9800; margin-bottom: 15px;"><i class="fa-solid fa-unlock-keyhole"></i> Desbloqueio Global do Sistema</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">
+                Defina uma <b>data e hora limite</b> para liberar o acesso ao sistema para todos os gestores que possuem avaliações (Experiência ou Desempenho) atrasadas. <br><br>Quando a data e hora informada for atingida, o sistema expulsará os gestores e bloqueará a tela novamente de forma automática.
+            </p>
+            
+            <div class="form-group" style="background: rgba(255, 152, 0, 0.1); padding: 15px; border-radius: 8px; border: 1px dashed #ff9800;">
+                <label style="color: #ff9800; font-weight: bold;">Liberar o sistema temporariamente até: <span style="color: var(--cor-perigo);">*</span></label>
+                <input type="datetime-local" id="input-override-data" value="${dataExpiracao}" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.5); color: #fff; margin-top: 8px; font-size: 1.1rem; outline: none; cursor: pointer;">
+                <small style="color: var(--cor-texto-secundario); display: block; margin-top: 8px;">Para <b>desativar o desbloqueio agora</b>, apague a data acima e clique em aplicar.</small>
+            </div>
+            
+            <button class="btn-success" style="background: #ff9800; color: #000; border: none; width: 100%; font-weight: bold; height: 50px; margin-top: 15px;" onclick="salvarOverrideTravas()">
+                <i class="fa-solid fa-floppy-disk"></i> Aplicar Desbloqueio Instantâneo
+            </button>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+window.salvarOverrideTravas = async function() {
+    const dataVal = document.getElementById('input-override-data').value;
+    const btn = document.querySelector('#modal-override-travas .btn-success');
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando no banco...';
+    btn.disabled = true;
+
+    const payload = JSON.stringify({ expiracao: dataVal });
+
+    const { data: rowExiste } = await supabaseClient.from('config_sistema').select('id').eq('chave', 'override_travas').maybeSingle();
+    
+    let err;
+    if (rowExiste) {
+        const res = await supabaseClient.from('config_sistema').update({ valor: payload }).eq('id', rowExiste.id);
+        err = res.error;
+    } else {
+        const res = await supabaseClient.from('config_sistema').insert([{ chave: 'override_travas', valor: payload }]);
+        err = res.error;
+    }
+
+    if (err) {
+        mostrarAlerta("Erro ao salvar o passe-livre: " + err.message, "erro");
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Aplicar Desbloqueio Instantâneo';
+        btn.disabled = false;
+    } else {
+        mostrarAlerta(dataVal ? "Desbloqueio temporário aplicado! Os gestores estão liberados." : "Passe-livre removido. Travas ativadas novamente.", "sucesso");
+        document.getElementById('modal-override-travas').remove();
+    }
 };
       
         window.ultimoContadorSino = 0;
