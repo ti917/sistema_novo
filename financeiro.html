@@ -1947,10 +1947,72 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             carregarFornecedores();
         });
 
+        // =========================================================================
+        // MOTOR INTELIGENTE DE PRAZOS (USADO POR RESCISÃO E FÉRIAS)
+        // =========================================================================
+        window.calcularTextoPrazo = function(dataAlvoObj) {
+            const hoje = new Date();
+            hoje.setHours(0, 0, 0, 0);
+            
+            const alvo = new Date(dataAlvoObj);
+            alvo.setHours(0, 0, 0, 0);
+
+            // Calcula a diferença em dias matematicamente
+            const diffTime = alvo.getTime() - hoje.getTime();
+            const diffDias = Math.round(diffTime / (1000 * 3600 * 24));
+
+            const dia = String(alvo.getDate()).padStart(2, '0');
+            const mes = String(alvo.getMonth() + 1).padStart(2, '0');
+            const ano = alvo.getFullYear();
+            const dataFormatada = `${dia}/${mes}/${ano}`;
+
+            if (diffDias < 0) {
+                const diasAtraso = Math.abs(diffDias);
+                return {
+                    texto: `<i class="fa-solid fa-triangle-exclamation"></i> Venceu em: ${dataFormatada} (Há ${diasAtraso} dia${diasAtraso > 1 ? 's' : ''})`,
+                    estourado: true,
+                    cor: 'var(--cor-perigo)'
+                };
+            } else if (diffDias === 0) {
+                return {
+                    texto: `<i class="fa-solid fa-bell"></i> Vence HOJE (${dataFormatada})`,
+                    estourado: true,
+                    cor: '#e67e22' // Laranja pra dar urgência
+                };
+            } else {
+                return {
+                    texto: `<i class="fa-regular fa-clock"></i> Vence em: ${dataFormatada} (Falta${diffDias > 1 ? 'm' : ''} ${diffDias} dia${diffDias > 1 ? 's' : ''})`,
+                    estourado: false,
+                    cor: 'var(--cor-texto-secundario)'
+                };
+            }
+        };
+
+        const extrairDataProfunda = (obj) => {
+            if (!obj) return null;
+            let dataEncontrada = null;
+            const buscarRecurso = (item) => {
+                if (dataEncontrada) return; 
+                if (typeof item === 'object' && item !== null) {
+                    for (let chave in item) {
+                        const val = item[chave];
+                        if (typeof val === 'string' && chave.toLowerCase().includes('data') && (val.includes('-') || val.includes('/'))) {
+                            if (!chave.toLowerCase().includes('nascimento')) {
+                                dataEncontrada = val; return;
+                            }
+                        } else if (typeof val === 'object') {
+                            buscarRecurso(val);
+                        }
+                    }
+                }
+            };
+            buscarRecurso(obj);
+            return dataEncontrada;
+        };
+
         // ==========================================
         // MÓDULO: INTEGRAÇÃO RH -> RESCISÕES
         // ==========================================
-        window.rescisoesEmMemoria = []; // 🧠 Variável Global pra salvar as rescisões na RAM e pesquisar rápido
 
         // Preenche o Select com os meses (Auto-seleciona o atual)
         window.preencherFiltroMesRescisao = function() {
@@ -1977,96 +2039,50 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
         };
 
         // ==========================================
-        // MÓDULO: INTEGRAÇÃO RH -> RESCISÕES
+        // MÓDULO 1: GESTÃO DE RESCISÕES
         // ==========================================
-        window.rescisoesEmMemoria = []; // 🧠 Variável Global pra salvar as rescisões na RAM
-        window.filtroMesRescisaoAguardado = null; // Guarda a escolha do usuário caso ele atualize a tela
+        window.rescisoesEmMemoria = [];
+        window.filtroMesRescisaoAguardado = null;
 
         window.carregarRescisoesFinanceiro = async function() {
             const tbody = document.getElementById('lista-rescisoes-fin-body');
             if(!tbody) return;
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
 
-            // 1. Busca os colaboradores desligados no RH
             let queryRH = supabaseClient.from('perfis').select('id, nome, unidade, empresa, dados_rescisao').eq('status', 'Desligado');
             if (empresaFinanceiraSelecionada !== 'Todas') queryRH = queryRH.eq('empresa', empresaFinanceiraSelecionada);
             const { data: desligados, error: errRH } = await queryRH;
-            
-            if (errRH) return tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar dados do RH.</td></tr>';
 
-            // 2. Busca os lançamentos financeiros de Rescisão
-            const { data: lancamentos, error: errFin } = await supabaseClient.from('financeiro_lancamentos')
-                .select('descricao, valor_total, status')
-                .like('descricao', '%Rescisão%');
+            const { data: lancamentos } = await supabaseClient.from('financeiro_lancamentos').select('descricao, valor_total, status').like('descricao', '%Rescisão%');
 
-            // 3. O Rastreador Universal de Data
-            const extrairDataProfunda = (obj) => {
-                if (!obj) return null;
-                let dataEncontrada = null;
-                const buscarRecurso = (item) => {
-                    if (dataEncontrada) return; 
-                    if (typeof item === 'object' && item !== null) {
-                        for (let chave in item) {
-                            const val = item[chave];
-                            if (typeof val === 'string') {
-                                if (chave.toLowerCase().includes('data') && (val.includes('-') || val.includes('/'))) {
-                                    if (!chave.toLowerCase().includes('nascimento')) {
-                                        dataEncontrada = val; return;
-                                    }
-                                }
-                            } else if (typeof val === 'object') {
-                                buscarRecurso(val);
-                            }
-                        }
-                    }
-                };
-                buscarRecurso(obj);
-                return dataEncontrada;
-            };
-
-            // Mapeador Inteligente de Meses (Lê o banco e cria o filtro automaticamente)
             const mesesExistentes = new Set();
             const hoje = new Date();
             const mesAtualMascara = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
-            mesesExistentes.add(mesAtualMascara); // Garante que o mês atual sempre vai aparecer no dropdown
+            mesesExistentes.add(mesAtualMascara);
 
-            // Mastiga e formata os dados antes de salvar na memória
             (desligados || []).forEach(colab => {
-                let rescisaoObj = colab.dados_rescisao || {};
-                if (typeof rescisaoObj === 'string') {
-                    try { rescisaoObj = JSON.parse(rescisaoObj); } catch(e) { rescisaoObj = {}; }
-                }
-
+                let rescisaoObj = typeof colab.dados_rescisao === 'string' ? JSON.parse(colab.dados_rescisao || '{}') : (colab.dados_rescisao || {});
                 const dataRaw = extrairDataProfunda(rescisaoObj);
                 
                 let dataDeslFormatada = 'Não informada';
-                let dataPrazoFormatada = 'Sem data';
+                let htmlPrazoFormatado = '<span style="color: var(--cor-texto-secundario);">Sem data base</span>';
                 let prazoEstourado = false;
                 let dataOrdenacao = '2000-01-01'; 
                 let mesAnoReferencia = '0000-00'; 
+                let dataPrazoPura = '';
 
                 if (dataRaw) {
                     let ano, mes, dia;
-                    if (dataRaw.includes('/')) {
-                        [dia, mes, ano] = dataRaw.split('/');
-                    } else if (dataRaw.includes('-')) {
-                        [ano, mes, dia] = dataRaw.split('-');
-                        dia = dia.substring(0, 2); 
-                    }
+                    if (dataRaw.includes('/')) [dia, mes, ano] = dataRaw.split('/');
+                    else if (dataRaw.includes('-')) { [ano, mes, dia] = dataRaw.split('-'); dia = dia.substring(0, 2); }
 
                     if (ano && mes && dia) {
                         dataDeslFormatada = `${dia}/${mes}/${ano}`;
-                        dataOrdenacao = `${ano}-${mes}-${dia}`; 
-                        mesAnoReferencia = `${ano}-${mes}`; // Salva YYYY-MM para bater com o filtro
                         
-                        // Adiciona o mês do desligamento na listinha do Dropdown dinâmico
-                        mesesExistentes.add(mesAnoReferencia);
-
-                        // 🚨 REGRA DE SEGURANÇA DA SOUL: 9 DIAS CORRIDOS
+                        // REGRA: 9 DIAS CORRIDOS (E pula final de semana/feriado)
                         const dataObj = new Date(ano, parseInt(mes) - 1, dia);
                         dataObj.setDate(dataObj.getDate() + 9);
                         
-                        // 🛡️ ESCUDO DE FINAL DE SEMANA E FERIADOS
                         const feriadosFixos = ['01-01', '04-21', '05-01', '09-07', '10-12', '11-02', '11-15', '11-20', '12-25'];
                         while (true) {
                             let diaSemana = dataObj.getDay(); 
@@ -2077,82 +2093,67 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                             else if (feriadosFixos.includes(mesDiaStr)) dataObj.setDate(dataObj.getDate() - 1);
                             else break;
                         }
-                        
-                        const pDia = String(dataObj.getDate()).padStart(2, '0');
-                        const pMes = String(dataObj.getMonth() + 1).padStart(2, '0');
-                        const pAno = dataObj.getFullYear();
-                        dataPrazoFormatada = `${pDia}/${pMes}/${pAno}`;
 
-                        const hrHoje = new Date(); hrHoje.setHours(0,0,0,0);
-                        if (dataObj < hrHoje) prazoEstourado = true;
+                        // Joga a data final no Motor Inteligente
+                        const infoPrazo = window.calcularTextoPrazo(dataObj);
+                        htmlPrazoFormatado = `<span style="display: block; font-size: 0.85rem; margin-top: 5px; color: ${infoPrazo.cor}; font-weight: bold;">${infoPrazo.texto}</span>`;
+                        prazoEstourado = infoPrazo.estourado;
+
+                        dataOrdenacao = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}-${String(dataObj.getDate()).padStart(2,'0')}`;
+                        mesAnoReferencia = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}`;
+                        mesesExistentes.add(mesAnoReferencia);
+                        
+                        dataPrazoPura = `${String(dataObj.getDate()).padStart(2,'0')}/${String(dataObj.getMonth()+1).padStart(2,'0')}/${dataObj.getFullYear()}`;
                     }
                 }
 
-                const lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Rescisão - ${colab.nome}`));
-
-                // Salva tudo "pré-renderizado" dentro do objeto do colaborador
                 colab._dataOrdenacao = new Date(dataOrdenacao).getTime(); 
                 colab._mesAnoReferencia = mesAnoReferencia;
                 colab._htmlDeslFormatada = dataDeslFormatada;
-                colab._htmlPrazoFormatada = dataPrazoFormatada;
+                colab._htmlPrazoFormatada = htmlPrazoFormatado;
+                colab._dataPrazoPura = dataPrazoPura; // Usado para mandar pro form
                 colab._prazoEstourado = prazoEstourado;
-                colab._lancamentoFeito = lancamentoFeito;
+                colab._lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Rescisão - ${colab.nome}`));
             });
 
-            // Ordena os caras (do mais recente pro mais antigo) e joga na memória RAM
             desligados.sort((a, b) => b._dataOrdenacao - a._dataOrdenacao);
             window.rescisoesEmMemoria = desligados;
 
-            // 🌟 Monta o Dropdown dinâmico com os meses que realmente existem no banco 🌟
             const selectMes = document.getElementById('filtro-resc-mes');
-            let optionsMes = '<option value="Todos">Todos os Meses (Geral)</option>';
-            
-            // Ordena os meses do mais novo para o mais antigo (ex: 2026-06, 2026-05, etc)
-            const mesesOrdenados = Array.from(mesesExistentes).sort((a, b) => b.localeCompare(a));
-            
-            mesesOrdenados.forEach(m => {
-                if (m === '0000-00') return; // Ignora os que não tem data
-                const [ano, mes] = m.split('-');
-                optionsMes += `<option value="${m}">Mês: ${mes}/${ano}</option>`;
-            });
-            
-            selectMes.innerHTML = optionsMes;
+            if(selectMes) {
+                let optionsMes = '<option value="Todos">Todos os Meses (Geral)</option>';
+                Array.from(mesesExistentes).sort((a, b) => b.localeCompare(a)).forEach(m => {
+                    if (m === '0000-00') return;
+                    optionsMes += `<option value="${m}">Mês de Pagto: ${m.split('-')[1]}/${m.split('-')[0]}</option>`;
+                });
+                selectMes.innerHTML = optionsMes;
+                if (!window.filtroMesRescisaoAguardado) window.filtroMesRescisaoAguardado = mesAtualMascara;
+                selectMes.value = window.filtroMesRescisaoAguardado;
+            }
 
-            // Define o Mês Atual como padrão ao abrir a tela (ou mantém o que o usuário escolheu antes de atualizar)
-            if (!window.filtroMesRescisaoAguardado) window.filtroMesRescisaoAguardado = mesAtualMascara;
-            selectMes.value = window.filtroMesRescisaoAguardado;
-
-            // Manda desenhar na tela com base nos filtros
             window.filtrarRescisoesLocal();
         };
 
-        // 🧠 Função que filtra e desenha a tabela instantaneamente
         window.filtrarRescisoesLocal = function() {
             const tbody = document.getElementById('lista-rescisoes-fin-body');
             const termoNome = document.getElementById('busca-resc-colab').value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             const termoUnid = document.getElementById('busca-resc-unidade').value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            
-            // Salva a escolha pra não resetar se ele clicar em "Atualizar Dados"
             const filtroMes = document.getElementById('filtro-resc-mes').value;
             window.filtroMesRescisaoAguardado = filtroMes; 
 
             tbody.innerHTML = '';
 
             const filtrados = window.rescisoesEmMemoria.filter(colab => {
-                const nomeColabStr = (colab.nome || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                const unidColabStr = (colab.unidade || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
-                if (termoNome && !nomeColabStr.includes(termoNome)) return false;
-                if (termoUnid && !unidColabStr.includes(termoUnid)) return false;
-                
-                // Filtro do Mês Baseado na data de Desligamento
+                const nomeStr = (colab.nome || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                const unidStr = (colab.unidade || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (termoNome && !nomeStr.includes(termoNome)) return false;
+                if (termoUnid && !unidStr.includes(termoUnid)) return false;
                 if (filtroMes !== 'Todos' && colab._mesAnoReferencia !== filtroMes) return false;
-
                 return true;
             });
 
             if (filtrados.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão pendente neste mês/filtro. Limpo! 🎉</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão pendente neste filtro. Limpo! 🎉</td></tr>';
                 return;
             }
 
@@ -2167,22 +2168,22 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                     botoesAcao = `<button class="btn-secondary" style="border-color: var(--cor-acento); color: var(--cor-acento); opacity: 0.5; cursor: not-allowed; width: 100%;" disabled><i class="fa-solid fa-check"></i> Finalizado</button>`;
                 } else {
                     statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">A Lançar Valor</span>`;
-                    botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoRescisao('${colab.nome}', '${colab.unidade}', '${colab._htmlPrazoFormatada}')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
+                    botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoSistema('${colab.nome}', '${colab.unidade}', '${colab._dataPrazoPura}', 'Rescisão')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
                 }
 
-                const corPrazo = (colab._prazoEstourado && !colab._lancamentoFeito) ? 'color: var(--cor-perigo); font-weight: bold;' : 'color: var(--cor-texto-secundario);';
+                // Se já pagou, a gente não deixa o texto vermelho de vencido (fica cinza suave)
+                let prazoHtmlExibicao = colab._htmlPrazoFormatada;
+                if (colab._lancamentoFeito) {
+                    prazoHtmlExibicao = prazoHtmlExibicao.replace(/color:.*?;/, 'color: var(--cor-texto-secundario); opacity: 0.7;');
+                }
 
                 tbody.innerHTML += `
                     <tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
+                        <td style="padding: 15px;"><strong style="color: var(--cor-texto-principal); font-size: 1.05rem;">${colab.nome}</strong></td>
+                        <td style="padding: 15px; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building-columns" style="color: var(--cor-acento); margin-right: 5px;"></i> ${colab.unidade || 'Sem unidade'}</td>
                         <td style="padding: 15px;">
-                            <strong style="color: var(--cor-texto-principal); font-size: 1.05rem;">${colab.nome}</strong>
-                        </td>
-                        <td style="padding: 15px; color: var(--cor-texto-secundario);">
-                            <i class="fa-solid fa-building-columns" style="color: var(--cor-acento); margin-right: 5px;"></i> ${colab.unidade || 'Sem unidade'}
-                        </td>
-                        <td style="padding: 15px;">
-                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-secundario);">Desligado em: ${colab._htmlDeslFormatada}</span>
-                            <span style="display: block; font-size: 0.85rem; margin-top: 5px; ${corPrazo}"><i class="fa-regular fa-calendar-xmark"></i> Vence em: ${colab._htmlPrazoFormatada}</span>
+                            <span style="display: block; font-size: 0.85rem; color: var(--cor-texto-secundario);">Saída Oficial: ${colab._htmlDeslFormatada}</span>
+                            ${prazoHtmlExibicao}
                         </td>
                         <td style="padding: 15px; text-align: center;">${statusBadge}</td>
                         <td style="padding: 15px; text-align: center;">${botoesAcao}</td>
@@ -3540,130 +3541,106 @@ if (formClara) {
 }
 
         // ==========================================
-        // MÓDULO: INTEGRAÇÃO RH -> GESTÃO DE FÉRIAS
+        // MÓDULO 2: GESTÃO DE FÉRIAS
         // ==========================================
-        window.feriasEmMemoria = []; // 🧠 RAM para armazenar dados de férias de forma volátil
-        window.filtroMesFeriasAguardado = null; // Memoriza o mês selecionado no filtro ao dar F5
+        window.feriasEmMemoria = []; 
+        window.filtroMesFeriasAguardado = null; 
 
         window.carregarFeriasFinanceiro = async function() {
             const tbody = document.getElementById('lista-ferias-fin-body');
             if(!tbody) return;
             tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
 
-            // 1. Busca os registros de férias aprovados no banco de dados do RH
             let queryRH = supabaseClient.from('ferias').select('*, perfis(nome, unidade, empresa)').eq('status', 'Aprovado');
-            if (empresaFinanceiraSelecionada !== 'Todas') {
-                queryRH = queryRH.eq('empresa', empresaFinanceiraSelecionada);
-            }
+            if (empresaFinanceiraSelecionada !== 'Todas') queryRH = queryRH.eq('empresa', empresaFinanceiraSelecionada);
+            
             const { data: listaFerias, error: errRH } = await queryRH;
-            if (errRH) return tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar dados de férias do RH.</td></tr>';
-
-            // 2. Busca lançamentos financeiros já existentes para cruzar dados de pagamento
-            const { data: lancamentos, error: errFin } = await supabaseClient.from('financeiro_lancamentos')
-                .select('descricao, valor_total, status')
-                .like('descricao', '%Férias%');
+            const { data: lancamentos } = await supabaseClient.from('financeiro_lancamentos').select('descricao, valor_total, status').like('descricao', '%Férias%');
 
             const mesesExistentes = new Set();
             const hoje = new Date();
             const mesAtualMascara = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
-            mesesExistentes.add(mesAtualMascara); // Mantém o mês atual como âncora fixa
+            mesesExistentes.add(mesAtualMascara); 
 
             (listaFerias || []).forEach(item => {
                 const nomeColab = item.perfis?.nome || 'Colaborador Oculto';
                 const unidadeColab = item.perfis?.unidade || 'Sem unidade';
                 
-                // Mapeia as datas de início e fim salvas pelo RH
                 const dataInicioStr = item.data_inicio;
-                const dataFimStr = item.data_fim;
-
                 let gozoFormatado = 'Não informado';
-                let dataLimiteFormatada = 'Sem limite';
+                let htmlPrazoFormatado = '<span style="color: var(--cor-texto-secundario);">Sem limite</span>';
                 let prazoEstourado = false;
                 let dataOrdenacao = '2000-01-01';
                 let mesAnoReferencia = '0000-00';
+                let dataPrazoPura = '';
 
                 if (dataInicioStr) {
                     let ano, mes, dia;
-                    if (dataInicioStr.includes('/')) {
-                        [dia, mes, ano] = dataInicioStr.split('/');
-                    } else if (dataInicioStr.includes('-')) {
-                        [ano, mes, dia] = dataInicioStr.split('-');
-                        dia = dia.substring(0, 2);
-                    }
+                    if (dataInicioStr.includes('/')) [dia, mes, ano] = dataInicioStr.split('/');
+                    else if (dataInicioStr.includes('-')) { [ano, mes, dia] = dataInicioStr.split('-'); dia = dia.substring(0, 2); }
 
                     if (ano && mes && dia) {
-                        // Formata exibição do gozo inicial
                         let diaF = '', mesF = '', anoF = '';
-                        if(dataFimStr) {
-                            if(dataFimStr.includes('/')) [diaF, mesF, anoF] = dataFimStr.split('/');
-                            else [anoF, mesF, diaF] = dataFimStr.split('-');
-                            diaF = diaF.substring(0, 2);
+                        if(item.data_fim) {
+                            if(item.data_fim.includes('/')) [diaF, mesF, anoF] = item.data_fim.split('/');
+                            else { [anoF, mesF, diaF] = item.data_fim.split('-'); diaF = diaF.substring(0, 2); }
                         }
                         gozoFormatado = `De ${dia}/${mes}/${ano} até ${diaF}/${mesF}/${anoF}`;
 
-                        // 🚨 REGRA DE SEGURANÇA OPERACIONAL: Pagar 3 dias antes de entrar de gozo
+                        // REGRA: 3 DIAS ANTES DE SAIR DE FÉRIAS
                         const dataObj = new Date(ano, parseInt(mes) - 1, dia);
                         dataObj.setDate(dataObj.getDate() - 3);
 
-                        // 🛡️ ESCUDO ANTI-FIM DE SEMANA E FERIADOS (Antecipar pro dia útil anterior)
+                        // ESCUDO ANTI-FIM DE SEMANA
                         const feriadosFixos = ['01-01', '04-21', '05-01', '09-07', '10-12', '11-02', '11-15', '11-20', '12-25'];
                         while (true) {
                             let diaSemana = dataObj.getDay(); 
                             let mesDiaStr = String(dataObj.getMonth() + 1).padStart(2, '0') + '-' + String(dataObj.getDate()).padStart(2, '0');
                             
-                            if (diaSemana === 0) dataObj.setDate(dataObj.getDate() - 2); // Domingo recua para Sexta
-                            else if (diaSemana === 6) dataObj.setDate(dataObj.getDate() - 1); // Sábado recua para Sexta
-                            else if (feriadosFixos.includes(mesDiaStr)) dataObj.setDate(dataObj.getDate() - 1); // Feriado recua véspera
+                            if (diaSemana === 0) dataObj.setDate(dataObj.getDate() - 2); 
+                            else if (diaSemana === 6) dataObj.setDate(dataObj.getDate() - 1); 
+                            else if (feriadosFixos.includes(mesDiaStr)) dataObj.setDate(dataObj.getDate() - 1); 
                             else break;
                         }
 
-                        const pDia = String(dataObj.getDate()).padStart(2, '0');
-                        const pMes = String(dataObj.getMonth() + 1).padStart(2, '0');
-                        const pAno = dataObj.getFullYear();
-                        
-                        dataLimiteFormatada = `${pDia}/${pMes}/${pAno}`;
-                        dataOrdenacao = `${ano}-${mes}-${dia}`;
-                        mesAnoReferencia = `${pAno}-${pMes}`; // Filtro baseado no mês que o dinheiro TEM que sair do caixa
-                        
-                        mesesExistentes.add(mesAnoReferencia);
+                        // Joga a data final no Motor Inteligente
+                        const infoPrazo = window.calcularTextoPrazo(dataObj);
+                        htmlPrazoFormatado = `<span style="display: block; font-size: 0.85rem; color: ${infoPrazo.cor}; font-weight: bold;">${infoPrazo.texto}</span>`;
+                        prazoEstourado = infoPrazo.estourado;
 
-                        const hrHoje = new Date(); hrHoje.setHours(0,0,0,0);
-                        if (dataObj < hrHoje) prazoEstourado = true;
+                        dataOrdenacao = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}-${String(dataObj.getDate()).padStart(2,'0')}`;
+                        mesAnoReferencia = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}`; 
+                        mesesExistentes.add(mesAnoReferencia);
+                        
+                        dataPrazoPura = `${String(dataObj.getDate()).padStart(2,'0')}/${String(dataObj.getMonth()+1).padStart(2,'0')}/${dataObj.getFullYear()}`;
                     }
                 }
-
-                // Verifica se já existe um lançamento com a descrição contendo o nome do indivíduo
-                const lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Férias - ${nomeColab}`));
 
                 item._nomeColab = nomeColab;
                 item._unidadeColab = unidadeColab;
                 item._dataOrdenacao = new Date(dataOrdenacao).getTime();
                 item._mesAnoReferencia = mesAnoReferencia;
                 item._htmlGozoFormatado = gozoFormatado;
-                item._htmlLimiteFormatada = dataLimiteFormatada;
+                item._htmlPrazoFormatada = htmlPrazoFormatado;
+                item._dataPrazoPura = dataPrazoPura;
                 item._prazoEstourado = prazoEstourado;
-                item._lancamentoFeito = lancamentoFeito;
+                item._lancamentoFeito = lancamentos?.find(l => l.descricao.includes(`Férias - ${nomeColab}`));
             });
 
-            // Ordena os prazos por proximidade
             listaFerias.sort((a, b) => a._dataOrdenacao - b._dataOrdenacao);
             window.feriasEmMemoria = listaFerias;
 
-            // Rebuild do Dropdown Dinâmico de Períodos
             const selectMes = document.getElementById('filtro-ferias-mes');
-            let optionsMes = '<option value="Todos">Todos os Meses (Geral)</option>';
-            const mesesOrdenados = Array.from(mesesExistentes).sort((a, b) => b.localeCompare(a));
-            
-            mesesOrdenados.forEach(m => {
-                if (m === '0000-00') return;
-                const [ano, mes] = m.split('-');
-                optionsMes += `<option value="${m}">Mês de Caixa: ${mes}/${ano}</option>`;
-            });
-            selectMes.innerHTML = optionsMes;
-
-            // Auto-seleciona o mês atual na primeira abertura da aba
-            if (!window.filtroMesFeriasAguardado) window.filtroMesFeriasAguardado = mesAtualMascara;
-            selectMes.value = window.filtroMesFeriasAguardado;
+            if(selectMes) {
+                let optionsMes = '<option value="Todos">Todos os Meses (Geral)</option>';
+                Array.from(mesesExistentes).sort((a, b) => b.localeCompare(a)).forEach(m => {
+                    if (m === '0000-00') return;
+                    optionsMes += `<option value="${m}">Mês de Pagto: ${m.split('-')[1]}/${m.split('-')[0]}</option>`;
+                });
+                selectMes.innerHTML = optionsMes;
+                if (!window.filtroMesFeriasAguardado) window.filtroMesFeriasAguardado = mesAtualMascara;
+                selectMes.value = window.filtroMesFeriasAguardado;
+            }
 
             window.filtrarFeriasLocal();
         };
@@ -3680,11 +3657,9 @@ if (formClara) {
             const filtrados = window.feriasEmMemoria.filter(item => {
                 const nomeLower = item._nomeColab.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
                 const unidLower = item._unidadeColab.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
                 if (termoNome && !nomeLower.includes(termoNome)) return false;
                 if (termoUnid && !unidLower.includes(termoUnid)) return false;
                 if (filtroMes !== 'Todos' && item._mesAnoReferencia !== filtroMes) return false;
-
                 return true;
             });
 
@@ -3703,18 +3678,21 @@ if (formClara) {
                     statusBadge = `<span style="background: ${bgBadge}; color: ${corBadge}; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">Lançado / ${item._lancamentoFeito.status}</span><div style="font-size: 0.75rem; margin-top: 5px; color: ${corBadge};">R$ ${item._lancamentoFeito.valor_total.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</div>`;
                     botoesAcao = `<button class="btn-secondary" style="border-color: var(--cor-acento); color: var(--cor-acento); opacity: 0.5; cursor: not-allowed; width: 100%;" disabled><i class="fa-solid fa-check"></i> Processado</button>`;
                 } else {
-                    statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">Aguardando Lançar</span>`;
-                    botoesAcao = `<button class="btn-success" style="background: #e67e22; width: 100%; border: none;" onclick="prepararLancamentoFerias('${item._nomeColab}', '${item._unidadeColab}', '${item._htmlLimiteFormatada}')"><i class="fa-solid fa-umbrella-beach"></i> Lançar Férias</button>`;
+                    statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">A Lançar Valor</span>`;
+                    botoesAcao = `<button class="btn-success" style="background: #e67e22; width: 100%; border: none;" onclick="prepararLancamentoSistema('${item._nomeColab}', '${item._unidadeColab}', '${item._dataPrazoPura}', 'Férias')"><i class="fa-solid fa-umbrella-beach"></i> Pagar / Lançar</button>`;
                 }
 
-                const corPrazo = (item._prazoEstourado && !item._lancamentoFeito) ? 'color: var(--cor-perigo); font-weight: bold;' : 'color: var(--cor-texto-secundario);';
+                let prazoHtmlExibicao = item._htmlPrazoFormatada;
+                if (item._lancamentoFeito) {
+                    prazoHtmlExibicao = prazoHtmlExibicao.replace(/color:.*?;/, 'color: var(--cor-texto-secundario); opacity: 0.7;');
+                }
 
                 tbody.innerHTML += `
                     <tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
                         <td style="padding: 15px;"><strong style="color: var(--cor-texto-principal); font-size: 1.05rem;">${item._nomeColab}</strong></td>
                         <td style="padding: 15px; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building-columns" style="color: var(--cor-acento); margin-right: 5px;"></i> ${item._unidadeColab}</td>
                         <td style="padding: 15px; font-size: 0.85rem; color: var(--cor-texto-secundario);">${item._htmlGozoFormatado}</td>
-                        <td style="padding: 15px; ${corPrazo}"><i class="fa-regular fa-clock"></i> Pagar até: ${item._htmlLimiteFormatada}</td>
+                        <td style="padding: 15px;">${prazoHtmlExibicao}</td>
                         <td style="padding: 15px; text-align: center;">${statusBadge}</td>
                         <td style="padding: 15px; text-align: center;">${botoesAcao}</td>
                     </tr>
@@ -3724,56 +3702,53 @@ if (formClara) {
 
         window.prepararLancamentoVisualForn = function() {}; // Fallback preventivo
 
-        window.prepararLancamentoRescisao = function(nomeColab, nomeUnidade, dataPrazoStr) {
+        // =========================================================================
+        // ATALHO UNIVERSAL PARA O FINANCEIRO LANÇAR PAGAMENTOS ESPECIAIS (RH)
+        // =========================================================================
+        window.prepararLancamentoSistema = function(nomeColab, nomeUnidade, dataPrazoStr, tipoLcto) {
             const cc = todosCentrosCustoGlobais.find(c => c.nome_unidade === nomeUnidade);
             if (!cc) {
-                mostrarAlerta(`A unidade "${nomeUnidade}" ainda não possui um Centro de Custo! Crie a unidade na aba "Centros de Custo" primeiro.`, 'aviso');
+                mostrarAlerta(`A unidade "${nomeUnidade}" não possui Centro de Custo ativo! Crie a unidade na aba "Centros de Custo" primeiro.`, 'aviso');
                 return;
             }
             abrirDetalheUnidade(cc.id);
+            
             setTimeout(() => {
                 abrirModalLancamento();
+                
                 setTimeout(() => {
                     document.getElementById('lanc-tipo').value = 'Despesa';
                     toggleFornecedorLancamento('Despesa');
                     document.getElementById('lanc-fornecedor').value = ''; 
-                    document.getElementById('lanc-descricao').value = `Rescisão - ${nomeColab}`;
-                    const linhas = document.querySelectorAll('.linha-pagamento');
-                    if(linhas.length > 0 && dataPrazoStr && dataPrazoStr !== 'Sem data') {
-                        linhas[0].querySelector('.data-input').value = dataPrazoStr;
+                    
+                    // 🛡️ BLOQUEIO E PADRONIZAÇÃO EM MAIÚSCULO 🛡️
+                    const inputDescricao = document.getElementById('lanc-descricao');
+                    inputDescricao.value = `${tipoLcto} - ${nomeColab}`.toUpperCase(); // Força Maiúsculas
+                    inputDescricao.readOnly = true; // Impede edição manual
+                    inputDescricao.style.background = 'rgba(0,0,0,0.6)';
+                    inputDescricao.style.border = '1px dashed var(--cor-acento)';
+                    inputDescricao.style.color = 'var(--cor-acento)';
+                    inputDescricao.style.cursor = 'not-allowed';
+                    
+                    const lines = document.querySelectorAll('.linha-pagamento');
+                    if(lines.length > 0 && dataPrazoStr && dataPrazoStr !== 'Sem data') {
+                        lines[0].querySelector('.data-input').value = dataPrazoStr;
                     }
-                    mostrarAlerta("Preencha o valor da rescisão, anexe o comprovante e salve!", "aviso", "Quase lá!");
+                    
+                    mostrarAlerta(`Lançamento de ${tipoLcto.toUpperCase()} pré-preenchido com sucesso!`, 'sucesso', 'Padronizado!');
                 }, 100);
             }, 300);
         };
 
-        // Nova Função de Atalho para Lançar Férias/Rescisões de forma idêntica
-        window.prepararLancamentoRescisao = function(nomeColab, nomeUnidade, dataPrazoStr) {
-            const cc = todosCentrosCustoGlobais.find(c => c.nome_unidade === nomeUnidade);
-            if (!cc) {
-                mostrarAlerta(`A unidade "${nomeUnidade}" não possui Centro de Custo ativo!`, 'aviso');
-                return;
-            }
-            abrirDetalheUnidade(cc.id);
-            setTimeout(() => {
-                abrirModalLancamento();
-                setTimeout(() => {
-                    document.getElementById('lanc-tipo').value = 'Despesa';
-                    toggleFornecedorLancamento('Despesa');
-                    document.getElementById('lanc-fornecedor').value = ''; 
-                    document.getElementById('lanc-descricao').value = `Rescisão - ${nomeColab}`;
-                    const linhas = document.querySelectorAll('.linha-pagamento');
-                    if(linhas.length > 0 && dataPrazoStr && dataPrazoStr !== 'Sem data') {
-                        linhas[0].querySelector('.data-input').value = dataPrazoStr;
-                    }
-                }, 100);
-            }, 300);
-        };
-
-        // Mapeia o clique do botão na navegação lateral
+        // Gatilhos de cliques nas abas da Sidebar
         document.querySelector('.sidebar-item[data-target="tela-rescisoes"]')?.addEventListener('click', () => {
             if (todosCentrosCustoGlobais.length === 0) carregarCentrosCusto();
             carregarRescisoesFinanceiro();
+        });
+        
+        document.querySelector('.sidebar-item[data-target="tela-ferias-fin"]')?.addEventListener('click', () => {
+            if (todosCentrosCustoGlobais.length === 0) carregarCentrosCusto();
+            carregarFeriasFinanceiro();
         });
     </script>
 </body>
