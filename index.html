@@ -45376,7 +45376,7 @@ document.querySelectorAll('.btn-aba-desempenho').forEach(btn => {
 });
 
 // =========================================================================
-// FUNÇÃO 1: CHECAR PENDÊNCIAS (COM TRAVA, RESPIRO E CATCH BLINDADO)
+// FUNÇÃO 1: CHECAR PENDÊNCIAS (BLINDADO E SEM RESPIRO)
 // =========================================================================
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
@@ -45393,16 +45393,13 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         const hojeObj = new Date();
         hojeObj.setHours(0,0,0,0);
         const hojeIso = hojeObj.toISOString().split('T')[0];
-
-        const respiroObj = new Date(hojeObj);
-        respiroObj.setDate(respiroObj.getDate() - 2);
-        const respiroIso = respiroObj.toISOString().split('T')[0];
         
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
             supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
-            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').gte('data_fim', respiroIso),
-            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', respiroIso)
+            // 👇 Buscamos apenas quem está ausente HOJE 👇
+            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
         ]);
 
         if (resColabs.error) throw resColabs.error; 
@@ -45435,29 +45432,28 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
             if (diffDiasEmpresa < 90) return; 
 
             let taAfastadoHoje = false;
-            let teveRetornoRecente = false; 
 
+            // Verifica Atestados/Ausências HOJE
             const ausColab = ausenciasGlobais.filter(a => a.colaborador_id === c.id);
             ausColab.forEach(a => {
                 if (a.data_inicio <= hojeIso && a.data_fim >= hojeIso) taAfastadoHoje = true;
-                else if (a.data_fim >= respiroIso && a.data_fim < hojeIso) teveRetornoRecente = true;
             });
 
+            // Verifica Férias HOJE
             const ferColab = feriasGlobais.filter(f => f.colaborador_id === c.id);
             ferColab.forEach(f => {
                 if (f.data_inicio_ferias <= hojeIso && f.data_fim_ferias >= hojeIso) taAfastadoHoje = true;
-                else if (f.data_fim_ferias >= respiroIso && f.data_fim_ferias < hojeIso) teveRetornoRecente = true;
             });
 
+            // Verifica Folga Padrão da Escala HOJE
             if (window.isDiaDeFolga && window.isDiaDeFolga(c, hojeIso)) {
                 taAfastadoHoje = true; 
             }
 
-           // Se o cara está de atestado ou férias hoje, pula ele! 
-// Ele não bloqueia o sistema e nem aparece na lista de cobrança.
-if (taAfastadoHoje) {
-    return; 
-}
+            // Se o cara está de atestado, férias ou folga na escala hoje, pula ele! 
+            if (taAfastadoHoje) {
+                return; 
+            }
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
             let taAtrasado = false;
@@ -45475,26 +45471,20 @@ if (taAfastadoHoje) {
                 taAtrasado = true;
             }
 
-           if (taAtrasado || mapaAndamento[c.id]) {
+            if (taAtrasado || mapaAndamento[c.id]) {
                 let deveBloquearEsseCara = false;
                 
+                // 👇 A CORREÇÃO MESTRA: Como já sabemos que ele TÁ de plantão hoje, se bateu 92 dias: BLOQUEIA!
                 if (diasAtraso >= 92) {
-                    if (teveRetornoRecente) {
-                        deveBloquearEsseCara = false; 
-                    } else {
-                        deveBloquearEsseCara = true;  
-                    }
+                    deveBloquearEsseCara = true;  
                 }
 
                 window.avaliacoesDesempenhoPendentes.push({ 
                     colab: c, 
                     dias: diasAtraso, 
-                    statusAndamento: mapaAndamento[c.id] || null,
-                    teveRespiro: teveRetornoRecente && diasAtraso >= 92 
+                    statusAndamento: mapaAndamento[c.id] || null
                 });
 
-                // 👇 A CORREÇÃO: Tiramos a exceção daqui! Agora, se passou do prazo, 
-                // bloqueia sem dó, não importa se ele já começou e deixou pela metade.
                 if (deveBloquearEsseCara) {
                     deveBloquearSistema = true;
                 } else {
@@ -45511,7 +45501,6 @@ if (taAfastadoHoje) {
         if (avisoTravaDesAntigo) avisoTravaDesAntigo.remove();
         if (avisoAlertaDesAntigo) avisoAlertaDesAntigo.remove();
 
-       // 👇 A MÁGICA: CHECA SE O SUPER ADMIN DEU O PASSE LIVRE E PEGA A DATA 👇
         const destravamento = await window.verificarDesbloqueioGlobal();
 
         if (deveBloquearSistema && !destravamento.liberado) {
@@ -45530,7 +45519,6 @@ if (taAfastadoHoje) {
             }
         } 
         else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
-            // TEM PASSE LIVRE OU ESTÁ SÓ NO ALERTA
             let textoAlerta = deveBloquearSistema 
                 ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Você tem avaliações de desempenho vencidas. Bloqueio retorna em: <span class="contador-desbloqueio" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
                 : `<i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo. Preencha nos dias em que o colaborador estiver de plantão.`;
@@ -45542,7 +45530,6 @@ if (taAfastadoHoje) {
                 document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
             }
 
-            // 👇 Se estava para ser bloqueado e usou o passe-livre, inicia a contagem 👇
             if (deveBloquearSistema && destravamento.liberado) {
                 window.iniciarContagemDesbloqueio(destravamento.expiracao);
             }
@@ -45562,7 +45549,6 @@ if (taAfastadoHoje) {
         if(buscaP) buscaP.value = '';
         window.filtrarDesempenhoPendentes();
 
-    // AQUI ESTÁ O CATCH BLINDADO FECHANDO A FUNÇÃO 1 PERFEITAMENTE!
     } catch (e) {
         console.error("Erro na busca de desempenho:", e);
         const containerErro = document.getElementById('lista-desempenho-pendente');
@@ -45623,15 +45609,9 @@ window.renderizarListaDesempenhoPendentes = function() {
                 <i class="fa-solid fa-arrow-right"></i> Continuar Etapa
             </button>`;
         } else {
-            let respiroBadge = item.teveRespiro 
-                ? `<span class="badge" style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid #28a745; margin-top: 8px; display: inline-block;"><i class="fa-solid fa-clock-rotate-left"></i> Respiro: Retornou de folga/ausência recentemente</span>` 
-                : '';
-
             btnAcao = `<button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="abrirFormularioDesempenho(${indexReal})">
                 <i class="fa-solid fa-pen-to-square"></i> Iniciar Avaliação
             </button>`;
-            
-            badgeExtra = respiroBadge;
         }
 
         container.innerHTML += `
