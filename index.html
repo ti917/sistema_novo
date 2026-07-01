@@ -51107,6 +51107,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 window.edicoesPrevistaDB = { edicoes: {}, ocultos: [] };
 
+// =========================================================================
+// MÁGICA: APLICANDO A CAMADA DE EDIÇÃO NA ESCALA PREVISTA
+// =========================================================================
 window.processarEscalaPrevista = async function() {
     const mesAno = document.getElementById('filtro-mes-escala-prevista').value;
     const unidade = document.getElementById('filtro-unidade-escala-prevista').value;
@@ -51174,17 +51177,16 @@ window.processarEscalaPrevista = async function() {
             supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes),
             supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes),
             supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or(`dia_solicitante_ira.gte.${dataBuscaStr},dia_substituto_ira.gte.${dataBuscaStr}`),
-            supabaseClient.from('escalas_previstas').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).maybeSingle() // 👇 PUXA AS EDIÇÕES SALVAS!
+            supabaseClient.from('escalas_previstas').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).maybeSingle() 
         ]);
 
         const siglasOcultas = ['ATM', 'FA', 'AF', 'ATC', 'ATOB', 'LDM', 'LDP', 'DECL', 'FE', 'ATR', 'ABD', 'LG'];
         const ausenciasLimpas = (resAusencias.data || []).filter(a => !siglasOcultas.includes(a.sigla));
         const ocorrenciasMescladas = [...ausenciasLimpas, ...(resFts.data || [])];
 
-        // 3. Gera a Escala Prevista Base (O Algoritmo original)
         const escalaPrevistaGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, resPonto.data || [], resFerias.data || [], resPlantao.data || [], resTrocas.data || []);
         
-        // 4. A MÁGICA: APLICA A CAMADA DE "MAQUIAGEM" POR CIMA DA ESCALA BASE 👇
+        // 4. APLICA AS EDIÇÕES SALVAS POR CIMA DA ESCALA
         window.edicoesPrevistaDB = resDbPrevista.data || { edicoes: {}, ocultos: [] };
         if (!window.edicoesPrevistaDB.edicoes) window.edicoesPrevistaDB.edicoes = {};
         if (!window.edicoesPrevistaDB.ocultos) window.edicoesPrevistaDB.ocultos = [];
@@ -51192,24 +51194,30 @@ window.processarEscalaPrevista = async function() {
         escalaPrevistaGerada.forEach(colab => {
             const id = colab.id_colaborador;
             
-            // Verifica se o Gestor ocultou esse funcionário (olhinho)
             if (window.edicoesPrevistaDB.ocultos.includes(id)) {
                 colab.is_oculto_prevista = true;
             }
 
-            // Verifica se o Gestor alterou a sigla de algum dia
             if (window.edicoesPrevistaDB.edicoes[id]) {
                 const edicoesDesteColab = window.edicoesPrevistaDB.edicoes[id];
                 Object.keys(edicoesDesteColab).forEach(diaNum => {
                     if (colab.dias[diaNum]) {
-                        colab.dias[diaNum].sigla = edicoesDesteColab[diaNum];
-                        colab.dias[diaNum].cssClass = window.mapearCssClassSigla(edicoesDesteColab[diaNum]);
+                        let objEditado = edicoesDesteColab[diaNum];
+                        
+                        // Garante compatibilidade se a edição antiga for só uma string
+                        if (typeof objEditado === 'string') {
+                            objEditado = { sigla: objEditado, marcador: '' };
+                        }
+                        
+                        colab.dias[diaNum].sigla = objEditado.sigla;
+                        colab.dias[diaNum].cssClass = window.mapearCssClassSigla(objEditado.sigla);
+                        colab.dias[diaNum].marcador = objEditado.marcador || '';
                     }
                 });
             }
         });
 
-        window.escalaPrevistaAtual = escalaPrevistaGerada; // Salva na memória
+        window.escalaPrevistaAtual = escalaPrevistaGerada;
         window.atualizarFiltroCargosPrevista(escalaPrevistaGerada);
 
         renderizarTabelaPrevistaHTML(escalaPrevistaGerada, mesAno);
@@ -51254,7 +51262,6 @@ window.renderizarTabelaPrevistaHTML = function(dadosArray, mesAnoStr) {
     html += '</tr></thead><tbody id="body-escala-prevista">';
 
     dadosArray.forEach((colab, index) => {
-        // Lógica visual do "Olhinho" baseada no banco de dados
         const isEscondido = colab.is_oculto_prevista;
         const iconEyeClass = isEscondido ? 'fa-eye-slash' : 'fa-eye';
         const iconEyeColor = isEscondido ? 'var(--cor-perigo)' : '#20c997';
@@ -51285,10 +51292,26 @@ window.renderizarTabelaPrevistaHTML = function(dadosArray, mesAnoStr) {
                 classesTd += ' bg-hachurado celula-inativo';
             }
 
-            // A MÁGICA: A célula agora envia o idColab pro modal!
+            // 👇 RECRIANDO OS ÍCONES H+ / H- (Para a tela da Escala Prevista) 👇
+            let iconesSuperioresHtml = '<div style="position: absolute; top: 3px; left: 3px; display: flex; gap: 3px; align-items: center;">';
+            
+            // Lê o marcador editado ou pega o original do algoritmo
+            let marker = diaData.marcador;
+            if (marker === undefined) { 
+                marker = diaData.temHPlus ? diaData.siglaTag : (diaData.temHMinus ? diaData.siglaTag : '');
+            }
+
+            if (marker === 'h+' || marker === 'he') {
+                iconesSuperioresHtml += `<span style="font-size: 0.6rem; color: #ff9800; font-weight: 900;">${marker}</span>`;
+            } else if (marker === 'h-') {
+                iconesSuperioresHtml += `<span style="font-size: 0.6rem; color: #dc3545; font-weight: 900;">h-</span>`;
+            }
+            iconesSuperioresHtml += '</div>';
+
             html += `<td class="${classesTd}" style="position: relative; cursor: pointer; transition: background 0.2s;" 
                 onmouseover="this.style.background='rgba(128,128,128,0.2)'" onmouseout="this.style.background='transparent'" 
                 onclick="abrirEdicaoRapidaPrevista(${index}, ${d}, '${colab.id_colaborador}', '${colab.nome.replace(/'/g, "\\'")}')" title="Clique para editar este dia (Só afeta a exportação)">
+                ${iconesSuperioresHtml}
                 <span class="dia-num-badge">${d}</span>
                 <div style="margin-top: 10px;">${visualPilula}</div>
             </td>`;
@@ -51328,12 +51351,15 @@ window.salvarBancoPrevista = async function() {
     }
 };
 
-      // =========================================================================
-// MÁGICA: EDIÇÃO MANUAL INDEPENDENTE NA ESCALA PREVISTA
+     // =========================================================================
+// O MODAL DE EDIÇÃO DE CÉLULAS PREVISTAS (ATUALIZADO COM TODAS AS SIGLAS)
 // =========================================================================
 window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab) {
     const diaData = window.escalaPrevistaAtual[indexColab].dias[dia] || {};
     const siglaAtual = diaData.sigla || '';
+    
+    // Captura o marcador se ele já existir, ou traduz do sistema antigo (temHPlus/temHMinus)
+    const marcadorAtual = diaData.marcador !== undefined ? diaData.marcador : (diaData.temHPlus ? diaData.siglaTag : (diaData.temHMinus ? diaData.siglaTag : ''));
 
     const modalHtml = `
     <div id="modal-edit-prevista" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -51344,7 +51370,7 @@ window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab)
             <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Alterando o dia <b>${dia}</b> de <b style="color:#fff;">${nomeColab}</b></p>
             
             <div class="form-group">
-                <label style="color: #20c997;">Nova Sigla</label>
+                <label style="color: #20c997;">Sigla Central do Dia</label>
                 <select id="edit-prev-sigla" style="width: 100%; padding: 12px; border-radius: 8px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid var(--cor-borda); outline: none;">
                     <option value="D" ${siglaAtual === 'D' ? 'selected' : ''}>D - Diurno</option>
                     <option value="N" ${siglaAtual === 'N' ? 'selected' : ''}>N - Noturno</option>
@@ -51354,9 +51380,25 @@ window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab)
                     <option value="TP" ${siglaAtual === 'TP' ? 'selected' : ''}>TP - Troca de Plantão</option>
                     <option value="FE" ${siglaAtual === 'FE' ? 'selected' : ''}>FE - Folga Extra</option>
                     <option value="FRD" ${siglaAtual === 'FRD' ? 'selected' : ''}>FRD - Feriado</option>
-                    <option value="FA" ${siglaAtual === 'FA' ? 'selected' : ''}>FA - Falta</option>
-                    <option value="ATM" ${siglaAtual === 'ATM' ? 'selected' : ''}>ATM - Atestado</option>
+                    <option value="FER" ${siglaAtual === 'FER' ? 'selected' : ''}>FER - Férias</option>
+                    <option value="FA" ${siglaAtual === 'FA' ? 'selected' : ''}>FA - Falta Injustificada</option>
+                    <option value="ATM" ${siglaAtual === 'ATM' ? 'selected' : ''}>ATM - Atestado Médico</option>
+                    <option value="AF" ${siglaAtual === 'AF' ? 'selected' : ''}>AF - Afastamento INSS</option>
+                    <option value="ATC" ${siglaAtual === 'ATC' ? 'selected' : ''}>ATC - Atestado Acompanhante</option>
+                    <option value="ATOB" ${siglaAtual === 'ATOB' ? 'selected' : ''}>ATOB - Atestado de Óbito</option>
+                    <option value="LDM" ${siglaAtual === 'LDM' ? 'selected' : ''}>LDM - Licença Maternidade</option>
+                    <option value="LDP" ${siglaAtual === 'LDP' ? 'selected' : ''}>LDP - Licença Paternidade</option>
+                    <option value="LG" ${siglaAtual === 'LG' ? 'selected' : ''}>LG - Licença Casamento (Gala)</option>
                     <option value="-" ${siglaAtual === '-' ? 'selected' : ''}>- (Vazio/Inativo)</option>
+                </select>
+            </div>
+
+            <div class="form-group" style="margin-top: 10px;">
+                <label style="color: #ff9800;">Marcador Extra (Canto Superior)</label>
+                <select id="edit-prev-marcador" style="width: 100%; padding: 12px; border-radius: 8px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid var(--cor-borda); outline: none;">
+                    <option value="">Nenhum</option>
+                    <option value="h+" ${marcadorAtual === 'h+' || marcadorAtual === 'he' ? 'selected' : ''}>H+ / HE (Hora Extra / Quebra)</option>
+                    <option value="h-" ${marcadorAtual === 'h-' ? 'selected' : ''}>H- (Abate de Horas / Atraso)</option>
                 </select>
             </div>
 
@@ -51365,7 +51407,7 @@ window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab)
             </button>
             
             <small style="color: var(--cor-texto-secundario); display: block; margin-top: 15px; text-align: center; font-style: italic; line-height: 1.4;">
-                Nota: Esta alteração é visual e afeta apenas a exportação do PDF (Prefeitura). Não interfere na Escala Oficial do sistema.
+                Nota: Esta alteração é visual e afeta apenas a exportação do PDF. Não interfere na Escala Oficial do sistema.
             </small>
         </div>
     </div>`;
@@ -51375,6 +51417,7 @@ window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab)
 
      window.salvarEdicaoPrevista = function(indexColab, dia, idColab) {
     const siglaNova = document.getElementById('edit-prev-sigla').value;
+    const marcadorNovo = document.getElementById('edit-prev-marcador').value;
     const cssClass = window.mapearCssClassSigla(siglaNova);
 
     // 1. Aplica na Memória da Tabela Ativa
@@ -51383,14 +51426,15 @@ window.abrirEdicaoRapidaPrevista = function(indexColab, dia, idColab, nomeColab)
     }
     window.escalaPrevistaAtual[indexColab].dias[dia].sigla = siglaNova;
     window.escalaPrevistaAtual[indexColab].dias[dia].cssClass = cssClass;
+    window.escalaPrevistaAtual[indexColab].dias[dia].marcador = marcadorNovo;
 
-    // 2. Registra no Objeto Global que vai pro Supabase
+    // 2. Registra no Objeto Global que vai pro Supabase (Salva como Objeto JSON para guardar a Sigla E o Marcador H+)
     if (!window.edicoesPrevistaDB.edicoes[idColab]) {
         window.edicoesPrevistaDB.edicoes[idColab] = {};
     }
-    window.edicoesPrevistaDB.edicoes[idColab][String(dia)] = siglaNova;
+    window.edicoesPrevistaDB.edicoes[idColab][String(dia)] = { sigla: siglaNova, marcador: marcadorNovo };
 
-    // Salva silenciosamente
+    // Salva silenciosamente no banco de dados da Escala Prevista
     window.salvarBancoPrevista();
 
     document.getElementById('modal-edit-prevista').remove();
@@ -51447,7 +51491,10 @@ window.toggleRowPrevista = function(icon, idColab) {
     window.salvarBancoPrevista();
 };
 
-      window.mapearCssClassSigla = function(sigla) {
+     // =========================================================================
+// CORRETOR DE CORES DAS SIGLAS (CSS MAPPER)
+// =========================================================================
+window.mapearCssClassSigla = function(sigla) {
     if (sigla === 'D') return 'celula-d';
     if (sigla === 'N') return 'celula-n';
     if (sigla === 'F') return 'celula-folga';
@@ -51457,7 +51504,9 @@ window.toggleRowPrevista = function(icon, idColab) {
     if (sigla === 'FP') return 'celula-fp';
     if (sigla === 'FRD') return 'celula-frd';
     if (sigla === 'FA') return 'celula-falta';
-    if (sigla === 'ATM') return 'celula-atm';
+    if (sigla === 'FER') return 'celula-ferias';
+    if (sigla === 'AF') return 'celula-af';
+    if (['ATM', 'ATC', 'ATOB', 'LDM', 'LDP', 'LG'].includes(sigla)) return 'celula-atm';
     if (sigla === '-') return 'celula-inativo';
     return '';
 };
