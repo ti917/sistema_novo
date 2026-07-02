@@ -54114,25 +54114,31 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     if (!ATIVAR_BLOQUEIO_CONTRATO) return; // Se estiver falso, ele aborta a função silenciosamente.
     // 👆 ================================================================= 👆
 
-
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hojeObj = new Date();
     hojeObj.setHours(0,0,0,0);
+    const hojeIso = hojeObj.toISOString().split('T')[0];
 
-    const { data: colabs } = await supabaseClient.from('perfis')
-        .select('id, nome, dados_admissao, status, status_aprovacao')
-        .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo')
-        .in('unidade', unids);
+    // 👇 A MÁGICA: Calcula a data limite de carência (5 dias atrás) 👇
+    const dCarencia = new Date(hojeObj);
+    dCarencia.setDate(dCarencia.getDate() - 5);
+    const dataCarenciaIso = dCarencia.toISOString().split('T')[0];
+
+    // Busca os colaboradores ativos E as ausências/férias recentes (com data fim nos últimos 5 dias ou no futuro)
+    const [resColabs, resAusencias, resFerias] = await Promise.all([
+        supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
+        supabaseClient.from('ausencias').select('colaborador_id, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').gte('data_fim', dataCarenciaIso),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', dataCarenciaIso)
+    ]);
 
     let deveBloquearSistema = false;
     let temAlerta = false;
     let menorPrazo = 999;
     let qtdPendentesProrrogacao = 0;
 
-    (colabs || []).forEach(c => {
+    (resColabs.data || []).forEach(c => {
         const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
         if (emRescisao) return;
 
@@ -54147,10 +54153,28 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         const dIni = new Date(dataInicioStr + 'T00:00:00');
         const diffDias = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
 
-        // Se já bateu os 45 dias, BLOQUEIA O SISTEMA DO GESTOR
+        // 👇 ESCUDO DE PROTEÇÃO (AFASTAMENTO / RETORNO RECENTE) 👇
+        let protegidoPorAfastamento = false;
+        
+        const ausColab = (resAusencias.data || []).filter(a => a.colaborador_id === c.id);
+        const ferColab = (resFerias.data || []).filter(f => f.colaborador_id === c.id);
+
+        // Se a query retornou o ID dele, ele está de atestado/férias HOJE, ou voltou nos últimos 5 dias!
+        if (ausColab.length > 0 || ferColab.length > 0) {
+            protegidoPorAfastamento = true;
+        }
+
+        // Se já bateu os 45 dias
         if (diffDias >= 45) {
-            deveBloquearSistema = true;
-            qtdPendentesProrrogacao++;
+            if (protegidoPorAfastamento) {
+                // Mantém apenas como alerta roxo, mas NÃO bloqueia a tela (dá a carência de 5 dias)
+                temAlerta = true;
+                if (0 < menorPrazo) menorPrazo = 0;
+            } else {
+                // Sem proteção: BLOQUEIA O SISTEMA DO GESTOR
+                deveBloquearSistema = true;
+                qtdPendentesProrrogacao++;
+            }
         } 
         // Se falta 5 dias (Entre 40 e 44), manda o AVISO
         else if (diffDias >= 40) {
@@ -54177,7 +54201,6 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
             if (b.dataset.target !== 'tela-usuarios') b.style.display = 'none';
         });
 
-        // Esconde as outras abas para o Gestor não conseguir fazer Nova Admissão!
         document.querySelectorAll('.btn-aba-usuario').forEach(aba => {
             if (aba.getAttribute('data-aba') !== 'aba-contratos-trabalho') {
                 aba.style.display = 'none';
@@ -54197,7 +54220,7 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         }
     } 
     else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
-        let diasTextoDisplay = menorPrazo <= 0 ? 'hoje' : `em ${menorPrazo} dia(s)`;
+        let diasTextoDisplay = menorPrazo <= 0 ? 'hoje (ou está sob carência de retorno)' : `em ${menorPrazo} dia(s)`;
         
         let textoAlerta = deveBloquearSistema 
             ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Contratos pendentes de prorrogação. Bloqueio retorna em: <span class="contador-desbloqueio" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
@@ -54205,7 +54228,6 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
 
         document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-ctr" style="position: fixed; top: 0; left: 0; width: 100%; background: #9c27b0; color: #fff; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">${textoAlerta}</div>`);
         
-        // Só destranca o sistema se a Experiência e o Desempenho também estiverem limpos!
         if (!document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des') && menuSidebar) {
             menuSidebar.classList.remove('sidebar-bloqueada');
             document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
@@ -54216,7 +54238,6 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
             window.iniciarContagemDesbloqueio(destravamento.expiracao);
         }
     } else {
-        // TUDO LIMPO (Sem alertas e sem travas)
         if (!document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des') && menuSidebar) {
             menuSidebar.classList.remove('sidebar-bloqueada');
             document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
@@ -54224,7 +54245,6 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         }
     }
 
-    // Ajuste visual para as tarjas não sobreporem umas às outras
     let offsetTop = 0;
     if (document.getElementById('aviso-bloqueio-exp') || document.getElementById('aviso-alerta-exp')) offsetTop += 38;
     if (document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des')) offsetTop += 38;
