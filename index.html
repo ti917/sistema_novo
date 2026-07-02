@@ -16389,17 +16389,15 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     const btnSalvar = document.getElementById('btn-salvar-escala');
     const grupoBotoes = document.getElementById('grupo-botoes-escala');
 
-    // 👇 A MÁGICA DA LIMPEZA ENTRA EXATAMENTE AQUI 👇
     assinaturaEscalaAtual = null;
     window.nomeAssinaturaEscala = '';
-    // 👆 FIM DA LIMPEZA 👆
 
     document.getElementById('banner-escala-desatualizada').classList.add('hidden');
     containerTabela.innerHTML = '';
     btnSalvar.classList.add('hidden');
     grupoBotoes.classList.add('hidden');
 
-      if (document.getElementById('btn-forcar-recalculo')) document.getElementById('btn-forcar-recalculo').remove();
+    if (document.getElementById('btn-forcar-recalculo')) document.getElementById('btn-forcar-recalculo').remove();
 
     if(!mesAno || !unidade) {
         containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario);">Selecione o Mês e a Unidade para visualizar a escala.</p>';
@@ -16440,27 +16438,19 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
         }
 
-        // 1. Busca se já existe registro dessa escala no banco (para saber se está fechada ou não)
         const { data: escalasSalvas } = await supabaseClient.from('escalas_mensais').select('*').eq('mes_ano', mesAno).eq('unidade', unidade).order('created_at', { ascending: false }).limit(1);
         const escalaSalva = (escalasSalvas && escalasSalvas.length > 0) ? escalasSalvas[0] : null;
 
-        // 👇 MÁGICA DA CORREÇÃO AQUI 👇
-        // Se a escala já está fechada, NÓS NÃO PROCESSAMOS OS COLABORADORES NOVAMENTE.
-        // Apenas puxamos a foto "congelada" do banco de dados!
         if (escalaSalva && escalaSalva.fechada) {
-            
-            // LÊ DO BANCO CONGELADO (NÃO RECALCULA NADA, MANTÉM OS HORÁRIOS DA ÉPOCA)
             escalaMesAtualGerada = typeof escalaSalva.dados_escala === 'string' ? JSON.parse(escalaSalva.dados_escala) : escalaSalva.dados_escala;
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
 
             assinaturaEscalaAtual = escalaSalva.assinatura;
             window.nomeAssinaturaEscala = escalaSalva.assinado_por || 'Responsável não identificado';
             
-            // RENDERIZA COMO LEITURA
             renderizarTabelaHTML(escalaMesAtualGerada, mesAno, true);
             grupoBotoes.classList.remove('hidden'); 
 
-            // 👇 MÁGICA: BOTÃO PARA O ADMIN FORÇAR A ATUALIZAÇÃO DE COISAS ANTIGAS 👇
             if (usuarioAtual.perfil === 'Admin') {
                 if (!document.getElementById('btn-forcar-recalculo')) {
                     const btnSync = document.createElement('button');
@@ -16473,47 +16463,86 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                         const btn = document.getElementById('btn-forcar-recalculo');
                         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sincronizando...';
                         btn.disabled = true;
-                        
-                        // Chama o furador de cadeado que criamos antes!
                         await window.atualizarEscalaCongeladaSeNecessario(mesAno + '-01', unidade);
                         mostrarAlerta("Escala atualizada com todos os lançamentos mais recentes!", "sucesso");
                     };
                     grupoBotoes.insertBefore(btnSync, grupoBotoes.firstChild);
                 }
             }
-            // 👆 FIM DO BOTÃO MÁGICO 👆
             
         } else {
-            // ========================================================
-            // A ESCALA AINDA ESTÁ ABERTA: RECALCULA TUDO DINAMICAMENTE
-            // ========================================================
-
             const { data: todosColaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
 
-           const colaboradores = (todosColaboradores || []).filter(c => {
-            // 👇 TRAVA 1: Status Base e ASO
-            if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false; 
-            
-            // 👇 TRAVA 2: Contrato Base não assinado (Impede de entrar na escala)
-            const ctr = c.dados_admissao?.contrato || {};
-            if (ctr.status === 'Aguardando RH' || ctr.status === 'Aguardando Assinatura') return false;
+            // 👇 A MÁGICA DOS BLOQUEIOS: Separamos quem passa de quem fica preso 👇
+            const colaboradores = [];
+            const bloqueados = [];
 
-            const adm = c.dados_admissao || {};
-            const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
-            if (!dataInicioStr) return false;
+            (todosColaboradores || []).forEach(c => {
+                let motivoBloqueio = null;
+                const adm = c.dados_admissao || {};
+                const ctr = adm.contrato || {};
+                const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
 
-            const dInicio = new Date(dataInicioStr + 'T00:00:00');
-            if (dInicio > ultimoDiaDoMesVisivel) return false;
+                // Só processa quem é desta unidade atual (ou que tem transferência pra ela)
+                let pertenceAUnidade = (c.unidade === unidade) || (adm.historico_transferencias && adm.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade));
+                if (!pertenceAUnidade) return;
 
-            if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
-                const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                if (udRegex) {
-                    const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]), 23, 59, 59);
-                    if (dataDesligamento < primeiroDiaDoMesVisivel) return false;
+                // Fichas velhas excluídas não entram na conta
+                if (c.status === 'Cancelado(a)' || c.status === 'Excluído') return;
+
+                // Avalia os motivos de bloqueio em ordem de prioridade
+                if (c.status === 'Aguardando ASO') {
+                    motivoBloqueio = "Falta anexar o Exame ASO Admissional";
+                } else if (ctr.status === 'Aguardando RH' || ctr.status === 'Aguardando Assinatura') {
+                    motivoBloqueio = "Contrato de Trabalho pendente de assinatura";
+                } else if (!dataInicioStr) {
+                    motivoBloqueio = "Cadastro incompleto (Sem data de início)";
+                } else {
+                    const dInicio = new Date(dataInicioStr + 'T00:00:00');
+                    if (dInicio > ultimoDiaDoMesVisivel) {
+                        motivoBloqueio = `Admissão inicia apenas no futuro (${formatarDataBR(dataInicioStr)})`;
+                    }
                 }
+
+                if (!motivoBloqueio && c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
+                    const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                    if (udRegex) {
+                        const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]), 23, 59, 59);
+                        if (dataDesligamento < primeiroDiaDoMesVisivel) {
+                            motivoBloqueio = `Já desligado do sistema (Último dia: ${c.dados_rescisao.ultimo_dia.split(' ')[0]})`;
+                        }
+                    }
+                }
+
+                // Joga pro array correspondente
+                if (motivoBloqueio) {
+                    bloqueados.push({ nome: c.nome, motivo: motivoBloqueio });
+                } else {
+                    colaboradores.push(c);
+                }
+            });
+
+            colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
+
+            // Se não sobrar ninguém ativo, desenha a tela de aviso detalhada
+            if(colaboradores.length === 0){
+                if (bloqueados.length > 0) {
+                    let listaHtml = bloqueados.map(b => `<li style="margin-bottom: 8px; color: var(--cor-texto-principal); padding-bottom: 8px; border-bottom: 1px dashed rgba(220,53,69,0.2);"><b>${b.nome}</b> <i class="fa-solid fa-arrow-right" style="color:var(--cor-texto-secundario); font-size:0.8rem; margin:0 5px;"></i> <span style="color: #ff9800; font-weight: bold;">${b.motivo}</span></li>`).join('');
+                    
+                    containerTabela.innerHTML = `
+                        <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-perigo); border-left: 4px solid var(--cor-perigo); border-radius: 8px; padding: 25px; text-align: left; max-width: 800px; margin: 0 auto;">
+                            <h4 style="color: var(--cor-perigo); margin-bottom: 10px; font-size: 1.1rem;"><i class="fa-solid fa-lock"></i> Escala Bloqueada: Pendências Encontradas</h4>
+                            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Os colaboradores abaixo pertencem a esta unidade, mas <b>não puderam entrar na escala</b> devido às seguintes travas do sistema:</p>
+                            <ul style="list-style: none; padding: 0; font-size: 0.85rem; background: rgba(220,53,69,0.05); padding: 15px; border-radius: 8px; border: 1px dashed rgba(220,53,69,0.3);">
+                                ${listaHtml}
+                            </ul>
+                        </div>
+                    `;
+                } else {
+                    containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador encontrado para esta unidade neste mês.</p>';
+                }
+                return;
             }
-            return (c.unidade === unidade) || (adm.historico_transferencias && adm.historico_transferencias.some(h => h.unidade_antiga === unidade || h.unidade_nova === unidade));
-        }).sort((a, b) => a.nome.localeCompare(b.nome));
 
             const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(new Date(anoSelecionado, mesSelecionado, 0).getDate()).padStart(2, '0')}`;
@@ -16531,18 +16560,11 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or(`dia_solicitante_ira.gte.${dataBuscaStr},dia_substituto_ira.gte.${dataBuscaStr}`)
             ]);
 
-            if(!colaboradores || colaboradores.length === 0){
-                containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador encontrado para este mês.</p>';
-                return;
-            }
-
             const ocorrenciasMescladas = [...(resAusencias.data || []), ...(resFts.data || [])];
             
-            // Gera a nova escala atualizada
             escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, resPonto.data || [], resFerias.data || [], resPlantao.data || [], resTrocas.data || []);
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
 
-            // Atualiza o banco mantendo a escala como "Aberta" (fechada = false)
             if (escalaSalva) {
                 await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
             } else {
@@ -16553,11 +16575,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
             btnSalvar.disabled = false;
             
-            if (usuarioAtual.perfil === 'Gestor') {
-                btnSalvar.classList.remove('hidden');
-            } else {
-                btnSalvar.classList.add('hidden');
-            }
+            if (usuarioAtual.perfil === 'Gestor') btnSalvar.classList.remove('hidden');
+            else btnSalvar.classList.add('hidden');
+            
             grupoBotoes.classList.remove('hidden');
         }
 
