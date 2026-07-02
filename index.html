@@ -38931,8 +38931,9 @@ window.filtrarContratos = function() {
     
     let filtrados = todosContratosGlobais.filter(c => {
         const adm = c.dados_admissao || {};
-        const ctr = adm.contrato || { status: 'Aguardando RH' }; 
-        const statusReal = ctr.status;
+        const ctr = adm.contrato || {}; 
+        // 👇 A MÁGICA AQUI: Força o status padrão caso venha vazio/undefined
+        const statusReal = ctr.status || 'Aguardando RH';
 
         const matchNome = window.removerAcentos(c.nome).includes(termo) || 
                           (c.unidade && window.removerAcentos(c.unidade).includes(termo)); 
@@ -39024,10 +39025,11 @@ window.renderizarPaginacaoContratos = function() {
 
     itensDestaPagina.forEach(c => {
         const adm = c.dados_admissao || {};
-        const ctr = adm.contrato || { status: 'Aguardando RH', doc_rh: null, doc_assinado: null, doc_prorrogacao: null };
+        const ctr = adm.contrato || {};
         
         let corStatus = '#ff9800';
-        let txtStatus = ctr.status;
+        // 👇 A MÁGICA AQUI TAMBÉM 👇
+        let txtStatus = ctr.status || 'Aguardando RH';
         let acoesHtml = '';
 
         const notifDesteContrato = notifsBanco.find(n => n.referencia_id === c.id && n.tipo.includes('Contrato'));
@@ -45722,7 +45724,7 @@ document.querySelectorAll('.btn-aba-desempenho').forEach(btn => {
 });
 
 // =========================================================================
-// FUNÇÃO 1: CHECAR PENDÊNCIAS (BLINDADO E SEM RESPIRO)
+// FUNÇÃO 1: CHECAR PENDÊNCIAS (COM AVISO PRÉVIO DE 5 DIAS)
 // =========================================================================
 window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
@@ -45743,7 +45745,6 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
             supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
-            // 👇 Buscamos apenas quem está ausente HOJE 👇
             supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
             supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
         ]);
@@ -45766,6 +45767,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
         window.avaliacoesDesempenhoPendentes = [];
         let deveBloquearSistema = false;
         let temAlerta = false;
+        let contagemMenorFaltante = 999; // Guarda o menor tempo que falta para o aviso na tarja
 
         colabs.forEach(c => {
             const adm = c.dados_admissao || {};
@@ -45774,11 +45776,11 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false) {
 
             const dIni = new Date(dataInicioStr + 'T00:00:00');
             const diffDiasEmpresa = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
+            
+            // 👇 A MÁGICA: O Leão de Chácara agora deixa passar quem tem 85 dias ou mais!
+            if (diffDiasEmpresa < 85) return; 
 
-// 👇 MUDANÇA 1: O "Leão de chácara" agora deixa passar quem tem 85 dias ou mais!
-if (diffDiasEmpresa < 85) return; 
-
-let taAfastadoHoje = false;
+            let taAfastadoHoje = false;
 
             // Verifica Atestados/Ausências HOJE
             const ausColab = ausenciasGlobais.filter(a => a.colaborador_id === c.id);
@@ -45797,34 +45799,33 @@ let taAfastadoHoje = false;
                 taAfastadoHoje = true; 
             }
 
-            // Se o cara está de atestado, férias ou folga na escala hoje, pula ele! 
-if (taAfastadoHoje) {
-    return; 
-}
+            // Se o cara está de atestado, férias ou folga na escala hoje, pula ele (mesmo atrasado)
+            if (taAfastadoHoje) return; 
 
-const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
-let taAtrasado = false;
-let diasAtraso = diffDiasEmpresa;
-
-if (ultimaDataAvaliacaoStr) {
-    const dUltima = new Date(ultimaDataAvaliacaoStr + 'T00:00:00');
-    const diffDiasDesdeUltima = Math.floor((hojeObj - dUltima) / (1000 * 60 * 60 * 24));
-    
-    // 👇 MUDANÇA 2: O cronômetro dos ciclos seguintes também apita aos 85!
-    if (diffDiasDesdeUltima >= 85) {
-        taAtrasado = true;
-        diasAtraso = diffDiasDesdeUltima;
-    }
-} else {
-    // Como a gente já barrou lá no topo quem tem menos de 85 dias, 
-    // se cair aqui (Primeira Avaliação), o taAtrasado fica TRUE!
-    taAtrasado = true;
-}
+            const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
+            let taAtrasado = false;
+            let diasAtraso = diffDiasEmpresa;
+            
+            if (ultimaDataAvaliacaoStr) {
+                // É UMA AVALIAÇÃO DE CICLO TRIMESTRAL
+                const dUltima = new Date(ultimaDataAvaliacaoStr + 'T00:00:00');
+                const diffDiasDesdeUltima = Math.floor((hojeObj - dUltima) / (1000 * 60 * 60 * 24));
+                
+                // 👇 A MÁGICA 2: O cronômetro dos ciclos seguintes também apita aos 85 dias!
+                if (diffDiasDesdeUltima >= 85) {
+                    taAtrasado = true;
+                    diasAtraso = diffDiasDesdeUltima;
+                }
+            } else {
+                // PRIMEIRA AVALIAÇÃO DA VIDA DO COLABORADOR
+                // Como já barramos lá em cima quem tem menos de 85 dias, se chegar aqui ele ativa o alerta!
+                taAtrasado = true;
+            }
 
             if (taAtrasado || mapaAndamento[c.id]) {
                 let deveBloquearEsseCara = false;
                 
-                // 👇 A CORREÇÃO MESTRA: Como já sabemos que ele TÁ de plantão hoje, se bateu 92 dias: BLOQUEIA!
+                // O Bloqueio oficial rigoroso da tela continua cravado nos 92 dias
                 if (diasAtraso >= 92) {
                     deveBloquearEsseCara = true;  
                 }
@@ -45839,6 +45840,11 @@ if (ultimaDataAvaliacaoStr) {
                     deveBloquearSistema = true;
                 } else {
                     temAlerta = true;
+                    // Salva qual é a pessoa que está com o prazo mais apertado para mostrar na mensagem da tarja
+                    const diasFaltandoProVencimento = 90 - diasAtraso;
+                    if (diasFaltandoProVencimento < contagemMenorFaltante) {
+                        contagemMenorFaltante = diasFaltandoProVencimento;
+                    }
                 }
             }
         }); 
@@ -45854,7 +45860,7 @@ if (ultimaDataAvaliacaoStr) {
         const destravamento = await window.verificarDesbloqueioGlobal();
 
         if (deveBloquearSistema && !destravamento.liberado) {
-            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 48h esgotou! Você tem avaliações de desempenho vencidas. O sistema está bloqueado até o preenchimento.</div>`);
+            document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-des" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10001; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de tolerância (92 dias) esgotou! Você possui avaliações de desempenho vencidas. O sistema está bloqueado até o preenchimento.</div>`);
             
             document.querySelectorAll('.nav-btn').forEach(b => {
                 if (b.dataset.target !== 'tela-desempenho') b.style.display = 'none';
@@ -45869,9 +45875,12 @@ if (ultimaDataAvaliacaoStr) {
             }
         } 
         else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
+            // 👇 A MÁGICA 3: MENSAGEM DINÂMICA INTELIGENTE MOSTRANDO OS DIAS FALTANTES 👇
+            let diasTextoDisplay = contagemMenorFaltante <= 0 ? 'hoje' : `em ${contagemMenorFaltante} dia(s)`;
+            
             let textoAlerta = deveBloquearSistema 
-    ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Você tem avaliações de desempenho vencidas. Bloqueio retorna em: <span class="contador-desbloqueio" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
-    : `<i class="fa-solid fa-triangle-exclamation"></i> Faltam <b>${90 - diasAtraso} dia(s)</b> para o vencimento de avaliações de desempenho. Preencha nos dias em que o colaborador estiver de plantão.`;
+                ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Você tem avaliações de desempenho vencidas. Bloqueio retorna em: <span class="contador-desbloqueio" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
+                : `<i class="fa-solid fa-triangle-exclamation"></i> Você possui avaliações de desempenho vencendo <b>${diasTextoDisplay}</b>. Preencha no dia em que o colaborador estiver de plantão.`;
 
             document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-des" style="position: fixed; top: 0; left: 0; width: 100%; background: #ff9800; color: #000; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">${textoAlerta}</div>`);
             
@@ -48546,14 +48555,14 @@ window.filtrarContratosAcaoGestor = function() {
     const statusFiltro = document.getElementById('filtro-status-contratos-acao-gestor').value;
     const mesFiltro = document.getElementById('filtro-mes-ctr-acao-gestor').value; 
 
-    // 👇 A MÁGICA ANTI-ERRO: Colocamos o (todosContratosGlobais || []) para NUNCA dar undefined
     let filtrados = (todosContratosGlobais || []).filter(c => {
         const adm = c.dados_admissao || {};
-        const ctr = adm.contrato || { status: 'Aguardando RH' }; 
-        const statusReal = ctr.status;
+        const ctr = adm.contrato || {}; 
+        // 👇 TRAVA AQUI 👇
+        const statusReal = ctr.status || 'Aguardando RH';
 
         if (statusReal === 'Aguardando RH') return false;
-
+  
         const matchNome = window.removerAcentos(c.nome).includes(termo) || (c.unidade && window.removerAcentos(c.unidade).includes(termo)); 
         const matchStatus = statusFiltro === 'Todos' || statusReal === statusFiltro;
         
@@ -48621,12 +48630,13 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
     const inicio = (paginaAtualContratosAcaoGestor - 1) * itensPorPaginaAdmissoes;
     const itensDestaPagina = contratosAcaoGestorFiltrados.slice(inicio, inicio + itensPorPaginaAdmissoes);
 
-    itensDestaPagina.forEach(c => {
+   itensDestaPagina.forEach(c => {
         const adm = c.dados_admissao || {};
         const ctr = adm.contrato || {};
         
         let corStatus = '#28a745';
-        let txtStatus = ctr.status;
+        // 👇 TRAVA FINAL AQUI 👇
+        let txtStatus = ctr.status || 'Aguardando RH';
         let acoesHtml = '';
 
         if (ctr.status === 'Aguardando Assinatura') {
