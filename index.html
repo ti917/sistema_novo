@@ -12725,7 +12725,7 @@ window.atualizarContador = async function() {
         }
     }
     
-    const todasPermissoesIniciais = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
+    const todasPermissoesIniciais = ['Admissao', 'AprovacaoVagas', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
     
     // 👇 BLINDAGEM: Trata null e undefined da mesma forma para Admins e Gestores 👇
     let p = [];
@@ -15021,7 +15021,7 @@ window.deletarUnidadeOficial = async function(id) {
         }
     }
 
-   const todasPermissoesIniciais = ['Admissao', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
+   const todasPermissoesIniciais = ['Admissao', 'AprovacaoVagas', 'Rescisao', 'Ausencia', 'FT', 'Troca', 'Advertencia', 'Alteracao', 'Ferias', 'OcorrenciaPlantao', 'JustificativaPonto', 'ArquivoDigital', 'AvaliacaoExp', 'AvaliacaoDesempenho'];
     
     // 👇 BLINDAGEM: Trata null e undefined da mesma forma para Admins e Gestores 👇
     let p = [];
@@ -15053,6 +15053,7 @@ window.deletarUnidadeOficial = async function(id) {
     // 👇 CORREÇÃO: Tiramos o 'isAdmin ||' de dentro das verificações. A regra do P vale pra todos agora! 👇
     let statusAprovacaoFiltro = [];
     if (p.includes('Admissao')) statusAprovacaoFiltro.push('Pendente');
+    if (p.includes('AprovacaoVagas')) statusAprovacaoFiltro.push('Aguardando Liberação de Vaga'); // <--- INJETA O FILTRO AQUI
     if (p.includes('Rescisao')) statusAprovacaoFiltro.push('Rescisão Pendente');
 
     let qP = statusAprovacaoFiltro.length > 0 ? supabaseClient.from('perfis').select('*').in('status_aprovacao', statusAprovacaoFiltro).order('nome') : null;
@@ -15165,7 +15166,24 @@ window.deletarUnidadeOficial = async function(id) {
             if (u.status_aprovacao === 'Pendente') {
                 const infoEnvio = formatarEnvio(u.dados_admissao?.criado_por, u.dados_admissao?.data_envio || u.created_at);
                 tbody.innerHTML += desenharLinha(u.nome, 'fa-user-plus', '#28a745', 'Nova Admissão', `Cargo: ${u.dados_admissao?.cargo || '-'}`, u.empresa, u.unidade, `verFichaAdmissao('${u.id}')`, infoEnvio);
+            
+            } else if (u.status_aprovacao === 'Aguardando Liberação de Vaga') {
+                // 👇 NOVO BLOCO DE VAGAS EXCEDENTES 👇
+                const infoEnvio = formatarEnvio(u.dados_admissao?.criado_por, u.dados_admissao?.data_envio || u.created_at);
+                const temPermissaoDiretoria = p.includes('AprovacaoVagas');
+
+                let acaoVaga = temPermissaoDiretoria 
+                    ? `liberarVagaExtraordinaria('${u.id}', '${u.nome.replace(/'/g, "\\'")}', '${u.unidade}', '${u.dados_admissao?.cargo}')`
+                    : `mostrarAlerta('Aguardando a Diretoria autorizar a vaga excedente.', 'aviso')`;
+                    
+                let txtBotaoVaga = temPermissaoDiretoria ? 'Autorizar Vaga Extra' : 'Aguardando Vaga';
+                let iconeVaga = temPermissaoDiretoria ? 'fa-unlock-keyhole' : 'fa-hourglass';
+
+                // Desenha a linha na Central
+                tbody.innerHTML += desenharLinha(u.nome, 'fa-lock', '#ff9800', 'Vaga Excedente (Aprovação)', `Cargo: ${u.dados_admissao?.cargo || '-'}`, u.empresa, u.unidade, acaoVaga, infoEnvio, iconeVaga, txtBotaoVaga);
+            
             } else {
+                // Desligamento
                 const infoEnvio = formatarEnvio(u.dados_rescisao?.registrado_por, u.dados_rescisao?.data_registro || u.created_at);
                 tbody.innerHTML += desenharLinha(u.nome, 'fa-user-slash', '#dc3545', 'Desligamento', `Aviso: ${u.dados_rescisao?.aviso_cumprido || '-'}`, u.empresa, u.unidade, `verFichaRescisaoPendente('${u.id}')`, infoEnvio);
             }
@@ -15363,6 +15381,67 @@ window.aprovarFeriasModal = async function(idFerias, idColab, nomeColab, unidade
     }
 };
 
+      window.liberarVagaExtraordinaria = async function(idColab, nomeColab, unidade, cargo) {
+    const confirmado = await mostrarConfirmacao(`Deseja autorizar uma vaga excedente para <b>${nomeColab}</b> no cargo de <b>${cargo}</b>?<br><br>A ficha será enviada ao RH para admissão e os alertas da Clara serão disparados.`, "Autorizar Vaga Extra");
+    if (!confirmado) return;
+
+    try {
+        // 1. Muda o status para Pendente (Agora o RH pode fazer a admissão normal)
+        await supabaseClient.from('perfis').update({ status_aprovacao: 'Pendente' }).eq('id', idColab);
+
+        // 2. Notifica o RH no Sininho
+        await supabaseClient.from('notificacoes').insert([{
+            colaborador_id: idColab, nome: nomeColab, unidade: unidade, lida: false, tipo: 'Admissão_Admin'
+        }]);
+
+        // 👇 3. A MÁGICA DA CLARA: Dispara o aviso para quem tem o alerta ativado 👇
+        await dispararAlertaDeVagaAprovada(nomeColab, unidade, cargo, usuarioAtual.nome);
+
+        mostrarAlerta("Vaga extraordinária autorizada com sucesso!", "sucesso");
+        listarSolicitacoes(); // Recarrega a tela
+        atualizarContador();
+    } catch(e) {
+        mostrarAlerta("Erro ao autorizar vaga: " + e.message, "erro");
+    }
+};
+
+      window.dispararAlertaDeVagaAprovada = async function(nomeColab, nomeUnidade, cargo, nomeAdmin) {
+    try {
+        // Busca todos os líderes/admins que ativaram o alerta de lotação na engrenagem
+        const { data: lideres } = await supabaseClient.from('perfis').select('nome, dados_admissao, permissoes, perfil, unidade').in('perfil', ['Admin', 'Gestor']);
+        
+        for (let lider of lideres) {
+            const permissoes = lider.permissoes || {};
+            const alertas = permissoes.alertas_clara || {};
+            const telefoneAlvo = alertas.telefone || (lider.dados_admissao ? lider.dados_admissao.telefone : null);
+
+            // Só dispara se o cara quer receber o alerta e tem telefone
+            if (alertas.lotacao_excedida === true && telefoneAlvo) {
+                
+                // Se for gestor, só recebe se a unidade for dele
+                if (lider.perfil === 'Gestor') {
+                    const unidsGestor = lider.unidade ? lider.unidade.split(',').map(u => u.trim()) : [];
+                    if (!unidsGestor.includes(nomeUnidade)) continue; 
+                }
+
+                const primeiroNome = lider.nome.split(' ')[0];
+
+                // 👇 Usamos a GraphAPI com o template de alerta de lotação 👇
+                // Ajuste as variáveis [1, 2, 3, 4] conforme o seu template aprovado na Meta!
+                // Exemplo: "Olá {{1}}, o Admin {{2}} acabou de autorizar o funcionário {{3}} no cargo {{4}} excedendo o limite de vagas..."
+                await enviarMensagemGraphAPI(
+                    telefoneAlvo, 
+                    'alerta_lotacao_unidade', // Mantém o nome do seu template atual
+                    [primeiroNome, nomeAdmin, nomeColab, cargo, nomeUnidade], // Adapte essa array para bater com as variáveis do Meta
+                    null, null
+                );
+            }
+        }
+    } catch (e) {
+        console.error("Falha ao disparar alerta de aprovação de vaga excedente pela Clara:", e);
+    }
+};
+
 window.reprovarFeriasModal = async function(idFerias, idColab) {
     const confirmado = await mostrarConfirmacao("Deseja RECUSAR E EXCLUIR este pedido de férias?", "Recusar Férias");
     if (!confirmado) return;
@@ -15528,8 +15607,6 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
         document.querySelector('[data-aba="aba-aso-admin"]').click();
         await mostrarAlerta("Documentos aprovados! O colaborador agora aguarda o anexo do ASO para entrar na escala.", "sucesso");
         
-        // 👇 GATILHO DA CLARA (PRIMEIRA CHECAGEM) 👇
-        verificarEDispararAlertaLotacao(unidadeColab);
     }
 };
 
@@ -19511,8 +19588,33 @@ btn.innerText = "Salvar Cadastro";
             
             let sal = document.getElementById('novo-salario').value; let salLimpo = sal ? parseFloat(sal.replace('R$ ', '').replace(/\./g, '').replace(',', '.')) : 0;
 
+           // 👇 MÁGICA DO HEADCOUNT: VERIFICA SE TEM VAGA ANTES DE MANDAR PRO RH 👇
             let statusAdmissao = 'Aprovado';
-            if (usuarioAtual.perfil === 'Gestor') { statusAdmissao = 'Pendente'; }
+            if (usuarioAtual.perfil === 'Gestor') { 
+                statusAdmissao = 'Pendente'; 
+                
+                try {
+                    // 1. Busca as regras da unidade
+                    const { data: uniRegra } = await supabaseClient.from('unidades_oficiais').select('limites_cargos').eq('nome', unidadeFinal).single();
+                    if (uniRegra && uniRegra.limites_cargos) {
+                        let limites = JSON.parse(uniRegra.limites_cargos);
+                        
+                        // 2. Se esse cargo tem um limite configurado...
+                        if (limites[cargoFinal] !== undefined) {
+                            const limiteMaximo = limites[cargoFinal];
+                            
+                            // 3. Conta quantos ativos (ou em aviso) já existem nesse cargo na unidade
+                            const { data: ativosDb } = await supabaseClient.from('perfis').select('id, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidadeFinal).contains('dados_admissao', { cargo: cargoFinal });
+                            const ativosReaisCount = window.filtrarAtivosE_AvisoPrevio(ativosDb || []).length;
+                            
+                            // 4. Se a contratação de agora estourar o limite, manda pra SALA DE ESPERA DA DIRETORIA!
+                            if ((ativosReaisCount + 1) > limiteMaximo) {
+                                statusAdmissao = 'Aguardando Liberação de Vaga';
+                            }
+                        }
+                    }
+                } catch(e) { console.error("Erro ao checar vagas", e); }
+            }
 
             const rua = document.getElementById('adm-rua').value.trim() || 'Rua não informada';
             const num = document.getElementById('adm-numero').value.trim() || 'S/N';
@@ -42663,9 +42765,6 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
             if(typeof processarEscala === 'function') processarEscala();
         }
 
-        // GATILHO DA CLARA (SEGUNDA CHECAGEM DE LOTAÇÃO)
-        verificarEDispararAlertaLotacao(unidadeColab);
-
         // 👇 A MÁGICA ENTRA AQUI: DISPARO AUTOMÁTICO DE BOAS VINDAS 👇
         if (adm.telefone) {
             const primeiroNome = nomeColab.split(' ')[0];
@@ -45693,6 +45792,7 @@ window.carregarUnidadesAvulso = async function() {
     
    const categorias = [
         { id: 'Admissao', icone: 'fa-user-plus', nome: 'Aprovar Admissões', cor: '#28a745' },
+        { id: 'AprovacaoVagas', icone: 'fa-unlock-keyhole', nome: 'Aprovar Vagas Excedentes (Diretoria/Headcount)', cor: '#ff9800' },
         { id: 'Rescisao', icone: 'fa-user-minus', nome: 'Homologar Rescisões', cor: '#dc3545' },
         { id: 'Ausencia', icone: 'fa-user-clock', nome: 'Validar Ausências e Atestados', cor: '#ff9800' },
         { id: 'FT', icone: 'fa-business-time', nome: 'Aprovar FT e Horas Extras', cor: '#4fc3f7' },
