@@ -14684,6 +14684,7 @@ window.deletarUnidadeOficial = async function(id) {
         if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
             btnAdminAcoes = `
                 <button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background-color: #28a745; color: white; border: none; font-weight: bold;" onclick="exportarExcelAdmissaoR6('${a.id}')" title="Gerar Excel R6 do Colaborador"><i class="fa-solid fa-file-excel"></i> R6</button>
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107;" onclick="abrirModalEnviarOBSA('${a.id}')" title="Gerar Formulário OBSA"><i class="fa-solid fa-file-invoice"></i> Gerar OBSA</button>
                 <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarAdmissaoAdmin('${a.id}')" title="Editar Ficha de Admissão"><i class="fa-solid fa-pen"></i> Editar</button>
             `;
             // Só mostra a lixeirinha (Arquivar) se ele ainda NÃO estiver arquivado
@@ -54542,6 +54543,520 @@ window.buscarColabsEmprestimoPrevista = async function() {
 
     selectColab.innerHTML = optHtml;
     selectColab.disabled = false;
+};
+
+  // =========================================================================
+// MÓDULO OBSA: GERAÇÃO DE FORMULÁRIO DE ADMISSÃO PARA CONTABILIDADE E SALVAMENTO
+// =========================================================================
+
+window.abrirModalEnviarOBSA = async function(idColab) {
+    // 1. Acha o colaborador na lista já carregada da tela
+    const colab = todasAdmissoesAprovadas.find(c => c.id === idColab);
+    if (!colab) return mostrarAlerta("Colaborador não encontrado.", "erro");
+
+    const adm = colab.dados_admissao || {};
+    
+    // Tratamento de Endereço e Cidade (Para separar as variáveis pro Excel)
+    let eRua = '', eNum = '', eComp = '', eBairro = '', eCidadeStr = '', eUF = '';
+    if (adm.endereco) {
+        let partesEnd = adm.endereco.split(' - ');
+        if (partesEnd.length > 0) {
+            let pRuaNum = partesEnd[0].split(', Nº ');
+            eRua = pRuaNum[0] || ''; eNum = pRuaNum[1] || '';
+        }
+        if (partesEnd.length === 3) {
+            eComp = partesEnd[1];
+            let pBairroCid = partesEnd[2].split(', ');
+            eBairro = pBairroCid[0] || ''; eCidadeStr = pBairroCid[1] || '';
+        } else if (partesEnd.length === 2) {
+            let pBairroCid = partesEnd[1].split(', ');
+            eBairro = pBairroCid[0] || ''; eCidadeStr = pBairroCid[1] || '';
+        }
+    }
+    if (eCidadeStr.includes('/')) {
+        let cParts = eCidadeStr.split('/');
+        eCidadeStr = cParts[0].trim(); eUF = cParts[1].trim();
+    } else if (eCidadeStr.includes('-')) {
+        let cParts = eCidadeStr.split('-');
+        eCidadeStr = cParts[0].trim(); eUF = cParts[1].trim();
+    }
+
+    // Monta o Modal
+    const modalHtml = `
+    <div id="modal-obsa" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 800px; max-height: 90vh; overflow-y: auto; border: 1px solid #ffc107; position: relative;">
+            <button onclick="document.getElementById('modal-obsa').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index: 10;"><i class="fa-solid fa-xmark"></i></button>
+            
+            <h3 style="color: #ffc107; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> Gerar Requisição OBSA</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Preencha os dados faltantes de <b>${colab.nome}</b> para salvar na ficha e gerar a planilha da contabilidade.</p>
+            
+            <div id="bloco-ia-obsa" class="form-group" style="background: rgba(79, 195, 247, 0.1); padding: 15px; border-radius: 8px; border: 1px dashed #4fc3f7; margin-bottom: 20px;">
+                <label style="color: #4fc3f7; font-weight: bold; font-size: 1rem;"><i class="fa-solid fa-wand-magic-sparkles"></i> Clara IA: Extrair de Documento Faltante</label>
+                <p style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-bottom: 12px; margin-top: 4px;">Anexe a CTPS, CNH ou outro documento para a IA preencher os campos vazios abaixo automaticamente.</p>
+                <input type="file" id="doc-ia-obsa" accept="image/jpeg, image/png, application/pdf" style="margin-bottom: 12px; width: 100%;">
+                <button type="button" id="btn-ler-obsa-ia" class="btn-secondary" style="width: 100%; border-color: #4fc3f7; color: #4fc3f7; font-weight: bold; background: transparent;" onclick="lerDocumentoFaltanteOBSA()">
+                    <i class="fa-solid fa-microchip"></i> Extrair Dados Faltantes
+                </button>
+            </div>
+
+            <form id="form-gerar-obsa">
+                <input type="hidden" id="obsa-colab-id" value="${colab.id}">
+                
+                <div class="box-interior" style="border-left: 4px solid #ffc107; margin-bottom: 20px;">
+                    <h5 style="color: #ffc107; margin-bottom: 15px;">Dados Profissionais (CTPS / eSocial)</h5>
+                    <div class="form-row-3">
+                        <div class="form-group">
+                            <label>Cód. Registro / Matrícula</label>
+                            <input type="text" id="obsa-matricula" value="${adm.matricula_obsa || ''}" placeholder="Ex: 00123">
+                        </div>
+                        <div class="form-group">
+                            <label>Nº CTPS <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="text" id="obsa-ctps" value="${adm.ctps || ''}" required placeholder="Número">
+                        </div>
+                        <div class="form-group">
+                            <label>Série CTPS <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="text" id="obsa-ctps-serie" value="${adm.ctps_serie || ''}" required placeholder="Série">
+                        </div>
+                    </div>
+                    <div class="form-row-3">
+                        <div class="form-group">
+                            <label>UF da CTPS</label>
+                            <input type="text" id="obsa-ctps-uf" value="${adm.ctps_uf || ''}" placeholder="Ex: SP" maxlength="2">
+                        </div>
+                        <div class="form-group">
+                            <label>Data de Emissão CTPS</label>
+                            <input type="date" id="obsa-ctps-data" value="${adm.ctps_data_expedicao || ''}" onclick="this.showPicker()">
+                        </div>
+                        <div class="form-group">
+                            <label>Cód. CBO</label>
+                            <input type="text" id="obsa-cbo" value="${adm.cbo || ''}" placeholder="Ex: 2235-05">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #4fc3f7; margin-bottom: 20px;">
+                    <h5 style="color: #4fc3f7; margin-bottom: 15px;">Outros Documentos</h5>
+                    <div class="form-row-3">
+                        <div class="form-group">
+                            <label>Órgão Emissor RG</label>
+                            <input type="text" id="obsa-rg-emissor" value="${adm.rg?.emissor || ''}" placeholder="Ex: SSP/SP">
+                        </div>
+                        <div class="form-group">
+                            <label>Reservista (Se homem)</label>
+                            <input type="text" id="obsa-reservista" value="${adm.reservista || ''}" placeholder="Número">
+                        </div>
+                        <div class="form-group">
+                            <label>CNH</label>
+                            <input type="text" id="obsa-cnh" value="${adm.cnh || ''}" placeholder="Número da CNH">
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" id="btn-exportar-obsa" class="btn-success" style="width: 100%; height: 50px; background-color: #ffc107; color: #000; border: none; font-weight: bold;">
+                    <i class="fa-solid fa-floppy-disk"></i> Salvar na Ficha e Gerar OBSA (Excel)
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Ocultar dados vitais do colaborador globalmente para o submit do Excel
+    window.colabDadosOBSAAtual = {
+        nome: colab.nome,
+        empresa: colab.empresa,
+        cnpj: colab.cnpj || '',
+        nascimento: adm.nascimento ? formatarDataBR(adm.nascimento) : '',
+        cidade_nasc: adm.cidade_nascimento || '',
+        cor_raca: adm.cor_raca || '',
+        sexo: adm.sexo || '',
+        mae: adm.mae || '',
+        pai: adm.pai || '',
+        endereco: `${eRua}, ${eNum}`,
+        compl: eComp,
+        bairro: eBairro,
+        cidade: eCidadeStr,
+        uf: eUF,
+        cep: adm.cep || '',
+        telefone: adm.telefone || '',
+        email: adm.email_pessoal || '',
+        estado_civil: adm.estado_civil || '',
+        cpf: adm.cpf ? mascaraCPF(adm.cpf) : '',
+        pis: adm.pis || '',
+        rg: adm.rg?.numero || '',
+        rg_data: adm.rg?.data_expedicao ? formatarDataBR(adm.rg.data_expedicao) : '',
+        titulo: adm.titulo_eleitoral?.numero || '',
+        zona: adm.titulo_eleitoral?.zona || '',
+        secao: adm.titulo_eleitoral?.secao || '',
+        cargo: adm.cargo || '',
+        salario: adm.salario || 0,
+        jornada: adm.jornada?.horario || adm.jornada?.tipo || '',
+        data_adm: adm.jornada?.data_inicio ? formatarDataBR(adm.jornada.data_inicio) : '',
+        dependentes: adm.dependentes || [],
+        vt: adm.vt?.precisa === 'Sim' ? 'Sim' : 'Não',
+        vr: 'Sim' 
+    };
+
+    document.getElementById('form-gerar-obsa').addEventListener('submit', function(e) {
+        e.preventDefault();
+        gerarExcelOBSASeguro(); // Chama a função que salva e baixa
+    });
+};
+
+// ==========================================
+// CLARA IA: PREENCHIMENTO DO OBSA (LÊ FOTOS E CNH)
+// ==========================================
+window.lerDocumentoFaltanteOBSA = async function() {
+    const fileInput = document.getElementById('doc-ia-obsa');
+    const btn = document.getElementById('btn-ler-obsa-ia');
+
+    if (!fileInput.files || fileInput.files.length === 0) {
+        return mostrarAlerta("Anexe o documento (CTPS, CNH, etc)!", "aviso");
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando com Clara IA...';
+
+    const converterParaBase64 = (file) => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (event) => {
+                if (file.type === 'application/pdf') {
+                    const base64Completo = reader.result;
+                    resolve({ base64Puro: base64Completo.substring(base64Completo.indexOf(';base64,') + 8), mimeType: file.type });
+                    return;
+                }
+                const img = new Image();
+                img.src = event.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width, height = img.height;
+                    if (width > 1200) { height *= 1200 / width; width = 1200; }
+                    canvas.width = width; canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                    resolve({ base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8), mimeType: 'image/jpeg' });
+                };
+                img.onerror = error => reject(error);
+            };
+            reader.onerror = error => reject(error);
+        });
+    };
+
+    try {
+        const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
+        const listaArquivosBase64 = await Promise.all(promessas);
+
+        // Usamos a mesma Edge Function de Admissão, pois ela já lê CTPS, CNH e afins no prompt da IA
+        const { data, error } = await supabaseClient.functions.invoke('gemini-ocr-admissao', {
+            body: { arquivos: listaArquivosBase64 }
+        });
+
+        if (error) throw new Error("Falha na comunicação com a IA.");
+
+        const travarCampo = (id, valor) => {
+            const el = document.getElementById(id);
+            if (el && valor) {
+                el.value = valor;
+                // Efeito visual de que foi a IA quem preencheu
+                el.style.borderColor = '#28a745';
+                el.style.backgroundColor = 'rgba(40, 167, 69, 0.05)';
+            }
+        };
+
+        // Injeta os dados descobertos
+        if (data.ctps) travarCampo('obsa-ctps', data.ctps);
+        if (data.ctps_serie) travarCampo('obsa-ctps-serie', data.ctps_serie);
+        if (data.ctps_uf) travarCampo('obsa-ctps-uf', data.ctps_uf);
+        if (data.ctps_data_expedicao) travarCampo('obsa-ctps-data', data.ctps_data_expedicao);
+        if (data.cnh) travarCampo('obsa-cnh', data.cnh);
+        if (data.rg_expedicao) travarCampo('obsa-rg-emissor', data.rg_expedicao);
+
+        mostrarAlerta("Campos preenchidos com sucesso pela IA!", "sucesso");
+
+    } catch (err) {
+        mostrarAlerta("Erro na leitura: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados Faltantes';
+    }
+};
+
+      // =========================================================================
+// SALVAR NO BANCO E GERAR O ARQUIVO EXCEL - PADRÃO CONTABILIDADE (OBSA)
+// =========================================================================
+window.gerarExcelOBSASeguro = async function() {
+    const btn = document.getElementById('btn-exportar-obsa');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando dados e gerando Planilha...';
+
+    try {
+        const d = window.colabDadosOBSAAtual;
+        const idColab = document.getElementById('obsa-colab-id').value;
+        
+        // Pega os dados complementares do modal
+        const ctps = document.getElementById('obsa-ctps').value;
+        const ctpsSerie = document.getElementById('obsa-ctps-serie').value;
+        const ctpsUF = document.getElementById('obsa-ctps-uf').value;
+        let ctpsData = document.getElementById('obsa-ctps-data').value;
+        
+        const matricula = document.getElementById('obsa-matricula').value || '';
+        const cbo = document.getElementById('obsa-cbo').value || '';
+        const rgEmissor = document.getElementById('obsa-rg-emissor').value || '';
+        const reservista = document.getElementById('obsa-reservista').value || '';
+        const cnh = document.getElementById('obsa-cnh').value || '';
+
+        // 👇==============================================================👇
+        // 🔒 A MÁGICA: SALVAMENTO BLINDADO NO BANCO DE DADOS
+        // ================================================================
+        
+        // 1. Puxa a "gaveta" atual do colaborador no banco (Isso garante que pegamos a versão mais atualizada)
+        const { data: perfilData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        let adm = perfilData.dados_admissao || {};
+
+        // 2. Injetamos as propriedades novas NA MESMA GAVETA, sem apagar o resto
+        adm.ctps = ctps;
+        adm.ctps_serie = ctpsSerie;
+        adm.ctps_uf = ctpsUF;
+        adm.ctps_data_expedicao = ctpsData; // Salva o formato YYYY-MM-DD
+        adm.matricula_obsa = matricula;
+        adm.cbo = cbo;
+        
+        if (!adm.rg) adm.rg = {};
+        adm.rg.emissor = rgEmissor;
+        
+        adm.reservista = reservista;
+        adm.cnh = cnh;
+
+        // 3. Atualizamos a gaveta no banco de dados.
+        const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+        if (errUpdate) throw new Error("Falha ao salvar as informações no banco: " + errUpdate.message);
+        // 👆 FIM DA MÁGICA DO SALVAMENTO 👆
+        
+        // ================================================================
+        // CONTINUAÇÃO: GERADOR DO EXCEL
+        // ================================================================
+
+        if(ctpsData) ctpsData = formatarDataBR(ctpsData);
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Portal';
+        
+        const sheet = workbook.addWorksheet('Formulário de Admissão');
+
+        // Configuração de Colunas para ficar parecida com um formulário
+        sheet.columns = [
+            { width: 3 },  // A (Borda)
+            { width: 25 }, // B (Labels)
+            { width: 25 }, // C (Inputs 1)
+            { width: 15 }, // D (Labels)
+            { width: 20 }, // E (Inputs 2)
+            { width: 15 }, // F (Labels)
+            { width: 20 }, // G (Inputs 3)
+            { width: 3 }   // H (Borda)
+        ];
+
+        // Função auxiliar para pintar o fundo e alinhar
+        const styleCell = (cell, isHeader = false, isInput = false) => {
+            cell.alignment = { vertical: 'middle', horizontal: isHeader ? 'center' : 'left' };
+            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            if (isHeader) {
+                cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+            } else if (isInput) {
+                cell.font = { color: { argb: 'FF000000' }, bold: true };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+            } else {
+                cell.font = { color: { argb: 'FF333333' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+            }
+        };
+
+        // Cabeçalho Principal
+        sheet.mergeCells('B2:G2');
+        const title = sheet.getCell('B2');
+        title.value = 'REQUISIÇÃO DE ADMISSÃO';
+        styleCell(title, true);
+        title.font = { size: 16, bold: true, color: { argb: 'FFFFFFFF' } };
+
+        sheet.addRow([]); // Espaço
+
+        // Bloco 1: Contratante
+        sheet.mergeCells('B4:G4');
+        sheet.getCell('B4').value = 'DADOS DO CONTRATANTE';
+        styleCell(sheet.getCell('B4'), true);
+        
+        sheet.getCell('B5').value = '*Empresa:'; styleCell(sheet.getCell('B5'));
+        sheet.mergeCells('C5:E5'); sheet.getCell('C5').value = d.empresa; styleCell(sheet.getCell('C5'), false, true);
+        sheet.getCell('F5').value = 'CNPJ:'; styleCell(sheet.getCell('F5'));
+        sheet.getCell('G5').value = d.cnpj; styleCell(sheet.getCell('G5'), false, true);
+
+        sheet.addRow([]); // Espaço
+
+        // Bloco 2: Dados Pessoais
+        sheet.mergeCells('B7:G7');
+        sheet.getCell('B7').value = 'DADOS PESSOAIS';
+        styleCell(sheet.getCell('B7'), true);
+
+        sheet.getCell('B8').value = '*Nome do Contratado:'; styleCell(sheet.getCell('B8'));
+        sheet.mergeCells('C8:E8'); sheet.getCell('C8').value = d.nome; styleCell(sheet.getCell('C8'), false, true);
+        sheet.getCell('F8').value = 'Matrícula:'; styleCell(sheet.getCell('F8'));
+        sheet.getCell('G8').value = matricula; styleCell(sheet.getCell('G8'), false, true);
+
+        sheet.getCell('B9').value = '*Data de Nascimento:'; styleCell(sheet.getCell('B9'));
+        sheet.getCell('C9').value = d.nascimento; styleCell(sheet.getCell('C9'), false, true);
+        sheet.getCell('D9').value = '*Naturalidade:'; styleCell(sheet.getCell('D9'));
+        sheet.getCell('E9').value = d.cidade_nasc; styleCell(sheet.getCell('E9'), false, true);
+        sheet.getCell('F9').value = '*Cor/Raça:'; styleCell(sheet.getCell('F9'));
+        sheet.getCell('G9').value = d.cor_raca; styleCell(sheet.getCell('G9'), false, true);
+
+        sheet.getCell('B10').value = '*Sexo:'; styleCell(sheet.getCell('B10'));
+        sheet.getCell('C10').value = d.sexo; styleCell(sheet.getCell('C10'), false, true);
+        sheet.getCell('D10').value = '*Estado Civil:'; styleCell(sheet.getCell('D10'));
+        sheet.getCell('E10').value = d.estado_civil; styleCell(sheet.getCell('E10'), false, true);
+        sheet.getCell('F10').value = ''; styleCell(sheet.getCell('F10'));
+        sheet.getCell('G10').value = ''; styleCell(sheet.getCell('G10'), false, true);
+
+        sheet.getCell('B11').value = '*Nome da Mãe:'; styleCell(sheet.getCell('B11'));
+        sheet.mergeCells('C11:G11'); sheet.getCell('C11').value = d.mae; styleCell(sheet.getCell('C11'), false, true);
+
+        sheet.getCell('B12').value = '*Nome do Pai:'; styleCell(sheet.getCell('B12'));
+        sheet.mergeCells('C12:G12'); sheet.getCell('C12').value = d.pai; styleCell(sheet.getCell('C12'), false, true);
+
+        sheet.addRow([]); // Espaço
+
+        // Bloco 3: Endereço e Contato
+        sheet.mergeCells('B14:G14');
+        sheet.getCell('B14').value = 'ENDEREÇO E CONTATO';
+        styleCell(sheet.getCell('B14'), true);
+
+        sheet.getCell('B15').value = '*Endereço:'; styleCell(sheet.getCell('B15'));
+        sheet.mergeCells('C15:E15'); sheet.getCell('C15').value = d.endereco; styleCell(sheet.getCell('C15'), false, true);
+        sheet.getCell('F15').value = 'Compl.:'; styleCell(sheet.getCell('F15'));
+        sheet.getCell('G15').value = d.compl; styleCell(sheet.getCell('G15'), false, true);
+
+        sheet.getCell('B16').value = '*Bairro:'; styleCell(sheet.getCell('B16'));
+        sheet.getCell('C16').value = d.bairro; styleCell(sheet.getCell('C16'), false, true);
+        sheet.getCell('D16').value = '*CEP:'; styleCell(sheet.getCell('D16'));
+        sheet.getCell('E16').value = d.cep; styleCell(sheet.getCell('E16'), false, true);
+        sheet.getCell('F16').value = '*Cidade / UF:'; styleCell(sheet.getCell('F16'));
+        sheet.getCell('G16').value = `${d.cidade} / ${d.uf}`; styleCell(sheet.getCell('G16'), false, true);
+
+        sheet.getCell('B17').value = '*Celular/WhatsApp:'; styleCell(sheet.getCell('B17'));
+        sheet.mergeCells('C17:D17'); sheet.getCell('C17').value = d.telefone; styleCell(sheet.getCell('C17'), false, true);
+        sheet.getCell('E17').value = 'Email:'; styleCell(sheet.getCell('E17'));
+        sheet.mergeCells('F17:G17'); sheet.getCell('F17').value = d.email; styleCell(sheet.getCell('F17'), false, true);
+
+        sheet.addRow([]); // Espaço
+
+        // Bloco 4: Documentação
+        sheet.mergeCells('B19:G19');
+        sheet.getCell('B19').value = 'DOCUMENTAÇÃO';
+        styleCell(sheet.getCell('B19'), true);
+
+        sheet.getCell('B20').value = '*CTPS:'; styleCell(sheet.getCell('B20'));
+        sheet.getCell('C20').value = ctps; styleCell(sheet.getCell('C20'), false, true);
+        sheet.getCell('D20').value = '*Série:'; styleCell(sheet.getCell('D20'));
+        sheet.getCell('E20').value = ctpsSerie; styleCell(sheet.getCell('E20'), false, true);
+        sheet.getCell('F20').value = 'UF CTPS:'; styleCell(sheet.getCell('F20'));
+        sheet.getCell('G20').value = ctpsUF; styleCell(sheet.getCell('G20'), false, true);
+
+        sheet.getCell('B21').value = '*PIS:'; styleCell(sheet.getCell('B21'));
+        sheet.getCell('C21').value = d.pis; styleCell(sheet.getCell('C21'), false, true);
+        sheet.getCell('D21').value = '*CPF:'; styleCell(sheet.getCell('D21'));
+        sheet.getCell('E21').value = d.cpf; styleCell(sheet.getCell('E21'), false, true);
+        sheet.getCell('F21').value = 'Data Emis. CTPS:'; styleCell(sheet.getCell('F21'));
+        sheet.getCell('G21').value = ctpsData; styleCell(sheet.getCell('G21'), false, true);
+
+        sheet.getCell('B22').value = '*Título Eleitor:'; styleCell(sheet.getCell('B22'));
+        sheet.getCell('C22').value = d.titulo; styleCell(sheet.getCell('C22'), false, true);
+        sheet.getCell('D22').value = 'Zona:'; styleCell(sheet.getCell('D22'));
+        sheet.getCell('E22').value = d.zona; styleCell(sheet.getCell('E22'), false, true);
+        sheet.getCell('F22').value = 'Seção:'; styleCell(sheet.getCell('F22'));
+        sheet.getCell('G22').value = d.secao; styleCell(sheet.getCell('G22'), false, true);
+
+        sheet.getCell('B23').value = '*RG:'; styleCell(sheet.getCell('B23'));
+        sheet.getCell('C23').value = d.rg; styleCell(sheet.getCell('C23'), false, true);
+        sheet.getCell('D23').value = 'Emissor/UF:'; styleCell(sheet.getCell('D23'));
+        sheet.getCell('E23').value = rgEmissor; styleCell(sheet.getCell('E23'), false, true);
+        sheet.getCell('F23').value = 'Data Emis. RG:'; styleCell(sheet.getCell('F23'));
+        sheet.getCell('G23').value = d.rg_data; styleCell(sheet.getCell('G23'), false, true);
+
+        sheet.getCell('B24').value = 'CNH:'; styleCell(sheet.getCell('B24'));
+        sheet.getCell('C24').value = cnh; styleCell(sheet.getCell('C24'), false, true);
+        sheet.getCell('D24').value = 'Reservista:'; styleCell(sheet.getCell('D24'));
+        sheet.mergeCells('E24:G24'); sheet.getCell('E24').value = reservista; styleCell(sheet.getCell('E24'), false, true);
+
+        sheet.addRow([]); // Espaço
+
+        // Bloco 5: Dados Contratuais
+        sheet.mergeCells('B26:G26');
+        sheet.getCell('B26').value = 'DADOS CONTRATUAIS';
+        styleCell(sheet.getCell('B26'), true);
+
+        sheet.getCell('B27').value = '*Data Admissão:'; styleCell(sheet.getCell('B27'));
+        sheet.getCell('C27').value = d.data_adm; styleCell(sheet.getCell('C27'), false, true);
+        sheet.getCell('D27').value = '*Cargo:'; styleCell(sheet.getCell('D27'));
+        sheet.mergeCells('E27:G27'); sheet.getCell('E27').value = d.cargo; styleCell(sheet.getCell('E27'), false, true);
+
+        sheet.getCell('B28').value = '*Salário (R$):'; styleCell(sheet.getCell('B28'));
+        sheet.getCell('C28').value = d.salario; styleCell(sheet.getCell('C28'), false, true);
+        sheet.getCell('C28').numFmt = '"R$ "#,##0.00';
+        sheet.getCell('D28').value = 'CBO:'; styleCell(sheet.getCell('D28'));
+        sheet.getCell('E28').value = cbo; styleCell(sheet.getCell('E28'), false, true);
+        sheet.getCell('F28').value = 'Horário / Escala:'; styleCell(sheet.getCell('F28'));
+        sheet.getCell('G28').value = d.jornada; styleCell(sheet.getCell('G28'), false, true);
+
+        sheet.getCell('B29').value = 'Vale Transporte:'; styleCell(sheet.getCell('B29'));
+        sheet.getCell('C29').value = d.vt; styleCell(sheet.getCell('C29'), false, true);
+        sheet.getCell('D29').value = 'Vale Refeição:'; styleCell(sheet.getCell('D29'));
+        sheet.mergeCells('E29:G29'); sheet.getCell('E29').value = d.vr; styleCell(sheet.getCell('E29'), false, true);
+
+        // Bloco 6: Dependentes
+        if (d.dependentes && d.dependentes.length > 0) {
+            sheet.addRow([]);
+            sheet.mergeCells('B31:G31');
+            sheet.getCell('B31').value = 'DEPENDENTES';
+            styleCell(sheet.getCell('B31'), true);
+
+            let rowDep = 32;
+            d.dependentes.forEach((dep, i) => {
+                sheet.getCell(`B${rowDep}`).value = `Dependente ${i+1}:`; styleCell(sheet.getCell(`B${rowDep}`));
+                sheet.mergeCells(`C${rowDep}:E${rowDep}`); sheet.getCell(`C${rowDep}`).value = dep.nome; styleCell(sheet.getCell(`C${rowDep}`), false, true);
+                sheet.getCell(`F${rowDep}`).value = `Nasc: ${formatarDataBR(dep.nascimento)}`; styleCell(sheet.getCell(`F${rowDep}`), false, true);
+                sheet.getCell(`G${rowDep}`).value = `CPF: ${dep.cpf}`; styleCell(sheet.getCell(`G${rowDep}`), false, true);
+                rowDep++;
+            });
+        }
+
+        // 4. Salvar o arquivo
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `OBSA_${d.nome.replace(/ /g, '_')}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        mostrarAlerta("Formulário OBSA gerado, salvo na ficha e baixado com sucesso!", "sucesso");
+        document.getElementById('modal-obsa').remove();
+
+        // Atualiza a tabela de trás para exibir que foi modificado, se necessário
+        // Se houver uma variável global 'todasAdmissoesAprovadas', você pode atualizar ela aqui para evitar refresh da tela:
+        const colabEmMemoria = todasAdmissoesAprovadas.find(c => c.id === idColab);
+        if (colabEmMemoria) {
+            colabEmMemoria.dados_admissao = adm;
+        }
+
+    } catch (err) {
+        mostrarAlerta("Erro ao gerar a planilha: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-file-excel"></i> Salvar na Ficha e Gerar OBSA (Excel)';
+    }
 };
       
         window.ultimoContadorSino = 0;
