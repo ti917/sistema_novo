@@ -16569,20 +16569,14 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
             
        } else {
-            // ========================================================
-            // A ESCALA AINDA ESTÁ ABERTA: RECALCULA TUDO DINAMICAMENTE
-            // ========================================================
-
-            const { data: todosColaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
-
             const colaboradores = [];
-            const bloqueados = [];
+            const bloqueadosELogs = []; // 👈 MÁGICA 1: Nova array unificada para o Log
 
             // Função auxiliar de blindagem: remove espaços e joga tudo para maiúsculo
             const limparStringSafe = (txt) => txt ? String(txt).trim().toUpperCase() : '';
             const unidadeAlvoLimpa = limparStringSafe(unidade);
 
-            // 👇 CHAVES LIGA/DESLIGA DAS TRAVAS DA ESCALA (Pode mudar para true depois) 👇
+            // 👇 CHAVES LIGA/DESLIGA DAS TRAVAS DA ESCALA (MANTIDAS DESATIVADAS COMO PEDIDO) 👇
             const ATIVAR_TRAVA_ASO_ADMISSIONAL = false; 
             const ATIVAR_TRAVA_CONTRATO = false;        
             const ATIVAR_TRAVA_ASO_PERIODICO = false;   
@@ -16590,6 +16584,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
             (todosColaboradores || []).forEach(c => {
                 let motivoBloqueio = null;
+                let isEmAviso = false;
+                let dataUltimoDiaAviso = '';
+
                 const adm = c.dados_admissao || {};
                 const ctr = adm.contrato || {};
                 const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
@@ -16604,12 +16601,16 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 if (c.status === 'Cancelado(a)' || c.status === 'Excluído') return;
 
                 // Limpeza: Se já foi desligado antes desse mês, pula ele silenciosamente!
-                if ((c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente') && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
+                if ((c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                     const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
                         const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]), 23, 59, 59);
                         if (dataDesligamento < primeiroDiaDoMesVisivel) {
                             return; 
+                        } else {
+                            // Está dentro do mês, então está cumprindo aviso ou saindo neste mês!
+                            isEmAviso = true;
+                            dataUltimoDiaAviso = c.dados_rescisao.ultimo_dia.split(' ')[0];
                         }
                     }
                 }
@@ -16644,33 +16645,28 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
                 // Joga para o balde correto
                 if (motivoBloqueio) {
-                    bloqueados.push({ nome: c.nome, motivo: motivoBloqueio });
+                    bloqueadosELogs.push({ nome: c.nome, motivo: motivoBloqueio, tipo: 'bloqueio' });
                 } else {
                     c.unidade = unidade; 
-                    colaboradores.push(c);
+                    colaboradores.push(c); // 👈 Entrou na escala!
+
+                    // 👇 MÁGICA 2: Se ele não está bloqueado, mas está de aviso/rescisão, joga pro Log também!
+                    if (isEmAviso) {
+                        bloqueadosELogs.push({ 
+                            nome: c.nome, 
+                            motivo: `Em processo de Desligamento / Aviso Prévio (Último dia: ${dataUltimoDiaAviso})`, 
+                            tipo: 'aviso' 
+                        });
+                    }
                 }
             });
 
             colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
 
-            if (colaboradores.length === 0) {
-                if (bloqueados.length > 0) {
-                    let listaHtml = bloqueados.map(b => `<li style="margin-bottom: 8px; color: var(--cor-texto-principal); padding-bottom: 8px; border-bottom: 1px dashed rgba(220,53,69,0.2);"><b>${b.nome}</b> <i class="fa-solid fa-arrow-right" style="color:var(--cor-texto-secundario); font-size:0.8rem; margin:0 5px;"></i> <span style="color: #ff9800; font-weight: bold;">${b.motivo}</span></li>`).join('');
-                    
-                    containerTabela.innerHTML = `
-                        <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-perigo); border-left: 4px solid var(--cor-perigo); border-radius: 8px; padding: 25px; text-align: left; max-width: 800px; margin: 0 auto;">
-                            <h4 style="color: var(--cor-perigo); margin-bottom: 10px; font-size: 1.1rem;"><i class="fa-solid fa-lock"></i> Escala Bloqueada: Pendências Encontradas</h4>
-                            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Os colaboradores abaixo pertencem a esta unidade, mas <b>não puderam entrar na escala</b> devido às seguintes travas do sistema:</p>
-                            <ul style="list-style: none; padding: 0; font-size: 0.85rem; background: rgba(220,53,69,0.05); padding: 15px; border-radius: 8px; border: 1px dashed rgba(220,53,69,0.3);">
-                                ${listaHtml}
-                            </ul>
-                        </div>
-                    `;
-                } else {
-                    containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador ativo ou pendente encontrado para esta unidade neste mês.</p>';
-                }
-                return;
-            }
+           if (colaboradores.length === 0 && bloqueadosELogs.length === 0) {
+    containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador ativo ou pendente encontrado para esta unidade neste mês.</p>';
+    return;
+}
 
             const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(new Date(anoSelecionado, mesSelecionado, 0).getDate()).padStart(2, '0')}`;
@@ -16707,14 +16703,47 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             else btnSalvar.classList.add('hidden');
             
             grupoBotoes.classList.remove('hidden');
-        }
+
+      // 👇 MÁGICA 3: ANEXA O LOG NO FUNDO DA TABELA 👇
+            if (bloqueadosELogs.length > 0) {
+                let listaHtml = bloqueadosELogs.map(b => {
+                    const isBloq = b.tipo === 'bloqueio';
+                    const cor = isBloq ? 'var(--cor-perigo)' : '#ff9800'; // Vermelho se bloqueou, Laranja se é só aviso
+                    const icone = isBloq ? 'fa-lock' : 'fa-user-clock';
+                    const acaoText = isBloq ? 'Bloqueado na Escala' : 'Lançado na Escala';
+                    
+                    return `
+                    <li style="margin-bottom: 8px; color: var(--cor-texto-principal); padding-bottom: 8px; border-bottom: 1px dashed rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <div>
+                            <i class="fa-solid ${icone}" style="color: ${cor}; margin-right: 8px;"></i>
+                            <b>${b.nome}</b> 
+                            <i class="fa-solid fa-arrow-right" style="color:var(--cor-texto-secundario); font-size:0.8rem; margin:0 5px;"></i> 
+                            <span style="color: ${cor}; font-weight: bold;">${b.motivo}</span>
+                        </div>
+                        <span class="badge" style="background: ${cor}22; color: ${cor}; border: 1px solid ${cor}55;">${acaoText}</span>
+                    </li>`;
+                }).join('');
+                
+                const logPanelHtml = `
+                    <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-acento); border-radius: 8px; padding: 25px; text-align: left; max-width: 100%; margin-top: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+                        <h4 style="color: var(--cor-acento); margin-bottom: 10px; font-size: 1.1rem;"><i class="fa-solid fa-rectangle-list"></i> Log Operacional da Escala</h4>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Abaixo constam os colaboradores com travas de bloqueio ativadas pelo RH ou que estão em processo de desligamento neste mês:</p>
+                        <ul style="list-style: none; padding: 0; font-size: 0.85rem; background: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; border: 1px dashed var(--cor-borda);">
+                            ${listaHtml}
+                        </ul>
+                    </div>
+                `;
+                
+                containerTabela.insertAdjacentHTML('beforeend', logPanelHtml);
+            }
+        } 
 
     } catch (error) {
         console.error("Erro na escala:", error); 
     } finally { 
         loading.classList.add('hidden'); 
     }
-};
+}; 
         
   // ==========================================
 // CÉREBRO GERADOR DA ESCALA (ALGORITMO)
