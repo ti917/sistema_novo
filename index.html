@@ -5014,6 +5014,9 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
           <button type="button" class="btn-aba-resc-admin" data-aba="aba-processo-resc-admin" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="carregarProcessosRescisoriosAdmin()">
     <i class="fa-solid fa-folder-open"></i> Processo Rescisório Final
 </button>
+          <button type="button" class="btn-aba-resc-admin" data-aba="aba-arquivadas-resc-admin" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="filtrarArquivadasRescAdmin()">
+    <i class="fa-solid fa-box-archive"></i> Arquivadas (Concluídas)
+</button>
         </div>
 
       <div id="aba-processo-resc-admin" class="conteudo-aba-resc-admin hidden">
@@ -5037,6 +5040,25 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         </div>
     </div>
     <div id="lista-processo-resc-container-admin" style="display: flex; flex-direction: column; gap: 15px;"></div>
+</div>
+
+      <div id="aba-arquivadas-resc-admin" class="conteudo-aba-resc-admin hidden">
+    <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 20px;">
+        Aqui ficam as rescisões que o RH já finalizou 100% e marcou como concluídas/arquivadas.
+    </p>
+
+    <div class="controls-escala" style="justify-content: flex-start; gap: 15px; margin-bottom: 20px; flex-wrap: wrap;">
+        <div class="input-wrapper" style="flex: 2; min-width: 250px;">
+            <i class="fa-solid fa-search"></i>
+            <input type="text" id="busca-rescisoes-arquivadas" placeholder="Buscar arquivadas por nome ou unidade..." oninput="window.executarComAtraso(filtrarArquivadasRescAdmin)">
+        </div>
+        <div class="input-wrapper" style="width: 180px;">
+            <i class="fa-regular fa-calendar"></i>
+            <input type="month" id="filtro-mes-rescisoes-arquivadas" onchange="filtrarArquivadasRescAdmin()" title="Filtrar por Mês" onclick="this.showPicker()">
+        </div>
+    </div>
+    <div id="lista-rescisoes-arquivadas-container"></div>
+    <div id="paginacao-rescisoes-arquivadas" class="paginacao-container"></div>
 </div>
         
         <div id="aba-historico-resc-admin" class="conteudo-aba-resc-admin">
@@ -21483,6 +21505,171 @@ window.isDiaDeFolga = function(colab, dataIso) {
     return false;
 };
 
+      // =========================================================================
+// MÁGICA: ARQUIVAR RESCISÕES CONCLUÍDAS (ADMIN)
+// =========================================================================
+
+// Adiciona o Botão de Arquivar dentro da Renderização da aba Histórico
+const observerRenderRescisoes = new MutationObserver(() => {
+    document.querySelectorAll('#lista-rescisoes-container .admissao-card').forEach(card => {
+        // Se o funcionário já está oficialmente Desligado, injetamos o botão de Arquivar!
+        if (card.innerHTML.includes('badge desligado') && !card.innerHTML.includes('arquivarRescisaoAdmin')) {
+            const idColab = card.id.replace('card-resc-', '');
+            const btnContainer = card.querySelector('div[style*="align-items: flex-start;"]'); // A div onde ficam os botões de ação
+            
+            if (btnContainer && usuarioAtual.perfil === 'Admin') {
+                const btnArquivar = `<button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background: #28a745; color: #fff; border: none; font-weight: bold; margin-left: 5px;" onclick="arquivarRescisaoAdmin('${idColab}')"><i class="fa-solid fa-box-archive"></i> Concluir / Arquivar</button>`;
+                btnContainer.insertAdjacentHTML('beforeend', btnArquivar);
+            }
+        }
+    });
+});
+// Ativa o observador para a aba de rescisões
+const boxListaResc = document.getElementById('lista-rescisoes-container');
+if (boxListaResc) observerRenderRescisoes.observe(boxListaResc, { childList: true });
+
+// Ação de Arquivar
+window.arquivarRescisaoAdmin = async function(idColab) {
+    const confirmado = await mostrarConfirmacao("Deseja marcar esta rescisão como <b>TOTALMENTE CONCLUÍDA</b>?<br><br>Ela sairá das pendências e irá para a aba de Arquivadas.", "Arquivar Rescisão");
+    if (!confirmado) return;
+
+    try {
+        const { data: colab } = await supabaseClient.from('perfis').select('nome, dados_rescisao').eq('id', idColab).single();
+        let resc = colab.dados_rescisao || {};
+        
+        resc.arquivado_rh = true;
+        resc.arquivado_em = new Date().toISOString();
+        resc.arquivado_por = usuarioAtual.nome;
+
+        await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab);
+
+        mostrarAlerta("Rescisão movida para o Arquivo com sucesso!", "sucesso");
+        carregarRescisoesParaAdmin(); // Recarrega as tabelas!
+    } catch (e) {
+        mostrarAlerta("Erro ao arquivar: " + e.message, "erro");
+    }
+};
+
+// =========================================================================
+// RENDERIZAÇÃO DA NOVA ABA DE ARQUIVADAS
+// =========================================================================
+let paginaAtualArquivadas = 1;
+let rescisoesArquivadasFiltradas = [];
+
+window.filtrarArquivadasRescAdmin = function() {
+    const termo = window.removerAcentos(document.getElementById('busca-rescisoes-arquivadas').value);
+    const mesFiltro = document.getElementById('filtro-mes-rescisoes-arquivadas').value;
+
+    rescisoesArquivadasFiltradas = todasRescisoesAprovadas.filter(c => {
+        const resc = c.dados_rescisao || {};
+        
+        // Pega SOMENTE as arquivadas
+        if (resc.arquivado_rh !== true) return false;
+
+        const matchTexto = window.removerAcentos(c.nome).includes(termo) || window.removerAcentos(c.unidade || '').includes(termo);
+
+        let matchData = true;
+        if (mesFiltro) {
+            const ultimoDiaTexto = resc.ultimo_dia || '';
+            const regexData = ultimoDiaTexto.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (regexData) {
+                const mesAnoUltimoDia = `${regexData[3]}-${regexData[2]}`;
+                if (mesAnoUltimoDia !== mesFiltro) matchData = false;
+            } else { matchData = false; }
+        }
+
+        return matchTexto && matchData;
+    });
+
+    // Ordena pela data de arquivamento (mais recentes no topo)
+    rescisoesArquivadasFiltradas.sort((a, b) => {
+        const dA = a.dados_rescisao?.arquivado_em || 0;
+        const dB = b.dados_rescisao?.arquivado_em || 0;
+        return new Date(dB) - new Date(dA);
+    });
+
+    paginaAtualArquivadas = 1;
+    renderizarArquivadasRescAdmin();
+};
+
+window.renderizarArquivadasRescAdmin = function() {
+    const container = document.getElementById('lista-rescisoes-arquivadas-container');
+    const paginacao = document.getElementById('paginacao-rescisoes-arquivadas');
+    
+    container.innerHTML = ''; paginacao.innerHTML = '';
+
+    if (rescisoesArquivadasFiltradas.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 40px;"><i class="fa-solid fa-box-open fa-3x" style="opacity: 0.5; margin-bottom: 15px;"></i><br>Nenhuma rescisão arquivada com estes filtros.</p>';
+        return;
+    }
+
+    const inicio = (paginaAtualArquivadas - 1) * 20; // 20 itens por página
+    const itensDestaPagina = rescisoesArquivadasFiltradas.slice(inicio, inicio + 20);
+
+    itensDestaPagina.forEach(a => {
+        const resc = a.dados_rescisao || {};
+        const ultimoDia = resc.ultimo_dia || '-';
+        const arquivadoEm = new Date(resc.arquivado_em).toLocaleDateString('pt-BR');
+        
+        container.innerHTML += `
+            <div class="admissao-card" style="border-left: 4px solid var(--cor-sucesso); opacity: 0.9;">
+                <div>
+                    <strong style="font-size: 1.15rem; color: var(--cor-sucesso);"><i class="fa-solid fa-check-double"></i> ${a.nome}</strong><br>
+                    <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
+                        <i class="fa-solid fa-building"></i> <b>${a.empresa || '-'}</b> &nbsp;|&nbsp; 
+                        <i class="fa-solid fa-map-marker-alt"></i> <b>${a.unidade || '-'}</b>
+                    </span>
+                    <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
+                        Tipo: ${resc.tipo} | Último dia: <b style="color: var(--cor-texto-principal);">${ultimoDia}</b>
+                    </span>
+                    
+                    <div style="margin-top: 10px; font-size: 0.8rem; color: #28a745; background: rgba(40, 167, 69, 0.1); padding: 6px 12px; border-radius: 6px; border: 1px dashed rgba(40, 167, 69, 0.3); display: inline-block;">
+                        <i class="fa-solid fa-box-archive"></i> Arquivado por <b>${resc.arquivado_por || 'RH'}</b> em ${arquivadoEm}
+                    </div>
+                </div>
+                
+                <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 180px;">
+                    <span class="badge" style="background: rgba(40, 167, 69, 0.1); color: var(--cor-sucesso); border: 1px solid var(--cor-sucesso);">CONCLUÍDO</span>
+                    <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; border-color: var(--cor-acento); color: var(--cor-acento); margin-top: 5px;" onclick="verDetalhesRescisaoConcluida('${a.id}')">
+                        <i class="fa-solid fa-eye"></i> Acessar Documentos
+                    </button>
+                    <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.65rem; border-color: #ff9800; color: #ff9800; border-radius: 4px; margin-top: 5px;" onclick="desarquivarRescisaoAdmin('${a.id}')" title="Voltar para a aba de Histórico/Pendências">
+                        <i class="fa-solid fa-rotate-left"></i> Desarquivar
+                    </button>
+                </div>
+            </div>
+        `;
+    });
+
+    const totalPaginas = Math.ceil(rescisoesArquivadasFiltradas.length / 20);
+    renderizarBotoesPaginacaoInteligente(paginacao, totalPaginas, paginaAtualArquivadas, (novaPag) => {
+        paginaAtualArquivadas = novaPag;
+        renderizarArquivadasRescAdmin();
+    });
+};
+
+// Ação de Desarquivar (caso o Admin clique sem querer)
+window.desarquivarRescisaoAdmin = async function(idColab) {
+    const confirmado = await mostrarConfirmacao("Deseja voltar esta rescisão para a aba de Pendências?", "Desarquivar");
+    if (!confirmado) return;
+
+    try {
+        const { data: colab } = await supabaseClient.from('perfis').select('dados_rescisao').eq('id', idColab).single();
+        let resc = colab.dados_rescisao || {};
+        
+        resc.arquivado_rh = false;
+        delete resc.arquivado_em;
+        delete resc.arquivado_por;
+
+        await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab);
+
+        mostrarAlerta("Rescisão desarquivada! Ela voltou para a tela de pendências.", "sucesso");
+        carregarRescisoesParaAdmin();
+    } catch (e) {
+        mostrarAlerta("Erro ao desarquivar: " + e.message, "erro");
+    }
+};
+
        window.buscarColaboradoresParaAusencia = async function() {
     const unidade = document.getElementById('aus-unidade').value;
     const selectColab = document.getElementById('aus-colaborador');
@@ -27513,27 +27700,23 @@ window.filtrarRescisoes = function() {
     });
 
     rescisoesFiltradas = todasRescisoesAprovadas.filter(c => {
-        // Busca abrangente: Nome, CPF ou Unidade
+        const resc = c.dados_rescisao || {};
+        
+        // 👇 A MÁGICA: Esconde da tela principal se já estiver arquivado pelo RH!
+        if (resc.arquivado_rh === true) return false;
+
         const matchTexto = window.removerAcentos(c.nome).includes(termo) || 
                            (c.cpf && c.cpf.includes(termo)) ||
                            window.removerAcentos(c.unidade || '').includes(termo);
 
-        // 👇 A MÁGICA AQUI: Filtra EXATAMENTE pelo 'Último Dia' 👇
         let matchData = true;
         if (mesFiltro) {
-            const ultimoDiaTexto = c.dados_rescisao?.ultimo_dia || '';
-            
-            // Procura o padrão de data DD/MM/YYYY no meio do texto
+            const ultimoDiaTexto = resc.ultimo_dia || '';
             const regexData = ultimoDiaTexto.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-            
             if (regexData) {
-                // regexData[2] é o Mês e regexData[3] é o Ano
-                const mesAnoUltimoDia = `${regexData[3]}-${regexData[2]}`; // Transforma em YYYY-MM
-                if (mesAnoUltimoDia !== mesFiltro) {
-                    matchData = false;
-                }
+                const mesAnoUltimoDia = `${regexData[3]}-${regexData[2]}`;
+                if (mesAnoUltimoDia !== mesFiltro) matchData = false;
             } else {
-                // Se não tem último dia definido ou deu erro, oculta do filtro
                 matchData = false; 
             }
         }
