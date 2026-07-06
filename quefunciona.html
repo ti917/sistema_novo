@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -14680,13 +14679,13 @@ window.deletarUnidadeOficial = async function(id) {
             btnCancelar = `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #28a745; color: #28a745;" onclick="reverterCancelamento('${a.id}')" title="Reativar e Voltar para a Tela Principal"><i class="fa-solid fa-rotate-left"></i> Reativar / Restaurar</button>`;
         }
 
-        let btnAdminAcoes = '';
+       let btnAdminAcoes = '';
         if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
             btnAdminAcoes = `
                 <button class="btn-success" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; background-color: #28a745; color: white; border: none; font-weight: bold;" onclick="exportarExcelAdmissaoR6('${a.id}')" title="Gerar Excel R6 do Colaborador"><i class="fa-solid fa-file-excel"></i> R6</button>
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255, 193, 7, 0.1);" onclick="abrirModalEnviarOBSA('${a.id}')" title="Gerar Formulário OBSA"><i class="fa-solid fa-file-invoice"></i> Gerar OBSA</button>
                 <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarAdmissaoAdmin('${a.id}')" title="Editar Ficha de Admissão"><i class="fa-solid fa-pen"></i> Editar</button>
             `;
-            // Só mostra a lixeirinha (Arquivar) se ele ainda NÃO estiver arquivado
             if (a.status !== 'Excluído') {
                 btnAdminAcoes += `<button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirAdmissaoAdmin('${a.id}')" title="Enviar para o Arquivo Morto"><i class="fa-solid fa-folder-minus"></i></button>`;
             }
@@ -16569,20 +16568,34 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
             
        } else {
-            // ========================================================
-            // A ESCALA AINDA ESTÁ ABERTA: RECALCULA TUDO DINAMICAMENTE
-            // ========================================================
-
-            const { data: todosColaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
-
             const colaboradores = [];
-            const bloqueados = [];
+            const bloqueadosELogs = []; // 👈 MÁGICA 1: Nova array unificada para o Log
+
+            // 👇 A MÁGICA DA CORREÇÃO ENTRA AQUI: BUSCA OS COLABORADORES NO BANCO! 👇
+            let queryColabs = supabaseClient.from('perfis')
+                .select('*')
+                .eq('perfil', 'Colaborador')
+                .in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura']);
+            
+            // Se o Admin tiver filtrado por empresa no topo, aplica o filtro
+            if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+                queryColabs = queryColabs.eq('empresa', empresaSelecionadaFiltro);
+            }
+
+            const { data: todosColaboradores, error: errColabs } = await queryColabs;
+            
+            if (errColabs) {
+                console.error("Erro ao buscar colaboradores para a escala:", errColabs);
+                loading.classList.add('hidden');
+                return mostrarAlerta("Erro ao carregar colaboradores da escala.", "erro");
+            }
+            // 👆 FIM DA CORREÇÃO 👆
 
             // Função auxiliar de blindagem: remove espaços e joga tudo para maiúsculo
             const limparStringSafe = (txt) => txt ? String(txt).trim().toUpperCase() : '';
             const unidadeAlvoLimpa = limparStringSafe(unidade);
 
-            // 👇 CHAVES LIGA/DESLIGA DAS TRAVAS DA ESCALA (Pode mudar para true depois) 👇
+            // 👇 CHAVES LIGA/DESLIGA DAS TRAVAS DA ESCALA (MANTIDAS DESATIVADAS COMO PEDIDO) 👇
             const ATIVAR_TRAVA_ASO_ADMISSIONAL = false; 
             const ATIVAR_TRAVA_CONTRATO = false;        
             const ATIVAR_TRAVA_ASO_PERIODICO = false;   
@@ -16590,6 +16603,9 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
             (todosColaboradores || []).forEach(c => {
                 let motivoBloqueio = null;
+                let isEmAviso = false;
+                let dataUltimoDiaAviso = '';
+
                 const adm = c.dados_admissao || {};
                 const ctr = adm.contrato || {};
                 const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
@@ -16604,12 +16620,16 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 if (c.status === 'Cancelado(a)' || c.status === 'Excluído') return;
 
                 // Limpeza: Se já foi desligado antes desse mês, pula ele silenciosamente!
-                if ((c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente') && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
+                if ((c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                     const udRegex = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
                         const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]), 23, 59, 59);
                         if (dataDesligamento < primeiroDiaDoMesVisivel) {
                             return; 
+                        } else {
+                            // Está dentro do mês, então está cumprindo aviso ou saindo neste mês!
+                            isEmAviso = true;
+                            dataUltimoDiaAviso = c.dados_rescisao.ultimo_dia.split(' ')[0];
                         }
                     }
                 }
@@ -16644,33 +16664,28 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
 
                 // Joga para o balde correto
                 if (motivoBloqueio) {
-                    bloqueados.push({ nome: c.nome, motivo: motivoBloqueio });
+                    bloqueadosELogs.push({ nome: c.nome, motivo: motivoBloqueio, tipo: 'bloqueio' });
                 } else {
                     c.unidade = unidade; 
-                    colaboradores.push(c);
+                    colaboradores.push(c); // 👈 Entrou na escala!
+
+                    // 👇 MÁGICA 2: Se ele não está bloqueado, mas está de aviso/rescisão, joga pro Log também!
+                    if (isEmAviso) {
+                        bloqueadosELogs.push({ 
+                            nome: c.nome, 
+                            motivo: `Em processo de Desligamento / Aviso Prévio (Último dia: ${dataUltimoDiaAviso})`, 
+                            tipo: 'aviso' 
+                        });
+                    }
                 }
             });
 
             colaboradores.sort((a, b) => a.nome.localeCompare(b.nome));
 
-            if (colaboradores.length === 0) {
-                if (bloqueados.length > 0) {
-                    let listaHtml = bloqueados.map(b => `<li style="margin-bottom: 8px; color: var(--cor-texto-principal); padding-bottom: 8px; border-bottom: 1px dashed rgba(220,53,69,0.2);"><b>${b.nome}</b> <i class="fa-solid fa-arrow-right" style="color:var(--cor-texto-secundario); font-size:0.8rem; margin:0 5px;"></i> <span style="color: #ff9800; font-weight: bold;">${b.motivo}</span></li>`).join('');
-                    
-                    containerTabela.innerHTML = `
-                        <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-perigo); border-left: 4px solid var(--cor-perigo); border-radius: 8px; padding: 25px; text-align: left; max-width: 800px; margin: 0 auto;">
-                            <h4 style="color: var(--cor-perigo); margin-bottom: 10px; font-size: 1.1rem;"><i class="fa-solid fa-lock"></i> Escala Bloqueada: Pendências Encontradas</h4>
-                            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Os colaboradores abaixo pertencem a esta unidade, mas <b>não puderam entrar na escala</b> devido às seguintes travas do sistema:</p>
-                            <ul style="list-style: none; padding: 0; font-size: 0.85rem; background: rgba(220,53,69,0.05); padding: 15px; border-radius: 8px; border: 1px dashed rgba(220,53,69,0.3);">
-                                ${listaHtml}
-                            </ul>
-                        </div>
-                    `;
-                } else {
-                    containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador ativo ou pendente encontrado para esta unidade neste mês.</p>';
-                }
-                return;
-            }
+           if (colaboradores.length === 0 && bloqueadosELogs.length === 0) {
+    containerTabela.innerHTML = '<p style="text-align:center; color: var(--cor-acento);">Nenhum colaborador ativo ou pendente encontrado para esta unidade neste mês.</p>';
+    return;
+}
 
             const dataInicioMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-01`;
             const dataFimMes = `${anoSelecionado}-${String(mesSelecionado).padStart(2, '0')}-${String(new Date(anoSelecionado, mesSelecionado, 0).getDate()).padStart(2, '0')}`;
@@ -16707,14 +16722,47 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             else btnSalvar.classList.add('hidden');
             
             grupoBotoes.classList.remove('hidden');
-        }
+
+      // 👇 MÁGICA 3: ANEXA O LOG NO FUNDO DA TABELA 👇
+            if (bloqueadosELogs.length > 0) {
+                let listaHtml = bloqueadosELogs.map(b => {
+                    const isBloq = b.tipo === 'bloqueio';
+                    const cor = isBloq ? 'var(--cor-perigo)' : '#ff9800'; // Vermelho se bloqueou, Laranja se é só aviso
+                    const icone = isBloq ? 'fa-lock' : 'fa-user-clock';
+                    const acaoText = isBloq ? 'Bloqueado na Escala' : 'Lançado na Escala';
+                    
+                    return `
+                    <li style="margin-bottom: 8px; color: var(--cor-texto-principal); padding-bottom: 8px; border-bottom: 1px dashed rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <div>
+                            <i class="fa-solid ${icone}" style="color: ${cor}; margin-right: 8px;"></i>
+                            <b>${b.nome}</b> 
+                            <i class="fa-solid fa-arrow-right" style="color:var(--cor-texto-secundario); font-size:0.8rem; margin:0 5px;"></i> 
+                            <span style="color: ${cor}; font-weight: bold;">${b.motivo}</span>
+                        </div>
+                        <span class="badge" style="background: ${cor}22; color: ${cor}; border: 1px solid ${cor}55;">${acaoText}</span>
+                    </li>`;
+                }).join('');
+                
+                const logPanelHtml = `
+                    <div style="background: rgba(0,0,0,0.2); border: 1px solid var(--cor-borda); border-left: 4px solid var(--cor-acento); border-radius: 8px; padding: 25px; text-align: left; max-width: 100%; margin-top: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+                        <h4 style="color: var(--cor-acento); margin-bottom: 10px; font-size: 1.1rem;"><i class="fa-solid fa-rectangle-list"></i> Log Operacional da Escala</h4>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Abaixo constam os colaboradores com travas de bloqueio ativadas pelo RH ou que estão em processo de desligamento neste mês:</p>
+                        <ul style="list-style: none; padding: 0; font-size: 0.85rem; background: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; border: 1px dashed var(--cor-borda);">
+                            ${listaHtml}
+                        </ul>
+                    </div>
+                `;
+                
+                containerTabela.insertAdjacentHTML('beforeend', logPanelHtml);
+            }
+        } 
 
     } catch (error) {
         console.error("Erro na escala:", error); 
     } finally { 
         loading.classList.add('hidden'); 
     }
-};
+}; 
         
   // ==========================================
 // CÉREBRO GERADOR DA ESCALA (ALGORITMO)
@@ -18486,7 +18534,7 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
 };
         
 // =========================================================================
-// EXPORTAÇÃO PARA PDF OFICIAL (CABEÇALHOS CORRIGIDOS E ENCAIXE A4 PERFEITO)
+// EXPORTAÇÃO PARA PDF OFICIAL (CABEÇALHOS CORRIGIDOS E ENCAIXE A4 PERFEITO COM H+/H-)
 // =========================================================================
 window.exportarPDF = function() {
     const tabelaDOM = document.querySelector('.tabela-escala');
@@ -18511,7 +18559,6 @@ window.exportarPDF = function() {
     let headerHtml = '';
     
     trs[0].querySelectorAll('th').forEach((th, index) => {
-        // Reduzimos o espaço do Nome (120px), Cargo (70px) e Dias (30px)
         let w = index === 0 ? '120px' : (index === 1 ? '70px' : '30px');
         let conteudo = '';
         
@@ -18546,12 +18593,19 @@ window.exportarPDF = function() {
         tds.forEach((td, index) => {
             let clone = td.cloneNode(true);
             
-            // Remove o número do dia e tags que não vão pro PDF
+            // Remove o número do dia e tags inúteis
             let badge = clone.querySelector('.dia-num-badge');
             if(badge) badge.remove();
             
+            // 👇 A MÁGICA: Extrai os marcadores H+ e H- ANTES de pegar o texto principal!
+            let temHPlusMinus = false;
+            let siglaH = '';
+            let corH = '';
+
             clone.querySelectorAll('span').forEach(s => { 
-                if(s.textContent.includes('h+') || s.textContent.includes('h-') || s.textContent.includes('he')) s.remove(); 
+                let t = s.textContent.toLowerCase();
+                if(t.includes('h+') || t.includes('he')) { temHPlusMinus = true; siglaH = t; corH = '#ff9800'; s.remove(); }
+                else if(t.includes('h-')) { temHPlusMinus = true; siglaH = t; corH = '#dc3545'; s.remove(); }
             });
             
             let txt = clone.textContent.trim().replace(/\n/g, '') || '-';
@@ -18563,7 +18617,6 @@ window.exportarPDF = function() {
             let pilulaColor = '#333333';
             let temPilula = false;
             
-          // 👇 MAPEAMENTO COMPLETO DA NOVA PALETA CORPORATIVA VISUAL 👇
             if(txt === 'FA') { pilulaBg = '#ffebee'; pilulaColor = '#dc3545'; bold = 'bold'; temPilula = true; }
             else if(txt === 'F') { pilulaBg = '#e8f5e9'; pilulaColor = '#28a745'; temPilula = true; }
             else if(txt === 'FP') { pilulaBg = '#e0f2f1'; pilulaColor = '#20c997'; temPilula = true; }
@@ -18580,7 +18633,6 @@ window.exportarPDF = function() {
             else if(txt === 'DES' || txt === 'AD') { pilulaBg = '#f1f5f9'; pilulaColor = '#64748b'; temPilula = true; }
             else if(txt === 'AL' || txt === 'TR') { pilulaBg = '#f1f5f9'; pilulaColor = '#64748b'; bold = 'bold'; temPilula = true; }
             
-            // Ajuste do Padding e Width acompanhando o Header
             let pad = (index === 0 || index === 1) ? '4px 6px' : '4px 0px';
             let extraCss = '';
             let wFixed = index === 0 ? '120px' : (index === 1 ? '70px' : '30px');
@@ -18594,12 +18646,21 @@ window.exportarPDF = function() {
                 if (txt === '-') txt = ''; 
             }
 
-            // A MÁGICA: Reduzimos a pílula de 32px para 26px, assim cabe perfeitamente na coluna de 30px!
             let pílulaHtml = '';
             if (index > 1 && temPilula && txt !== '') {
-                pílulaHtml = `<span style="background-color: ${pilulaBg}; color: ${pilulaColor}; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 16px; border-radius: 4px; font-size: 6px; font-weight: 800; border: 0.5px solid ${pilulaColor}40; letter-spacing: 0.2px; border-bottom: 1.5px solid ${pilulaColor}; box-sizing: border-box; line-height: 1;">${txt}</span>`;
+                pílulaHtml = `<span style="background-color: ${pilulaBg}; color: ${pilulaColor}; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 15px; border-radius: 4px; font-size: 6px; font-weight: 800; border: 0.5px solid ${pilulaColor}40; letter-spacing: 0.2px; border-bottom: 1.5px solid ${pilulaColor}; box-sizing: border-box; line-height: 1;">${txt}</span>`;
             } else {
                 pílulaHtml = txt;
+            }
+
+            // 👇 INJETA O MARCADOR H+ / H- COMO UM OVERLAY NO PDF 👇
+            if (index > 1 && temHPlusMinus) {
+                pílulaHtml = `
+                    <div style="position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
+                        <span style="position: absolute; top: -3px; left: -2px; font-size: 5px; font-weight: 900; color: ${corH};">${siglaH}</span>
+                        ${pílulaHtml}
+                    </div>
+                `;
             }
 
             bodyHtml += `<td style="border: 1px solid #dee2e6; padding: ${pad}; text-align: ${align}; color: #2d3748; font-size: 8px; font-weight: ${bold}; font-family: sans-serif; vertical-align: middle; width: ${wFixed}; min-width: ${wFixed}; max-width: ${wFixed}; box-sizing: border-box; ${extraCss}">${pílulaHtml}</td>`;
@@ -18632,7 +18693,7 @@ window.exportarPDF = function() {
                 <div style="display: flex; align-items: center; gap: 4px;"><span style="width:12px; height:10px; background:#ffebee; border:1px solid #dc3545; border-bottom:2px solid #dc3545; border-radius:3px;"></span><b style="color:#d32f2f;">FA:</b> Falta Injust.</div>
                 <div style="display: flex; align-items: center; gap: 4px;"><span style="width:12px; height:10px; background:#f3e8ff; border:1px solid #9c27b0; border-bottom:2px solid #9c27b0; border-radius:3px;"></span><b style="color:#7e22ce;">FRD:</b> Feriado</div>
                 <div style="display: flex; align-items: center; gap: 4px;"><span style="width:12px; height:10px; background:#f1f5f9; border:1px solid #64748b; border-bottom:2px solid #64748b; border-radius:3px;"></span><b style="color:#475569;">AL / TR:</b> Transf. Unidade</div>
-<div style="display: flex; align-items: center; gap: 4px;"><span style="width:12px; height:10px; background:#ffebee; border:1px solid #dc3545; border-bottom:2px solid #dc3545; border-radius:3px;"></span><b style="color:#d32f2f;">DES:</b> Desligado</div>
+                <div style="display: flex; align-items: center; gap: 4px;"><span style="width:12px; height:10px; background:#ffebee; border:1px solid #dc3545; border-bottom:2px solid #dc3545; border-radius:3px;"></span><b style="color:#d32f2f;">DES:</b> Desligado</div>
             </div>
         </div>
     `;
@@ -18663,7 +18724,7 @@ window.exportarPDF = function() {
 
     const logoSeguro = `<div style="background-color: #002347; color: #ffc107; padding: 10px 15px; font-size: 15px; font-weight: bold; border-radius: 6px; text-align: center; line-height: 1.2; font-family: sans-serif;">RH SOUL<br><span style="font-size: 8.5px; color: #fff;">Gestão Inteligente</span></div>`;
 
-    // 5. ESTRUTURA HTML GERAL DA NOVA GUIA DO PDF (A MÁGICA DO ZOOM: 0.82)
+    // 5. ESTRUTURA HTML GERAL DA NOVA GUIA DO PDF
     const conteudoHTML = `
         <!DOCTYPE html>
         <html lang="pt-BR">
@@ -18674,9 +18735,7 @@ window.exportarPDF = function() {
                 body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 15px; color: #1e293b; margin: 0; background: #ffffff; }
                 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
                 @media print { 
-                    /* MÁGICA: Reduz 18% de tudo para forçar o navegador a desenhar o dia 31 na folha A4 */
                     body { padding: 0; background: #ffffff; zoom: 0.82; } 
-                    /* Retiramos margens inúteis para liberar papel */
                     @page { margin: 6mm 5mm; size: landscape; } 
                     thead { display: table-header-group; } 
                     tr { page-break-inside: avoid; } 
@@ -19603,8 +19662,18 @@ btn.innerText = "Salvar Cadastro";
                 jornadaEmpacotada = { tipo: tipoJornada, data_inicio: dataInicioValor, escala: escalaSemanalObj };
             }
 
-            const dependentesDOM = document.getElementById('container-dependentes').querySelectorAll('.dep-box'); let listaDependentes = [];
-            dependentesDOM.forEach(box => { listaDependentes.push({ nome: box.querySelector('.dep-nome').value, cpf: box.querySelector('.dep-cpf').value, nascimento: box.querySelector('.dep-nasc').value }); });
+            const dependentesDOM = document.getElementById('container-dependentes').querySelectorAll('.dep-box'); 
+let listaDependentes = [];
+dependentesDOM.forEach(box => { 
+    const nomeDep = box.querySelector('.dep-nome').value.trim();
+    const cpfDep = box.querySelector('.dep-cpf').value.trim();
+    const nascDep = box.querySelector('.dep-nasc').value;
+    
+    // 👇 A MÁGICA: Só salva no banco se o nome não estiver vazio!
+    if (nomeDep !== "") {
+        listaDependentes.push({ nome: nomeDep, cpf: cpfDep, nascimento: nascDep }); 
+    }
+});
             
             let sal = document.getElementById('novo-salario').value; let salLimpo = sal ? parseFloat(sal.replace('R$ ', '').replace(/\./g, '').replace(',', '.')) : 0;
 
@@ -19623,9 +19692,14 @@ btn.innerText = "Salvar Cadastro";
                         if (limites[cargoFinal] !== undefined) {
                             const limiteMaximo = limites[cargoFinal];
                             
-                            // 3. Conta quantos ativos (ou em aviso) já existem nesse cargo na unidade
-                            const { data: ativosDb } = await supabaseClient.from('perfis').select('id, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidadeFinal).contains('dados_admissao', { cargo: cargoFinal });
-                            const ativosReaisCount = window.filtrarAtivosE_AvisoPrevio(ativosDb || []).length;
+                            // 3. Conta APENAS os Ativos efetivos nesse cargo na unidade 
+// (Ignora quem está de Aviso/Rescisão para permitir a entrada do substituto na vaga!)
+const { data: ativosDb } = await supabaseClient.from('perfis')
+    .select('id, status, dados_admissao')
+    .eq('perfil', 'Colaborador')
+    .eq('unidade', unidadeFinal);
+    
+const ativosReaisCount = (ativosDb || []).filter(c => c.status === 'Ativo' && c.dados_admissao?.cargo === cargoFinal).length;
                             
                             // 4. Se a contratação de agora estourar o limite, manda pra SALA DE ESPERA DA DIRETORIA!
                             if ((ativosReaisCount + 1) > limiteMaximo) {
@@ -21657,12 +21731,11 @@ window.isDiaDeFolga = function(colab, dataIso) {
         ausDataInicio.addEventListener('change', atualizarPainelAusenciaTempoReal);
         ausDataFim.addEventListener('change', atualizarPainelAusenciaTempoReal);
 
-       // ========================================================
-// 🚨 RADAR GLOBAL ANTI-CONFLITO DE AGENDAS 🚨
+      // ========================================================
+// 🚨 RADAR GLOBAL ANTI-CONFLITO DE AGENDAS (ATUALIZADO) 🚨
 // ========================================================
-window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck) {
-    // 1. Checa Ausências / Atestados / Faltas
-    // 🌟 ATUALIZAÇÃO: Ignora 'DECL' para permitir abates no mesmo dia de declarações parciais
+window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck, ignorarTroca = false) {
+    // 1. Checa Ausências / Atestados / Faltas (Ignora DECL para permitir abates no mesmo dia)
     const { data: confA } = await supabaseClient.from('ausencias')
         .select('sigla')
         .eq('colaborador_id', idColab)
@@ -21696,22 +21769,24 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         }
     }
 
-    // 4. Checa Trocas de Turno (TP / FP)
-    const { data: confT } = await supabaseClient.from('trocas_turno')
-        .select('dia_solicitante_ira, dia_substituto_ira')
-        .in('status', ['Pendente', 'Aprovado'])
-        .or(`solicitante_id.eq.${idColab},substituto_id.eq.${idColab}`);
-        
-    if (confT && confT.length > 0) {
-        for (let t of confT) {
-            if (t.dia_solicitante_ira >= dataIniCheck && t.dia_solicitante_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
-            if (t.dia_substituto_ira >= dataIniCheck && t.dia_substituto_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+    // 4. Checa Trocas de Turno (TP / FP) - AGORA COM PERMISSÃO DE SOBREPOSIÇÃO PARA EXTRAS/ABATES
+    if (!ignorarTroca) {
+        const { data: confT } = await supabaseClient.from('trocas_turno')
+            .select('dia_solicitante_ira, dia_substituto_ira')
+            .in('status', ['Pendente', 'Aprovado'])
+            .or(`solicitante_id.eq.${idColab},substituto_id.eq.${idColab}`);
+            
+        if (confT && confT.length > 0) {
+            for (let t of confT) {
+                if (t.dia_solicitante_ira >= dataIniCheck && t.dia_solicitante_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+                if (t.dia_substituto_ira >= dataIniCheck && t.dia_substituto_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+            }
         }
     }
 
     return null; // Caminho Livre!
 };
-
+      
       window.buscarColabsCobertura = async function(perfil) {
     const prefixo = perfil === 'admin' ? 'aus-admin-cob' : 'aus-cob';
     const unidade = document.getElementById(`${prefixo}-unidade`).value;
@@ -21883,7 +21958,8 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     btn.disabled = true; 
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando...';
 
-    const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim);
+    // Anti-conflito (Ignora trocas se for Atraso, Abandono ou Declaração)
+    const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim, ['ATR', 'ABD', 'DECL'].includes(sigla));
     if (motivoConflito) {
         btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação';
         return mostrarAlerta(`Bloqueado: O colaborador ${colabNome} já possui <b>${motivoConflito}</b> na escala neste período.`, "erro");
@@ -23925,7 +24001,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
 
     carregarVTParaEdicao();
 
-  // ========================================================
+ // ========================================================
         // SALVAMENTO DOS DADOS EDITADOS NO BANCO (BLINDADO)
         // ========================================================
         document.getElementById('form-edicao-admissao').addEventListener('submit', async (e) => {
@@ -23961,16 +24037,14 @@ window.editarAdmissaoAdmin = async function(idColab) {
                 novaJornadaEmpacotada.escala = escalaSemanalObj;
             }
 
-            // 👇 CORREÇÃO: "tipo" no lugar de "type" para comparar perfeitamente se o RH alterou o horário!
-            const jsonVelho = JSON.stringify({ tipo: jornadaVigente.tipo, horario: jornadaVigente.horario, status_inicio: jornadaVigente.status_inicio, escala: jornadaVigente.escala });
-            const jsonNovo = JSON.stringify({ tipo: novaJornadaEmpacotada.tipo, horario: novaJornadaEmpacotada.horario, status_inicio: novaJornadaEmpacotada.status_inicio, escala: novaJornadaEmpacotada.escala });
-            const mudouJornada = jsonVelho !== jsonNovo;
+            const jsonVelhoJor = JSON.stringify({ tipo: jornadaVigente.tipo, horario: jornadaVigente.horario, status_inicio: jornadaVigente.status_inicio, escala: jornadaVigente.escala });
+            const jsonNovoJor = JSON.stringify({ tipo: novaJornadaEmpacotada.tipo, horario: novaJornadaEmpacotada.horario, status_inicio: novaJornadaEmpacotada.status_inicio, escala: novaJornadaEmpacotada.escala });
+            const mudouJornada = jsonVelhoJor !== jsonNovoJor;
 
             const cargoAntigo = colab.dados_admissao.cargo || '';
             const unidadeAntiga = colab.unidade || '';
             const mudouCargoOuUnidade = (cargoFinal !== cargoAntigo) || (unidadeFinal !== unidadeAntiga);
 
-            // 👇 TRAVA DE VIGÊNCIA (Sem bloquear meses trancados) 👇
             let dataVigenciaValue = null;
             if (mudouCargoOuUnidade || mudouJornada) {
                 window.forcarExibicaoVigencia(); 
@@ -23985,7 +24059,6 @@ window.editarAdmissaoAdmin = async function(idColab) {
 
             const novoNome = document.getElementById('edit-adm-nome').value.trim().toUpperCase();
 
-            // Gravação dos históricos isolados se a trava passou
             if (mudouCargoOuUnidade || mudouJornada) {
                 const dataVigencia = inputMudanca.value;
 
@@ -24010,10 +24083,19 @@ window.editarAdmissaoAdmin = async function(idColab) {
 
                 if (mudouJornada) {
                     novaJornadaEmpacotada.data_inicio = dataVigencia;
+                    
+                    // 👇 A MÁGICA CONTRA O ERRO 'UNDEFINED' ESTÁ AQUI 👇
+                    // Se o funcionário perdeu a jornada no bug anterior, a gente recria ela pra ele não travar!
+                    if (!adm.jornada) adm.jornada = {};
                     if (!adm.jornada.historico_alteracoes) adm.jornada.historico_alteracoes = [];
+                    // 👆 ========================================= 👆
+
                     adm.jornada.historico_alteracoes = adm.jornada.historico_alteracoes.filter(h => h.data_inicio !== dataVigencia);
                     
-                    if (dataVigencia > novaDataInicio) {
+                    const dataNovaObj = new Date(dataVigencia + 'T00:00:00');
+                    const dataAdmOriginalObj = new Date((adm.data_inicio || adm.jornada.data_inicio) + 'T00:00:00');
+
+                    if (dataNovaObj > dataAdmOriginalObj) {
                         adm.jornada.historico_alteracoes.push(novaJornadaEmpacotada);
                         adm.jornada.historico_alteracoes.sort((a,b) => new Date(a.data_inicio + 'T00:00:00') - new Date(b.data_inicio + 'T00:00:00'));
                     } else {
@@ -24061,7 +24143,6 @@ window.editarAdmissaoAdmin = async function(idColab) {
             }
             adm.is_folguista = isFolguistaAgora;
 
-            // 👇 MÁGICA DA CORREÇÃO: LENDO OS DADOS PESSOAIS E DE CONTATO ANTES DE SALVAR 👇
             adm.telefone = document.getElementById('edit-adm-telefone').value;
             adm.email_pessoal = document.getElementById('edit-adm-email-pessoal').value;
             
@@ -24106,17 +24187,19 @@ window.editarAdmissaoAdmin = async function(idColab) {
             adm.uniforme.calca = document.getElementById('edit-adm-calca').value;
             adm.uniforme.sapato = document.getElementById('edit-adm-sapato').value;
 
-            const dependentesDOM = document.getElementById('edit-container-dependentes').querySelectorAll('.dep-box-edit');
-            let listaDependentes = [];
-            dependentesDOM.forEach(box => { 
-                listaDependentes.push({ 
-                    nome: box.querySelector('.dep-nome-edit').value, 
-                    cpf: box.querySelector('.dep-cpf-edit').value, 
-                    nascimento: box.querySelector('.dep-nasc-edit').value 
-                }); 
-            });
-            adm.dependentes = listaDependentes;
-            // 👆 FIM DA CORREÇÃO 👆
+           const dependentesDOM = document.getElementById('edit-container-dependentes').querySelectorAll('.dep-box-edit');
+let listaDependentes = [];
+dependentesDOM.forEach(box => { 
+    const nomeDep = box.querySelector('.dep-nome-edit').value.trim();
+    const cpfDep = box.querySelector('.dep-cpf-edit').value.trim();
+    const nascDep = box.querySelector('.dep-nasc-edit').value;
+
+    // 👇 A MÁGICA: Só puxa pra lista se tiver digitado o nome!
+    if (nomeDep !== "") {
+        listaDependentes.push({ nome: nomeDep, cpf: cpfDep, nascimento: nascDep }); 
+    }
+});
+adm.dependentes = listaDependentes;
 
             try {
                 await supabaseClient.from('perfis').update({ nome: novoNome, unidade: unidadeFinal, dados_admissao: adm }).eq('id', idColab);
@@ -24159,14 +24242,12 @@ window.editarAdmissaoAdmin = async function(idColab) {
                 mostrarAlerta("Atualização concluída com sucesso!", "sucesso");
                 carregarAdmissoesParaAdmin();
                 
-                // 👇 A MÁGICA: Força a atualização da escala mesmo se ela estiver trancada!
                 if (dataVigenciaValue) {
                     await window.atualizarEscalaCongeladaSeNecessario(dataVigenciaValue, unidadeAntiga, unidadeFinal);
                 } else if (!document.getElementById('tela-escala').classList.contains('hidden')) {
                     processarEscala(); 
                 }
 
-            // 👇 FALTAVA ESSA CHAVE AQUI PARA FECHAR O BLOCO 'TRY' ANTES DO 'CATCH' 👇
             } catch (err) {
                 mostrarAlerta("Erro ao salvar: " + err.message, "erro");
                 btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Atualizar Ficha do Colaborador';
@@ -25202,8 +25283,8 @@ window.confirmarCompensacaoDivida = async function(idColab, nome, minutosNegativ
     btn.disabled = true;
 
     try {
-        // 🛡️ Anti-Conflito de Escala
-        let conflito = await window.checarConflitoGlobal(idColab, dataTrabalho, dataTrabalho);
+        // 🛡️ Anti-Conflito de Escala (Ignorando TP)
+        let conflito = await window.checarConflitoGlobal(idColab, dataTrabalho, dataTrabalho, true);
         if (conflito) {
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Agendar Trabalho na Escala';
             return mostrarAlerta(`Bloqueado: O colaborador já possui <b>${conflito}</b> no dia ${formatarDataBR(dataTrabalho)}.`, "erro");
@@ -25604,8 +25685,8 @@ document.getElementById('form-ft').addEventListener('submit', async (e) => {
         const siglaDetectada = minTotais >= (minPlantaoBase - 15) ? 'FT' : 'HE';
         const decimal = (minTotais / 60).toFixed(2);
 
-        // Anti-conflito global
-        let conf = await window.checarConflitoGlobal(idColab, dataAlvo, dataAlvo);
+        // Anti-conflito global (Ignorando TP para permitir horas extras na troca)
+        let conf = await window.checarConflitoGlobal(idColab, dataAlvo, dataAlvo, true);
         if (conf) {
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Horas para o Banco';
             return mostrarAlerta(`<b>Ação Bloqueada!</b><br>O colaborador já possui <b>${conf}</b> no dia ${formatarDataBR(dataAlvo)}.`, "erro");
@@ -31392,7 +31473,9 @@ document.getElementById('form-nova-ocorrencia')?.addEventListener('submit', asyn
    // Coleta todas as batidas se for Atraso
     let batidasMultiplas = [];
     let horariosMultiplos = [];
-    if (document.getElementById('oco-tipo').value === 'Atraso / Falha de Batida') {
+    
+    // 👇 AQUI ESTAVA O ERRO DE TEXTO! Mude para 'Falha na Batida'
+    if (document.getElementById('oco-tipo').value === 'Falha na Batida') {
         document.querySelectorAll('#lista-batidas-oco .linha-batida-oco').forEach(linha => {
             const b = linha.querySelector('.oco-atraso-batida').value;
             const h = linha.querySelector('.oco-atraso-hora').value;
@@ -31536,12 +31619,13 @@ window.filtrarOcorrenciasAdmin = function() {
 
         // Estilização do Tipo de Ocorrência com Ícones Dinâmicos
         let iconeTipo = 'fa-circle-exclamation';
-        if (oco.tipo === 'Atraso / Falha de Batida') iconeTipo = 'fa-user-clock';
+        if (oco.tipo === 'Falha na Batida') iconeTipo = 'fa-user-clock';
         else if (oco.tipo === 'Abandono de Plantão') iconeTipo = 'fa-person-running';
         else if (oco.tipo === 'Postura / Comportamental') iconeTipo = 'fa-users-rays';
 
         let detalhesExtas = '';
-        if(oco.tipo === 'Atraso / Falha de Batida' && oco.batida_afetada) {
+        // 👇 AQUI TAMBÉM PRECISA MUDAR PARA 'Falha na Batida'
+        if(oco.tipo === 'Falha na Batida' && oco.batida_afetada) {
             let formatoBatidas = '';
             const bArr = String(oco.batida_afetada).split(' || ');
             const hArr = String(oco.horario_batida || '').split(' || ');
@@ -31699,7 +31783,7 @@ window.editarOcorrenciaAdmin = async function(idOco) {
     const oco = todasOcorrenciasAdmin.find(o => o.id === idOco);
     if (!oco) return mostrarAlerta("Ocorrência não encontrada", "erro");
 
-    const isAtraso = oco.tipo === 'Atraso / Falha de Batida';
+    const isAtraso = oco.tipo === 'Falha na Batida';
 
     // 👇 1. MÁGICA: Constrói as linhas de batida baseadas no que está no banco 👇
     let linhasBatidasHtml = '';
@@ -31820,7 +31904,7 @@ window.editarOcorrenciaAdmin = async function(idOco) {
             let batidasMultiplas = [];
             let horariosMultiplos = [];
             
-            if (document.getElementById('edit-oco-tipo').value === 'Atraso / Falha de Batida') {
+            if (document.getElementById('edit-oco-tipo').value === 'Falha na Batida') {
                 document.querySelectorAll('#lista-batidas-oco-edit .linha-batida-oco-edit').forEach(linha => {
                     const b = linha.querySelector('.edit-oco-batida').value;
                     const h = linha.querySelector('.edit-oco-hora').value;
@@ -34628,13 +34712,11 @@ let avaliacoesPendentesCache = [];
 // =========================================================================
 // FUNÇÃO 1: CHECAR PENDÊNCIAS (COM TRAVA, RESPIRO E CATCH BLINDADO)
 // =========================================================================
+// Dentro do Módulo: PERÍODO DE EXPERIÊNCIA (TRAVA DO GESTOR)
 window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
-
     const containerLista = document.getElementById('lista-experiencia-pendente');
-    if (foiCliqueManual && containerLista) {
-        containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de experiência...</p>';
-    }
+    if (foiCliqueManual && containerLista) containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Verificando prazos de experiência...</p>';
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hojeIso = new Date().toISOString().split('T')[0];
@@ -34647,19 +34729,18 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
 
     if (resColabs.error) return;
 
-    const setAfastados = new Set();
-    if (resAusencias.data) resAusencias.data.forEach(a => setAfastados.add(a.colaborador_id));
-    if (resFerias.data) resFerias.data.forEach(f => setAfastados.add(f.colaborador_id));
+    const setAfastados = new Set([
+        ...(resAusencias.data || []).map(a => a.colaborador_id),
+        ...(resFerias.data || []).map(f => f.colaborador_id)
+    ]);
 
     const colabs = (resColabs.data || []).filter(c => {
         const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
-        const taAfastado = setAfastados.has(c.id);
-        return !emRescisao && !taAfastado;
+        return !emRescisao && !setAfastados.has(c.id);
     });
 
     avaliacoesPendentesCache = [];
-    const hoje = new Date();
-    hoje.setHours(0,0,0,0);
+    const hoje = new Date(); hoje.setHours(0,0,0,0);
 
     colabs.forEach(c => {
         const adm = c.dados_admissao || {};
@@ -34669,15 +34750,19 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
         const dIni = new Date(dataInicioStr + 'T00:00:00');
         const diffDias = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
         
-        if (diffDias > 90) return;
+        // 👇 APLICA A REGRA DA AVALIAÇÃO DE EXPERIÊNCIA (Ex: 30/60 ou 45/90) 👇
+        const regraExp = window.obterRegraExperiencia(dataInicioStr);
+        if (diffDias > regraExp.total) return;
 
         const expTracker = adm.avaliacoes_exp || { p1_done: false, p2_done: false };
 
-        if (diffDias >= 35 && !expTracker.p1_done) {
-            avaliacoesPendentesCache.push({ colab: c, periodoStr: '1º Período (45 Dias)', periodoKey: 'p1_done', dias: diffDias });
+        // Ex: Aciona 10 dias antes do vencimento do 1º período (20 ou 35)
+        if (diffDias >= (regraExp.p1 - 10) && !expTracker.p1_done) {
+            avaliacoesPendentesCache.push({ colab: c, periodoStr: `1º Período (${regraExp.p1} Dias)`, periodoKey: 'p1_done', dias: diffDias });
         }
-        else if (diffDias >= 80 && !expTracker.p2_done) {
-            avaliacoesPendentesCache.push({ colab: c, periodoStr: '2º Período (90 Dias)', periodoKey: 'p2_done', dias: diffDias });
+        // Ex: Aciona 10 dias antes do vencimento total (50 ou 80)
+        else if (diffDias >= (regraExp.total - 10) && !expTracker.p2_done) {
+            avaliacoesPendentesCache.push({ colab: c, periodoStr: `2º Período (${regraExp.total} Dias)`, periodoKey: 'p2_done', dias: diffDias });
         }
     });
 
@@ -34811,14 +34896,14 @@ window.limparAssinaturaExp = function() { ctxExp.clearRect(0, 0, canvasExp.width
 window.abrirModalAvaliacaoExp = function(indexCache) {
     const item = avaliacoesPendentesCache[indexCache];
     
-    // Calcula datas
     const adm = item.colab.dados_admissao || {};
     const dInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
     let dInicioObj = new Date(dInicioStr + 'T00:00:00');
     
-    // 👇 A MÁGICA 2: Adiciona 45 ou 90 dias exatos na contagem do término pro PDF! 👇
+    // 👇 A MÁGICA DE CÁLCULO DA DATA FINAL DA EXPERIÊNCIA (RESPEITANDO 30 OU 45 DIAS) 👇
+    const regraExp = window.obterRegraExperiencia(dInicioStr);
     let dTerminoObj = new Date(dInicioObj);
-    dTerminoObj.setDate(dTerminoObj.getDate() + (item.periodoKey === 'p1_done' ? 45 : 90));
+    dTerminoObj.setDate(dTerminoObj.getDate() + (item.periodoKey === 'p1_done' ? (regraExp.p1 - 1) : (regraExp.total - 1)));
 
     document.getElementById('exp-id-colab').value = item.colab.id;
     document.getElementById('exp-unidade').value = item.colab.unidade;
@@ -39226,7 +39311,6 @@ window.renderizarPaginacaoContratos = function() {
         const ctr = adm.contrato || {};
         
         let corStatus = '#ff9800';
-        // 👇 A MÁGICA AQUI: Salva o status seguro
         let txtStatus = ctr.status || 'Aguardando RH';
         let acoesHtml = '';
 
@@ -39250,7 +39334,6 @@ window.renderizarPaginacaoContratos = function() {
             const itemLoteId = `fallback_ctr_${c.id}`;
             const tipoNotifBuscaCtr = isAdmin ? 'Contrato_Admin' : 'Contrato_Gestor';
             
-            // Lê da raiz do contrato usando o status seguro
             const isLidaFallback = !!ctr.lida_por || (txtStatus !== 'Aguardando RH' && txtStatus !== 'Aguardando Assinatura' && txtStatus !== 'Aguardando Prorrogação');
             const primeiroNomeFallback = ctr.lida_por ? ctr.lida_por.split(' ')[0] : 'RH';
             
@@ -39271,7 +39354,6 @@ window.renderizarPaginacaoContratos = function() {
             `;
         }
 
-        // 👇 A CORREÇÃO ESTÁ AQUI: Usa txtStatus no lugar de ctr.status 👇
         if (txtStatus === 'Aguardando RH') {
             corStatus = '#ff9800';
             if (isAdmin) {
@@ -39385,8 +39467,10 @@ window.renderizarPaginacaoContratos = function() {
 
         let htmlProrrogacao = '';
         if (dataInicioOrig) {
+            // 👇 A MÁGICA VISUAL: Lê a regra dinâmica para montar o Card 👇
+            const regraExp = window.obterRegraExperiencia(dataInicioOrig);
             const dIniObj = new Date(dataInicioOrig + 'T00:00:00');
-            dIniObj.setDate(dIniObj.getDate() + 44); 
+            dIniObj.setDate(dIniObj.getDate() + (regraExp.p1 - 1)); 
             
             const hojeObj = new Date();
             hojeObj.setHours(0,0,0,0);
@@ -39409,10 +39493,11 @@ window.renderizarPaginacaoContratos = function() {
                 }
             }
 
+            // 👇 Escreve 30º ou 45º dia baseado na regra
             htmlProrrogacao = `
                 <div style="border-left: 2px solid ${corProrrogacao}; padding-left: 10px; transition: 0.3s;">
                     <small style="color: var(--cor-texto-secundario); font-size: 0.65rem; text-transform: uppercase; font-weight: bold; letter-spacing: 1px;">Venc. Experiência</small><br>
-                    <span style="font-size: 0.9rem; color: var(--cor-texto-principal); display: block; margin-top: 4px;"><i class="fa-solid fa-calendar-plus" style="color: ${corProrrogacao};"></i> 45º Dia</span>
+                    <span style="font-size: 0.9rem; color: var(--cor-texto-principal); display: block; margin-top: 4px;"><i class="fa-solid fa-calendar-plus" style="color: ${corProrrogacao};"></i> ${regraExp.p1}º Dia</span>
                     <b style="font-size: 0.9rem; color: ${corProrrogacao};">${formatarDataBR(dIniObj.toISOString().split('T')[0])}</b>
                     ${alertaProrrogacao}
                 </div>
@@ -40540,8 +40625,8 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
 
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Aprovando...';
 
-    // Anti-conflito
-    const motivoConflito = await window.checarConflitoGlobal(idColab, dataI, dataF);
+   // Anti-conflito (Ignora trocas se for Atraso, Abandono ou Declaração)
+    const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim, ['ATR', 'ABD', 'DECL'].includes(sigla));
     if (motivoConflito) {
         btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Lançar e Aprovar Automaticamente';
         return mostrarAlerta(`Conflito de datas com: <b>${motivoConflito}</b>`, "erro");
@@ -40755,8 +40840,8 @@ document.getElementById('form-ft-admin')?.addEventListener('submit', async (e) =
         const horasPlantaoBase = window.obterHorasJornadaAtual(colab?.dados_admissao || {}, dataAlvo);
         const minPlantaoBase = Math.round(horasPlantaoBase * 60);
 
-        // Anti-conflito
-        let conf = await window.checarConflitoGlobal(idColab, dataAlvo, dataAlvo);
+        // Anti-conflito (Ignorando TP)
+        let conf = await window.checarConflitoGlobal(idColab, dataAlvo, dataAlvo, true);
         if (conf) {
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Lançar e Aprovar Automaticamente';
             return mostrarAlerta(`<b>Ação Bloqueada!</b><br>O colaborador já possui <b>${conf}</b> no dia ${formatarDataBR(dataAlvo)}.`, "erro");
@@ -48840,7 +48925,6 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
         const ctr = adm.contrato || {};
         
         let corStatus = '#28a745';
-        // 👇 A MÁGICA AQUI: Salva o status seguro
         let txtStatus = ctr.status || 'Aguardando RH';
         let acoesHtml = '';
 
@@ -48864,7 +48948,6 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
             const itemLoteId = `fallback_ctr_${c.id}`;
             const tipoNotifBuscaCtr = 'Contrato_Admin'; 
             
-            // Lê da raiz do contrato
             const isLidaFallback = !!ctr.lida_por || (txtStatus !== 'Aguardando RH' && txtStatus !== 'Aguardando Assinatura' && txtStatus !== 'Aguardando Prorrogação');
             const primeiroNomeFallback = ctr.lida_por ? ctr.lida_por.split(' ')[0] : 'RH';
             
@@ -48885,7 +48968,6 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
             `;
         }
 
-        // 👇 A CORREÇÃO ESTÁ AQUI: Usa txtStatus no lugar de ctr.status 👇
         if (txtStatus === 'Aguardando Assinatura') {
             corStatus = '#4fc3f7';
             acoesHtml = `
@@ -48934,8 +49016,10 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
 
         let htmlProrrogacao = '';
         if (dataInicioOrig) {
+            // 👇 A MÁGICA VISUAL: Lê a regra dinâmica para montar o Card no Hack do Admin também 👇
+            const regraExp = window.obterRegraExperiencia(dataInicioOrig);
             const dIniObj = new Date(dataInicioOrig + 'T00:00:00');
-            dIniObj.setDate(dIniObj.getDate() + 44); 
+            dIniObj.setDate(dIniObj.getDate() + (regraExp.p1 - 1)); 
             
             const hojeObj = new Date();
             hojeObj.setHours(0,0,0,0);
@@ -48958,10 +49042,11 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
                 }
             }
 
+            // 👇 Escreve 30º ou 45º dia baseado na regra
             htmlProrrogacao = `
                 <div style="border-left: 2px solid ${corProrrogacao}; padding-left: 10px; transition: 0.3s;">
                     <small style="color: var(--cor-texto-secundario); font-size: 0.65rem; text-transform: uppercase; font-weight: bold; letter-spacing: 1px;">Venc. Experiência</small><br>
-                    <span style="font-size: 0.9rem; color: var(--cor-texto-principal); display: block; margin-top: 4px;"><i class="fa-solid fa-calendar-plus" style="color: ${corProrrogacao};"></i> 45º Dia</span>
+                    <span style="font-size: 0.9rem; color: var(--cor-texto-principal); display: block; margin-top: 4px;"><i class="fa-solid fa-calendar-plus" style="color: ${corProrrogacao};"></i> ${regraExp.p1}º Dia</span>
                     <b style="font-size: 0.9rem; color: ${corProrrogacao};">${formatarDataBR(dIniObj.toISOString().split('T')[0])}</b>
                     ${alertaProrrogacao}
                 </div>
@@ -49385,7 +49470,7 @@ document.getElementById('form-lancar-abate-bh').addEventListener('submit', async
             aprovado_por: isAdmin ? usuarioAtual.nome : null
         };
 
-        let conflito = await window.checarConflitoGlobal(idColab, dataAbate, dataAbate);
+        let conflito = await window.checarConflitoGlobal(idColab, dataAbate, dataAbate, true);
         if (conflito) {
             btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Enviar Solicitação';
             return mostrarAlerta(`Bloqueado: Colaborador já possui <b>${conflito}</b> no dia ${formatarDataBR(dataAbate)}.`, "erro");
@@ -50139,7 +50224,6 @@ window.pagarHorasVencidasAdmin = async function(idColab, nomeColab, minutosVenci
 let configsBancoHorasGlobais = [];
 
 window.abrirModalConfigBH = async function() {
-    // Trazemos as opções de unidades lá do filtro principal da escala
     const optUnidades = document.getElementById('filtro-unidade-escala').innerHTML;
 
     const modalHtml = `
@@ -50166,17 +50250,24 @@ window.abrirModalConfigBH = async function() {
                         </select>
                     </div>
 
-                    <div class="form-group" id="box-cfg-bh-prazo">
-                        <label style="color: #4fc3f7;">Prazo de Validade (Vencimento) <span style="color: var(--cor-perigo);">*</span></label>
-                        <div class="input-wrapper">
-                            <i class="fa-solid fa-calendar-days"></i>
-                            <input type="number" id="cfg-bh-dias-validade" min="1" max="365" placeholder="Ex: 60" style="padding-left: 45px;">
-                            <span style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); color: var(--cor-texto-secundario);">dias</span>
+                    <div id="box-cfg-bh-prazo">
+                        <div class="form-group">
+                            <label style="color: #ffc107;">Data de Início do 1º Ciclo <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="date" id="cfg-bh-data-inicio" required style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.3); color: #ffc107; font-weight: bold; outline: none; cursor: pointer;">
                         </div>
-                        <small style="color: var(--cor-texto-secundario); display: block; margin-top: 5px;">Após esse prazo, as horas não gozadas aparecerão em vermelho no extrato exigindo o pagamento em folha.</small>
+
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label style="color: #4fc3f7;">Duração do Ciclo de Fechamento <span style="color: var(--cor-perigo);">*</span></label>
+                            <div class="input-wrapper">
+                                <i class="fa-solid fa-calendar-days"></i>
+                                <input type="number" id="cfg-bh-dias-validade" min="1" max="365" placeholder="Ex: 60" required style="padding-left: 45px;">
+                                <span style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); color: var(--cor-texto-secundario);">dias</span>
+                            </div>
+                            <small style="color: var(--cor-texto-secundario); display: block; margin-top: 8px;">A cada <b>fechamento de ciclo</b> a partir da data de início, os saldos anteriores vencem e um novo ciclo zerado começa.</small>
+                        </div>
                     </div>
 
-                    <button type="submit" id="btn-salvar-cfg-bh" class="btn-success" style="width: 100%; height: 50px; background-color: #4fc3f7; color: #000; border: none; font-weight: bold; margin-top: 10px;">
+                    <button type="submit" id="btn-salvar-cfg-bh" class="btn-success" style="width: 100%; height: 50px; background-color: #4fc3f7; color: #000; border: none; font-weight: bold; margin-top: 15px;">
                         <i class="fa-solid fa-floppy-disk"></i> Salvar Regra
                     </button>
                 </div>
@@ -50185,11 +50276,9 @@ window.abrirModalConfigBH = async function() {
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-    // Carrega as configurações do banco silenciosamente
     const { data } = await supabaseClient.from('config_banco_horas').select('*');
     configsBancoHorasGlobais = data || [];
 
-    // Lógica de Salvar do Modal
     document.getElementById('form-config-bh').addEventListener('submit', async (e) => {
         e.preventDefault();
         const btn = document.getElementById('btn-salvar-cfg-bh');
@@ -50198,8 +50287,15 @@ window.abrirModalConfigBH = async function() {
         const unidade = document.getElementById('cfg-bh-unidade').value;
         const usaBanco = document.getElementById('cfg-bh-usa-banco').value === 'true';
         const diasValidade = parseInt(document.getElementById('cfg-bh-dias-validade').value) || 60;
+        const dataInicioCiclo = document.getElementById('cfg-bh-data-inicio').value;
 
-        const configObj = { unidade: unidade, usa_banco: usaBanco, dias_validade: diasValidade };
+        // Adicionamos a data ao salvamento
+        const configObj = { 
+            unidade: unidade, 
+            usa_banco: usaBanco, 
+            dias_validade: diasValidade,
+            data_inicio_ciclo: dataInicioCiclo
+        };
 
         try {
             const configExistente = configsBancoHorasGlobais.find(c => c.unidade === unidade);
@@ -50209,11 +50305,9 @@ window.abrirModalConfigBH = async function() {
                 await supabaseClient.from('config_banco_horas').insert([configObj]);
             }
             
-            mostrarAlerta(`Regra do Banco de Horas salva para ${unidade}!`, "sucesso");
+            mostrarAlerta(`Regras salvas! O ciclo começará a ser contado a partir de ${formatarDataBR(dataInicioCiclo)}.`, "sucesso");
             document.getElementById('modal-config-bh').remove();
-            
-            // Recalcula o extrato se a tela estiver aberta
-            carregarExtratoBancoHorasAdmin();
+            carregarExtratoBancoHorasAdmin(); // Recalcula tudo!
         } catch (err) {
             mostrarAlerta("Erro ao salvar.", "erro");
         }
@@ -50231,15 +50325,41 @@ window.carregarConfigBHUnidade = function() {
     if (config) {
         document.getElementById('cfg-bh-usa-banco').value = config.usa_banco ? "true" : "false";
         document.getElementById('cfg-bh-dias-validade').value = config.dias_validade;
+        document.getElementById('cfg-bh-data-inicio').value = config.data_inicio_ciclo || ''; // Preenche a data salva
         document.getElementById('box-cfg-bh-prazo').classList.toggle('hidden', !config.usa_banco);
     } else {
-        // Valores Padrão
         document.getElementById('cfg-bh-usa-banco').value = "true";
         document.getElementById('cfg-bh-dias-validade').value = "60";
+        document.getElementById('cfg-bh-data-inicio').value = ""; 
         document.getElementById('box-cfg-bh-prazo').classList.remove('hidden');
     }
 
     bloco.classList.remove('hidden');
+};
+
+  window.obterInicioCicloAtual = function(dataInicioStr, diasValidade, dataHoje = new Date()) {
+    if (!dataInicioStr || !diasValidade) {
+        return null; // Fallback se o RH ainda não configurou a data
+    }
+
+    const dStart = new Date(dataInicioStr + 'T00:00:00');
+    const hoje = new Date(dataHoje);
+    hoje.setHours(0,0,0,0);
+
+    if (hoje < dStart) return dStart; // O ciclo ainda nem começou
+
+    // Calcula quantos dias se passaram desde o início do 1º Ciclo
+    const diffTempo = hoje.getTime() - dStart.getTime();
+    const diffDias = Math.floor(diffTempo / (1000 * 3600 * 24));
+
+    // Descobre em qual "Bloco" (Ciclo) nós estamos agora
+    const cicloAtualIndex = Math.floor(diffDias / diasValidade);
+
+    // A data de início do ciclo atual é a Data de Origem + (Ciclo * Dias)
+    const inicioCicloAtual = new Date(dStart);
+    inicioCicloAtual.setDate(inicioCicloAtual.getDate() + (cicloAtualIndex * diasValidade));
+
+    return inicioCicloAtual;
 };
 
 // =========================================================================
@@ -50373,14 +50493,43 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 if (deb.minutos === 0) dIdx++;
             }
 
+            // 👇 INTELIGÊNCIA DE FECHAMENTO POR COMPETÊNCIA (CORTE NO DIA 25) 👇
             let vencidoPositivo = 0;
             let hVencidosPos = [];
+            
             listCreditos.forEach(cred => {
                 if (cred.minutos > 0) {
-                    const diff = Math.floor((hoje - new Date(cred.data + 'T00:00:00')) / (1000 * 3600 * 24));
-                    if (diff > configUnidade.dias_validade) {
+                    const dCred = new Date(cred.data + 'T00:00:00');
+                    let estaVencido = false;
+
+                    // 1. Descobre a competência da hora extra (Corte sempre no dia 25)
+                    let anoComp = dCred.getFullYear();
+                    let mesComp = dCred.getMonth(); // 0-11
+                    
+                    if (dCred.getDate() > 25) {
+                        mesComp++;
+                        if (mesComp > 11) { mesComp = 0; anoComp++; }
+                    }
+
+                    // 2. Define o vencimento para o dia 25 do mês seguinte (+1)
+                    let mesLimite = mesComp + 1; 
+                    let anoLimite = anoComp;
+                    if (mesLimite > 11) {
+                        mesLimite = mesLimite - 12;
+                        anoLimite++;
+                    }
+                    
+                    // Trava o cronômetro exatamente às 23:59:59 do dia 25 do mês de vencimento
+                    const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
+
+                    // Usa a variável 'hoje' para saber se já passou do prazo
+                    if (hoje > dataLimiteVencimento) {
+                        estaVencido = true;
+                    }
+
+                    if (estaVencido) {
                         vencidoPositivo += cred.minutos;
-                        hVencidosPos.push({ sigla: cred.sigla, data: cred.data, minutos: cred.minutos, obs: cred.obs });
+                        hVencidosPos.push({ sigla: cred.sigla, data: cred.data, minutes: cred.minutos, obs: cred.obs });
                     }
                 }
             });
@@ -50389,8 +50538,31 @@ window.carregarExtratoBancoHorasAdmin = async function() {
             let hVencidosNeg = [];
             listDebitos.forEach(deb => {
                 if (deb.minutos > 0) {
-                    const diff = Math.floor((hoje - new Date(deb.data + 'T00:00:00')) / (1000 * 3600 * 24));
-                    if (diff > configUnidade.dias_validade) {
+                    const dDeb = new Date(deb.data + 'T00:00:00');
+                    let estaVencido = false;
+
+                    let anoComp = dDeb.getFullYear();
+                    let mesComp = dDeb.getMonth();
+                    
+                    if (dDeb.getDate() > 25) {
+                        mesComp++;
+                        if (mesComp > 11) { mesComp = 0; anoComp++; }
+                    }
+
+                    let mesLimite = mesComp + 1;
+                    let anoLimite = anoComp;
+                    if (mesLimite > 11) {
+                        mesLimite = mesLimite - 12;
+                        anoLimite++;
+                    }
+                    
+                    const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
+
+                    if (hoje > dataLimiteVencimento) {
+                        estaVencido = true;
+                    }
+
+                    if (estaVencido) {
                         vencidoNegativo += deb.minutos;
                         hVencidosNeg.push({ data: deb.data, minutes: deb.minutos, motivo: deb.motivo, obs: deb.obs });
                     }
@@ -54279,51 +54451,33 @@ window.salvarOverrideTravas = async function() {
     }
 };
 
-    // =========================================================================
-// MÓDULO: TRAVA DE SISTEMA PARA PRORROGAÇÃO DE CONTRATO VENCIDA
-// =========================================================================
+    // Dentro do Módulo: TRAVA DE SISTEMA PARA PRORROGAÇÃO DE CONTRATO VENCIDA
 window.checarTravaContrato = async function(foiCliqueManual = false) {
-    
-    // 👇 ================================================================= 👇
-    // ⚙️ CHAVE LIGA/DESLIGA: BLOQUEIO DE PRORROGAÇÃO DE CONTRATO (45 DIAS)
-    // Para reativar os avisos e o bloqueio total do sistema no futuro,
-    // basta trocar a palavra "false" por "true" aqui embaixo:
     const ATIVAR_BLOQUEIO_CONTRATO = false; 
-    
-    if (!ATIVAR_BLOQUEIO_CONTRATO) return; // Se estiver falso, ele aborta a função silenciosamente.
-    // 👆 ================================================================= 👆
+    if (!ATIVAR_BLOQUEIO_CONTRATO) return; 
 
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
-    const hojeObj = new Date();
-    hojeObj.setHours(0,0,0,0);
+    const hojeObj = new Date(); hojeObj.setHours(0,0,0,0);
     const hojeIso = hojeObj.toISOString().split('T')[0];
 
-    // 👇 A MÁGICA: Calcula a data limite de carência (5 dias atrás) 👇
-    const dCarencia = new Date(hojeObj);
-    dCarencia.setDate(dCarencia.getDate() - 5);
+    const dCarencia = new Date(hojeObj); dCarencia.setDate(dCarencia.getDate() - 5);
     const dataCarenciaIso = dCarencia.toISOString().split('T')[0];
 
-    // Busca os colaboradores ativos E as ausências/férias recentes (com data fim nos últimos 5 dias ou no futuro)
     const [resColabs, resAusencias, resFerias] = await Promise.all([
         supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
         supabaseClient.from('ausencias').select('colaborador_id, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').gte('data_fim', dataCarenciaIso),
         supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', dataCarenciaIso)
     ]);
 
-    let deveBloquearSistema = false;
-    let temAlerta = false;
-    let menorPrazo = 999;
-    let qtdPendentesProrrogacao = 0;
+    let deveBloquearSistema = false; let temAlerta = false; let menorPrazo = 999; let qtdPendentesProrrogacao = 0;
 
     (resColabs.data || []).forEach(c => {
-        const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
-        if (emRescisao) return;
+        if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
 
         const adm = c.dados_admissao || {};
         const ctr = adm.contrato || {};
-        
         if (ctr.status !== 'Aguardando Prorrogação') return;
 
         const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
@@ -54331,34 +54485,25 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
 
         const dIni = new Date(dataInicioStr + 'T00:00:00');
         const diffDias = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
-
-        // 👇 ESCUDO DE PROTEÇÃO (AFASTAMENTO / RETORNO RECENTE) 👇
-        let protegidoPorAfastamento = false;
         
-        const ausColab = (resAusencias.data || []).filter(a => a.colaborador_id === c.id);
-        const ferColab = (resFerias.data || []).filter(f => f.colaborador_id === c.id);
+        // 👇 APLICA A REGRA (30 ou 45 dias) PARA A PRORROGAÇÃO 👇
+        const regraExp = window.obterRegraExperiencia(dataInicioStr);
 
-        // Se a query retornou o ID dele, ele está de atestado/férias HOJE, ou voltou nos últimos 5 dias!
-        if (ausColab.length > 0 || ferColab.length > 0) {
+        let protegidoPorAfastamento = false;
+        if ((resAusencias.data || []).some(a => a.colaborador_id === c.id) || (resFerias.data || []).some(f => f.colaborador_id === c.id)) {
             protegidoPorAfastamento = true;
         }
 
-        // Se já bateu os 45 dias
-        if (diffDias >= 45) {
+        if (diffDias >= regraExp.p1) { // 30 ou 45
             if (protegidoPorAfastamento) {
-                // Mantém apenas como alerta roxo, mas NÃO bloqueia a tela (dá a carência de 5 dias)
-                temAlerta = true;
-                if (0 < menorPrazo) menorPrazo = 0;
+                temAlerta = true; if (0 < menorPrazo) menorPrazo = 0;
             } else {
-                // Sem proteção: BLOQUEIA O SISTEMA DO GESTOR
-                deveBloquearSistema = true;
-                qtdPendentesProrrogacao++;
+                deveBloquearSistema = true; qtdPendentesProrrogacao++;
             }
         } 
-        // Se falta 5 dias (Entre 40 e 44), manda o AVISO
-        else if (diffDias >= 40) {
+        else if (diffDias >= (regraExp.p1 - 5)) { // Avisa 5 dias antes (25 ou 40)
             temAlerta = true;
-            let diasFaltando = 45 - diffDias;
+            let diasFaltando = regraExp.p1 - diffDias;
             if (diasFaltando < menorPrazo) menorPrazo = diasFaltando;
         }
     });
@@ -54374,33 +54519,21 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     const destravamento = await window.verificarDesbloqueioGlobal();
 
     if (deveBloquearSistema && !destravamento.liberado) {
-        document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-ctr" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10003; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo de 45 dias esgotou! Você possui ${qtdPendentesProrrogacao} contrato(s) pendente(s) de prorrogação. O sistema está bloqueado até a conclusão do processo.</div>`);
+        document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-ctr" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10003; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: O prazo limite para prorrogação esgotou! Você possui ${qtdPendentesProrrogacao} contrato(s) pendente(s). O sistema está bloqueado até a conclusão do processo.</div>`);
         
-        document.querySelectorAll('.nav-btn').forEach(b => {
-            if (b.dataset.target !== 'tela-usuarios') b.style.display = 'none';
-        });
-
-        document.querySelectorAll('.btn-aba-usuario').forEach(aba => {
-            if (aba.getAttribute('data-aba') !== 'aba-contratos-trabalho') {
-                aba.style.display = 'none';
-            }
-        });
-
+        document.querySelectorAll('.nav-btn').forEach(b => { if (b.dataset.target !== 'tela-usuarios') b.style.display = 'none'; });
+        document.querySelectorAll('.btn-aba-usuario').forEach(aba => { if (aba.getAttribute('data-aba') !== 'aba-contratos-trabalho') aba.style.display = 'none'; });
         if (menuSidebar) menuSidebar.classList.add('sidebar-bloqueada');
         
         if (btnMenuAdm) {
-            btnMenuAdm.classList.remove('hidden');
-            btnMenuAdm.style.display = '';
-            btnMenuAdm.style.pointerEvents = 'auto';
+            btnMenuAdm.classList.remove('hidden'); btnMenuAdm.style.display = ''; btnMenuAdm.style.pointerEvents = 'auto';
             if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des')) {
-                btnMenuAdm.click();
-                setTimeout(() => document.querySelector('[data-aba="aba-contratos-trabalho"]')?.click(), 100);
+                btnMenuAdm.click(); setTimeout(() => document.querySelector('[data-aba="aba-contratos-trabalho"]')?.click(), 100);
             }
         }
     } 
     else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
         let diasTextoDisplay = menorPrazo <= 0 ? 'hoje (ou está sob carência de retorno)' : `em ${menorPrazo} dia(s)`;
-        
         let textoAlerta = deveBloquearSistema 
             ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Contratos pendentes de prorrogação. Bloqueio retorna em: <span class="contador-desbloqueio" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
             : `<i class="fa-solid fa-triangle-exclamation"></i> Você possui Prorrogação de Contrato vencendo <b>${diasTextoDisplay}</b>. Imprima e colha a assinatura.`;
@@ -54413,9 +54546,7 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
             document.querySelectorAll('.btn-aba-usuario').forEach(aba => aba.style.display = '');
         }
 
-        if (deveBloquearSistema && destravamento.liberado) {
-            window.iniciarContagemDesbloqueio(destravamento.expiracao);
-        }
+        if (deveBloquearSistema && destravamento.liberado) window.iniciarContagemDesbloqueio(destravamento.expiracao);
     } else {
         if (!document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des') && menuSidebar) {
             menuSidebar.classList.remove('sidebar-bloqueada');
@@ -54427,7 +54558,6 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     let offsetTop = 0;
     if (document.getElementById('aviso-bloqueio-exp') || document.getElementById('aviso-alerta-exp')) offsetTop += 38;
     if (document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des')) offsetTop += 38;
-    
     const avisoCtrNovo = document.getElementById('aviso-bloqueio-ctr') || document.getElementById('aviso-alerta-ctr');
     if (avisoCtrNovo) avisoCtrNovo.style.top = `${offsetTop}px`;
 };
@@ -54513,6 +54643,1026 @@ window.buscarColabsEmprestimoPrevista = async function() {
 
     selectColab.innerHTML = optHtml;
     selectColab.disabled = false;
+};
+
+window.abrirModalEnviarOBSA = async function(idColab) {
+    const colab = todasAdmissoesAprovadas.find(c => c.id === idColab);
+    if (!colab) return mostrarAlerta("Colaborador não encontrado.", "erro");
+
+    const adm = colab.dados_admissao || {};
+    
+    // Tratamento Inteligente do Endereço
+    let eRua = '', eNum = '', eComp = '', eBairro = '', eCidadeStr = '', eUF = '';
+    if (adm.endereco) {
+        let partesEnd = adm.endereco.split(' - ');
+        if (partesEnd.length > 0) {
+            let pRuaNum = partesEnd[0].split(', Nº ');
+            eRua = pRuaNum[0] || ''; eNum = pRuaNum[1] || '';
+        }
+        if (partesEnd.length === 3) {
+            eComp = partesEnd[1];
+            let pBairroCid = partesEnd[2].split(', ');
+            eBairro = pBairroCid[0] || ''; eCidadeStr = pBairroCid[1] || '';
+        } else if (partesEnd.length === 2) {
+            let pBairroCid = partesEnd[1].split(', ');
+            eBairro = pBairroCid[0] || ''; eCidadeStr = pBairroCid[1] || '';
+        }
+    }
+    if (eCidadeStr.includes('/')) {
+        let cParts = eCidadeStr.split('/');
+        eCidadeStr = cParts[0].trim(); eUF = cParts[1].trim();
+    } else if (eCidadeStr.includes('-')) {
+        let cParts = eCidadeStr.split('-');
+        eCidadeStr = cParts[0].trim(); eUF = cParts[1].trim();
+    }
+
+    let endCompleto = eRua;
+    if (eNum) endCompleto += `, Nº ${eNum}`;
+
+    const dependentes = adm.dependentes || [];
+    
+    let dependentesHtml = '';
+    if (dependentes.length > 0) {
+        dependentesHtml = `<h5 style="color: #ff9800; margin-bottom: 15px; margin-top: 10px;"><i class="fa-solid fa-children"></i> Complemento de Dependentes</h5>`;
+        dependentes.forEach((dep, index) => {
+            const grau = dep.grau_parentesco || '';
+            const depFin = dep.dep_financeiro || '';
+            dependentesHtml += `
+            <div class="form-row-3" style="background: rgba(255, 152, 0, 0.05); padding: 10px; border-radius: 6px; margin-bottom: 10px; border: 1px dashed #ffb74d;">
+                <div class="form-group" style="grid-column: span 1;">
+                    <label style="color: #ff9800;">Nome do Dependente</label>
+                    <input type="text" value="${dep.nome}" disabled style="background: transparent; border: none; color: var(--cor-texto-principal); font-weight: bold; padding: 0;">
+                </div>
+                <div class="form-group">
+                    <label>Grau de Parentesco <span style="color: var(--cor-perigo);">*</span></label>
+                    <select id="obsa-dep-grau-${index}" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: var(--cor-fundo-input); color: #fff;">
+                        <option value="" disabled ${!grau ? 'selected' : ''}>Selecione...</option>
+                        <option value="Filho Válido" ${grau === 'Filho Válido' ? 'selected' : ''}>Filho Válido</option>
+                        <option value="Filho Vitálicio" ${grau === 'Filho Vitálicio' ? 'selected' : ''}>Filho Vitalício</option>
+                        <option value="Enteado Válido" ${grau === 'Enteado Válido' ? 'selected' : ''}>Enteado Válido</option>
+                        <option value="Enteado Vitálicio" ${grau === 'Enteado Vitálicio' ? 'selected' : ''}>Enteado Vitalício</option>
+                        <option value="Filho Estudante" ${grau === 'Filho Estudante' ? 'selected' : ''}>Filho Estudante</option>
+                        <option value="Enteado Estudante" ${grau === 'Enteado Estudante' ? 'selected' : ''}>Enteado Estudante</option>
+                        <option value="Pai" ${grau === 'Pai' ? 'selected' : ''}>Pai</option>
+                        <option value="Mãe" ${grau === 'Mãe' ? 'selected' : ''}>Mãe</option>
+                        <option value="Neto" ${grau === 'Neto' ? 'selected' : ''}>Neto</option>
+                        <option value="Avó/Avô" ${grau === 'Avó/Avô' ? 'selected' : ''}>Avó/Avô</option>
+                        <option value="Outros" ${grau === 'Outros' ? 'selected' : ''}>Outros</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Dependente Financeiro?</label>
+                    <select id="obsa-dep-fin-${index}" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: var(--cor-fundo-input); color: #fff;">
+                        <option value="" disabled ${!depFin ? 'selected' : ''}>Selecione...</option>
+                        <option value="S" ${depFin === 'S' || depFin === 'Sim' ? 'selected' : ''}>Sim</option>
+                        <option value="N" ${depFin === 'N' || depFin === 'Não' ? 'selected' : ''}>Não</option>
+                    </select>
+                </div>
+            </div>`;
+        });
+    }
+
+    let insalubridadeColab = adm.insalubridade;
+    if (!insalubridadeColab && adm.cargo && colab.unidade) {
+        try {
+            if (typeof tabelaSalariosGlobais !== 'undefined' && tabelaSalariosGlobais.length > 0) {
+                const regraSalario = tabelaSalariosGlobais.find(s => s.cargo === adm.cargo && s.unidade === colab.unidade && (s.empresa === colab.empresa || !s.empresa));
+                if (regraSalario && regraSalario.insalubridade) insalubridadeColab = regraSalario.insalubridade;
+            }
+        } catch(e) { console.error(e); }
+    }
+    if (!insalubridadeColab || insalubridadeColab === '0%' || insalubridadeColab === 'Não') insalubridadeColab = 'N'; 
+
+    let horarioBase = adm.jornada?.horario || ''; 
+    let tipoJorStr = adm.jornada?.tipo || '12x36';
+    if (tipoJorStr !== '12x36' && adm.jornada?.escala) {
+        for (let diaConfig of Object.values(adm.jornada.escala)) {
+            if (diaConfig.status === 'Trabalho' && diaConfig.horario) { horarioBase = diaConfig.horario; break; }
+        }
+    }
+
+    // Regra Inteligente da Carga Horária Semanal
+    let cargaHorariaReal = adm.carga_horaria;
+    if (tipoJorStr.includes('12x36')) {
+        cargaHorariaReal = '12x36'; 
+    } else if (!cargaHorariaReal) {
+        cargaHorariaReal = '44h'; 
+    }
+
+    // INTEGRAÇÃO DO CAMPO "POSSUI ESCALA?" BASEADO NA JORNADA
+    let possuiEscalaSugerido = adm.possui_escala;
+    if (!possuiEscalaSugerido || possuiEscalaSugerido === '') {
+        possuiEscalaSugerido = tipoJorStr.includes('12x36') ? 'N' : 'S';
+    }
+
+    const inputOpcional = (id, label, valorSistema, type = 'text', ph = '', extraAttr = '') => {
+        let style = valorSistema ? 'background: rgba(40, 167, 69, 0.05); border: 1px solid #28a745; color: var(--cor-texto-principal); font-weight: bold;' : 'background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);';
+        let val = valorSistema || '';
+        if (type === 'date' && val.includes('/')) { val = val.split('/').reverse().join('-'); }
+        return `<div class="form-group"><label>${label}</label><input type="${type}" id="${id}" value="${val}" placeholder="${ph}" ${extraAttr} style="width: 100%; padding: 12px; border-radius: 8px; outline: none; transition: 0.2s; ${style}"></div>`;
+    };
+
+    const selectOpcional = (id, label, valorSistema, optionsHtml) => {
+        let style = valorSistema ? 'background: rgba(40, 167, 69, 0.05); border: 1px solid #28a745; color: var(--cor-texto-principal); font-weight: bold;' : 'background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);';
+        let finalOptions = optionsHtml.replace(/selected/gi, ''); 
+        let valBusca = valorSistema;
+        if (valorSistema === 'Sim') valBusca = 'S';
+        if (valorSistema === 'Não') valBusca = 'N';
+        const regexValue = new RegExp(`value="${valBusca}"`, 'i');
+        if (finalOptions.match(regexValue)) {
+            finalOptions = finalOptions.replace(regexValue, `value="${valBusca}" selected`);
+        } else if (valorSistema) {
+            finalOptions = `<option value="${valorSistema}" selected>${valorSistema}</option>` + finalOptions;
+        }
+        return `<div class="form-group"><label>${label}</label><select id="${id}" style="width: 100%; padding: 12px; border-radius: 8px; outline: none; transition: 0.2s; cursor: pointer; ${style}">${finalOptions}</select></div>`;
+    };
+
+    const modalHtml = `
+    <div id="modal-obsa" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 1000px; max-height: 90vh; overflow-y: auto; border: 1px solid #ffc107; position: relative;">
+            <button onclick="document.getElementById('modal-obsa').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index: 10;"><i class="fa-solid fa-xmark"></i></button>
+            
+            <h3 style="color: #ffc107; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> Conferência de Requisição OBSA</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Revise a ficha de <b>${colab.nome}</b>. Os campos com <b>borda verde</b> já foram preenchidos pelo sistema, mas <b style="color:#fff;">você pode editá-los livremente</b> através das caixas abaixo antes de exportar.</p>
+            
+            <div id="bloco-ia-obsa" class="form-group" style="background: rgba(79, 195, 247, 0.1); padding: 15px; border-radius: 8px; border: 1px dashed #4fc3f7; margin-bottom: 20px;">
+                <label style="color: #4fc3f7; font-weight: bold; font-size: 1rem;"><i class="fa-solid fa-wand-magic-sparkles"></i> Clara IA: Preenchimento Automático</label>
+                <p style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-bottom: 12px; margin-top: 4px;">Anexe a CTPS, CNH, RG, Título de Eleitor ou Reservista caso os campos em branco abaixo precisem ser extraídos.</p>
+                <input type="file" id="doc-ia-obsa" accept="image/jpeg, image/png, application/pdf" multiple style="margin-bottom: 12px; width: 100%;">
+                <button type="button" id="btn-ler-obsa-ia" class="btn-secondary" style="width: 100%; border-color: #4fc3f7; color: #4fc3f7; font-weight: bold; background: transparent;" onclick="lerDocumentoFaltanteOBSA()">
+                    <i class="fa-solid fa-microchip"></i> Extrair Dados Faltantes com IA
+                </button>
+            </div>
+
+            <form id="form-gerar-obsa">
+                <input type="hidden" id="obsa-colab-id" value="${colab.id}">
+                
+                <div class="box-interior" style="border-left: 4px solid #28a745; margin-bottom: 20px; background: rgba(40, 167, 69, 0.02);">
+                    <h5 style="color: #28a745; margin-bottom: 15px;">Dados Pessoais & Contato</h5>
+                    <div class="form-row-4">
+                        ${inputOpcional('obsa-sys-nome', 'Nome Completo', colab.nome)}
+                        ${inputOpcional('obsa-sys-cpf', 'CPF', adm.cpf, 'text', '000.000.000-00', 'oninput="this.value = mascaraCPF(this.value)"')}
+                        ${inputOpcional('obsa-sys-nasc', 'Nascimento', adm.nascimento ? formatarDataBR(adm.nascimento) : '', 'date')}
+                        ${inputOpcional('obsa-sys-celular', 'Celular', adm.telefone)}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${selectOpcional('obsa-sys-estadocivil', 'Estado Civil', adm.estado_civil, '<option value="" disabled selected>Selecione...</option><option value="Solteiro(a)">Solteiro(a)</option><option value="Casado(a)">Casado(a)</option><option value="Divorciado(a)">Divorciado(a)</option><option value="Viúvo(a)">Viúvo(a)</option><option value="Desquitado">Desquitado</option><option value="União Estável">União Estável</option><option value="Outros">Outros</option>')}
+                        ${selectOpcional('obsa-sys-raca', 'Cor/Raça', adm.cor_raca, '<option value="" disabled selected>Selecione...</option><option value="Branca">Branca</option><option value="Preta">Preta</option><option value="Parda">Parda</option><option value="Amarela">Amarela</option><option value="Indígena">Indígena</option><option value="Não Informado">Não Informado</option>')}
+                        ${selectOpcional('obsa-sys-escolaridade', 'Escolaridade', adm.escolaridade, '<option value="" disabled selected>Selecione...</option><option value="Ensino Fundamental Incompleto">Fundamental Incomp.</option><option value="Ensino Fundamental Completo">Fundamental Comp.</option><option value="Ensino Médio Incompleto">Médio Incomp.</option><option value="Ensino Médio Completo">Médio Comp.</option><option value="Ensino Superior Incompleto">Superior Incomp.</option><option value="Ensino Superior Completo">Superior Comp.</option><option value="Pós-graduação/Especialização">Pós/Especialização</option>')}
+                        ${inputOpcional('obsa-sys-email', 'E-mail', adm.email_pessoal)}
+                    </div>
+                    <div class="form-row-2" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-mae', 'Nome da Mãe', adm.mae)}
+                        ${inputOpcional('obsa-sys-pai', 'Nome do Pai', adm.pai)}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-naturalidade', 'Naturalidade (Cidade Nasc)', adm.cidade_nascimento)}
+                        ${selectOpcional('obsa-sys-nacionalidade', 'Nacionalidade', adm.pais_nascimento === 'Brasil' || !adm.pais_nascimento ? 'Brasileira' : 'Estrangeira', '<option value="Brasileira">Brasileira</option><option value="Estrangeira">Estrangeira</option>')}
+                        ${inputOpcional('obsa-sys-end', 'Endereço (Rua e Nº)', endCompleto)}
+                        ${inputOpcional('obsa-sys-cep', 'CEP', adm.cep)} 
+                    </div>
+                    <div class="form-row-2" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-bairro', 'Bairro', eBairro)}
+                        ${inputOpcional('obsa-sys-cidade', 'Cidade/UF', `${eCidadeStr}/${eUF}`)}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #ffc107; margin-bottom: 20px;">
+                    <h5 style="color: #ffc107; margin-bottom: 15px;">CTPS / eSocial</h5>
+                    <div class="form-row-3">
+                        ${inputOpcional('obsa-matricula', 'Cód. Registro / Matrícula', adm.matricula_obsa, 'text', 'Ex: 00123')}
+                        ${selectOpcional('obsa-ctps-digital', 'CTPS Digital?', adm.ctps_digital, '<option value="" disabled selected>Selecione...</option><option value="S">Sim</option><option value="N">Não</option>')}
+                        ${inputOpcional('obsa-ctps', 'Nº CTPS', adm.ctps, 'text', 'Número')}
+                    </div>
+                    <div class="form-row-3" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-ctps-serie', 'Série CTPS', adm.ctps_serie, 'text', 'Série')}
+                        ${inputOpcional('obsa-ctps-uf', 'UF da CTPS', adm.ctps_uf, 'text', 'Ex: SP', 'maxlength="2" style="text-transform: uppercase;"')}
+                        ${inputOpcional('obsa-ctps-data', 'Data de Emissão CTPS', adm.ctps_data_expedicao, 'date')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #4fc3f7; margin-bottom: 20px;">
+                    <h5 style="color: #4fc3f7; margin-bottom: 15px;">Outros Documentos Oficiais</h5>
+                    <div class="form-row-4">
+                        ${inputOpcional('obsa-sys-rg', 'Nº do RG', adm.rg?.numero)}
+                        ${inputOpcional('obsa-rg-emissor', 'Órgão Emissor RG', adm.rg?.emissor, 'text', 'Ex: SSP')}
+                        ${inputOpcional('obsa-rg-uf', 'UF do RG', adm.rg?.uf, 'text', 'Ex: SP', 'maxlength="2" style="text-transform: uppercase;"')}
+                        ${inputOpcional('obsa-rg-data', 'Data Expedição RG', adm.rg?.data_expedicao, 'date')}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-pis', 'Nº PIS', adm.pis)}
+                        ${inputOpcional('obsa-pis-data', 'Data Cadastro PIS', adm.pis_data_cadastro, 'date')}
+                        ${inputOpcional('obsa-cnh', 'CNH', adm.cnh, 'text', 'Número da CNH')}
+                        ${inputOpcional('obsa-cnh-cat', 'Categoria CNH', adm.cnh_cat, 'text', 'Ex: AB')}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-titulo', 'Nº Título Eleitor', adm.titulo_eleitoral?.numero)}
+                        ${inputOpcional('obsa-sys-zona', 'Zona Eleitoral', adm.titulo_eleitoral?.zona)}
+                        ${inputOpcional('obsa-sys-secao', 'Seção Eleitoral', adm.titulo_eleitoral?.secao)}
+                        ${inputOpcional('obsa-titulo-data', 'Data Emissão Título', adm.titulo_eleitoral?.data_emissao, 'date')}
+                    </div>
+                    <div class="form-row-2" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-reservista', 'Reservista (Se homem)', adm.reservista, 'text', 'Número')}
+                        ${inputOpcional('obsa-reservista-tipo', 'Tipo Reservista', adm.reservista_tipo, 'text', 'Ex: 1ª Categoria')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #9c27b0; margin-bottom: 20px;">
+                    <h5 style="color: #9c27b0; margin-bottom: 15px;"><i class="fa-solid fa-notes-medical"></i> Exames Ocupacionais</h5>
+                    <div class="form-row-3">
+                        ${inputOpcional('obsa-aso-data', 'Data do Exame ASO', adm.aso_data, 'date')}
+                        ${inputOpcional('obsa-aso-validade', 'Validade (Ex: 12 meses)', adm.aso_validade, 'text', 'Ex: 12 meses')}
+                        ${inputOpcional('obsa-toxico-data', 'Data Exame Toxicológico', adm.toxico_data, 'date')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #a6b0cf; margin-bottom: 20px;">
+                    <h5 style="color: #a6b0cf; margin-bottom: 15px;">Dados Contratuais e Banco</h5>
+                    <div class="form-row-4">
+                        ${inputOpcional('obsa-sys-data-adm', 'Data Admissão', adm.jornada?.data_inicio ? formatarDataBR(adm.jornada.data_inicio) : '', 'date')}
+                        ${inputOpcional('obsa-tipo-admissao', 'Tipo Admissão', adm.tipo_admissao, 'text', 'Ex: Normal')}
+                        ${selectOpcional('obsa-primeiro-emprego', 'Primeiro Emprego?', adm.primeiro_emprego, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                        ${selectOpcional('obsa-seguro', 'Receb. Seg. Desemprego?', adm.recebe_seguro, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${selectOpcional('obsa-exp-dias', 'Período Experiência (1º)', adm.experiencia_dias || '45', '<option value="30">30 dias</option><option value="45">45 dias</option><option value="60">60 dias</option><option value="90">90 dias</option>')}
+                        ${selectOpcional('obsa-exp-prorrogacao', 'Prorrogação Experiência (2º)', adm.experiencia_prorrogacao || '45', '<option value="0">Sem Prorrogação</option><option value="30">30 dias</option><option value="45">45 dias</option><option value="60">60 dias</option>')}
+                        ${inputOpcional('obsa-cbo', 'Cód. CBO', adm.cbo, 'text', 'Ex: 2235-05')}
+                        ${inputOpcional('obsa-cod-categoria', 'Cód. Categoria', adm.cod_categoria || '101', 'text', 'Ex: 101')}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${selectOpcional('obsa-banco-nome', 'Banco Oficial', adm.banco?.tem_santander === 'Sim' ? 'SANTANDER' : (adm.banco?.tem_santander === 'Não' ? 'OUTRO' : ''), '<option value="" disabled selected>Selecione...</option><option value="SANTANDER">SANTANDER</option><option value="OUTRO">OUTRO BANCO</option>')}
+                        ${selectOpcional('obsa-banco-tipo', 'Tipo de Conta Bancária', adm.banco?.tipo_conta, '<option value="" disabled selected>Selecione...</option><option value="C. Corrente">Conta Corrente</option><option value="C. Poupança">Conta Poupança</option><option value="C. Salário">Conta Salário</option>')}
+                        ${inputOpcional('obsa-sys-agencia', 'Agência', adm.banco?.agencia)}
+                        ${inputOpcional('obsa-sys-conta', 'Conta', adm.banco?.conta)}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-carga-horaria', 'Carga Horária Sem.', cargaHorariaReal, 'text', 'Ex: 12x36')}
+                        ${inputOpcional('obsa-sys-cargo', 'Cargo na Empresa', adm.cargo)}
+                        ${inputOpcional('obsa-local-setor', 'Local / Setor', adm.local_setor, 'text', 'Ex: Portaria')}
+                        ${inputOpcional('obsa-local-ctps', 'Local (CTPS)', adm.local_ctps, 'text', 'Ex: Sede')}
+                    </div>
+                    <div class="form-row-3" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-sys-salario', 'Salário Bruto (R$)', adm.salario ? mascaraMoeda(String((adm.salario * 100).toFixed(0))) : '', 'text', 'R$ 0,00', 'oninput="this.value = mascaraMoeda(this.value)"')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #64748b; margin-bottom: 20px; background: rgba(100, 116, 139, 0.05);">
+                    <h5 style="color: #64748b; margin-bottom: 15px;"><i class="fa-solid fa-clock"></i> Resumo da Jornada de Trabalho</h5>
+                    <div class="form-row-3">
+                        ${inputOpcional('obsa-prev-escala', 'Tipo de Escala', tipoJorStr)}
+                        ${inputOpcional('obsa-prev-horario', 'Horário Base Encontrado', horarioBase)}
+                        ${selectOpcional('obsa-possui-escala', 'Possui Escala?', possuiEscalaSugerido, '<option value="S">S - Sim (Escala Fixa/Semanal)</option><option value="N">N - Não (Plantão Rotativo/12x36)</option>')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #81c784; margin-bottom: 20px;">
+                    <h5 style="color: #81c784; margin-bottom: 15px;"><i class="fa-solid fa-money-bill-wave"></i> Benefícios, Adicionais e Descontos</h5>
+                    <div class="form-row-4">
+                        ${selectOpcional('obsa-sys-vt', 'Desconto de VT?', adm.vt?.precisa === 'Sim' ? 'Sim' : (adm.vt?.precisa === 'Não' ? 'Não' : ''), '<option value="" disabled selected>Selecione...</option><option value="Sim">Sim</option><option value="Não">Não</option>')}
+                        ${inputOpcional('obsa-sys-vt-valor', 'Valor Desconto VT', adm.vt?.precisa === 'Sim' ? '6%' : 'Isento')}
+                        
+                        ${selectOpcional('obsa-vr-desconto', 'Desconto VR/VA?', adm.beneficios?.vr_desconto, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                        ${inputOpcional('obsa-vr-valor', 'Valor a Descontar (R$)', adm.beneficios?.vr_valor, 'text', '0,00')}
+                    </div>
+                    <div class="form-row-4" style="margin-top: 10px;">
+                        ${selectOpcional('obsa-periculosidade', 'Periculosidade?', adm.beneficios?.periculosidade, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                        ${selectOpcional('obsa-insalubridade', 'Insalubridade?', insalubridadeColab, '<option value="N">Não</option><option value="20%">Sim (20%)</option><option value="40%">Sim (40%)</option>')}
+                        ${selectOpcional('obsa-ajuda-custo', 'Ajuda de Custo?', adm.beneficios?.ajuda_custo, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                        ${inputOpcional('obsa-ajuda-valor', 'Valor Ajuda Custo (R$)', adm.beneficios?.ajuda_valor, 'text', '0,00')}
+                    </div>
+                    <div class="form-row-2" style="margin-top: 10px;">
+                        ${inputOpcional('obsa-desc-diversos', 'Desc. Diversos (Motivo/R$)', adm.beneficios?.desc_diversos, 'text', 'Ex: Adiantamento Farmácia R$50')}
+                        ${selectOpcional('obsa-adicional-noturno', 'Adicional Noturno?', adm.beneficios?.adicional_noturno, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                    </div>
+                </div>
+
+                <div class="box-interior" style="border-left: 4px solid #ff9800; margin-bottom: 20px;">
+                    <h5 style="color: #ff9800; margin-bottom: 15px;"><i class="fa-solid fa-ring"></i> Dados do Cônjuge e Filhos (Dependentes)</h5>
+                    <div class="form-row-3">
+                        ${inputOpcional('obsa-conjuge-nome', 'Nome do Cônjuge', adm.conjuge?.nome, 'text', 'Nome Completo')}
+                        ${inputOpcional('obsa-conjuge-nasc', 'Data de Nascimento', adm.conjuge?.nascimento, 'date')}
+                        ${inputOpcional('obsa-conjuge-cpf', 'CPF Cônjuge', adm.conjuge?.cpf, 'text', '000.000.000-00', 'oninput="this.value = mascaraCPF(this.value)"')}
+                    </div>
+                    <div class="form-row-3" style="margin-top: 10px;">
+                        ${selectOpcional('obsa-conjuge-trabalha', 'Cônjuge Trabalha?', adm.conjuge?.trabalha, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                        ${selectOpcional('obsa-conjuge-dep-fin', 'Dependente Financeiro?', adm.conjuge?.dep_financeiro, '<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>')}
+                    </div>
+
+                    ${dependentesHtml}
+                </div>
+
+                <div style="background: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; align-items: center; gap: 15px; border: 1px solid var(--cor-borda);">
+                    <input type="checkbox" id="obsa-termo-aceito" style="width: 25px; height: 25px; cursor: pointer;" ${adm.termo_obsa_aceito ? 'checked' : ''}>
+                    <label for="obsa-termo-aceito" style="margin: 0; cursor: pointer; color: var(--cor-texto-principal); font-size: 0.9rem;">
+                        <b>Concordar com o Termo de Responsabilidade</b> <br>
+                        <span style="font-size: 0.8rem; color: var(--cor-texto-secundario);">Declaro que as informações conferidas ou digitadas acima são verdadeiras e estou ciente das regras do eSocial.</span>
+                    </label>
+                </div>
+
+                <button type="submit" id="btn-exportar-obsa" class="btn-success" style="width: 100%; height: 50px; background-color: #ffc107; color: #000; border: none; font-weight: bold; font-size: 1.1rem;">
+                    <i class="fa-solid fa-file-excel"></i> Salvar Revisão e Gerar Planilha Oficial (Excel)
+                </button>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    window.colabDadosOBSAAtual = {
+        nome: colab.nome,
+        empresa: colab.empresa,
+        cnpj: colab.cnpj || '',
+        dependentes: dependentes,
+        jornada_obj: adm.jornada || {}
+    };
+
+    document.getElementById('form-gerar-obsa').addEventListener('submit', function(e) {
+        e.preventDefault();
+        gerarExcelOBSASeguro(idColab, colab.unidade, colab.nome); 
+    });
+};
+
+// =========================================================================
+// CLARA IA: PREENCHIMENTO DO OBSA AUTOMÁTICO (ATUALIZADO)
+// =========================================================================
+window.lerDocumentoFaltanteOBSA = async function() {
+    const fileInput = document.getElementById('doc-ia-obsa');
+    const btn = document.getElementById('btn-ler-obsa-ia');
+
+    if (!fileInput.files || fileInput.files.length === 0) {
+        return mostrarAlerta("Anexe o documento (CTPS, CNH, Reservista, Título, etc)!", "aviso");
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando com Clara IA...';
+
+    const converterParaBase64 = (file) => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = (event) => {
+                if (file.type === 'application/pdf') {
+                    resolve({ base64Puro: reader.result.substring(reader.result.indexOf(';base64,') + 8), mimeType: file.type });
+                    return;
+                }
+                const img = new Image();
+                img.src = event.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width, height = img.height;
+                    if (width > 1200) { height *= 1200 / width; width = 1200; }
+                    canvas.width = width; canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                    resolve({ base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8), mimeType: 'image/jpeg' });
+                };
+                img.onerror = error => reject(error);
+            };
+            reader.onerror = error => reject(error);
+        });
+    };
+
+    const criarTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("O tempo limite esgotou. O arquivo PDF deve estar muito pesado ou ilegível.")), ms));
+
+    try {
+        const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
+        const listaArquivosBase64 = await Promise.all(promessas);
+
+        const response = await Promise.race([
+            supabaseClient.functions.invoke('gemini-ocr-admissao', { body: { arquivos: listaArquivosBase64 } }),
+            criarTimeout(120000) 
+        ]);
+
+        if (response.error) {
+            let mensagemReal = "Erro interno ao tentar ler o documento.";
+            if (response.error.context) {
+                try {
+                    const erroDetalhado = await response.error.context.json();
+                    if (erroDetalhado.erro) mensagemReal = erroDetalhado.erro;
+                } catch(e) {}
+            } else if (response.error.message) {
+                mensagemReal = response.error.message;
+            }
+            throw new Error(mensagemReal);
+        }
+
+        const data = response.data;
+
+        const injetarCampo = (id, valor) => {
+            const el = document.getElementById(id);
+            if (el && valor) {
+                if (el.type === 'date' && valor.includes('/')) valor = valor.split('/').reverse().join('-');
+                el.value = valor;
+                el.style.borderColor = '#28a745';
+                el.style.backgroundColor = 'rgba(40, 167, 69, 0.05)';
+            }
+        };
+
+        // INJEÇÃO DA CTPS
+        if (data.ctps) injetarCampo('obsa-ctps', data.ctps);
+        if (data.ctps_serie) injetarCampo('obsa-ctps-serie', data.ctps_serie);
+        if (data.ctps_uf) injetarCampo('obsa-ctps-uf', data.ctps_uf);
+        if (data.ctps_data_expedicao) injetarCampo('obsa-ctps-data', data.ctps_data_expedicao);
+        
+        // INJEÇÃO DA CNH E CATEGORIA
+        if (data.cnh) injetarCampo('obsa-cnh', data.cnh);
+        if (data.cnh_categoria || data.cnh_cat) injetarCampo('obsa-cnh-cat', data.cnh_categoria || data.cnh_cat);
+
+        // INJEÇÃO DO RG
+        if (data.rg_emissor) injetarCampo('obsa-rg-emissor', data.rg_emissor);
+        if (data.rg_uf) injetarCampo('obsa-rg-uf', data.rg_uf);
+        if (data.rg_data_expedicao || data.rg_expedicao) injetarCampo('obsa-rg-data', data.rg_data_expedicao || data.rg_expedicao);
+
+        // INJEÇÃO DO TÍTULO DE ELEITOR E PIS
+        if (data.pis_data_cadastro || data.pis_data) injetarCampo('obsa-pis-data', data.pis_data_cadastro || data.pis_data);
+        if (data.titulo_eleitoral) injetarCampo('obsa-sys-titulo', data.titulo_eleitoral);
+        if (data.titulo_zona) injetarCampo('obsa-sys-zona', data.titulo_zona);
+        if (data.titulo_secao) injetarCampo('obsa-sys-secao', data.titulo_secao);
+        if (data.titulo_data_emissao || data.titulo_data) injetarCampo('obsa-titulo-data', data.titulo_data_emissao || data.titulo_data);
+
+        // INJEÇÃO DO RESERVISTA (Militar)
+        if (data.reservista_numero) injetarCampo('obsa-reservista', data.reservista_numero);
+        if (data.reservista_categoria) injetarCampo('obsa-reservista-tipo', data.reservista_categoria);
+
+        // EXAMES OCUPACIONAIS
+        if (data.aso_data || data.data_exame_aso) injetarCampo('obsa-aso-data', data.aso_data || data.data_exame_aso);
+        if (data.aso_validade) injetarCampo('obsa-aso-validade', data.aso_validade);
+        if (data.toxico_data || data.data_toxico) injetarCampo('obsa-toxico-data', data.toxico_data || data.data_toxico);
+
+        mostrarAlerta("Campos preenchidos com sucesso pela Clara IA!", "sucesso");
+
+    } catch (err) {
+        mostrarAlerta("Erro na leitura da IA: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados Faltantes com IA';
+    }
+};
+  
+// =========================================================================
+// SALVAR NO BANCO E GERAR O ARQUIVO EXCEL - PADRÃO CONTABILIDADE (OBSA)
+// =========================================================================
+window.gerarExcelOBSASeguro = async function(idColab, unidade, nomeColaborador) {
+    const btn = document.getElementById('btn-exportar-obsa');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando dados e gerando Planilha...';
+
+    try {
+        const d = window.colabDadosOBSAAtual || {}; 
+        
+        // 🛡️ COLETA DIRETA DE TODOS OS INPUTS DA TELA 🛡️
+        const nomeInput = document.getElementById('obsa-sys-nome')?.value || d.nome || '';
+        const cpfInput = document.getElementById('obsa-sys-cpf')?.value || '';
+        const nascInput = document.getElementById('obsa-sys-nasc')?.value || '';
+        const celInput = document.getElementById('obsa-sys-celular')?.value || '';
+        const maeInput = document.getElementById('obsa-sys-mae')?.value || '';
+        const paiInput = document.getElementById('obsa-sys-pai')?.value || '';
+        const emailInput = document.getElementById('obsa-sys-email')?.value || '';
+        const endInput = document.getElementById('obsa-sys-end')?.value || '';
+        const bairroInput = document.getElementById('obsa-sys-bairro')?.value || '';
+        const cepInput = document.getElementById('obsa-sys-cep')?.value || '';
+        const cidadeUfInput = document.getElementById('obsa-sys-cidade')?.value || '';
+        const bancoNomeInput = document.getElementById('obsa-banco-nome')?.value || '';
+        const bancoTipoInput = document.getElementById('obsa-banco-tipo')?.value || '';
+        const bancoAgInput = document.getElementById('obsa-sys-agencia')?.value || '';
+        const bancoCcInput = document.getElementById('obsa-sys-conta')?.value || '';
+        const cargoInput = document.getElementById('obsa-sys-cargo')?.value || '';
+        const salarioInput = document.getElementById('obsa-sys-salario')?.value || '';
+        
+        const estadoCivilInput = document.getElementById('obsa-sys-estadocivil')?.value || '';
+        const corRacaInput = document.getElementById('obsa-sys-raca')?.value || '';
+        const escolaridadeInput = document.getElementById('obsa-sys-escolaridade')?.value || '';
+        const naturalidadeInput = document.getElementById('obsa-sys-naturalidade')?.value || '';
+        const nacionalidadeInput = document.getElementById('obsa-sys-nacionalidade')?.value || '';
+        const diasExp1 = document.getElementById('obsa-exp-dias')?.value || '45';
+        const diasExp2 = document.getElementById('obsa-exp-prorrogacao')?.value || '45';
+
+        const ctps = document.getElementById('obsa-ctps')?.value || '';
+        const ctpsSerie = document.getElementById('obsa-ctps-serie')?.value || '';
+        const ctpsUF = document.getElementById('obsa-ctps-uf')?.value || '';
+        const ctpsData = document.getElementById('obsa-ctps-data')?.value || '';
+        const ctpsDigital = document.getElementById('obsa-ctps-digital')?.value || '';
+        const matricula = document.getElementById('obsa-matricula')?.value || '';
+        const cbo = document.getElementById('obsa-cbo')?.value || '';
+        const rgNumInput = document.getElementById('obsa-sys-rg')?.value || '';
+        const rgEmissor = document.getElementById('obsa-rg-emissor')?.value || '';
+        const rgUF = document.getElementById('obsa-rg-uf')?.value || '';
+        const rgDataInput = document.getElementById('obsa-rg-data')?.value || '';
+        const pisInput = document.getElementById('obsa-sys-pis')?.value || '';
+        const pisData = document.getElementById('obsa-pis-data')?.value || '';
+        const tituloNumInput = document.getElementById('obsa-sys-titulo')?.value || '';
+        const tituloZonaInput = document.getElementById('obsa-sys-zona')?.value || '';
+        const tituloSecaoInput = document.getElementById('obsa-sys-secao')?.value || '';
+        const tituloData = document.getElementById('obsa-titulo-data')?.value || '';
+        const reservista = document.getElementById('obsa-reservista')?.value || '';
+        const reservistaTipo = document.getElementById('obsa-reservista-tipo')?.value || '';
+        const cnh = document.getElementById('obsa-cnh')?.value || '';
+        const cnhCat = document.getElementById('obsa-cnh-cat')?.value || '';
+        
+        const asoData = document.getElementById('obsa-aso-data')?.value || '';
+        const asoValidade = document.getElementById('obsa-aso-validade')?.value || '';
+        const toxicoData = document.getElementById('obsa-toxico-data')?.value || '';
+
+        const primeiroEmprego = document.getElementById('obsa-primeiro-emprego')?.value || '';
+        const seguroDesemprego = document.getElementById('obsa-seguro')?.value || '';
+
+        const vrDesconto = document.getElementById('obsa-vr-desconto')?.value || '';
+        const vrValor = document.getElementById('obsa-vr-valor')?.value || '';
+        const periculosidade = document.getElementById('obsa-periculosidade')?.value || '';
+        const descDiversos = document.getElementById('obsa-desc-diversos')?.value || '';
+        const ajudaCusto = document.getElementById('obsa-ajuda-custo')?.value || '';
+        const ajudaValor = document.getElementById('obsa-ajuda-valor')?.value || '';
+        const insalubridadeSelect = document.getElementById('obsa-insalubridade')?.value || 'N';
+        const adicionalNoturno = document.getElementById('obsa-adicional-noturno')?.value || '';
+        
+        const tipoAdmissao = document.getElementById('obsa-tipo-admissao')?.value || '';
+        const codCategoria = document.getElementById('obsa-cod-categoria')?.value || '';
+        const localCtps = document.getElementById('obsa-local-ctps')?.value || '';
+        const cargaHoraria = document.getElementById('obsa-carga-horaria')?.value || '';
+        const localSetor = document.getElementById('obsa-local-setor')?.value || '';
+        
+        const dataAdmBase = document.getElementById('obsa-sys-data-adm')?.value || '';
+        const possuiEscalaInput = document.getElementById('obsa-possui-escala')?.value || 'N';
+
+        const conjNome = document.getElementById('obsa-conjuge-nome')?.value || '';
+        const conjNasc = document.getElementById('obsa-conjuge-nasc')?.value || '';
+        const conjCpf = document.getElementById('obsa-conjuge-cpf')?.value || '';
+        const conjTrabalha = document.getElementById('obsa-conjuge-trabalha')?.value || '';
+        const conjDepFin = document.getElementById('obsa-conjuge-dep-fin')?.value || '';
+
+        const termoAceito = document.getElementById('obsa-termo-aceito')?.checked || false;
+
+        // Separa Cidade da UF
+        let eCid = '', eUf = '';
+        if (cidadeUfInput.includes('/')) {
+            let p = cidadeUfInput.split('/'); eCid = p[0].trim(); eUf = p[1].trim();
+        } else if (cidadeUfInput.includes('-')) {
+            let p = cidadeUfInput.split('-'); eCid = p[0].trim(); eUf = p[1].trim();
+        } else {
+            eCid = cidadeUfInput;
+        }
+
+        // 👇 A MÁGICA DA CORREÇÃO: "DESEMPACOTA" O JSON SEM QUEBRAR OS OUTROS DADOS 👇
+        const { data: perfilData } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        
+        let adm = perfilData?.dados_admissao || {};
+        if (typeof adm === 'string') {
+            try { adm = JSON.parse(adm); } catch(e) { adm = {}; }
+        }
+
+        adm.nome = nomeInput;
+        adm.cpf = cpfInput;
+        adm.nascimento = nascInput;
+        adm.telefone = celInput;
+        adm.mae = maeInput;
+        adm.pai = paiInput;
+        adm.email_pessoal = emailInput;
+        adm.cep = cepInput;
+        
+        // 👇 RECONSTRÓI O ENDEREÇO DE VOLTA PARA O BANCO 👇
+        let eNum = ''; 
+        let eRua = endInput;
+        let eComp = '';
+        let numMatch = endInput.match(/, Nº (\d+)/i);
+        if(numMatch) {
+            eNum = numMatch[1];
+            eRua = endInput.split(', Nº')[0];
+        }
+        adm.endereco = `${eRua}, Nº ${eNum} - ${bairroInput}, ${eCid}/${eUf}`; 
+
+        adm.pis = pisInput;
+        adm.cargo = cargoInput;
+        adm.salario = salarioInput.replace('R$ ', '').replace(/\./g, '').replace(',', '.');
+
+        adm.estado_civil = estadoCivilInput;
+        adm.cor_raca = corRacaInput;
+        adm.escolaridade = escolaridadeInput;
+        adm.cidade_nascimento = naturalidadeInput;
+        adm.pais_nascimento = nacionalidadeInput === 'Estrangeira' ? 'Exterior' : 'Brasil';
+        adm.experiencia_dias = diasExp1;
+        adm.experiencia_prorrogacao = diasExp2;
+        
+        adm.aso_data = asoData;
+        adm.aso_validade = asoValidade;
+        adm.toxico_data = toxicoData;
+        
+        adm.possui_escala = possuiEscalaInput;
+
+        adm.ctps = ctps; adm.ctps_serie = ctpsSerie; adm.ctps_uf = ctpsUF.toUpperCase();
+        adm.ctps_data_expedicao = ctpsData; adm.ctps_digital = ctpsDigital;
+        adm.matricula_obsa = matricula; adm.cbo = cbo; adm.pis_data_cadastro = pisData;
+        adm.primeiro_emprego = primeiroEmprego; adm.recebe_seguro = seguroDesemprego;
+        adm.reservista = reservista; adm.reservista_tipo = reservistaTipo;
+        adm.cnh = cnh; adm.cnh_cat = cnhCat;
+
+        if (tipoAdmissao) adm.tipo_admissao = tipoAdmissao; 
+        if (codCategoria) adm.cod_categoria = codCategoria;
+        if (localCtps) adm.local_ctps = localCtps; 
+        if (cargaHoraria) adm.carga_horaria = cargaHoraria; 
+        if (localSetor) adm.local_setor = localSetor;
+
+        if (!adm.rg) adm.rg = {};
+        adm.rg.numero = rgNumInput; adm.rg.emissor = rgEmissor; adm.rg.uf = rgUF.toUpperCase(); adm.rg.data_expedicao = rgDataInput;
+
+        if (!adm.titulo_eleitoral) adm.titulo_eleitoral = {};
+        adm.titulo_eleitoral.numero = tituloNumInput; adm.titulo_eleitoral.zona = tituloZonaInput; adm.titulo_eleitoral.secao = tituloSecaoInput; adm.titulo_eleitoral.data_emissao = tituloData;
+
+        if (!adm.banco) adm.banco = {};
+        adm.banco.tipo_conta = bancoTipoInput; adm.banco.agencia = bancoAgInput; adm.banco.conta = bancoCcInput;
+        if (bancoNomeInput === 'SANTANDER') adm.banco.tem_santander = 'Sim'; else if (bancoNomeInput === 'OUTRO') adm.banco.tem_santander = 'Não';
+
+        if (!adm.beneficios) adm.beneficios = {};
+        adm.beneficios.vr_desconto = vrDesconto;
+        adm.beneficios.vr_valor = vrValor;
+        adm.beneficios.periculosidade = periculosidade;
+        adm.beneficios.desc_diversos = descDiversos;
+        adm.beneficios.ajuda_custo = ajudaCusto;
+        adm.beneficios.ajuda_valor = ajudaValor;
+        adm.beneficios.adicional_noturno = adicionalNoturno;
+        
+        adm.insalubridade = insalubridadeSelect; 
+
+        if (!adm.conjuge) adm.conjuge = {};
+        adm.conjuge.nome = conjNome; 
+        adm.conjuge.nascimento = conjNasc; 
+        adm.conjuge.cpf = conjCpf; 
+        adm.conjuge.trabalha = conjTrabalha; 
+        adm.conjuge.dep_financeiro = conjDepFin;
+
+        if (adm.dependentes && adm.dependentes.length > 0) {
+            adm.dependentes.forEach((dep, i) => {
+                const elGrau = document.getElementById(`obsa-dep-grau-${i}`);
+                const elFin = document.getElementById(`obsa-dep-fin-${i}`);
+                if (elGrau) dep.grau_parentesco = elGrau.value;
+                if (elFin) dep.dep_financeiro = elFin.value;
+            });
+        }
+        
+        adm.termo_obsa_aceito = termoAceito;
+        
+        // 👇 PROTEÇÃO MÁXIMA DA DATA DE INÍCIO DA ESCALA 👇
+        adm.data_inicio = dataAdmBase;
+        if (!adm.jornada) adm.jornada = {};
+        adm.jornada.data_inicio = dataAdmBase;
+
+        // SALVA DE VOLTA NO BANCO O JSON ÍNTEGRO
+        const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
+        if (errUpdate) throw new Error("Erro ao salvar dados na nuvem: " + errUpdate.message);
+
+        // ================================================================
+        // MONTAGEM DO EXCEL
+        // ================================================================
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Soul';
+        const sheet = workbook.addWorksheet('Formulário de Admissão', { views: [{ showGridLines: false }] });
+
+        sheet.columns = [
+            { width: 3 },  { width: 25 }, { width: 25 }, { width: 20 },
+            { width: 25 }, { width: 18 }, { width: 22 }, { width: 3 } 
+        ];
+
+        const styleCell = (cell, type = 'normal') => {
+            cell.alignment = { vertical: 'middle', horizontal: (type === 'header') ? 'center' : 'left', wrapText: true };
+            cell.border = { 
+                top: {style:'thin', color: {argb:'FFB0BEC5'}}, left: {style:'thin', color: {argb:'FFB0BEC5'}}, 
+                bottom: {style:'thin', color: {argb:'FFB0BEC5'}}, right: {style:'thin', color: {argb:'FFB0BEC5'}} 
+            };
+            if (type === 'header') {
+                cell.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } }; 
+            } else if (type === 'label') {
+                cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF475569' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } }; 
+            } else {
+                cell.font = { name: 'Arial', size: 10, color: { argb: 'FF0F172A' } };
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } }; 
+            }
+        };
+
+        let row = 2;
+        sheet.mergeCells(`B${row}:G${row}`); const title = sheet.getCell(`B${row}`);
+        title.value = 'REQUISIÇÃO DE ADMISSÃO'; styleCell(title, 'header'); title.font = { name: 'Arial', size: 15, bold: true, color: { argb: 'FFFFFFFF' } };
+        sheet.getRow(row).height = 30;
+
+        row += 2; 
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'DADOS DO CONTRATANTE (Obrigatório)'; styleCell(sheet.getCell(`B${row}`), 'header');
+        
+        let empresaParaPlanilha = d.empresa || ''; let cnpjParaPlanilha = d.cnpj || '';
+        const empLimpa = String(d.empresa || '').trim().toUpperCase();
+        if (empLimpa === 'SOUL GESTÃO' || empLimpa === 'SOUL') {
+            empresaParaPlanilha = 'SOUL SEGURANÇA E FACILITES LTDA'; cnpjParaPlanilha = '48.052.632/0001-25';
+        }
+
+        row++;
+        sheet.getCell(`B${row}`).value = '*Empresa:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:E${row}`); sheet.getCell(`C${row}`).value = empresaParaPlanilha.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`F${row}`).value = 'CNPJ:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = cnpjParaPlanilha; styleCell(sheet.getCell(`G${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'DADOS PESSOAIS (Obrigatório)'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = '*Nome do Contratado:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:E${row}`); sheet.getCell(`C${row}`).value = nomeInput.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`F${row}`).value = 'Matrícula:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = matricula; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Data de Nascimento:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = formatarDataBR(nascInput); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Naturalidade/UF:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = naturalidadeInput.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Cor/Raça:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = corRacaInput.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Sexo:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = adm.sexo ? adm.sexo.toUpperCase() : ''; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Estado Civil:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = estadoCivilInput.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Escolaridade:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = escolaridadeInput.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Nome da Mãe:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:G${row}`); sheet.getCell(`C${row}`).value = maeInput.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Nome do Pai:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:G${row}`); sheet.getCell(`C${row}`).value = paiInput.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+
+        let ruaPura = endInput; let compPuro = '';
+        if (endInput.includes('- Apto') || endInput.includes('- Bloco')) {
+            const spl = endInput.split('-');
+            compPuro = spl[spl.length - 1].trim();
+            ruaPura = spl.slice(0, spl.length - 1).join('-').trim();
+        }
+
+        row++; sheet.getCell(`B${row}`).value = '*Endereço:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:E${row}`); sheet.getCell(`C${row}`).value = ruaPura.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`F${row}`).value = 'Compl.:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = compPuro.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Bairro:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = bairroInput.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Cep:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = cepInput; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Cidade / UF:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = `${eCid.toUpperCase()} / ${eUf.toUpperCase()}`; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Celular:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = celInput; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`E${row}`).value = 'E-mail:'; styleCell(sheet.getCell(`E${row}`), 'label');
+        sheet.mergeCells(`F${row}:G${row}`); sheet.getCell(`F${row}`).value = emailInput.toLowerCase(); styleCell(sheet.getCell(`F${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'DADOS CADASTRAIS (Obrigatório)'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = '*RG:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = rgNumInput; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Expedição:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = formatarDataBR(rgDataInput); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Emissor/UF:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = rgEmissor.toUpperCase() + (rgUF ? `/${rgUF.toUpperCase()}` : ''); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*CPF:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = cpfInput; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Inscrição PIS:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = pisInput; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Data Cadastro PIS:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = formatarDataBR(pisData); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'Título Eleitor:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = tituloNumInput; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Zona / Seção:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = `${tituloZonaInput} / ${tituloSecaoInput}`; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Emissão Título:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = formatarDataBR(tituloData); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'CTPS:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = ctps; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Série / UF:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = `${ctpsSerie} / ${ctpsUF.toUpperCase()}`; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Emissão CTPS:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = formatarDataBR(ctpsData); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*CTPS Digital?'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = ctpsDigital.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'CNH:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = cnh; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Categoria CNH:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = cnhCat.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'Reservista:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = reservista; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Tipo Res.:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.mergeCells(`E${row}:G${row}`); sheet.getCell(`E${row}`).value = reservistaTipo.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'EXAMES OCUPACIONAIS'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = 'Data Exame ASO:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = formatarDataBR(asoData); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Validade ASO:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = asoValidade.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Toxicológico:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = formatarDataBR(toxicoData); styleCell(sheet.getCell(`G${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'DADOS CONTRATUAIS (Obrigatório)'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = '*Tipo Admissão:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = tipoAdmissao ? tipoAdmissao.toUpperCase() : ''; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Data Admissão:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = formatarDataBR(dataAdmBase); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Receb. Seg. Desem.?'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = seguroDesemprego.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Primeiro Emprego?'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = primeiroEmprego.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Período Experiência:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = diasExp1; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Prorrogação +:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = diasExp2; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Salário (R$):'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = parseFloat(adm.salario) || 0; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`C${row}`).numFmt = '"R$ "#,##0.00';
+        sheet.getCell(`D${row}`).value = 'Banco Oficial:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = bancoNomeInput; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Tipo de Conta:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = bancoTipoInput.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Cargo:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = cargoInput.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`E${row}`).value = '*CBO:'; styleCell(sheet.getCell(`E${row}`), 'label');
+        sheet.getCell(`F${row}`).value = cbo; styleCell(sheet.getCell(`F${row}`));
+        sheet.getCell(`G${row}`).value = codCategoria ? `Cód. Categoria: ${codCategoria}` : ''; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'Local/Setor:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = localSetor ? localSetor.toUpperCase() : ''; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Local (CTPS):'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = localCtps ? localCtps.toUpperCase() : ''; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Carga Horária Sem.:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = cargaHoraria; styleCell(sheet.getCell(`G${row}`));
+
+        let horarioBase = document.getElementById('obsa-prev-horario')?.value || ''; 
+        let tipoJorStr = document.getElementById('obsa-prev-escala')?.value || '12x36';
+        
+        let tEntrada = "06:00"; let tSaida = "18:00";
+        if (horarioBase.includes('às')) { let pHor = horarioBase.split('às'); tEntrada = pHor[0].trim(); tSaida = pHor[1].trim(); } 
+        else if (horarioBase.includes('-')) { let pHor = horarioBase.split('-'); tEntrada = pHor[0].trim(); tSaida = pHor[1].trim(); }
+
+        const [hEnt, mEnt] = tEntrada.split(':').map(Number);
+        const horasAteAlmoco = tipoJorStr.toLowerCase().includes('12x36') ? 6 : 4; 
+
+        let hIntInicio = (hEnt + horasAteAlmoco) % 24; let hIntFim = (hIntInicio + 1) % 24; 
+        const padTime = (h, m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        
+        let stringEntrada = padTime(hEnt, mEnt); let stringIntInicio = padTime(hIntInicio, mEnt); let stringIntFim = padTime(hIntFim, mEnt);
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'JORNADA DE TRABALHO (Obrigatório)'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = '*Entrada:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = stringEntrada; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Saída Intervalo:'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = stringIntInicio; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Retorno Intervalo:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = stringIntFim; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = '*Saída:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = tSaida; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = '*Possui Escala?'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = possuiEscalaInput.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = '*Descreva escala:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = tipoJorStr.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'INFORMAÇÕES ADICIONAIS E DESCONTOS'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        row++; sheet.getCell(`B${row}`).value = 'Desconto de VT?'; styleCell(sheet.getCell(`B${row}`), 'label');
+        const descVTVal = document.getElementById('obsa-sys-vt')?.value || 'Não';
+        sheet.getCell(`C${row}`).value = descVTVal === 'Sim' ? 'S (6%)' : 'N'; styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Desconto VR/VA?'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = vrDesconto.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Valor a descontar:'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = vrValor ? `R$ ${vrValor}` : ''; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'Periculosidade?'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.getCell(`C${row}`).value = periculosidade.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`D${row}`).value = 'Insalubridade?'; styleCell(sheet.getCell(`D${row}`), 'label');
+        sheet.getCell(`E${row}`).value = insalubridadeSelect; styleCell(sheet.getCell(`E${row}`));
+        sheet.getCell(`F${row}`).value = 'Ajuda de Custo?'; styleCell(sheet.getCell(`F${row}`), 'label');
+        sheet.getCell(`G${row}`).value = ajudaCusto === 'S' ? `Sim (R$ ${ajudaValor})` : 'N'; styleCell(sheet.getCell(`G${row}`));
+
+        row++; sheet.getCell(`B${row}`).value = 'Desc. Diversos:'; styleCell(sheet.getCell(`B${row}`), 'label');
+        sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = descDiversos.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+        sheet.getCell(`E${row}`).value = 'Adicional Noturno?'; styleCell(sheet.getCell(`E${row}`), 'label');
+        sheet.mergeCells(`F${row}:G${row}`); sheet.getCell(`F${row}`).value = adicionalNoturno ? adicionalNoturno.toUpperCase() : ''; styleCell(sheet.getCell(`F${row}`));
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'DADOS CADASTRAIS - CÔNJUGE E DEPENDENTES'; styleCell(sheet.getCell(`B${row}`), 'header');
+
+        if (conjNome) {
+            row++; sheet.getCell(`B${row}`).value = '*Cônjuge:'; styleCell(sheet.getCell(`B${row}`), 'label');
+            sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = conjNome.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+            sheet.getCell(`E${row}`).value = '*Nascimento:'; styleCell(sheet.getCell(`E${row}`), 'label');
+            sheet.mergeCells(`F${row}:G${row}`); sheet.getCell(`F${row}`).value = formatarDataBR(conjNasc); styleCell(sheet.getCell(`F${row}`));
+
+            row++; sheet.getCell(`B${row}`).value = '*CPF Cônjuge:'; styleCell(sheet.getCell(`B${row}`), 'label');
+            sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = conjCpf; styleCell(sheet.getCell(`C${row}`));
+            sheet.getCell(`E${row}`).value = 'Trabalha?'; styleCell(sheet.getCell(`E${row}`), 'label');
+            sheet.getCell(`F${row}`).value = conjTrabalha.toUpperCase(); styleCell(sheet.getCell(`F${row}`));
+            sheet.getCell(`G${row}`).value = `Dep. Financeiro: ${conjDepFin.toUpperCase()}`; styleCell(sheet.getCell(`G${row}`));
+        } else {
+            row++; sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'Nenhum cônjuge informado.'; styleCell(sheet.getCell(`B${row}`));
+        }
+
+        if (adm.dependentes && adm.dependentes.length > 0) {
+            adm.dependentes.forEach((dep, i) => {
+                const elGrau = document.getElementById(`obsa-dep-grau-${i}`);
+                const elFin = document.getElementById(`obsa-dep-fin-${i}`);
+                
+                row++; sheet.getCell(`B${row}`).value = `*Nome Dep. ${i+1}:`; styleCell(sheet.getCell(`B${row}`), 'label');
+                sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = dep.nome.toUpperCase(); styleCell(sheet.getCell(`C${row}`));
+                sheet.getCell(`E${row}`).value = '*Nascimento:'; styleCell(sheet.getCell(`E${row}`), 'label');
+                sheet.mergeCells(`F${row}:G${row}`); sheet.getCell(`F${row}`).value = formatarDataBR(dep.nascimento); styleCell(sheet.getCell(`F${row}`));
+
+                row++; sheet.getCell(`B${row}`).value = '*CPF Dep:'; styleCell(sheet.getCell(`B${row}`), 'label');
+                sheet.mergeCells(`C${row}:D${row}`); sheet.getCell(`C${row}`).value = dep.cpf; styleCell(sheet.getCell(`C${row}`));
+                sheet.getCell(`E${row}`).value = '*Parentesco:'; styleCell(sheet.getCell(`E${row}`), 'label');
+                sheet.getCell(`F${row}`).value = (elGrau ? elGrau.value : dep.grau_parentesco || '').toUpperCase(); styleCell(sheet.getCell(`F${row}`));
+                sheet.getCell(`G${row}`).value = `Dep. Fin.: ${(elFin ? elFin.value : dep.dep_financeiro || 'N').toUpperCase()}`; styleCell(sheet.getCell(`G${row}`));
+            });
+        }
+
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row}`);
+        sheet.getCell(`B${row}`).value = 'TERMO DE RESPONSABILIDADE'; styleCell(sheet.getCell(`B${row}`), 'header');
+        
+        row++; sheet.mergeCells(`B${row}:G${row}`);
+        sheet.getCell(`B${row}`).value = 'DECLARO QUE AS INFORMAÇÕES AQUI FORNECIDAS SÃO VERDADEIRAS.';
+        styleCell(sheet.getCell(`B${row}`), 'label'); sheet.getCell(`B${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        row++; sheet.mergeCells(`B${row}:G${row}`);
+        sheet.getCell(`B${row}`).value = 'ESTOU CIENTE DO PRAZO PARA CUMPRIMENTO DO REGISTRO E OBRIGAÇÃO E-SOCIAL, BEM COMO, PENALIDADES POR AUSÊNCIA OU ATRASO NAS OBRIGAÇÕES.';
+        styleCell(sheet.getCell(`B${row}`), 'label'); sheet.getCell(`B${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        if (termoAceito) {
+            row++; sheet.mergeCells(`B${row}:G${row}`);
+            sheet.getCell(`B${row}`).value = `[ X ] Aceite Eletrônico Registrado pelo Sistema RH - Confirmado por ${usuarioAtual.nome} em ${new Date().toLocaleDateString('pt-BR')}`;
+            styleCell(sheet.getCell(`B${row}`)); sheet.getCell(`B${row}`).font = { name: 'Arial', size: 9, italic: true, color: { argb: 'FF16A34A' } };
+            sheet.getCell(`B${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+        }
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `OBSA_${nomeInput.replace(/ /g, '_')}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        mostrarAlerta("Formulário OBSA gerado, salvo na ficha e baixado com sucesso!", "sucesso");
+        
+        // Recarrega a tabela base e limpa a tela
+        carregarAdmissoesParaAdmin(true); 
+        document.getElementById('modal-obsa').remove();
+
+    } catch (err) {
+        console.error("Erro na geração:", err);
+        mostrarAlerta("Erro ao gerar a planilha: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-file-excel"></i> Salvar Revisão e Gerar Planilha Oficial (Excel)';
+    }
+};
+
+      // =========================================================================
+// REGRA GLOBAL: PERÍODO DE EXPERIÊNCIA (30+30 vs 45+45)
+// =========================================================================
+window.obterRegraExperiencia = function(dataStr) {
+    // Se não tiver data, assume a regra nova
+    if (!dataStr) return { p1: 45, p2: 45, total: 90 }; 
+    
+    let strFixa = dataStr;
+    if (dataStr.includes('/')) {
+        const p = dataStr.split('/');
+        strFixa = `${p[2]}-${p[1]}-${p[0]}`;
+    }
+
+    const dInicio = new Date(strFixa + 'T00:00:00');
+    // 👇 A DATA DE CORTE OFICIAL DA MUDANÇA DA REGRA 👇
+    const dataMudanca = new Date('2026-05-01T00:00:00');
+    
+    if (dInicio < dataMudanca) {
+        // Antes de 01/05: 30 + 30 dias
+        return { p1: 30, p2: 30, total: 60 };
+    } else {
+        // A partir de 01/05: 45 + 45 dias
+        return { p1: 45, p2: 45, total: 90 };
+    }
 };
       
         window.ultimoContadorSino = 0;
