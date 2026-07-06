@@ -54953,7 +54953,7 @@ window.abrirModalEnviarOBSA = async function(idColab) {
 };
 
 // =========================================================================
-// CLARA IA: PREENCHIMENTO DO OBSA AUTOMÁTICO (CORRIGIDO E TURBINADO)
+// CLARA IA: PREENCHIMENTO DO OBSA AUTOMÁTICO (CORRIGIDO E BLINDADO)
 // =========================================================================
 window.lerDocumentoFaltanteOBSA = async function() {
     const fileInput = document.getElementById('doc-ia-obsa');
@@ -54981,6 +54981,7 @@ window.lerDocumentoFaltanteOBSA = async function() {
                 img.onload = () => {
                     const canvas = document.createElement('canvas');
                     let width = img.width, height = img.height;
+                    // Limita imagens a 1200px para não explodir o payload
                     if (width > 1200) { height *= 1200 / width; width = 1200; }
                     canvas.width = width; canvas.height = height;
                     const ctx = canvas.getContext('2d');
@@ -54994,20 +54995,42 @@ window.lerDocumentoFaltanteOBSA = async function() {
         });
     };
 
+    // Cria um limite de tempo (timeout) de 2 minutos
+    const criarTimeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("O tempo limite esgotou. O arquivo PDF deve estar muito pesado ou ilegível para a Inteligência Artificial.")), ms));
+
     try {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
         const listaArquivosBase64 = await Promise.all(promessas);
 
-        const { data, error } = await supabaseClient.functions.invoke('gemini-ocr-admissao', {
-            body: { arquivos: listaArquivosBase64 }
-        });
+        // Dispara uma corrida entre a resposta do Supabase e o nosso cronômetro de 2 minutos
+        const response = await Promise.race([
+            supabaseClient.functions.invoke('gemini-ocr-admissao', { body: { arquivos: listaArquivosBase64 } }),
+            criarTimeout(120000) 
+        ]);
 
-        if (error) throw new Error("Falha na comunicação com a IA.");
+        // 👇 A MÁGICA: Pega o erro REAL e mostra na tela do Administrador 👇
+        if (response.error) {
+            let mensagemReal = "Erro interno ao tentar ler o documento.";
+            
+            if (response.error.context) {
+                try {
+                    const erroDetalhado = await response.error.context.json();
+                    if (erroDetalhado.erro) mensagemReal = erroDetalhado.erro;
+                    else if (erroDetalhado.error) mensagemReal = JSON.stringify(erroDetalhado.error);
+                } catch(e) {
+                    mensagemReal = response.error.message || mensagemReal;
+                }
+            } else if (response.error.message) {
+                mensagemReal = response.error.message;
+            }
+            throw new Error(mensagemReal);
+        }
+
+        const data = response.data;
 
         const injetarCampo = (id, valor) => {
             const el = document.getElementById(id);
             if (el && valor) {
-                // Formatação específica de data se for o caso
                 if (el.type === 'date' && valor.includes('/')) {
                     valor = valor.split('/').reverse().join('-');
                 }
@@ -55025,12 +55048,12 @@ window.lerDocumentoFaltanteOBSA = async function() {
         
         // INJEÇÃO DA CNH E CATEGORIA
         if (data.cnh) injetarCampo('obsa-cnh', data.cnh);
-        if (data.cnh_cat || data.cnh_categoria) injetarCampo('obsa-cnh-cat', data.cnh_cat || data.cnh_categoria);
+        if (data.cnh_categoria || data.cnh_cat) injetarCampo('obsa-cnh-cat', data.cnh_categoria || data.cnh_cat);
 
-        // INJEÇÃO DO RG CORRIGIDO
-        if (data.rg_emissor || data.orgao_emissor) injetarCampo('obsa-rg-emissor', data.rg_emissor || data.orgao_emissor);
-        if (data.rg_uf || data.estado_emissor_rg) injetarCampo('obsa-rg-uf', data.rg_uf || data.estado_emissor_rg);
-        if (data.rg_expedicao || data.rg_data_expedicao) injetarCampo('obsa-rg-data', data.rg_expedicao || data.rg_data_expedicao);
+        // INJEÇÃO DO RG
+        if (data.rg_emissor) injetarCampo('obsa-rg-emissor', data.rg_emissor);
+        if (data.rg_uf) injetarCampo('obsa-rg-uf', data.rg_uf);
+        if (data.rg_data_expedicao || data.rg_expedicao) injetarCampo('obsa-rg-data', data.rg_data_expedicao || data.rg_expedicao);
 
         // INJEÇÃO DAS DATAS EXTRAS (PIS E Título de Eleitor)
         if (data.pis_data_cadastro || data.pis_data) injetarCampo('obsa-pis-data', data.pis_data_cadastro || data.pis_data);
@@ -55039,7 +55062,7 @@ window.lerDocumentoFaltanteOBSA = async function() {
         mostrarAlerta("Campos preenchidos com sucesso pela Clara IA!", "sucesso");
 
     } catch (err) {
-        mostrarAlerta("Erro na leitura: " + err.message, "erro");
+        mostrarAlerta("Erro na leitura da IA: " + err.message, "erro");
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados Faltantes com IA';
