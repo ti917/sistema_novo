@@ -15955,25 +15955,37 @@ window.verFichaRescisaoPendente = function(idStr) {
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
-        window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, empresaColab) {
-    const colab = listaAdmissoesPendentes.find(c => c.id === idColab);
-    const resc = colab.dados_rescisao || {};
-    const isAutoGerado = (resc.tipo === 'Pedido da Empresa' || resc.tipo === 'Término de Contrato');
-
-    const fileInput = document.getElementById(`admin-doc-rh-${idColab}`);
-    
-    // Se não for automático, barra se não anexar arquivo
-    if (!isAutoGerado && (!fileInput || fileInput.files.length === 0)) {
-        return mostrarAlerta("Anexe o documento em PDF!", "aviso");
-    }
-
-    const confirmado = await mostrarConfirmacao(`Deseja enviar o processo de ${nomeColab} para o Gestor colher a assinatura?`, "Enviar Processo");
-    if (!confirmado) return;
-
-    const btn = document.querySelector('#modal-ficha-rescisao .btn-primary');
-    btn.innerText = "Enviando..."; btn.disabled = true;
-
+        // =========================================================================
+// CORREÇÃO: ENVIO DA RESCISÃO (APROVAÇÃO E MUDANÇA DE STATUS NO BANCO)
+// =========================================================================
+window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, empresaColab) {
     try {
+        // 1. Busca os dados fresquinhos direto do banco para evitar erros
+        const { data: perfilData, error: errPerfil } = await supabaseClient
+            .from('perfis')
+            .select('dados_rescisao')
+            .eq('id', idColab)
+            .single();
+
+        if (errPerfil) throw errPerfil;
+
+        const resc = perfilData.dados_rescisao || {};
+        const isAutoGerado = (resc.tipo === 'Pedido da Empresa' || resc.tipo === 'Término de Contrato');
+
+        const fileInput = document.getElementById(`admin-doc-rh-${idColab}`);
+        
+        // Se não for automático, barra se não anexar arquivo
+        if (!isAutoGerado && (!fileInput || fileInput.files.length === 0)) {
+            return mostrarAlerta("Anexe o documento oficial em PDF/Imagem!", "aviso");
+        }
+
+        const confirmado = await mostrarConfirmacao(`Deseja aprovar a rescisão de ${nomeColab} e liberar para o Gestor colher a assinatura?`, "Aprovar e Liberar");
+        if (!confirmado) return;
+
+        const btn = document.querySelector('#modal-ficha-rescisao .btn-primary');
+        if(btn) { btn.innerText = "Processando..."; btn.disabled = true; }
+
+        // 2. Anexa o documento ou ativa a tag de "Gerado pelo Sistema"
         if (isAutoGerado) {
             resc.doc_gerado_rh = 'GERADO_SISTEMA';
         } else {
@@ -15985,27 +15997,39 @@ window.verFichaRescisaoPendente = function(idStr) {
 
         resc.doc_gerado_por = usuarioAtual.nome; 
         resc.lida_por = usuarioAtual.nome; 
-        resc.status_trct = 'Aguardando Assinatura';
 
-        const { error } = await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab);
-        if(error) throw error;
+        // 👇 A MÁGICA QUE FALTAVA AQUI: MUDA O STATUS DA APROVAÇÃO 👇
+        const { error: errUpdate } = await supabaseClient.from('perfis').update({ 
+            status_aprovacao: 'Aguardando Assinatura', // <-- ISSO FAZ ELA SUMIR DA CENTRAL!
+            dados_rescisao: resc 
+        }).eq('id', idColab);
+        
+        if (errUpdate) throw errUpdate;
 
+        // 3. Notifica o Gestor que ele já pode colher a assinatura
         await supabaseClient.from('notificacoes').insert([
             { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Rescisão_Para_Assinar' }
         ]);
         
+        // 4. Marca as notificações pendentes do Admin como Lidas
         await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
             .eq('referencia_id', idColab).in('tipo', ['Rescisão_Admin', 'Rescisão']);
         
-        document.getElementById('modal-ficha-rescisao').remove();
-        listarSolicitacoes(); 
-        atualizarContador(); 
+        // 5. FECHA O MODAL À FORÇA!
+        const modal = document.getElementById('modal-ficha-rescisao');
+        if (modal) modal.remove();
         
+        // 6. Atualiza as telas de fundo para sumir da lista
+        if (typeof listarSolicitacoes === 'function') listarSolicitacoes(); 
+        if (typeof atualizarContador === 'function') atualizarContador(); 
         if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
-        mostrarAlerta("Enviado para o Gestor colher assinatura com sucesso!", "sucesso");
+        
+        mostrarAlerta("Rescisão aprovada e liberada com sucesso para o gestor!", "sucesso");
+
     } catch (err) {
-        mostrarAlerta("Erro: " + err.message, "erro");
-        btn.innerHTML = `<i class="fa-solid fa-pen-nib"></i> Tentar Novamente`; btn.disabled = false;
+        mostrarAlerta("Erro interno: " + err.message, "erro");
+        const btn = document.querySelector('#modal-ficha-rescisao .btn-primary');
+        if(btn) { btn.innerHTML = `<i class="fa-solid fa-magic"></i> Tentar Novamente`; btn.disabled = false; }
     }
 };
 
