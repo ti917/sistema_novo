@@ -18097,6 +18097,7 @@ window.filtrarFeriasAdmin = function() {
             `;
         } else {
             botoesAcao = `
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255, 193, 7, 0.1);" onclick="abrirModalObsaFerias('${f.id}', '${f.colaborador_id}')" title="Gerar Requisição de Férias (OBSA)"><i class="fa-solid fa-file-invoice"></i> OBSA</button>
                 <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarFeriasAdmin('${f.id}')" title="Editar Datas"><i class="fa-solid fa-pen"></i></button>
                 <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirFerias('${f.id}')"><i class="fa-solid fa-trash"></i> Apagar</button>
             `;
@@ -56502,6 +56503,362 @@ window.salvarEGerarObsaRescisao = async function(idColab) {
         if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
         const modal = document.getElementById('modal-obsa-rescisao');
         if (modal) modal.remove();
+
+    } catch (err) {
+        console.error("Erro na geração:", err);
+        mostrarAlerta("Erro ao processar planilha: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-file-excel"></i> Salvar e Gerar Planilha Excel';
+    }
+};
+
+  // =========================================================================
+// MÓDULO: OBSA - REQUISIÇÃO DE FÉRIAS
+// =========================================================================
+
+// Função para subtrair dias úteis (Pula FDS e Feriados fixos)
+window.subtrairDiasUteis = function(dataBase, diasParaSubtrair) {
+    let data = new Date(dataBase);
+    let diasSubtraidos = 0;
+    while (diasSubtraidos < diasParaSubtrair) {
+        data.setDate(data.getDate() - 1);
+        if (!ehFeriadoOuFDS(data)) {
+            diasSubtraidos++;
+        }
+    }
+    return data;
+};
+
+window.abrirModalObsaFerias = async function(idFerias, idColab) {
+    mostrarAlerta("Carregando dados das férias...", "aviso");
+    
+    try {
+        const [resColab, resFerias, resObsa] = await Promise.all([
+            supabaseClient.from('perfis').select('*').eq('id', idColab).single(),
+            supabaseClient.from('solicitacoes_ferias').select('*').eq('id', idFerias).single(),
+            supabaseClient.from('obsa_ferias').select('*').eq('ferias_id', idFerias).maybeSingle()
+        ]);
+
+        if (resColab.error || !resColab.data) return mostrarAlerta("Colaborador não encontrado.", "erro");
+        if (resFerias.error || !resFerias.data) return mostrarAlerta("Registro de férias não encontrado.", "erro");
+
+        const colab = resColab.data;
+        const ferias = resFerias.data;
+        const obs = resObsa.data || {};
+
+        // Cálculos automáticos de Datas
+        const [a, m, d] = ferias.data_inicio_ferias.split('-');
+        const dataInicioObj = new Date(a, m - 1, d, 12, 0, 0); // Meio-dia para evitar fuso
+
+        // 1. Data de Pagamento (2 dias ÚTEIS antes)
+        const dataPagamentoCalculada = window.subtrairDiasUteis(dataInicioObj, 2);
+        
+        // 2. Data de Aviso (30 dias corridos antes)
+        const dataAvisoCalculada = new Date(dataInicioObj);
+        dataAvisoCalculada.setDate(dataAvisoCalculada.getDate() - 30);
+
+        // Prepara formatações para os inputs
+        const formatDataInput = (dateObj) => dateObj.toISOString().split('T')[0];
+        
+        const dataPagSugerida = obs.data_pagamento ? obs.data_pagamento.split('/').reverse().join('-') : formatDataInput(dataPagamentoCalculada);
+        const dataAvisoSugerida = obs.data_aviso ? obs.data_aviso.split('/').reverse().join('-') : formatDataInput(dataAvisoCalculada);
+
+        // Função auxiliar para selects
+        const selectOpcional = (id, label, valorSistema, optionsHtml) => {
+            let finalOptions = optionsHtml.replace(/selected/gi, ''); 
+            if (valorSistema) {
+                const regexValue = new RegExp(`value="${valorSistema.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'i');
+                if (finalOptions.match(regexValue)) {
+                    finalOptions = finalOptions.replace(regexValue, `value="${valorSistema}" selected`);
+                }
+            }
+            return `<div class="form-group"><label style="color: #ff9800;">${label}</label><select id="${id}" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.3); color: #fff; outline: none; cursor: pointer;">${finalOptions}</select></div>`;
+        };
+
+        const optSimNao = `<option value="">Selecione...</option><option value="S - SIM">S - SIM</option><option value="N - NÃO">N - NÃO</option>`;
+
+        const modalHtml = `
+        <div id="modal-obsa-ferias" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+            <div class="glass-card" style="width: 100%; max-width: 800px; max-height: 90vh; overflow-y: auto; border: 1px solid #ffd54f; position: relative;">
+                <button type="button" onclick="document.getElementById('modal-obsa-ferias').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem; z-index: 10;"><i class="fa-solid fa-xmark"></i></button>
+                
+                <h3 style="color: #ffd54f; margin-bottom: 5px;"><i class="fa-solid fa-plane"></i> Requisição de Férias (OBSA)</h3>
+                <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Revise as informações de <b>${colab.nome}</b> para gerar a planilha padronizada.</p>
+
+                <form id="form-gerar-obsa-ferias">
+                    <div class="box-interior" style="border-left: 4px solid #ff9800; margin-bottom: 20px;">
+                        <h5 style="color: #ff9800; margin-bottom: 15px;">Parâmetros da Requisição</h5>
+                        <div class="form-row-3">
+                            ${selectOpcional('obsa-ferias-nova', 'Nova Solicitação', obs.nova_solicitacao || 'S - SIM', optSimNao)}
+                            ${selectOpcional('obsa-ferias-alt', 'Alteração', obs.alteracao || '', optSimNao)}
+                            ${selectOpcional('obsa-ferias-exc', 'Exclusão', obs.exclusao || '', optSimNao)}
+                        </div>
+                    </div>
+
+                    <div class="box-interior" style="border-left: 4px solid #20c997; margin-bottom: 20px; background: rgba(32, 201, 151, 0.05);">
+                        <h5 style="color: #20c997; margin-bottom: 15px;">Regras do Período</h5>
+                        <div class="form-row-3">
+                            <div class="form-group">
+                                <label>Nº Dias de Férias</label>
+                                <input type="text" value="${ferias.dias_direito}" disabled style="width:100%; padding:12px; border-radius:8px; border:1px solid #20c997; background:transparent; color:#fff; font-weight:bold; text-align:center;">
+                            </div>
+                            ${selectOpcional('obsa-ferias-abono', 'Abono Pecuniário (Venda)', obs.abono_pecuniario || 'N - NÃO', optSimNao)}
+                            ${selectOpcional('obsa-ferias-13', '13º Salário', obs.decimo_terceiro || 'N - NÃO', optSimNao)}
+                        </div>
+                    </div>
+
+                    <div class="box-interior" style="border-left: 4px solid #4fc3f7; margin-bottom: 20px;">
+                        <h5 style="color: #4fc3f7; margin-bottom: 15px;">Datas Oficiais</h5>
+                        <div class="form-row-3">
+                            <div class="form-group">
+                                <label style="color: #4fc3f7;">Data de Início</label>
+                                <input type="text" value="${formatarDataBR(ferias.data_inicio_ferias)}" disabled style="width:100%; padding:12px; border-radius:8px; border:1px solid #4fc3f7; background:transparent; color:#fff; font-weight:bold; text-align:center;">
+                            </div>
+                            <div class="form-group">
+                                <label>Data de Pagamento (Auto)</label>
+                                <input type="date" id="obsa-ferias-dt-pag" value="${dataPagSugerida}" required onclick="this.showPicker()" style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--cor-borda); background:var(--cor-fundo-input); color:#fff; cursor:pointer;">
+                                <small style="color:var(--cor-texto-secundario); display:block; margin-top:5px;">2 dias úteis antes</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Data do Aviso (Auto)</label>
+                                <input type="date" id="obsa-ferias-dt-aviso" value="${dataAvisoSugerida}" required onclick="this.showPicker()" style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--cor-borda); background:var(--cor-fundo-input); color:#fff; cursor:pointer;">
+                                <small style="color:var(--cor-texto-secundario); display:block; margin-top:5px;">30 dias antes</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Observações / Particularidades do processo</label>
+                        <textarea id="obsa-ferias-obs" placeholder="Detalhes adicionais..." style="width: 100%; min-height: 60px; padding: 12px; border-radius: 8px; border: 1px solid var(--cor-borda); background: var(--cor-fundo-input); color: #fff;">${obs.observacao || ''}</textarea>
+                    </div>
+
+                    <button type="button" id="btn-salvar-obsa-ferias" class="btn-success" style="width: 100%; height: 50px; background-color: #ffd54f; color: #000; border: none; font-weight: bold; font-size: 1.1rem; margin-top: 10px;" onclick="salvarEGerarObsaFerias('${idColab}', '${idFerias}', '${ferias.dias_direito}', '${ferias.data_inicio_ferias}')">
+                        <i class="fa-solid fa-file-excel"></i> Salvar e Gerar Planilha Excel
+                    </button>
+                </form>
+            </div>
+        </div>`;
+
+        document.getElementById('toast-container').innerHTML = '';
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // Memória para o gerador de Excel
+        window.colabDadosOBSAFeriasAtual = {
+            nome: colab.nome,
+            empresa: colab.empresa,
+            unidade: colab.unidade
+        };
+
+    } catch (err) {
+        mostrarAlerta("Erro ao carregar dados: " + err.message, "erro");
+    }
+};
+
+window.salvarEGerarObsaFerias = async function(idColab, idFerias, diasFerias, dataInicioIso) {
+    const btn = document.getElementById('btn-salvar-obsa-ferias');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando dados e gerando Excel...';
+
+    const formatDtStr = (dt) => dt ? dt.split('-').reverse().join('/') : '';
+
+    const dtPagFormatada = formatDtStr(document.getElementById('obsa-ferias-dt-pag').value);
+    const dtAvisoFormatada = formatDtStr(document.getElementById('obsa-ferias-dt-aviso').value);
+
+    const objDB = {
+        colaborador_id: idColab,
+        ferias_id: idFerias,
+        nova_solicitacao: document.getElementById('obsa-ferias-nova').value,
+        alteracao: document.getElementById('obsa-ferias-alt').value,
+        exclusao: document.getElementById('obsa-ferias-exc').value,
+        abono_pecuniario: document.getElementById('obsa-ferias-abono').value,
+        decimo_terceiro: document.getElementById('obsa-ferias-13').value,
+        data_pagamento: dtPagFormatada,
+        data_aviso: dtAvisoFormatada,
+        observacao: document.getElementById('obsa-ferias-obs').value
+    };
+
+    try {
+        const { data: existente } = await supabaseClient.from('obsa_ferias').select('id').eq('ferias_id', idFerias).maybeSingle();
+        
+        if (existente) {
+            await supabaseClient.from('obsa_ferias').update(objDB).eq('id', existente.id);
+        } else {
+            await supabaseClient.from('obsa_ferias').insert([objDB]);
+        }
+
+        // ================================================================
+        // MONTAGEM DO EXCEL (IDÊNTICO À IMAGEM)
+        // ================================================================
+        const d = window.colabDadosOBSAFeriasAtual;
+        
+        // Tratamento da Empresa
+        let empresaParaPlanilha = d.empresa || ''; 
+        const empLimpa = String(d.empresa || '').trim().toUpperCase();
+        if (empLimpa === 'SOUL GESTÃO' || empLimpa === 'SOUL') {
+            empresaParaPlanilha = 'SOUL SEGURANÇA E FACILITIES LTDA';
+        }
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Soul';
+        const sheet = workbook.addWorksheet('Requisição de Férias', { views: [{ showGridLines: false }] });
+
+        sheet.columns = [
+            { width: 5 },   // A (Margem)
+            { width: 15 },  // B 
+            { width: 15 },  // C 
+            { width: 12 },  // D 
+            { width: 18 },  // E 
+            { width: 18 },  // F
+            { width: 15 },  // G
+            { width: 5 }    // H (Margem)
+        ];
+
+        // --- TOPO PRETO E DOURADO ---
+        sheet.mergeCells('B2:G4');
+        const headerTopo = sheet.getCell('B2');
+        headerRow = sheet.getRow(2);
+        headerRow.height = 40;
+        headerTopo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF000000' } };
+        headerTopo.font = { name: 'Arial', size: 16, bold: true, color: { argb: 'FFFFC000' } }; // Dourado
+        headerTopo.alignment = { vertical: 'middle', horizontal: 'center' };
+        headerTopo.value = 'REQUISIÇÃO DE FÉRIAS (individual)          OB OLIVEIRA BRITO';
+
+        sheet.addRow([]); // Espaço
+        
+        // --- DADOS DE IDENTIFICAÇÃO E FÉRIAS ---
+        let row = 6;
+        sheet.mergeCells(`B${row}:G${row}`);
+        sheet.getCell(`B${row}`).value = 'Dados de Identificação e férias (obrigatório)';
+        sheet.getCell(`B${row}`).font = { name: 'Arial', size: 12, bold: true };
+        sheet.getCell(`B${row}`).border = { bottom: { style: 'thin' } };
+        
+        row++;
+        sheet.getCell(`B${row}`).value = 'Empresa:';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.mergeCells(`C${row}:G${row}`);
+        sheet.getCell(`C${row}`).value = empresaParaPlanilha.toUpperCase();
+        sheet.getCell(`C${row}`).border = { bottom: { style: 'thin' } };
+
+        row++;
+        sheet.getCell(`B${row}`).value = 'Unidade:';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.mergeCells(`C${row}:G${row}`);
+        sheet.getCell(`C${row}`).value = (d.unidade || '').toUpperCase();
+        sheet.getCell(`C${row}`).border = { bottom: { style: 'thin' } };
+
+        row += 2;
+        sheet.getCell(`B${row}`).value = 'Requisição de:';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        
+        sheet.getCell(`C${row}`).value = 'Alteração';
+        sheet.getCell(`C${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`D${row}`).value = objDB.alteracao;
+        sheet.getCell(`D${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+
+        sheet.getCell(`E${row}`).value = 'Nova solicitação';
+        sheet.getCell(`E${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`F${row}`).value = objDB.nova_solicitacao;
+        sheet.getCell(`F${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+
+        sheet.getCell(`G${row}`).value = `Exclusão   [${objDB.exclusao || '  '}]`;
+        sheet.getCell(`G${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        row += 2;
+        sheet.getCell(`B${row}`).value = 'Registro:';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`C${row}`).border = { bottom: { style: 'thin' } }; // Vazio
+        
+        sheet.getCell(`D${row}`).value = 'Empregado:';
+        sheet.getCell(`D${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.mergeCells(`E${row}:G${row}`);
+        sheet.getCell(`E${row}`).value = d.nome.toUpperCase();
+        sheet.getCell(`E${row}`).border = { bottom: { style: 'thin' } };
+
+        row += 2;
+        sheet.getCell(`B${row}`).value = 'Nº de dias de férias';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`C${row}`).value = diasFerias;
+        sheet.getCell(`C${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        sheet.getCell(`C${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        sheet.getCell(`D${row}`).value = 'Abono Pecuniário';
+        sheet.getCell(`D${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`E${row}`).value = objDB.abono_pecuniario;
+        sheet.getCell(`E${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        sheet.getCell(`E${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        sheet.getCell(`F${row}`).value = '13º Sal.';
+        sheet.getCell(`F${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`G${row}`).value = objDB.decimo_terceiro;
+        sheet.getCell(`G${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        sheet.getCell(`G${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        row += 2;
+        sheet.getCell(`D${row}`).value = 'Data de Início';
+        sheet.getCell(`D${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`E${row}`).value = formatDtStr(dataInicioIso);
+        sheet.getCell(`E${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        sheet.getCell(`E${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        sheet.getCell(`F${row}`).value = 'Data de Pagamento:';
+        sheet.getCell(`F${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`G${row}`).value = dtPagFormatada;
+        sheet.getCell(`G${row}`).border = { top: {style:'thick', color: {argb:'FF28A745'}}, left: {style:'thick', color: {argb:'FF28A745'}}, bottom: {style:'thick', color: {argb:'FF28A745'}}, right: {style:'thick', color: {argb:'FF28A745'}} }; // Borda Verde
+        sheet.getCell(`G${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        row += 2;
+        sheet.getCell(`F${row}`).value = 'Data do Aviso das Férias:';
+        sheet.getCell(`F${row}`).alignment = { horizontal: 'right', vertical: 'middle' };
+        sheet.getCell(`G${row}`).value = dtAvisoFormatada;
+        sheet.getCell(`G${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        sheet.getCell(`G${row}`).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        // --- CAIXA PRETA E DOURADA DE "IMPORTANTE" ---
+        row += 2;
+        sheet.mergeCells(`B${row}:G${row+1}`);
+        const boxImp = sheet.getCell(`B${row}`);
+        boxImp.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF000000' } };
+        boxImp.font = { color: { argb: 'FFFFC000' }, bold: true };
+        boxImp.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
+        boxImp.value = 'Importante: As férias não podem iniciar até 2 dias antes do final de semana ou feriado.\nO pagamento das férias deverá ser efetuado com 02 dias úteis de antecedência a data do início do gozo de férias.';
+        
+        // Coloca borda na tabela central inteira (B6:G17)
+        for(let r = 6; r <= row + 1; r++) {
+            sheet.getCell(`B${r}`).border = { ...sheet.getCell(`B${r}`).border, left: { style: 'thin' } };
+            sheet.getCell(`G${r}`).border = { ...sheet.getCell(`G${r}`).border, right: { style: 'thin' } };
+        }
+        sheet.getCell(`B${row+1}`).border = { ...sheet.getCell(`B${row+1}`).border, bottom: { style: 'thin' }, left: { style: 'thin' } };
+        sheet.getCell(`C${row+1}`).border = { ...sheet.getCell(`C${row+1}`).border, bottom: { style: 'thin' } };
+        sheet.getCell(`D${row+1}`).border = { ...sheet.getCell(`D${row+1}`).border, bottom: { style: 'thin' } };
+        sheet.getCell(`E${row+1}`).border = { ...sheet.getCell(`E${row+1}`).border, bottom: { style: 'thin' } };
+        sheet.getCell(`F${row+1}`).border = { ...sheet.getCell(`F${row+1}`).border, bottom: { style: 'thin' } };
+        sheet.getCell(`G${row+1}`).border = { ...sheet.getCell(`G${row+1}`).border, bottom: { style: 'thin' }, right: { style: 'thin' } };
+
+        row += 3;
+        sheet.mergeCells(`B${row}:G${row}`);
+        sheet.getCell(`B${row}`).value = 'Observações/Particularidades do processo:';
+        sheet.getCell(`B${row}`).alignment = { horizontal: 'center' };
+        sheet.getCell(`B${row}`).font = { bold: true };
+
+        row++;
+        sheet.mergeCells(`B${row}:G${row+2}`);
+        sheet.getCell(`B${row}`).value = objDB.observacao;
+        sheet.getCell(`B${row}`).alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+        sheet.getCell(`B${row}`).border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+
+        // Exportação Final
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `OBSA_Ferias_${d.nome.replace(/ /g, '_')}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        mostrarAlerta("Requisição de Férias gerada e baixada com sucesso!", "sucesso");
+        document.getElementById('modal-obsa-ferias').remove();
 
     } catch (err) {
         console.error("Erro na geração:", err);
