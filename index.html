@@ -13315,6 +13315,11 @@ await window.sincronizarLeituraTabelaBase(tipoNotif, referenciaId, colaboradorId
     }
 };
 
+// =========================================================================
+// 🚀 PATCH DE CORREÇÃO DEFINITIVA: EFEITO FANTASMA E MARCAÇÃO DE LEITURA
+// =========================================================================
+
+// 1. BLINDAGEM DA FUNÇÃO GLOBAL DE LEITURA
 window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
     if (event) event.stopPropagation();
 
@@ -13329,25 +13334,35 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
         btnTela.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ...';
     }
 
-      // Dispara o salvamento na raiz do documento resgatando a memória do sininho
-const notifBanco = notificacoesGlobais.find(n => n.id === idNotificacao);
-if (notifBanco) {
-    await window.sincronizarLeituraTabelaBase(notifBanco.tipo, notifBanco.referencia_id, notifBanco.colaborador_id, statusLida);
-}
-
     try {
-        // 1. FORÇA O UPDATE NO BANCO E ESPERA (Sem isso, dava o bug do F5)
+        // 👇 CORREÇÃO CRÍTICA: Se a notificação não estiver na memória rápida, busca direto na nuvem!
+        let notifBanco = notificacoesGlobais.find(n => String(n.id) === String(idNotificacao));
+        
+        if (!notifBanco) {
+            const { data } = await supabaseClient.from('notificacoes').select('*').eq('id', idNotificacao).maybeSingle();
+            notifBanco = data;
+        }
+
+        if (notifBanco) {
+            await window.sincronizarLeituraTabelaBase(notifBanco.tipo, notifBanco.referencia_id, notifBanco.colaborador_id, statusLida);
+        }
+
+        // FORÇA O UPDATE NO BANCO E ESPERA A CONFIRMAÇÃO
         const { error } = await supabaseClient.from('notificacoes').update({ lida: statusLida, lida_por: nomeQuemLeu }).eq('id', idNotificacao);
         if (error) throw error;
 
-        // 2. ATUALIZA A MEMÓRIA
-        const notifIndex = notificacoesGlobais.findIndex(n => n.id === idNotificacao);
+        // ATUALIZA A MEMÓRIA PARA NÃO REVERTER NA TROCA DE ABA
+        const notifIndex = notificacoesGlobais.findIndex(n => String(n.id) === String(idNotificacao));
         if (notifIndex !== -1) {
             notificacoesGlobais[notifIndex].lida = statusLida;
             notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
+        } else if (notifBanco) {
+            notifBanco.lida = statusLida;
+            notifBanco.lida_por = nomeQuemLeu;
+            notificacoesGlobais.push(notifBanco);
         }
 
-        // 3. ATUALIZA O VISUAL DO BOTÃO
+        // ATUALIZA O VISUAL DO BOTÃO INSTANTANEAMENTE
         if (btnTela) {
             const containerLeitura = document.getElementById(`container-leitura-${idNotificacao}`) || btnTela.parentElement;
             const existingSpan = containerLeitura.querySelector('.leitura-nome');
@@ -13372,7 +13387,7 @@ if (notifBanco) {
             btnTela.disabled = false;
         }
 
-        // 4. ATUALIZA O SINO E O MENU DROPDOWN
+        // ATUALIZA O SINO LÁ NO TOPO
         const headerBadge = document.getElementById('badge-header-count');
         if (headerBadge) {
              let currentCount = parseInt(headerBadge.innerText) || 0;
@@ -13397,7 +13412,6 @@ if (notifBanco) {
 
     } catch (err) {
         console.error("Erro ao sincronizar leitura:", err);
-        // Volta o botão ao normal em caso de falha na internet
         if (btnTela) {
             btnTela.innerHTML = htmlAntigo;
             btnTela.className = classeAntiga;
@@ -22720,13 +22734,25 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     });
 };
         
-       window.aprovarAusenciaAdmin = async function(idAusencia, idColab, nomeColab, unidadeColab) {
+       // 2. CORREÇÃO DA APROVAÇÃO DE AUSÊNCIA (Tabela do Admin)
+window.aprovarAusenciaAdmin = async function(idAusencia, idColab, nomeColab, unidadeColab) {
     const confirmado = await mostrarConfirmacao("Deseja APROVAR esta ausência? Ela vai popular a escala automaticamente.", "Aprovar Ausência");
     if (!confirmado) return;
 
-    const { error } = await supabaseClient.from('ausencias').update({ status: 'Aprovado' }).eq('id', idAusencia);
+    // Salva o nome de quem aprovou na tabela matriz!
+    const { error } = await supabaseClient.from('ausencias').update({ 
+        status: 'Aprovado',
+        aprovado_por: usuarioAtual.nome
+    }).eq('id', idAusencia);
+    
     if (error) { await mostrarAlerta("Erro ao aprovar: " + error.message, "erro"); return; }
 
+    // 👇 A MÁGICA: MARCA A NOTIFICAÇÃO DO ADMIN COMO LIDA IMEDIATAMENTE 👇
+    await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
+        .eq('referencia_id', idAusencia)
+        .eq('tipo', 'Ausência_Admin');
+
+    // Manda o aviso SÓ para o gestor
     await supabaseClient.from('notificacoes').insert([{
         colaborador_id: idColab, 
         nome: nomeColab,
@@ -22736,8 +22762,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         referencia_id: idAusencia
     }]);
 
-   // 👇 COMENTE ESTA LINHA ABAIXO:
- await window.dispararEmailAusenciaAprovada(idAusencia);
+    await window.dispararEmailAusenciaAprovada(idAusencia);
 
     await mostrarAlerta("Ausência aprovada com sucesso!", "sucesso");
     carregarAusenciasParaAdmin();
@@ -23632,40 +23657,7 @@ if (aus.sigla === 'LDM' || aus.sigla === 'LDP' || aus.sigla === 'LG') { // 🟢 
     }
 };
 
-// =========================================================
-// APROVAÇÃO PELA TABELA DA CENTRAL
-// =========================================================
-window.aprovarAusenciaAdmin = async function(idAusencia, idColab, nomeColab, unidadeColab) {
-    const confirmado = await mostrarConfirmacao("Deseja APROVAR esta ausência? Ela vai popular a escala automaticamente.", "Aprovar Ausência");
-    if (!confirmado) return;
-
-    const { error } = await supabaseClient.from('ausencias').update({ status: 'Aprovado' }).eq('id', idAusencia);
-    if (error) { await mostrarAlerta("Erro ao aprovar: " + error.message, "erro"); return; }
-
-    await supabaseClient.from('notificacoes').insert([{
-        colaborador_id: idColab, 
-        nome: nomeColab,
-        unidade: unidadeColab,
-        lida: false,
-        tipo: 'Ausência',
-        referencia_id: idAusencia
-    }]);
-
-    console.log("Ausência aprovada na tabela! Indo chamar o e-mail...");
-   // 👇 COMENTE ESTA LINHA ABAIXO:
- await window.dispararEmailAusenciaAprovada(idAusencia);
-
-    await mostrarAlerta("Ausência aprovada com sucesso!", "sucesso");
-    carregarAusenciasParaAdmin();
-    
-    if(!document.getElementById('tela-escala').classList.contains('hidden')) {
-        processarEscala(); 
-    }
-};
-
-// =========================================================
-// APROVAÇÃO POR DENTRO DO MODAL DA FICHA
-// =========================================================
+// 3. CORREÇÃO DA APROVAÇÃO DE AUSÊNCIA (Dentro do Modal Analisar)
 window.aprovarAusenciaModal = async function(idAusencia, idColab, nomeColab, unidadeColab) {
     const btn = document.querySelector('#modal-ficha-ausencia .btn-success');
     btn.innerText = "Aprovando..."; btn.disabled = true;
@@ -23677,16 +23669,19 @@ window.aprovarAusenciaModal = async function(idAusencia, idColab, nomeColab, uni
 
     if (error) {
         await mostrarAlerta("Erro ao aprovar: " + error.message, "erro");
-        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR AUSÊNCIA`; btn.disabled = false;
+        btn.innerHTML = `<i class="fa-solid fa-check"></i> APROVAR`; btn.disabled = false;
     } else {
+        // 👇 A MÁGICA: MARCA A NOTIFICAÇÃO DO ADMIN COMO LIDA IMEDIATAMENTE 👇
+        await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
+            .eq('referencia_id', idAusencia)
+            .eq('tipo', 'Ausência_Admin');
+
+        // Manda aviso pro Gestor
         await supabaseClient.from('notificacoes').insert([
-            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência', referencia_id: idAusencia },
-            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência_Admin', referencia_id: idAusencia }
+            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Ausência', referencia_id: idAusencia }
         ]);
 
-        console.log("Ausência aprovada no modal! Indo chamar o e-mail...");
-        // 👇 COMENTE ESTA LINHA ABAIXO:
- await window.dispararEmailAusenciaAprovada(idAusencia);
+        await window.dispararEmailAusenciaAprovada(idAusencia);
 
         document.getElementById('modal-ficha-ausencia').remove();
         listarSolicitacoes();
@@ -26344,7 +26339,8 @@ window.renderizarPaginacaoFTsAdmin = function() {
         }
         // ================================================================
 
-        const notifDestaFT = notifsBanco.find(n => String(n.referencia_id) === String(ft.id) && n.tipo.includes('FT'));
+        const tipoNotifBuscaFT = usuarioAtual.perfil === 'Admin' ? 'FT_Admin' : 'FT';
+        const notifDestaFT = notifsBanco.find(n => String(n.referencia_id) === String(ft.id) && n.tipo === tipoNotifBuscaFT);
         let btnNotifHtml = '';
 
         if (notifDestaFT) {
@@ -26478,14 +26474,23 @@ window.renderizarPaginacaoFTsAdmin = function() {
     });
 };
 
+// 4. CORREÇÃO DA APROVAÇÃO DE FT (Tabela Admin)
 window.aprovarFTAdmin = async function(idFT, idColab, nomeColab, unidadeColab) {
     const confirmado = await mostrarConfirmacao("Deseja APROVAR este registro? Ele populará a escala do colaborador automaticamente.", "Aprovar Lançamento");
     if (!confirmado) return;
 
-    const { error } = await supabaseClient.from('horas_extras_ft').update({ status: 'Aprovado', aprovado_por: usuarioAtual.nome }).eq('id', idFT);
+    const { error } = await supabaseClient.from('horas_extras_ft').update({ 
+        status: 'Aprovado', 
+        aprovado_por: usuarioAtual.nome 
+    }).eq('id', idFT);
+    
     if (error) return mostrarAlerta("Erro ao aprovar.", "erro");
 
-    // 👇 A MÁGICA: Notifica APENAS o Gestor. O Admin mantém a notificação original intacta para marcar como lida depois!
+    // 👇 A MÁGICA: MARCA A NOTIFICAÇÃO DO ADMIN COMO LIDA IMEDIATAMENTE 👇
+    await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
+        .eq('referencia_id', idFT).eq('tipo', 'FT_Admin');
+
+    // Notifica o Gestor
     await supabaseClient.from('notificacoes').insert([
         { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'FT', referencia_id: idFT }
     ]);
@@ -26493,6 +26498,20 @@ window.aprovarFTAdmin = async function(idFT, idColab, nomeColab, unidadeColab) {
     mostrarAlerta("Registro aprovado com sucesso!", "sucesso");
     carregarFTsParaAdmin();
     if(!document.getElementById('tela-escala').classList.contains('hidden')) processarEscala();
+};
+
+      // 5. CORREÇÃO DA APROVAÇÃO DE FT (Dentro do Modal Analisar)
+// (Apenas intercepta a parte do "Salvar" lá na função processarAnaliseFT)
+const oldProcessarAnaliseFT = window.processarAnaliseFT;
+window.processarAnaliseFT = async function(idFT, acao, isAbate) {
+    // Roda a função original que você já tinha aí
+    await oldProcessarAnaliseFT(idFT, acao, isAbate);
+
+    // Complementa com a baixa da notificação
+    if (acao === 'Aprovar') {
+        await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
+            .eq('referencia_id', idFT).eq('tipo', 'FT_Admin');
+    }
 };
         
 window.reprovarERemoverFT = async function(idFT) {
@@ -28044,13 +28063,14 @@ window.filtrarAusenciasAdmin = function() {
 window.filtrarFTsAdmin = function() {
     const termo = window.removerAcentos(document.getElementById('busca-ft-admin').value.toLowerCase());
     const status = document.getElementById('filtro-status-ft').value;
-    const mesFiltro = document.getElementById('filtro-mes-ft-admin').value; // Formato YYYY-MM
+    const mesFiltro = document.getElementById('filtro-mes-ft-admin').value;
     const notifsBanco = notificacoesGlobais; 
     
-    // 1. Ordenação: Não lidas no topo, depois por data de criação decrescente
+    // 👇 MÁGICA: Protegendo a Hora Extra contra a Notificação Duplicada do Gestor
     todasFTsAdmin.sort((a, b) => {
-        const nA = notifsBanco.find(n => String(n.referencia_id) === String(a.id) && n.tipo.includes('FT'));
-        const nB = notifsBanco.find(n => String(n.referencia_id) === String(b.id) && n.tipo.includes('FT'));
+        const tipoBuscaFT = usuarioAtual.perfil === 'Admin' ? 'FT_Admin' : 'FT';
+        const nA = notifsBanco.find(n => String(n.referencia_id) === String(a.id) && n.tipo === tipoBuscaFT);
+        const nB = notifsBanco.find(n => String(n.referencia_id) === String(b.id) && n.tipo === tipoBuscaFT);
         const lidaA = nA ? nA.lida : true;
         const lidaB = nB ? nB.lida : true;
         
@@ -28058,11 +28078,8 @@ window.filtrarFTsAdmin = function() {
         return new Date(b.created_at) - new Date(a.created_at);
     });
 
-    // 2. Filtra os dados de forma correta (se mesFiltro for vazio, ele ignora a trava de data)
     ftsAdminFiltradas = todasFTsAdmin.filter(a => {
-        const matchTexto = window.removerAcentos(a.nome).includes(termo) || 
-                           window.removerAcentos(a.unidade || '').includes(termo);
-                           
+        const matchTexto = window.removerAcentos(a.nome).includes(termo) || window.removerAcentos(a.unidade || '').includes(termo);
         const matchStatus = status === 'Todos' || a.status === status;
         
         let matchData = true;
@@ -28071,11 +28088,9 @@ window.filtrarFTsAdmin = function() {
                 matchData = false;
             }
         }
-
         return matchTexto && matchStatus && matchData;
     });
 
-    // 3. Força voltar para a página 1 ao filtrar e chama o renderizador fatiado
     paginaAtualFTsAdmin = 1;
     window.renderizarPaginacaoFTsAdmin();
 };
