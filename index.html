@@ -35900,10 +35900,10 @@ document.getElementById('form-enviar-documentos')?.addEventListener('submit', as
     const unidade = document.getElementById('doc-envio-unidade').value;
     const arquivo = document.getElementById('doc-envio-arquivo').files;
     
-    let idColab = null, nomeColab = null, empresaColab = null, nomeDoc = null;
+    let idColab = null, nomeColab = null, empresaColab = null, nomeDocBase = null;
 
     if (tipo === 'Documento Institucional') {
-        nomeDoc = document.getElementById('doc-envio-nome-inst').value.trim();
+        nomeDocBase = document.getElementById('doc-envio-nome-inst').value.trim();
         empresaColab = usuarioAtual.empresa.split(',')[0].trim(); // Usa a empresa do gestor
     } else {
         const selectColab = document.getElementById('doc-envio-colaborador');
@@ -35911,39 +35911,51 @@ document.getElementById('form-enviar-documentos')?.addEventListener('submit', as
         idColab = opt.value;
         nomeColab = opt.text;
         empresaColab = opt.getAttribute('data-empresa');
-        nomeDoc = `${tipo} - ${nomeColab}`;
+        nomeDocBase = `${tipo} - ${nomeColab}`;
     }
 
-    const confirmado = await mostrarConfirmacao(`Deseja enviar este documento para aprovação do RH?`, "Enviar Documento");
+    const confirmado = await mostrarConfirmacao(`Deseja enviar ${arquivo.length} documento(s) para aprovação do RH?`, "Enviar Documento(s)");
     if (!confirmado) return;
 
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando...';
 
     try {
         let caminhoBase = '';
-        let nomeParaStorage = null;
 
         if (tipo === 'Documento Institucional') {
             caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidade)}/Biblioteca_Institucional`;
-            nomeParaStorage = nomeDoc; 
         } else {
             caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidade)}/${formatarNomePasta(nomeColab)}/${formatarNomePasta(tipo)}`;
         }
 
-        const urls = await subirDocumentos(caminhoBase, arquivo, nomeParaStorage);
+        // 1. Sobe todos os arquivos para a nuvem
+        const urls = await subirDocumentos(caminhoBase, arquivo);
 
-        const { data: docSalvo, error } = await supabaseClient.from('envio_documentos').insert([{
-            tipo: tipo, unidade: unidade, empresa: empresaColab,
-            colaborador_id: idColab, nome_colaborador: nomeColab,
-            nome_documento: nomeDoc, observacao: document.getElementById('doc-envio-obs').value,
-            arquivo_url: urls[0], status: 'Pendente', criado_por: usuarioAtual.nome
-        }]).select('id').single();
+        // 2. MÁGICA: Cria uma linha no banco de dados para CADA arquivo anexado!
+        const registrosParaInserir = urls.map((url, index) => {
+            // Se tiver mais de 1 arquivo, bota um número no final para o RH saber qual é qual
+            const sufixoNumerico = urls.length > 1 ? ` (Parte ${index + 1})` : '';
+            
+            return {
+                tipo: tipo, 
+                unidade: unidade, 
+                empresa: empresaColab,
+                colaborador_id: idColab, 
+                nome_colaborador: nomeColab,
+                nome_documento: nomeDocBase + sufixoNumerico, 
+                observacao: document.getElementById('doc-envio-obs').value,
+                arquivo_url: url, 
+                status: 'Pendente', 
+                criado_por: usuarioAtual.nome
+            };
+        });
+
+        // 3. Salva todos de uma vez no banco
+        const { error } = await supabaseClient.from('envio_documentos').insert(registrosParaInserir);
 
         if (error) throw error;
 
-        // REMOVIDA A INSERÇÃO DE NOTIFICAÇÃO AQUI PARA NÃO DUPLICAR NOS AVISOS RECENTES
-
-        mostrarAlerta("Documento enviado ao RH com sucesso!", "sucesso");
+        mostrarAlerta(`${urls.length} documento(s) enviado(s) ao RH com sucesso!`, "sucesso");
         document.getElementById('form-enviar-documentos').reset();
         mudarTipoDocumentoEnvio();
     } catch (err) {
