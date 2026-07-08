@@ -13234,18 +13234,20 @@ window.abrirSolicitacaoDaCentral = async function(tipo, id) {
     }, 500);
 };
       
-    window.alternarLeituraNotificacaoDinamica = async function(idNotificacao, statusLida, colaboradorId, referenciaId, tipoNotif, unidade, nomeColab) {
+    // =========================================================================
+// 🚀 MOTOR DEFINITIVO DE LEITURA (SINCRONIZA BASE E NOTIFICAÇÃO AO MESMO TEMPO)
+// =========================================================================
+
+// Função unificada: Serve tanto para botão normal quanto para botões "Fallback"
+window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, idColab, refId, tipo, unidade, nomeColab) {
     if (event) event.stopPropagation();
 
-    // Se já tiver ID, manda pra função padrão
-    if (idNotificacao && idNotificacao !== 'null' && idNotificacao !== 'undefined') {
-        return window.alternarLeituraNotificacao(idNotificacao, statusLida);
-    }
-
+    // Se statusLida for FALSE (desmarcando), o nome vira NULL e o banco apaga o "Visto por"
     const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
-    const idVisualElement = `fallback_${referenciaId || colaboradorId}`;
-    const btnTela = document.getElementById(`btn-leitura-${idVisualElement}`) || document.getElementById(`btn-leitura-ferias-${idVisualElement}`);
-    const containerLeitura = document.getElementById(`container-leitura-${idVisualElement}`) || (btnTela ? btnTela.parentElement : null);
+    
+    // Captura o botão clicado
+    const btnTela = event.currentTarget || document.getElementById(`btn-leitura-${idNotif}`);
+    const htmlAntigo = btnTela ? btnTela.innerHTML : '';
 
     if (btnTela) {
         btnTela.disabled = true;
@@ -13253,37 +13255,60 @@ window.abrirSolicitacaoDaCentral = async function(tipo, id) {
     }
 
     try {
-        // 1. INSERE NO BANCO E AGUARDA CONFIRMAÇÃO
-        const { data: novaNotif, error } = await supabaseClient.from('notificacoes').insert([{
-            colaborador_id: colaboradorId, referencia_id: referenciaId,
-            nome: nomeColab, unidade: unidade || 'Matriz',
-            tipo: tipoNotif, lida: statusLida, lida_por: nomeQuemLeu
-        }]).select('id').single();
+        // 1️⃣ ATUALIZA A TABELA MATRIZ PRIMEIRO (Ausências, FT, etc)
+        await window.sincronizarLeituraTabelaBase(tipo, refId, idColab, statusLida);
 
-        if (error) throw error;
-        const targetId = novaNotif.id;
-      // Dispara o salvamento na raiz do documento
-await window.sincronizarLeituraTabelaBase(tipoNotif, referenciaId, colaboradorId, statusLida);
+        // 2️⃣ ATUALIZA A TABELA DE NOTIFICAÇÕES (SININHO)
+        let idRealNotificacao = idNotif;
 
-        // 2. ATUALIZA A MEMÓRIA PARA NÃO PRECISAR RECARREGAR
-        notificacoesGlobais.push({ id: targetId, lida: statusLida, lida_por: nomeQuemLeu, tipo: tipoNotif, colaborador_id: colaboradorId, referencia_id: referenciaId, nome: nomeColab, unidade });
+        // Se o ID for "null" ou um "fallback_", nós buscamos o ID real no banco!
+        if (!idRealNotificacao || idRealNotificacao.includes('fallback') || idRealNotificacao === 'null') {
+            const { data: notifExistente } = await supabaseClient.from('notificacoes')
+                .select('id')
+                .eq('referencia_id', refId)
+                .eq('tipo', tipo)
+                .maybeSingle();
 
-        // 3. ATUALIZA A INTERFACE VISUAL E O ID DO BOTÃO
-        if (btnTela && containerLeitura) {
-            btnTela.disabled = false;
+            if (notifExistente) {
+                idRealNotificacao = notifExistente.id;
+            } else if (statusLida) {
+                // Se não existia notificação, a gente cria ela já como "lida" pra ficar registrado!
+                const { data: novaNotif } = await supabaseClient.from('notificacoes').insert([{
+                    colaborador_id: idColab,
+                    nome: nomeColab || 'Registro do Sistema',
+                    unidade: unidade || 'Matriz',
+                    tipo: tipo,
+                    referencia_id: refId,
+                    lida: true,
+                    lida_por: nomeQuemLeu
+                }]).select('id').single();
+                
+                if (novaNotif) idRealNotificacao = novaNotif.id;
+            }
+        }
+
+        // Se achou um ID real, atualiza o lida_por (colocando o nome ou apagando com NULL)
+        if (idRealNotificacao && idRealNotificacao !== 'null') {
+            await supabaseClient.from('notificacoes')
+                .update({ lida: statusLida, lida_por: nomeQuemLeu })
+                .eq('id', idRealNotificacao);
+        }
+
+        // 3️⃣ ATUALIZA O VISUAL DO BOTÃO E A CAIXINHA DE "VISTO POR" (Tira a dupla piscada)
+        if (btnTela) {
+            const containerLeitura = btnTela.parentElement;
             const existingSpan = containerLeitura.querySelector('.leitura-nome');
-            if (existingSpan) existingSpan.remove();
-
-            // 👇 A MÁGICA: O botão ganha o ID real do banco para os próximos cliques!
-            btnTela.id = `btn-leitura-${targetId}`;
-            containerLeitura.id = `container-leitura-${targetId}`;
+            if (existingSpan) existingSpan.remove(); // Remove o "Visto por" antigo
 
             if (statusLida) {
                 btnTela.className = 'btn-secondary';
                 btnTela.style.opacity = '0.6';
                 btnTela.innerHTML = '<i class="fa-solid fa-check-double"></i> Lido';
-                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${targetId}', false)`);
                 
+                // Muda a função do botão para DESMARCAR se ele clicar de novo
+                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacaoDinamica('${idRealNotificacao}', false, '${idColab}', '${refId}', '${tipo}', '${unidade}', '${nomeColab}')`);
+                
+                // Escreve o "Visto por"
                 if (nomeQuemLeu) {
                     const pNome = nomeQuemLeu.split(' ')[0];
                     containerLeitura.insertAdjacentHTML('beforeend', `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${pNome}</b></span>`);
@@ -13292,26 +13317,23 @@ await window.sincronizarLeituraTabelaBase(tipoNotif, referenciaId, colaboradorId
                 btnTela.className = 'btn-success';
                 btnTela.style.opacity = '1';
                 btnTela.innerHTML = '<i class="fa-solid fa-envelope"></i> Marcar como Lido';
-                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${targetId}', true)`);
+                
+                // Muda a função do botão para MARCAR se ele clicar de novo
+                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacaoDinamica('${idRealNotificacao}', true, '${idColab}', '${refId}', '${tipo}', '${unidade}', '${nomeColab}')`);
             }
+            btnTela.disabled = false;
         }
 
-        // 4. ATUALIZA O SINO
-        const headerBadge = document.getElementById('badge-header-count');
-        if (headerBadge) {
-             let currentCount = parseInt(headerBadge.innerText) || 0;
-             currentCount = statusLida ? Math.max(0, currentCount - 1) : currentCount + 1;
-             headerBadge.innerText = currentCount;
-             headerBadge.style.display = currentCount > 0 ? 'block' : 'none';
-        }
+        // Atualiza a bolinha vermelha do Sino lá no topo
+        if (typeof atualizarContador === 'function') atualizarContador();
 
     } catch (err) {
-        console.error("Erro na trava dinâmica:", err);
-        if (btnTela) { 
-            btnTela.disabled = false; 
-            btnTela.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Erro'; 
+        console.error("Erro ao sincronizar leitura dupla:", err);
+        if (btnTela) {
+            btnTela.innerHTML = htmlAntigo;
+            btnTela.disabled = false;
         }
-        mostrarAlerta("Erro de conexão ao salvar status no banco de dados.", "erro");
+        mostrarAlerta("Falha de conexão ao salvar leitura.", "erro");
     }
 };
 
@@ -13319,109 +13341,14 @@ await window.sincronizarLeituraTabelaBase(tipoNotif, referenciaId, colaboradorId
 // 🚀 PATCH DE CORREÇÃO: INVERSÃO DE ORDEM PARA MATAR O EFEITO FANTASMA
 // =========================================================================
 
+// Redireciona o clique velho para a função dinâmica blindada
 window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
-    if (event) event.stopPropagation();
-
-    const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
-    const btnTela = document.getElementById(`btn-leitura-${idNotificacao}`) || document.getElementById(`btn-leitura-ferias-${idNotificacao}`);
-    
-    const htmlAntigo = btnTela ? btnTela.innerHTML : '';
-    const classeAntiga = btnTela ? btnTela.className : '';
-
-    if (btnTela) {
-        btnTela.disabled = true;
-        btnTela.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> ...';
-    }
-
-    try {
-        // 👇 1. ATUALIZA PRIMEIRO A TABELA DE NOTIFICAÇÕES (É a principal)
-        const { error: errNotif } = await supabaseClient.from('notificacoes').update({ lida: statusLida, lida_por: nomeQuemLeu }).eq('id', idNotificacao);
-        if (errNotif) throw errNotif;
-
-        // 👇 2. BUSCA O REGISTRO E ATUALIZA A MEMÓRIA IMEDIATAMENTE (Antes de qualquer refresh)
-        let notifBanco = notificacoesGlobais.find(n => String(n.id) === String(idNotificacao));
-        if (!notifBanco) {
-            const { data } = await supabaseClient.from('notificacoes').select('*').eq('id', idNotificacao).maybeSingle();
-            notifBanco = data;
-        }
-
-        if (notifBanco) {
-            // Garante que o array global já saiba que foi lido!
-            const notifIndex = notificacoesGlobais.findIndex(n => String(n.id) === String(idNotificacao));
-            if (notifIndex !== -1) {
-                notificacoesGlobais[notifIndex].lida = statusLida;
-                notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
-            } else {
-                notifBanco.lida = statusLida;
-                notifBanco.lida_por = nomeQuemLeu;
-                notificacoesGlobais.push(notifBanco);
-            }
-        }
-
-        // 👇 3. ATUALIZA O VISUAL DO BOTÃO INSTANTANEAMENTE (Pra não piscar)
-        if (btnTela) {
-            const containerLeitura = btnTela.parentElement;
-            const existingSpan = containerLeitura.querySelector('.leitura-nome');
-            if (existingSpan) existingSpan.remove();
-
-            if (statusLida) {
-                btnTela.className = 'btn-secondary';
-                btnTela.style.opacity = '0.6';
-                btnTela.innerHTML = '<i class="fa-solid fa-check-double"></i> Lido';
-                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${idNotificacao}', false)`);
-                
-                if (nomeQuemLeu) {
-                    const pNome = nomeQuemLeu.split(' ')[0];
-                    containerLeitura.insertAdjacentHTML('beforeend', `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${pNome}</b></span>`);
-                }
-            } else {
-                btnTela.className = 'btn-success';
-                btnTela.style.opacity = '1';
-                btnTela.innerHTML = '<i class="fa-solid fa-envelope"></i> Marcar como Lido';
-                btnTela.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${idNotificacao}', true)`);
-            }
-            btnTela.disabled = false;
-        }
-
-        // 👇 4. ATUALIZA O SINO NO TOPO DA TELA
-        const headerBadge = document.getElementById('badge-header-count');
-        if (headerBadge) {
-             let currentCount = parseInt(headerBadge.innerText) || 0;
-             currentCount = statusLida ? Math.max(0, currentCount - 1) : currentCount + 1;
-             headerBadge.innerText = currentCount;
-             headerBadge.style.display = currentCount > 0 ? 'block' : 'none';
-        }
-
-        // 👇 5. ATUALIZA A COR NO DROPDOWN DO SINO
-        const dropdownItem = document.querySelector(`#lista-notificacoes-dropdown button[onclick*="${idNotificacao}"]`);
-        if (dropdownItem) {
-            const containerDropdown = dropdownItem.closest('.notif-item');
-            if (statusLida) {
-                containerDropdown.classList.add('lida');
-                dropdownItem.innerHTML = '<i class="fa-solid fa-envelope-open-text"></i>';
-                dropdownItem.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${idNotificacao}', false)`);
-            } else {
-                containerDropdown.classList.remove('lida');
-                dropdownItem.innerHTML = '<i class="fa-solid fa-envelope"></i>';
-                dropdownItem.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${idNotificacao}', true)`);
-            }
-        }
-
-        // 👇 6. POR FIM: Roda a função que salva na tabela de Ausências/FT
-        // Removemos o 'await' daqui! Assim ele roda no "fundo" e não trava a tela,
-        // E se o Realtime recarregar a tela, a memória global já está com o "Lida: true" lá do Passo 2!
-        if (notifBanco) {
-            window.sincronizarLeituraTabelaBase(notifBanco.tipo, notifBanco.referencia_id, notifBanco.colaborador_id, statusLida);
-        }
-
-    } catch (err) {
-        console.error("Erro ao sincronizar leitura:", err);
-        if (btnTela) {
-            btnTela.innerHTML = htmlAntigo;
-            btnTela.className = classeAntiga;
-            btnTela.disabled = false;
-        }
-        mostrarAlerta("Erro de conexão ao alterar leitura.", "erro");
+    // Busca a notificação na memória para extrair os dados e mandar pro motor dinâmico
+    const n = notificacoesGlobais.find(x => String(x.id) === String(idNotificacao));
+    if (n) {
+        await window.alternarLeituraNotificacaoDinamica(n.id, statusLida, n.colaborador_id, n.referencia_id, n.tipo, n.unidade, n.nome);
+    } else {
+        await window.alternarLeituraNotificacaoDinamica(idNotificacao, statusLida, null, null, null, null, null);
     }
 };
 
@@ -54366,8 +54293,11 @@ window.filtrarSolicitacoesPendentes = function() {
       // =========================================================================
 // MÁGICA: SINCRONIZAÇÃO DUPLA DA LEITURA (COM ESCUDO ANTI-PISCAR)
 // =========================================================================
+// A Função que grava na tabela base garantindo o envio do NULL quando desmarca!
 window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, colaboradorId, statusLida) {
     if (!referenciaId && !colaboradorId) return;
+    
+    // 👇 A MÁGICA: O nome vira NULL para apagar do banco se a leitura for desmarcada! 👇
     const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
     let tabela = null;
 
@@ -54379,7 +54309,7 @@ window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, co
     else if (tipoNotif.includes('Advertência')) tabela = 'advertencias';
     else if (tipoNotif.includes('Ferias')) tabela = 'solicitacoes_ferias';
 
-    // 👇 O ESCUDO: Trava o Realtime dessa linha específica por 3 segundos para a tabela não piscar! 👇
+    // Escudo anti-piscada do Realtime (Trava a atualização automática da tela por 3 segs)
     const targetId = referenciaId || colaboradorId;
     window.idsIgnoradosRealtime = window.idsIgnoradosRealtime || new Set();
     window.idsIgnoradosRealtime.add(String(targetId));
