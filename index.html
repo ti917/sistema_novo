@@ -13316,10 +13316,9 @@ await window.sincronizarLeituraTabelaBase(tipoNotif, referenciaId, colaboradorId
 };
 
 // =========================================================================
-// 🚀 PATCH DE CORREÇÃO DEFINITIVA: EFEITO FANTASMA E MARCAÇÃO DE LEITURA
+// 🚀 PATCH DE CORREÇÃO: INVERSÃO DE ORDEM PARA MATAR O EFEITO FANTASMA
 // =========================================================================
 
-// 1. BLINDAGEM DA FUNÇÃO GLOBAL DE LEITURA
 window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
     if (event) event.stopPropagation();
 
@@ -13335,36 +13334,33 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
     }
 
     try {
-        // 👇 CORREÇÃO CRÍTICA: Se a notificação não estiver na memória rápida, busca direto na nuvem!
+        // 👇 1. ATUALIZA PRIMEIRO A TABELA DE NOTIFICAÇÕES (É a principal)
+        const { error: errNotif } = await supabaseClient.from('notificacoes').update({ lida: statusLida, lida_por: nomeQuemLeu }).eq('id', idNotificacao);
+        if (errNotif) throw errNotif;
+
+        // 👇 2. BUSCA O REGISTRO E ATUALIZA A MEMÓRIA IMEDIATAMENTE (Antes de qualquer refresh)
         let notifBanco = notificacoesGlobais.find(n => String(n.id) === String(idNotificacao));
-        
         if (!notifBanco) {
             const { data } = await supabaseClient.from('notificacoes').select('*').eq('id', idNotificacao).maybeSingle();
             notifBanco = data;
         }
 
         if (notifBanco) {
-            await window.sincronizarLeituraTabelaBase(notifBanco.tipo, notifBanco.referencia_id, notifBanco.colaborador_id, statusLida);
+            // Garante que o array global já saiba que foi lido!
+            const notifIndex = notificacoesGlobais.findIndex(n => String(n.id) === String(idNotificacao));
+            if (notifIndex !== -1) {
+                notificacoesGlobais[notifIndex].lida = statusLida;
+                notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
+            } else {
+                notifBanco.lida = statusLida;
+                notifBanco.lida_por = nomeQuemLeu;
+                notificacoesGlobais.push(notifBanco);
+            }
         }
 
-        // FORÇA O UPDATE NO BANCO E ESPERA A CONFIRMAÇÃO
-        const { error } = await supabaseClient.from('notificacoes').update({ lida: statusLida, lida_por: nomeQuemLeu }).eq('id', idNotificacao);
-        if (error) throw error;
-
-        // ATUALIZA A MEMÓRIA PARA NÃO REVERTER NA TROCA DE ABA
-        const notifIndex = notificacoesGlobais.findIndex(n => String(n.id) === String(idNotificacao));
-        if (notifIndex !== -1) {
-            notificacoesGlobais[notifIndex].lida = statusLida;
-            notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
-        } else if (notifBanco) {
-            notifBanco.lida = statusLida;
-            notifBanco.lida_por = nomeQuemLeu;
-            notificacoesGlobais.push(notifBanco);
-        }
-
-        // ATUALIZA O VISUAL DO BOTÃO INSTANTANEAMENTE
+        // 👇 3. ATUALIZA O VISUAL DO BOTÃO INSTANTANEAMENTE (Pra não piscar)
         if (btnTela) {
-            const containerLeitura = document.getElementById(`container-leitura-${idNotificacao}`) || btnTela.parentElement;
+            const containerLeitura = btnTela.parentElement;
             const existingSpan = containerLeitura.querySelector('.leitura-nome');
             if (existingSpan) existingSpan.remove();
 
@@ -13387,7 +13383,7 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
             btnTela.disabled = false;
         }
 
-        // ATUALIZA O SINO LÁ NO TOPO
+        // 👇 4. ATUALIZA O SINO NO TOPO DA TELA
         const headerBadge = document.getElementById('badge-header-count');
         if (headerBadge) {
              let currentCount = parseInt(headerBadge.innerText) || 0;
@@ -13396,6 +13392,7 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
              headerBadge.style.display = currentCount > 0 ? 'block' : 'none';
         }
 
+        // 👇 5. ATUALIZA A COR NO DROPDOWN DO SINO
         const dropdownItem = document.querySelector(`#lista-notificacoes-dropdown button[onclick*="${idNotificacao}"]`);
         if (dropdownItem) {
             const containerDropdown = dropdownItem.closest('.notif-item');
@@ -13408,6 +13405,13 @@ window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
                 dropdownItem.innerHTML = '<i class="fa-solid fa-envelope"></i>';
                 dropdownItem.setAttribute('onclick', `event.stopPropagation(); window.alternarLeituraNotificacao('${idNotificacao}', true)`);
             }
+        }
+
+        // 👇 6. POR FIM: Roda a função que salva na tabela de Ausências/FT
+        // Removemos o 'await' daqui! Assim ele roda no "fundo" e não trava a tela,
+        // E se o Realtime recarregar a tela, a memória global já está com o "Lida: true" lá do Passo 2!
+        if (notifBanco) {
+            window.sincronizarLeituraTabelaBase(notifBanco.tipo, notifBanco.referencia_id, notifBanco.colaborador_id, statusLida);
         }
 
     } catch (err) {
