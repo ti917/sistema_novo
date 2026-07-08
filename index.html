@@ -13235,10 +13235,9 @@ window.abrirSolicitacaoDaCentral = async function(tipo, id) {
 };
       
     // =========================================================================
-// 🚀 MOTOR DEFINITIVO DE LEITURA (SINCRONIZA BASE E NOTIFICAÇÃO AO MESMO TEMPO)
+// 🚀 MOTOR DEFINITIVO DE LEITURA (BLINDADO CONTRA DUPLICATAS NO BANCO)
 // =========================================================================
 
-// Função unificada: Serve tanto para botão normal quanto para botões "Fallback"
 window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, idColab, refId, tipo, unidade, nomeColab) {
     if (event) event.stopPropagation();
 
@@ -13246,7 +13245,7 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
     const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
     
     // Captura o botão clicado
-    const btnTela = event.currentTarget || document.getElementById(`btn-leitura-${idNotif}`);
+    const btnTela = event.currentTarget || document.getElementById(`btn-leitura-${idNotif}`) || document.getElementById(`btn-leitura-fallback_${refId}`);
     const htmlAntigo = btnTela ? btnTela.innerHTML : '';
 
     if (btnTela) {
@@ -13256,23 +13255,26 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
 
     try {
         // 1️⃣ ATUALIZA A TABELA MATRIZ PRIMEIRO (Ausências, FT, etc)
-        await window.sincronizarLeituraTabelaBase(tipo, refId, idColab, statusLida);
+        if (tipo) {
+            await window.sincronizarLeituraTabelaBase(tipo, refId, idColab, statusLida);
+        }
 
         // 2️⃣ ATUALIZA A TABELA DE NOTIFICAÇÕES (SININHO)
         let idRealNotificacao = idNotif;
 
-        // Se o ID for "null" ou um "fallback_", nós buscamos o ID real no banco!
-        if (!idRealNotificacao || idRealNotificacao.includes('fallback') || idRealNotificacao === 'null') {
-            const { data: notifExistente } = await supabaseClient.from('notificacoes')
+        // Se for fallback ou nulo, busca com LIMIT(1) para NUNCA dar erro de duplicidade
+        if (!idRealNotificacao || String(idRealNotificacao).includes('fallback') || String(idRealNotificacao) === 'null') {
+            const { data: notifsExistentes } = await supabaseClient.from('notificacoes')
                 .select('id')
                 .eq('referencia_id', refId)
                 .eq('tipo', tipo)
-                .maybeSingle();
+                .order('criado_em', { ascending: false }) // Pega a mais recente
+                .limit(1);
 
-            if (notifExistente) {
-                idRealNotificacao = notifExistente.id;
+            if (notifsExistentes && notifsExistentes.length > 0) {
+                idRealNotificacao = notifsExistentes[0].id;
             } else if (statusLida) {
-                // Se não existia notificação, a gente cria ela já como "lida" pra ficar registrado!
+                // Se não existe NENHUMA notificação, cria uma já lida para garantir o registro
                 const { data: novaNotif } = await supabaseClient.from('notificacoes').insert([{
                     colaborador_id: idColab,
                     nome: nomeColab || 'Registro do Sistema',
@@ -13287,18 +13289,36 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
             }
         }
 
-        // Se achou um ID real, atualiza o lida_por (colocando o nome ou apagando com NULL)
+        // Atualiza a notificação real no banco de dados
         if (idRealNotificacao && idRealNotificacao !== 'null') {
             await supabaseClient.from('notificacoes')
                 .update({ lida: statusLida, lida_por: nomeQuemLeu })
                 .eq('id', idRealNotificacao);
         }
 
-        // 3️⃣ ATUALIZA O VISUAL DO BOTÃO E A CAIXINHA DE "VISTO POR" (Tira a dupla piscada)
+        // ATUALIZA A MEMÓRIA LOCAL PARA EVITAR O EFEITO FANTASMA NAS ABAS
+        if (idRealNotificacao && idRealNotificacao !== 'null') {
+            const notifIndex = notificacoesGlobais.findIndex(n => String(n.id) === String(idRealNotificacao));
+            if (notifIndex !== -1) {
+                notificacoesGlobais[notifIndex].lida = statusLida;
+                notificacoesGlobais[notifIndex].lida_por = nomeQuemLeu;
+            } else {
+                notificacoesGlobais.push({
+                    id: idRealNotificacao,
+                    referencia_id: refId,
+                    tipo: tipo,
+                    lida: statusLida,
+                    lida_por: nomeQuemLeu,
+                    colaborador_id: idColab
+                });
+            }
+        }
+
+        // 3️⃣ ATUALIZA O VISUAL DO BOTÃO E A CAIXINHA DE "VISTO POR" NA HORA
         if (btnTela) {
             const containerLeitura = btnTela.parentElement;
             const existingSpan = containerLeitura.querySelector('.leitura-nome');
-            if (existingSpan) existingSpan.remove(); // Remove o "Visto por" antigo
+            if (existingSpan) existingSpan.remove(); // Apaga o texto anterior
 
             if (statusLida) {
                 btnTela.className = 'btn-secondary';
@@ -13324,16 +13344,16 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
             btnTela.disabled = false;
         }
 
-        // Atualiza a bolinha vermelha do Sino lá no topo
+        // Atualiza a bolinha vermelha do Sino
         if (typeof atualizarContador === 'function') atualizarContador();
 
     } catch (err) {
-        console.error("Erro ao sincronizar leitura dupla:", err);
+        console.error("Erro crítico ao sincronizar leitura:", err);
         if (btnTela) {
             btnTela.innerHTML = htmlAntigo;
             btnTela.disabled = false;
         }
-        mostrarAlerta("Falha de conexão ao salvar leitura.", "erro");
+        mostrarAlerta("Falha de conexão ao salvar leitura. Tente novamente.", "erro");
     }
 };
 
@@ -13343,7 +13363,6 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
 
 // Redireciona o clique velho para a função dinâmica blindada
 window.alternarLeituraNotificacao = async function(idNotificacao, statusLida) {
-    // Busca a notificação na memória para extrair os dados e mandar pro motor dinâmico
     const n = notificacoesGlobais.find(x => String(x.id) === String(idNotificacao));
     if (n) {
         await window.alternarLeituraNotificacaoDinamica(n.id, statusLida, n.colaborador_id, n.referencia_id, n.tipo, n.unidade, n.nome);
@@ -54293,11 +54312,12 @@ window.filtrarSolicitacoesPendentes = function() {
       // =========================================================================
 // MÁGICA: SINCRONIZAÇÃO DUPLA DA LEITURA (COM ESCUDO ANTI-PISCAR)
 // =========================================================================
-// A Função que grava na tabela base garantindo o envio do NULL quando desmarca!
+// Grava na tabela base e garante o NULL (limpeza) quando desmarcado
 window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, colaboradorId, statusLida) {
+    if (!tipoNotif || typeof tipoNotif !== 'string') return; // 👈 Proteção vital anti-crash
     if (!referenciaId && !colaboradorId) return;
     
-    // 👇 A MÁGICA: O nome vira NULL para apagar do banco se a leitura for desmarcada! 👇
+    // Se statusLida for false, manda 'null' para o banco apagar o nome!
     const nomeQuemLeu = statusLida ? usuarioAtual.nome : null;
     let tabela = null;
 
@@ -54309,7 +54329,7 @@ window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, co
     else if (tipoNotif.includes('Advertência')) tabela = 'advertencias';
     else if (tipoNotif.includes('Ferias')) tabela = 'solicitacoes_ferias';
 
-    // Escudo anti-piscada do Realtime (Trava a atualização automática da tela por 3 segs)
+    // Trava de 3 segundos no Realtime para a tabela não piscar ao salvar
     const targetId = referenciaId || colaboradorId;
     window.idsIgnoradosRealtime = window.idsIgnoradosRealtime || new Set();
     window.idsIgnoradosRealtime.add(String(targetId));
