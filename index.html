@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -34663,7 +34664,7 @@ window.calcularCestaAgora = async function() {
         const mesAnteriorStr = `${anoAnt}-${String(mesAnt).padStart(2, '0')}`;
 
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
-        if (empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
 
         const { data: resPerfis } = await queryPerfis;
         
@@ -34685,9 +34686,14 @@ window.calcularCestaAgora = async function() {
         const dAntI = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-01`;
         const dAntF = `${anoAnt}-${String(mesAnt).padStart(2,'0')}-${new Date(anoAnt, mesAnt, 0).getDate()}`;
         
-        const { data: ausAnteriores } = await supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dAntF).gte('data_fim', dAntI);
-        const { data: ftAnteriores } = await supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dAntF).gte('data_fim', dAntI);
-        const ocorrenciasAnt = [...(ausAnteriores || []), ...(ftAnteriores || [])];
+        // 👇 BUSCA FÉRIAS TAMBÉM (Correção aplicada aqui) 👇
+        const [resAus, resFt, resFerias] = await Promise.all([
+            supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dAntF).gte('data_fim', dAntI),
+            supabaseClient.from('horas_extras_ft').select('*').eq('status', 'Aprovado').lte('data_inicio', dAntF).gte('data_fim', dAntI),
+            supabaseClient.from('solicitacoes_ferias').select('*').eq('status', 'Aprovado').lte('data_inicio_ferias', dAntF).gte('data_fim_ferias', dAntI)
+        ]);
+
+        const ocorrenciasAnt = [...(resAus.data || []), ...(resFt.data || [])];
 
         let unidadesProcessar = unidadeSelecionada === 'Todas' 
             ? [...new Set(colabsAtivos.map(c => c.unidade.split(',')).flat().map(u => u.trim()))].filter(u => u !== '')
@@ -34698,10 +34704,12 @@ window.calcularCestaAgora = async function() {
         const CODIGOS_FALTA = ['FA', 'SUSP'];
 
         unidadesProcessar.forEach(u => {
-            const escAnt = algoritmoGeradorDeEscala(colabsAtivos, mesAnteriorStr, ocorrenciasAnt, u);
+            // MÁGICA: Passamos a array de férias (resFerias.data) para a escala virtual montar os "FER" nos dias!
+            const escAnt = algoritmoGeradorDeEscala(colabsAtivos, mesAnteriorStr, ocorrenciasAnt, u, [], resFerias.data || []);
             escAnt.forEach(linha => {
-                // 👈 ADICIONADO CONTADOR DE FÉRIAS AQUI
+                // Inclui a chave "ferias" na contagem
                 if(!faltasEAtestados[linha.id_colaborador]) faltasEAtestados[linha.id_colaborador] = { faltas: 0, atestados: 0, ferias: 0 };
+                
                 Object.values(linha.dias).forEach(diaObj => {
                     if (diaObj && diaObj.sigla) {
                         const s = diaObj.sigla.toUpperCase();
@@ -34728,12 +34736,10 @@ window.calcularCestaAgora = async function() {
                 regraUnidade = regrasDB.find(r => unidadesDoColab.includes((r.unidade || '').trim().toUpperCase()));
             }
 
-            // 👇 BLINDAGEM MÁXIMA ANTI-VAZAMENTO 👇
-            // Pega o valor exato, remove espaços e força tudo pra minúsculo pra não ter erro de leitura
             let recebeBeneficio = regraUnidade ? regraUnidade.recebe_cesta : false;
             
             if (!regraUnidade || recebeBeneficio === false || String(recebeBeneficio).trim().toLowerCase() === 'false') {
-                return; // Corta o funcionário na hora e impede a unidade de ir para o Excel!
+                return; 
             }
 
             const adm = colab.dados_admissao || {};
@@ -34753,12 +34759,13 @@ window.calcularCestaAgora = async function() {
 
             const dataCorte = new Date(anoAnt, mesAnt - 1, 15, 23, 59, 59);
             
-            // 👇 A MÁGICA: Retém a cesta se tiver 15 dias ou mais de férias
+            // 👇 A MÁGICA DE RETENÇÃO AQUI 👇
             if (contagem.ferias >= 15) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Em Férias (${contagem.ferias} dias)</span>`;
                 statusExcel = `Retido (Férias no período)`;
                 valorFinal = 0;
-            } else if (dataInicioObj.getFullYear() === anoAtual && dataInicioObj.getMonth() === (mesAtual - 1)) {
+            }
+            else if (dataInicioObj.getFullYear() === anoAtual && dataInicioObj.getMonth() === (mesAtual - 1)) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Admissão no mês atual</span>`;
                 statusExcel = 'Retido (Admissão no mês atual)';
             } else if (dataInicioObj > dataCorte) {
@@ -34812,10 +34819,11 @@ window.calcularCestaAgora = async function() {
             });
 
             contagemValidada++;
+            // Exibimos a contagem de férias ("FER:") direto na tela para você auditar visualmente
             html += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
                 <td style="text-align: left; color: #e91e63; padding: 12px; line-height: 1.4;"><strong>${colab.nome}</strong><br><span style="font-size: 0.8rem; color: var(--cor-texto-principal);"><i class="fa-solid fa-id-card" style="color: #e91e63;"></i> ${cpfColab}</span></td>
                 <td>${regraUnidade.unidade}</td>
-                <td style="color: #ff9800; font-weight: bold;">FA: ${contagem.faltas} | ATM: ${contagem.atestados}</td>
+                <td style="color: #ff9800; font-weight: bold;">FA: ${contagem.faltas} | ATM: ${contagem.atestados} | <span style="color: #ffd54f;">FER: ${contagem.ferias}</span></td>
                 <td>${statusTexto}</td>
                 <td style="color: ${valorFinal > 0 ? 'var(--cor-sucesso)' : 'var(--cor-texto-secundario)'}; font-weight: bold; font-size: 1.1rem;">${valorFinal.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
             </tr>`;
@@ -34830,7 +34838,7 @@ window.calcularCestaAgora = async function() {
             </tr>`;
             tbody.innerHTML = html;
             btnExcel.classList.remove('hidden');
-            document.getElementById('btn-exportar-cesta-r6')?.classList.remove('hidden'); // <-- Mostra o R6 da Cesta 2
+            document.getElementById('btn-exportar-cesta-r6')?.classList.remove('hidden'); 
         }
 
     } catch (err) {
