@@ -12672,54 +12672,72 @@ window.enviarTRCTAssinadoGestor = async function(idColab, nomeColab, unidadeCola
     return usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
 };
 
-      // 👇 1. COLE A FUNÇÃO INTEIRA AQUI, LOGO ACIMA DO CARREGAR PERFIL 👇
+     // 👇 1. SUBSTITUA A FUNÇÃO INTEIRA POR ESTA VERSÃO TURBO 👇
 window.checarAvisosAsoAoLogar = async function() {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return; // Só interessa ao Admin
 
+    const hoje = new Date();
+    hoje.setHours(0,0,0,0);
+
     try {
-        const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo');
+        // 1. Puxa todo mundo de uma vez (1 requisição)
+        const { data: colabs } = await supabaseClient.from('perfis')
+            .select('id, nome, unidade, dados_admissao')
+            .eq('perfil', 'Colaborador')
+            .eq('status', 'Ativo');
         
         if (!colabs || colabs.length === 0) return;
 
-        const hoje = new Date(); hoje.setHours(0,0,0,0);
+        // 2. Puxa TODAS as notificações de ASO existentes de uma vez só (1 requisição)
+        const idsColabs = colabs.map(c => c.id);
+        const { data: notifsExistentes } = await supabaseClient.from('notificacoes')
+            .select('referencia_id')
+            .eq('tipo', 'ASO_Vencimento_Admin')
+            .in('referencia_id', idsColabs);
 
+        // 3. Cria um "mapa" na memória para consultar instantaneamente (Custo Zero)
+        const setNotifsJaCriadas = new Set((notifsExistentes || []).map(n => n.referencia_id));
+        const novasNotificacoes = [];
+
+        // 4. Varre os colaboradores na memória do PC
         for (let c of colabs) {
             const adm = c.dados_admissao || {};
             const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
             
             if (!dataBaseAso) continue;
 
-            const dBase = new Date(dataBaseAso + 'T00:00:00');
-            const dVencimento = new Date(dBase);
+            // MÁGICA ANTI-FUSO HORÁRIO: Força a leitura do ano, mês e dia exatos
+            const [ano, mes, dia] = dataBaseAso.split('T')[0].split('-');
+            const dVencimento = new Date(ano, mes - 1, dia);
             dVencimento.setFullYear(dVencimento.getFullYear() + 1); // Vence 1 ano depois
 
-            // Distância em dias até o vencimento
-            const diffDias = Math.ceil((dVencimento - hoje) / (1000 * 60 * 60 * 24));
+            // Calcula os dias restantes com arredondamento preciso
+            const diffTime = dVencimento.getTime() - hoje.getTime();
+            const diffDias = Math.round(diffTime / (1000 * 3600 * 24));
 
-            // Se faltar 30 dias ou menos (ou se já tiver vencido), alerta o RH!
-            if (diffDias <= 30) {
-                // Checa no banco se já criamos esse alerta
-                const { data: jaExiste } = await supabaseClient.from('notificacoes')
-                    .select('id')
-                    .eq('referencia_id', c.id)
-                    .eq('tipo', 'ASO_Vencimento_Admin')
-                    .maybeSingle();
-
-                if (!jaExiste) {
-                    await supabaseClient.from('notificacoes').insert([{
+            // SE FALTAM 30 DIAS OU MENOS (E limitamos a -30 pra ignorar vencimentos jurássicos)
+            if (diffDias <= 30 && diffDias >= -30) {
+                
+                // Pergunta para a memória (Set) em vez de ir no Supabase
+                if (!setNotifsJaCriadas.has(c.id)) {
+                    novasNotificacoes.push({
                         colaborador_id: c.id,
                         nome: `ASO Perto do Vencimento: ${c.nome}`,
                         unidade: c.unidade || 'Matriz',
                         lida: false,
                         tipo: 'ASO_Vencimento_Admin',
                         referencia_id: c.id
-                    }]);
+                    });
                 }
             }
         }
         
-        // Atualiza a bolinha vermelha lá no topo
-        atualizarContador();
+        // 5. Se encontrou gente precisando de alerta, faz 1 ÚNICO INSERT no banco!
+        if (novasNotificacoes.length > 0) {
+            await supabaseClient.from('notificacoes').insert(novasNotificacoes);
+            // Atualiza a bolinha vermelha lá no topo
+            if (typeof atualizarContador === 'function') atualizarContador();
+        }
 
     } catch (e) {
         console.error("Erro ao checar vencimentos de ASO:", e);
@@ -45968,10 +45986,7 @@ document.addEventListener('DOMContentLoaded', () => {
     atualizarBotaoSom();
 });
 
-     // =========================================================================
-// MÓDULO: LEMBRETE AUTOMÁTICO DE PRORROGAÇÃO (45 DIAS) NO SINO
-// =========================================================================
-window.checarLembretesProrrogacaoAoLogar = async function() {
+    window.checarLembretesProrrogacaoAoLogar = async function() {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
@@ -45979,7 +45994,7 @@ window.checarLembretesProrrogacaoAoLogar = async function() {
     hoje.setHours(0,0,0,0);
 
     try {
-        // 1. Busca todos os colaboradores ativos das unidades desse gestor
+        // 1. Busca todos os colaboradores ativos
         const { data: colabs } = await supabaseClient.from('perfis')
             .select('id, nome, unidade, empresa, dados_admissao')
             .eq('perfil', 'Colaborador')
@@ -45987,6 +46002,19 @@ window.checarLembretesProrrogacaoAoLogar = async function() {
             .in('unidade', unids);
 
         if (!colabs || colabs.length === 0) return;
+
+        // 👇 A MÁGICA: Faz 1 ÚNICA BUSCA para saber quem já tem notificação criada
+        const idsColabs = colabs.map(c => c.id);
+        const { data: notifsExistentes } = await supabaseClient.from('notificacoes')
+            .select('colaborador_id')
+            .eq('tipo', 'Lembrete_Prorrogacao')
+            .in('colaborador_id', idsColabs);
+            
+        // Cria um mapa rápido na memória para checar instantaneamente
+        const setNotifsJaCriadas = new Set((notifsExistentes || []).map(n => n.colaborador_id));
+
+        // Array para salvar todas as novas notificações de uma vez só
+        const novasNotificacoesParaInserir = [];
 
         for (let c of colabs) {
             const adm = c.dados_admissao || {};
@@ -45998,33 +46026,27 @@ window.checarLembretesProrrogacaoAoLogar = async function() {
             const dIni = new Date(dataInicioStr + 'T00:00:00');
             const diffDias = Math.floor((hoje - dIni) / (1000 * 60 * 60 * 24));
 
-            // 👇 A MÁGICA DA TRAVA AQUI 👇
-            // >= 45 (Atingiu o prazo) E <= 105 (Máximo de 2 meses de atraso tolerado)
             if (diffDias >= 45 && diffDias <= 105 && ctr.status === 'Aguardando Prorrogação') {
                 
-                // 3. Verifica no banco se já não criamos esse lembrete antes
-                const { data: jaExiste } = await supabaseClient.from('notificacoes')
-                    .select('id')
-                    .eq('colaborador_id', c.id)
-                    .eq('tipo', 'Lembrete_Prorrogacao')
-                    .maybeSingle();
-
-                // 4. Se não existe, injeta o alerta
-                if (!jaExiste) {
-                    await supabaseClient.from('notificacoes').insert([{
+                // Checa no mapa da memória em vez de ir no banco
+                if (!setNotifsJaCriadas.has(c.id)) {
+                    novasNotificacoesParaInserir.push({
                         colaborador_id: c.id,
                         nome: c.nome,
                         unidade: c.unidade,
                         lida: false,
                         tipo: 'Lembrete_Prorrogacao',
                         referencia_id: c.id
-                    }]);
+                    });
                 }
             }
         }
 
-        // 5. Atualiza o sininho na tela do gestor
-        atualizarContador();
+        // Se encontrou gente precisando de alerta, faz 1 ÚNICO INSERT no banco!
+        if (novasNotificacoesParaInserir.length > 0) {
+            await supabaseClient.from('notificacoes').insert(novasNotificacoesParaInserir);
+            atualizarContador();
+        }
 
     } catch (e) {
         console.error("Erro ao processar lembretes de prorrogação:", e);
@@ -50044,13 +50066,12 @@ window.exportarExcelAdmissaoR6 = async function(idColab) {
     }
 };
 
-      window.resgatarNotificacoesPonto = async function() {
+     window.resgatarNotificacoesPonto = async function(event) {
     const btn = event.currentTarget;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Resgatando... Aguarde!';
     btn.disabled = true;
 
     try {
-        // 1. Puxa todos os chamados que estão "Pendentes"
         const { data: ocosPonto, error: errOco } = await supabaseClient.from('ocorrencias_ponto')
             .select('id, colaborador_id, nome, unidade')
             .eq('status', 'Pendente');
@@ -50062,31 +50083,36 @@ window.exportarExcelAdmissaoR6 = async function(idColab) {
             return;
         }
 
-        let resgatadas = 0;
+        // 1. Busca TODAS as notificações de uma vez
+        const idsOcorrencias = ocosPonto.map(o => o.id);
+        const { data: notifsExistentes } = await supabaseClient.from('notificacoes')
+            .select('referencia_id')
+            .eq('tipo', 'Ocorrencia_Ponto_Admin')
+            .in('referencia_id', idsOcorrencias);
 
+        const mapaNotifs = new Set((notifsExistentes || []).map(n => n.referencia_id));
+        const novasNotificacoes = [];
+
+        // 2. Cruza na memória
         for (let oco of ocosPonto) {
-            // 2. Olha se o RH já tem notificação para esse chamado
-            const { data: notifExiste } = await supabaseClient.from('notificacoes')
-                .select('id')
-                .eq('referencia_id', oco.id)
-                .eq('tipo', 'Ocorrencia_Ponto_Admin')
-                .maybeSingle();
-
-            // 3. Se o RLS bloqueou no passado, cria agora na marra!
-            if (!notifExiste) {
-                await supabaseClient.from('notificacoes').insert([{
+            if (!mapaNotifs.has(oco.id)) {
+                novasNotificacoes.push({
                     colaborador_id: oco.colaborador_id,
                     nome: `Ocorrência Respondida: ${oco.nome}`,
                     unidade: oco.unidade || 'Matriz',
                     lida: false,
                     tipo: 'Ocorrencia_Ponto_Admin',
                     referencia_id: oco.id
-                }]);
-                resgatadas++;
+                });
             }
         }
         
-        alert(`SUCESSO! O sistema encontrou e recriou ${resgatadas} notificações que tinham sido bloqueadas. A página vai recarregar agora.`);
+        // 3. Insere todas de uma vez (Lote)
+        if (novasNotificacoes.length > 0) {
+            await supabaseClient.from('notificacoes').insert(novasNotificacoes);
+        }
+        
+        alert(`SUCESSO! O sistema encontrou e recriou ${novasNotificacoes.length} notificações.`);
         location.reload(); 
 
     } catch (err) {
