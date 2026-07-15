@@ -19047,41 +19047,73 @@ window.excluirFerias = async function(id) {
     }
 };
 
-       window.editarFeriasAdmin = async function(idFerias) {
+      window.editarFeriasAdmin = async function(idFerias) {
+    // Localiza a solicitação na memória ativa do sistema
     const f = todasFeriasAdmin.find(x => x.id === idFerias) || (window.listaFeriasPendentes && window.listaFeriasPendentes.find(x => x.id === idFerias));
     if (!f) return;
 
-    // --- INTERCEPTADOR DE METATAGS DA CONTA CORRENTE 🧠 ---
+    mostrarAlerta("Carregando histórico de frações da conta corrente...", "aviso");
+
+    const strPAIni = f.periodo_aquisitivo_inicio;
+    const strPAFim = f.periodo_aquisitivo_fim;
+    const idColab = f.colaborador_id;
+
+    // ⚡ MÁGICA: Puxa o extrato do PA ignorando este ID específico para calcular o Saldo Livre real
+    const [resOcorrencias, resFeriasTiradas] = await Promise.all([
+        supabaseClient.from('ausencias').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').gte('data_inicio', strPAIni).lte('data_fim', strPAFim),
+        supabaseClient.from('solicitacoes_ferias').select('*').eq('colaborador_id', idColab).eq('periodo_aquisitivo_inicio', strPAIni).eq('periodo_aquisitivo_fim', strPAFim).neq('status', 'Reprovado').neq('id', idFerias)
+    ]);
+
+    let faltas = 0; let diasINSS = 0;
+    if (resOcorrencias.data) {
+        resOcorrencias.data.forEach(o => {
+            const d1 = new Date(o.data_inicio + 'T00:00:00');
+            const d2 = new Date(o.data_fim + 'T00:00:00');
+            const dias = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+            if (o.sigla === 'FA') faltas += dias;
+            if (o.sigla === 'ATM' && dias > 15) diasINSS += (dias - 15);
+            if (o.sigla === 'AF') diasINSS += dias;
+        });
+    }
+
+    let diasTotaisAdquiridos = 30;
+    if (diasINSS >= 180 || faltas > 32) diasTotaisAdquiridos = 0;
+    else if (faltas >= 6 && faltas <= 14) diasTotaisAdquiridos = 24;
+    else if (faltas >= 15 && faltas <= 23) diasTotaisAdquiridos = 18;
+    else if (faltas >= 24 && faltas <= 32) diasTotaisAdquiridos = 12;
+
+    let diasJaGozadosOutros = 0;
+    let jaVendeuAbonoOutros = false;
+    window.periodosOcupadosFeriasAdminGlobal = []; // Limpa cache de datas ocupadas
+
+    if (resFeriasTiradas.data) {
+        resFeriasTiradas.data.forEach(fer => {
+            const d1 = new Date(fer.data_inicio_ferias + 'T00:00:00');
+            const d2 = new Date(fer.data_fim_ferias + 'T00:00:00');
+            diasJaGozadosOutros += Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+            if (fer.observacao && fer.observacao.includes('Abono Pecuniário')) jaVendeuAbonoOutros = true;
+
+            window.periodosOcupadosFeriasAdminGlobal.push({
+                inicio: new Date(fer.data_inicio_ferias + 'T00:00:00'),
+                fim: new Date(fer.data_fim_ferias + 'T00:00:00'),
+                label: `${formatarDataBR(fer.data_inicio_ferias)} a ${formatarDataBR(fer.data_fim_ferias)}`
+            });
+        });
+    }
+
+    let diasAbonoCalculado = Math.floor(diasTotaisAdquiridos / 3);
+    if (jaVendeuAbonoOutros) {
+        diasJaGozadosOutros += diasAbonoCalculado;
+    }
+
+    // Limpa tags antigas da string de observações humana
     let obsLimpa = f.observacao || '';
-    let sistemaTexto = '';
-    let fracaoTexto = '';
-
-    if (obsLimpa.includes('[SISTEMA]:')) {
-        const matchSis = obsLimpa.match(/\[SISTEMA\]:\s*([^\n]+)/);
-        if (matchSis) {
-            sistemaTexto = matchSis[1];
-            obsLimpa = obsLimpa.replace(matchSis[0], '').trim();
-        }
-    }
-    if (obsLimpa.includes('[FRAÇÃO]:')) {
-        const matchFrac = obsLimpa.match(/\[FRAÇÃO\]:\s*([^\n]+)/);
-        if (matchFrac) {
-            fracaoTexto = matchFrac[1];
-            obsLimpa = obsLimpa.replace(matchFrac[0], '').trim();
-        }
-    }
-
-    // Monta a caixinha decorada idêntica à do lançamento
-    let previaHtml = '';
-    if (sistemaTexto || fracaoTexto) {
-        previaHtml = `
-            <div id="edit-previa-texto-fracao-modal" style="background: rgba(0, 188, 212, 0.05); border: 1px dashed #00bcd4; padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9rem; color: #00bcd4; font-weight: bold;">
-                <i class="fa-solid fa-robot"></i> Métrica Automática do Período:<br>
-                ${sistemaTexto ? `<span style="color:#ffc107; display:block; margin-top:4px;"><i class="fa-solid fa-money-bill-wave"></i> ${sistemaTexto}</span>` : ''}
-                ${fracaoTexto ? `<span style="color:#00bcd4; display:block; margin-top:4px;"><i class="fa-solid fa-chart-pie"></i> ${fracaoTexto}</span>` : ''}
-            </div>
-        `;
-    }
+    let inicialmenteVendeu = obsLimpa.includes('Abono Pecuniário');
+    
+    obsLimpa = obsLimpa
+        .replace(/\[SISTEMA\]:[^\n]*\n?/g, '')
+        .replace(/\[FRAÇÃO\]:[^\n]*\n?/g, '')
+        .trim();
 
     const modalHtml = `
     <div id="modal-editar-ferias" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -19090,16 +19122,15 @@ window.excluirFerias = async function(id) {
             <h3 style="color: #4fc3f7; margin-bottom: 20px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;"><i class="fa-solid fa-pen-to-square"></i> Edição Completa de Férias: ${f.nome}</h3>
             
             <form id="form-editar-ferias-admin">
-                
                 <h5 style="color: var(--cor-texto-secundario); margin-bottom: 10px;"><i class="fa-solid fa-calendar-check"></i> Período Aquisitivo</h5>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Início do P. Aquisitivo</label>
-                        <input type="date" id="edit-ferias-pa-ini" value="${f.periodo_aquisitivo_inicio}" required onclick="this.showPicker()">
+                        <input type="date" id="edit-ferias-pa-ini" value="${f.periodo_aquisitivo_inicio}" readonly style="background: rgba(0,0,0,0.2); cursor: not-allowed; opacity:0.7;">
                     </div>
                     <div class="form-group">
                         <label>Fim do P. Aquisitivo</label>
-                        <input type="date" id="edit-ferias-pa-fim" value="${f.periodo_aquisitivo_fim}" required onclick="this.showPicker()">
+                        <input type="date" id="edit-ferias-pa-fim" value="${f.periodo_aquisitivo_fim}" readonly style="background: rgba(0,0,0,0.2); cursor: not-allowed; opacity:0.7;">
                     </div>
                 </div>
 
@@ -19134,8 +19165,19 @@ window.excluirFerias = async function(id) {
                     </div>
                 </div>
 
-                <!-- Injeção da caixinha blindada do sistema -->
-                ${previaHtml}
+                <!-- 🌟 INTERFACE CORRIGIDA: CHECKBOX DE ABONO INCORPORADO NA EDICAO DO ADMIN 🌟 -->
+                <div class="form-group ${jaVendeuAbonoOutros ? 'hidden' : ''}" id="box-abono-ferias-edit" style="background: rgba(255, 213, 79, 0.05); padding: 12px; border-radius: 8px; border: 1px dashed #ffd54f; margin-bottom: 15px;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: #ffd54f; font-weight: bold; margin: 0;">
+                        <input type="checkbox" id="edit-ferias-vender-abono" style="width: 20px; height: 20px; accent-color: #ffd54f;" ${inicialmenteVendeu ? 'checked' : ''}>
+                        <i class="fa-solid fa-money-bill-wave"></i> Vender 1/3 das Férias (Abono Pecuniário)
+                    </label>
+                    <small id="txt-aviso-abono-edit" style="color: var(--cor-texto-secundario); display: block; margin-top: 4px; margin-left: 28px;"></small>
+                </div>
+
+                <!-- Painel dinâmico da Clara IA dentro da Edição -->
+                <div id="edit-previa-texto-fracao-modal" style="background: rgba(0, 188, 212, 0.05); border: 1px dashed #00bcd4; padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9rem; color: #00bcd4; font-weight: bold;">
+                    <i class="fa-solid fa-robot"></i> Métrica Automática do Período:<br>
+                </div>
 
                 <div class="form-group">
                     <label>Observações do Gestor / Notas Manuais (RH)</label>
@@ -19149,18 +19191,64 @@ window.excluirFerias = async function(id) {
         </div>
     </div>`;
 
+    const oldModal = document.getElementById('modal-editar-ferias');
+    if(oldModal) oldModal.remove();
+
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
-    // Lógica nativa de recalcular dias do seu script
+    // Amarra os elementos DOM locais
     const inpDias = document.getElementById('edit-ferias-dias');
     const inpIni = document.getElementById('edit-ferias-inicio');
     const inpFim = document.getElementById('edit-ferias-fim');
+    const chkVender = document.getElementById('edit-ferias-vender-abono');
+    const boxPrevia = document.getElementById('edit-previa-texto-fracao-modal');
+
+    let textoAutomacaoEdit = '';
+
+    // Algoritmo de cálculo dinâmico da prévia interno da edição
+    const atualizarPreviaEdicao = () => {
+        let diasGozo = parseInt(inpDias.value) || 0;
+        let tetoAtual = diasTotaisAdquiridos - diasJaGozadosOutros;
+        let vVendido = 0;
+        
+        textoAutomacaoEdit = '';
+
+        if (chkVender && chkVender.checked) {
+            vVendido = diasAbonoCalculado;
+            tetoAtual -= vVendido;
+            textoAutomacaoEdit += `[SISTEMA]: Colaborador vendeu ${vVendido} dias de férias (Abono Pecuniário).\n`;
+        }
+
+        if (diasGozo > tetoAtual) {
+            mostrarAlerta(`O saldo máximo para descanso nessa fração é de ${tetoAtual} dias.`, 'aviso');
+            diasGozo = tetoAtual;
+            inpDias.value = tetoAtual;
+        }
+
+        let saldoFuturo = tetoAtual - diasGozo;
+        if (diasGozo > 0) {
+            if (saldoFuturo > 0) {
+                textoAutomacaoEdit += `[FRAÇÃO]: O colaborador vai tirar ${diasGozo} dias de férias nesta fração. Restou ${saldoFuturo} dias pendentes para lançamento futuro.`;
+            } else {
+                textoAutomacaoEdit += `[FRAÇÃO]: O colaborador vai tirar ${diasGozo} dias de férias nesta fração. Saldo total deste período aquisitivo esgotado.`;
+            }
+        }
+
+        boxPrevia.innerHTML = `<i class="fa-solid fa-robot"></i> Métrica Automática do Período:<br>${textoAutomacaoEdit.replace(/\n/g, '<br>')}`;
+    };
+
+    const txtAvisoAbonoEdit = document.getElementById('txt-aviso-abono-edit');
+    if(txtAvisoAbonoEdit) {
+        let saldoRestante = diasTotaisAdquiridos - diasJaGozadosOutros;
+        txtAvisoAbonoEdit.innerText = `Se marcado, venderá ${diasAbonoCalculado} dias. O limite de descanso cai para ${saldoRestante - diasAbonoCalculado} dias.`;
+    }
 
     const recalcularFim = () => {
         if (!inpIni.value || !inpDias.value) return;
         const d = new Date(inpIni.value + 'T00:00:00');
         d.setDate(d.getDate() + (parseInt(inpDias.value) - 1));
         inpFim.value = d.toISOString().split('T')[0];
+        atualizarPreviaEdicao();
     };
 
     const recalcularDias = () => {
@@ -19169,35 +19257,62 @@ window.excluirFerias = async function(id) {
         const d2 = new Date(inpFim.value + 'T00:00:00');
         const diff = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
         if (diff > 0) inpDias.value = diff;
+        atualizarPreviaEdicao();
     };
 
     inpIni.addEventListener('change', recalcularFim);
     inpDias.addEventListener('input', recalcularFim);
     inpFim.addEventListener('change', recalcularDias);
+    if(chkVender) chkVender.addEventListener('change', atualizarPreviaEdicao);
 
-    // Evento de Submit da Edição (Mesclagem inteligente)
+    // Roda a montagem inicial do layout do modal
+    atualizarPreviaEdicao();
+
+    // Interceptação do submit de alteração
     document.getElementById('form-editar-ferias-admin').addEventListener('submit', async (e) => {
         e.preventDefault();
+
+        const dIniCheck = new Date(inpIni.value + 'T00:00:00');
+        const dFimCheck = new Date(inpFim.value + 'T00:00:00');
+
+        // Escudo de colisão contra as outras frações salvas no banco
+        let colidiu = false; let conflitoStr = '';
+        const listaDatasOcupadas = resFeriasTiradas.data || [];
+        
+        for(let fer of listaDatasOcupadas) {
+            const oIni = new Date(fer.data_inicio_ferias + 'T00:00:00');
+            const oFim = new Date(fer.data_fim_ferias + 'T00:00:00');
+            if (dIniCheck <= oFim && dFimCheck >= oIni) {
+                colidiu = true;
+                conflitoStr = `${formatarDataBR(fer.data_inicio_ferias)} a ${formatarDataBR(fer.data_fim_ferias)}`;
+                break;
+            }
+        }
+
+        if (colidiu) {
+            return mostrarAlerta(`<b>Conflito de Agenda!</b><br><br>Este colaborador já possui outra fração de férias agendada de <b>${conflitoStr}</b>.`, "erro", "⛔ Período Ocupado");
+        }
 
         const confirmado = await mostrarConfirmacao("Confirmar alteração de datas, dias de gozo e status desta solicitação de férias?", "Editar Férias");
         if (!confirmado) return;
 
-        const btn = e.target.querySelector('button[type="submit"]');
-        btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+        const btnForm = e.target.querySelector('button[type="submit"]');
+        btnForm.disabled = true; btnForm.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
 
         const statusEscolhido = document.getElementById('edit-ferias-status').value;
         const txtManual = document.getElementById('edit-ferias-obs').value.trim();
 
-        // Re-combina os logs com o que o admin alterou na caixa manual
+        // Une as strings de forma oculta e limpa
         let observacaoFinalBypass = '';
-        if (sistemaTexto) observacaoFinalBypass += `[SISTEMA]: ${sistemaTexto}\n`;
-        if (fracaoTexto) observacaoFinalBypass += `[FRAÇÃO]: ${fracaoTexto}\n`;
-        observacaoFinalBypass += txtManual;
-        observacaoFinalBypass = observacaoFinalBypass.trim();
+        if (textoAutomacaoEdit) {
+            observacaoFinalBypass = (textoAutomacaoEdit + '\n' + txtManual).trim();
+        } else {
+            observacaoFinalBypass = txtManual;
+        }
 
         const objUpdate = {
-            periodo_aquisitivo_inicio: document.getElementById('edit-ferias-pa-ini').value,
-            periodo_aquisitivo_fim: document.getElementById('edit-ferias-pa-fim').value,
+            periodo_aquisitivo_inicio: strPAIni,
+            periodo_aquisitivo_fim: strPAFim,
             dias_direito: parseInt(inpDias.value), 
             data_inicio_ferias: inpIni.value,
             data_fim_ferias: inpFim.value,
@@ -19209,11 +19324,11 @@ window.excluirFerias = async function(id) {
             objUpdate.aprovado_por = usuarioAtual.nome;
         }
 
-        const { error } = await supabaseClient.from('solicitacoes_ferias').update(objUpdate).eq('id', idFerias);
+        const { error: errUpdate } = await supabaseClient.from('solicitacoes_ferias').update(objUpdate).eq('id', idFerias);
 
-        if (error) {
+        if (errUpdate) {
             mostrarAlerta("Erro ao atualizar os dados no banco.", "erro");
-            btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Alterações';
+            btnForm.disabled = false; btnForm.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Alterações';
         } else {
             mostrarAlerta("Férias atualizadas com sucesso!", "sucesso");
             document.getElementById('modal-editar-ferias').remove();
@@ -19223,6 +19338,7 @@ window.excluirFerias = async function(id) {
         }
     });
 };
+      
         window.abrirFeriasDestacada = async function(idReferencia) {
     document.querySelector('[data-target="tela-ferias-admin"]')?.click();
     document.querySelector('[data-aba="aba-controle-ferias-admin"]')?.click();
