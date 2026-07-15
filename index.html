@@ -18197,9 +18197,9 @@ window.diasTotaisAdquiridosGlobal = 0;
 window.diasJaGozadosGlobal = 0;
 window.jaVendeuAbonoGlobal = false;
 
-// ===============================================
-// LÓGICA DO GESTOR: CÁLCULO COM FRAÇÃO E SALDO
-// ===============================================
+// Array global para guardar os períodos de férias que este colaborador já tem ocupados
+window.periodosOcupadosFeriasGlobal = [];
+
 window.calcularDireitoFerias = async function() {
     const idColab = document.getElementById('ferias-colaborador').value;
     const painel = document.getElementById('painel-calculo-ferias');
@@ -18217,7 +18217,6 @@ window.calcularDireitoFerias = async function() {
     const dAdmissao = new Date(dataInicioStr + 'T00:00:00');
     const hoje = new Date(); hoje.setHours(0,0,0,0);
 
-    // 1. TRAVA INFALÍVEL DE 1 ANO (12 Meses)
     const dataUmAnoDepois = new Date(dAdmissao);
     dataUmAnoDepois.setFullYear(dataUmAnoDepois.getFullYear() + 1);
     dataUmAnoDepois.setDate(dataUmAnoDepois.getDate() - 1); 
@@ -18230,7 +18229,6 @@ window.calcularDireitoFerias = async function() {
         document.getElementById('ferias-total-adquirido').innerText = "0 dias";
         document.getElementById('ferias-ja-usados').innerText = "0 dias";
         document.getElementById('ferias-dias-direito').innerText = "0 dias";
-        
         alertaPerda.innerHTML = "<i class='fa-solid fa-lock'></i> <b>Bloqueado:</b> O colaborador ainda não completou 12 meses de serviço.";
         alertaPerda.classList.remove('hidden');
         document.getElementById('box-abono-ferias').classList.add('hidden');
@@ -18238,7 +18236,6 @@ window.calcularDireitoFerias = async function() {
         return;
     }
 
-    // 2. Descobrir Período Aquisitivo
     let anosCompletos = hoje.getFullYear() - dAdmissao.getFullYear();
     let aniversarioEsteAno = new Date(dAdmissao);
     aniversarioEsteAno.setFullYear(hoje.getFullYear());
@@ -18250,7 +18247,6 @@ window.calcularDireitoFerias = async function() {
     paFim.setFullYear(paFim.getFullYear() + 1);
     paFim.setDate(paFim.getDate() - 1);
 
-    // 3. Data Limite (40 dias antes de vencer a segunda)
     const limiteConcessao = new Date(paFim);
     limiteConcessao.setFullYear(limiteConcessao.getFullYear() + 1);
     limiteConcessao.setDate(limiteConcessao.getDate() - 40);
@@ -18259,7 +18255,6 @@ window.calcularDireitoFerias = async function() {
     const strPAIni = paInicio.toISOString().split('T')[0];
     const strPAFim = paFim.toISOString().split('T')[0];
 
-    // 4. Buscar Faltas (FA), Afastamentos (INSS) E FÉRIAS JÁ TIRADAS NESTE PA
     const [resOcorrencias, resFeriasTiradas] = await Promise.all([
         supabaseClient.from('ausencias').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').gte('data_inicio', strPAIni).lte('data_fim', strPAFim),
         supabaseClient.from('solicitacoes_ferias').select('*').eq('colaborador_id', idColab).eq('periodo_aquisitivo_inicio', strPAIni).eq('periodo_aquisitivo_fim', strPAFim).neq('status', 'Reprovado')
@@ -18271,17 +18266,16 @@ window.calcularDireitoFerias = async function() {
             const d1 = new Date(o.data_inicio + 'T00:00:00');
             const d2 = new Date(o.data_fim + 'T00:00:00');
             const dias = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
-
             if (o.sigla === 'FA') faltas += dias;
             if (o.sigla === 'ATM' && dias > 15) diasINSS += (dias - 15);
             if (o.sigla === 'AF') diasINSS += dias;
         });
     }
 
-    // A MÁGICA: Varre o histórico de férias deste período aquisitivo
     window.diasJaGozadosGlobal = 0;
     window.jaVendeuAbonoGlobal = false;
-    
+    window.periodosOcupadosFeriasGlobal = []; // 💾 Limpa a memória de datas ocupadas
+
     if (resFeriasTiradas.data) {
         resFeriasTiradas.data.forEach(f => {
             const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
@@ -18291,10 +18285,16 @@ window.calcularDireitoFerias = async function() {
             if (f.observacao && f.observacao.includes('Abono Pecuniário')) {
                 window.jaVendeuAbonoGlobal = true;
             }
+
+            // ⚡ MÁGICA: Guarda as datas exatas que já estão guardadas para esse colaborador
+            window.periodosOcupadosFeriasGlobal.push({
+                inicio: new Date(f.data_inicio_ferias + 'T00:00:00'),
+                fim: new Date(f.data_fim_ferias + 'T00:00:00'),
+                label: `${formatarDataBR(f.data_inicio_ferias)} a ${formatarDataBR(f.data_fim_ferias)}`
+            });
         });
     }
 
-    // 5. Aplicar Regras CLT
     let perdeuDireito = false; let motivoPerda = "";
     if (diasINSS >= 180) { perdeuDireito = true; motivoPerda = "Mais de 6 meses de licença INSS."; } 
     else if (faltas > 32) { perdeuDireito = true; motivoPerda = "Mais de 32 faltas injustificadas."; }
@@ -18307,50 +18307,37 @@ window.calcularDireitoFerias = async function() {
         else if (faltas >= 24 && faltas <= 32) window.diasTotaisAdquiridosGlobal = 12;
     }
 
-    // Saldo Vivo = (Adquirido) - (O que já tirou) - (O que já vendeu)
     let diasAbonoCalculado = Math.floor(window.diasTotaisAdquiridosGlobal / 3);
     if (window.jaVendeuAbonoGlobal) {
-        window.diasJaGozadosGlobal += diasAbonoCalculado; // Soma ao usado para abater do saldo livre
+        window.diasJaGozadosGlobal += diasAbonoCalculado; 
     }
     
     let saldoRestante = window.diasTotaisAdquiridosGlobal - window.diasJaGozadosGlobal;
     if (saldoRestante < 0) saldoRestante = 0;
-    
-    window.diasDeDireitoGlobal = saldoRestante; // Teto de agora
+    window.diasDeDireitoGlobal = saldoRestante;
 
-    // Exibir na Tela
     document.getElementById('ferias-pa').innerText = `${formatarDataBR(strPAIni)} a ${formatarDataBR(strPAFim)}`;
     document.getElementById('ferias-limite').innerText = formatarDataBR(limiteConcessao.toISOString().split('T')[0]);
     document.getElementById('ferias-faltas').innerText = faltas;
-    
     document.getElementById('ferias-total-adquirido').innerText = `${window.diasTotaisAdquiridosGlobal} dias`;
     document.getElementById('ferias-ja-usados').innerText = `${window.diasJaGozadosGlobal} dias`;
     document.getElementById('ferias-dias-direito').innerText = `${saldoRestante} dias`;
 
-    // Controle do Abono na UI
-    const chkAbono = document.getElementById('ferias-vender-abono');
     const boxAbono = document.getElementById('box-abono-ferias');
-    chkAbono.checked = false; // Reseta
-    
-    if (window.jaVendeuAbonoGlobal || saldoRestante === 0) {
-        boxAbono.classList.add('hidden'); // Esconde se já vendeu em uma fração anterior
-    } else {
-        boxAbono.classList.remove('hidden');
-        document.getElementById('txt-aviso-abono').innerText = `Se marcado, venderá ${diasAbonoCalculado} dias. O limite de descanso de hoje cairá para ${saldoRestante - diasAbonoCalculado} dias.`;
-    }
+    document.getElementById('ferias-vender-abono').checked = false;
+    if (window.jaVendeuAbonoGlobal || saldoRestante === 0) { boxAbono.classList.add('hidden'); } 
+    else { boxAbono.classList.remove('hidden'); document.getElementById('txt-aviso-abono').innerText = `Se marcado, venderá ${diasAbonoCalculado} dias. O limite de descanso cai para ${saldoRestante - diasAbonoCalculado} dias.`; }
 
     if (perdeuDireito || saldoRestante === 0) {
-        alertaPerda.innerHTML = perdeuDireito ? `<i class='fa-solid fa-ban'></i> <b>Perdeu o Direito a Férias:</b> ${motivoPerda}` : `<i class='fa-solid fa-check-double'></i> <b>Sem saldo:</b> O colaborador já usufruiu (ou agendou) todos os dias deste período aquisitivo.`;
+        alertaPerda.innerHTML = perdeuDireito ? `<i class='fa-solid fa-ban'></i> <b>Perdeu o Direito:</b> ${motivoPerda}` : `<i class='fa-solid fa-check-double'></i> <b>Sem saldo livre</b> para este período aquisitivo.`;
         alertaPerda.classList.remove('hidden');
         btnSalvar.disabled = true;
     } else {
         alertaPerda.classList.add('hidden');
         btnSalvar.disabled = false;
-        
         const minVal = new Date().toISOString().split('T')[0];
         document.getElementById('ferias-data-inicio').setAttribute('min', minVal);
         document.getElementById('ferias-data-inicio').setAttribute('max', limiteConcessao.toISOString().split('T')[0]);
-
         document.getElementById('ferias-dias-gozo').max = saldoRestante;
         document.getElementById('ferias-dias-gozo').value = saldoRestante;
     }
@@ -18359,44 +18346,64 @@ window.calcularDireitoFerias = async function() {
     projetarFimFerias();
 };
 
-// ===============================================
-// MÁGICA: PROJETAR FIM DE FÉRIAS E VENDA (GESTOR)
-// ===============================================
 window.projetarFimFerias = function() {
     const inicioStr = document.getElementById('ferias-data-inicio').value;
     const inputDias = document.getElementById('ferias-dias-gozo');
     const obsTextarea = document.getElementById('ferias-observacao');
     const chkVender = document.getElementById('ferias-vender-abono');
+    const btnSalvar = document.getElementById('btn-salvar-ferias');
     
     let diasGozo = parseInt(inputDias.value) || 0;
-    let tetoAtual = window.diasDeDireitoGlobal; // Saldo limpo
+    let tetoAtual = window.diasDeDireitoGlobal; 
     let diasVendidos = 0;
 
-    // Se ele ativou o Abono Pecuniário NESTA FRAÇÃO
     if (chkVender && chkVender.checked) {
         diasVendidos = Math.floor(window.diasTotaisAdquiridosGlobal / 3);
         tetoAtual -= diasVendidos; 
-        
         const textoVenda = `[SISTEMA]: Colaborador vendeu ${diasVendidos} dias de férias (Abono Pecuniário).`;
         if (obsTextarea.value.trim() === '' || !obsTextarea.value.includes('Abono Pecuniário')) {
             obsTextarea.value = textoVenda + '\n' + obsTextarea.value;
         }
     } else {
-        // Remove a string automática de venda caso ele desmarque
         obsTextarea.value = obsTextarea.value.replace(/\[SISTEMA\]: Colaborador vendeu \d+ dias de férias \(Abono Pecuniário\)\.\n?/g, '');
     }
 
     if (diasGozo > tetoAtual) {
-        mostrarAlerta(`Atenção: O saldo disponível para descanso nesta fração é de ${tetoAtual} dias.`, 'aviso');
-        diasGozo = tetoAtual;
-        inputDias.value = tetoAtual;
+        mostrarAlerta(`O saldo disponível para descanso nesta fração é de ${tetoAtual} dias.`, 'aviso');
+        diasGozo = tetoAtual; inputDias.value = tetoAtual;
     }
 
     if (!inicioStr || diasGozo <= 0) return;
 
+    // Calcula a data final projetada
     const dIni = new Date(inicioStr + 'T00:00:00');
-    dIni.setDate(dIni.getDate() + (diasGozo - 1)); // Soma a quantidade exata pra cair no dia final de descanso
-    document.getElementById('ferias-data-fim').value = dIni.toISOString().split('T')[0];
+    const dFim = new Date(dIni);
+    dFim.setDate(dFim.getDate() + (diasGozo - 1));
+
+    // 🛡️ SHIELD ANTI-COLISÃO: Cruza o período novo com as frações salvas na memória
+    let colidiu = false;
+    let periodoConflitoStr = '';
+
+    for (let p of window.periodOcupadosFeriasGlobal || window.periodosOcupadosFeriasGlobal) {
+        // Se a data de início nova bate dentro de um período velho, ou a data final nova engloba um período velho
+        if (dIni <= p.fim && dFim >= p.inicio) {
+            colidiu = true;
+            periodoConflitoStr = p.label;
+            break;
+        }
+    }
+
+    if (colidiu) {
+        mostrarAlerta(`<b>Conflito de Agenda!</b><br><br>O colaborador já possui férias registradas no período de <b>${periodoConflitoStr}</b>.<br><br>Escolha outra data de início.`, "erro", "⛔ Período Ocupado");
+        document.getElementById('ferias-data-inicio').value = '';
+        document.getElementById('ferias-data-fim').value = '';
+        btnSalvar.disabled = true;
+        return;
+    }
+
+    // Se passou na trava, libera o botão e preenche a data final
+    btnSalvar.disabled = false;
+    document.getElementById('ferias-data-fim').value = dFim.toISOString().split('T')[0];
 };
 
 document.getElementById('form-ferias').addEventListener('submit', async (e) => {
@@ -18504,7 +18511,6 @@ window.buscarColaboradoresParaFeriasAdmin = async function() {
     selectColab.disabled = false;
 };
 
-// Roda os cálculos matemáticos da CLT e as travas de direito para o Admin
 window.calcularDireitoFeriasAdmin = async function() {
     const idColab = document.getElementById('ferias-admin-colaborador').value;
     const painel = document.getElementById('painel-calculo-ferias-admin');
@@ -18534,7 +18540,6 @@ window.calcularDireitoFeriasAdmin = async function() {
         document.getElementById('ferias-admin-total-adquirido').innerText = "0 dias";
         document.getElementById('ferias-admin-ja-usados').innerText = "0 dias";
         document.getElementById('ferias-admin-dias-direito').innerText = "0 dias";
-        
         alertaPerda.innerHTML = "<i class='fa-solid fa-lock'></i> <b>Bloqueado:</b> Período Aquisitivo em andamento.";
         alertaPerda.classList.remove('hidden');
         document.getElementById('box-abono-ferias-admin').classList.add('hidden');
@@ -18561,7 +18566,6 @@ window.calcularDireitoFeriasAdmin = async function() {
     const strPAIni = paInicio.toISOString().split('T')[0];
     const strPAFim = paFim.toISOString().split('T')[0];
 
-    // Busca Faltas e Férias já tiradas
     const [resOcorrencias, resFeriasTiradas] = await Promise.all([
         supabaseClient.from('ausencias').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').gte('data_inicio', strPAIni).lte('data_fim', strPAFim),
         supabaseClient.from('solicitacoes_ferias').select('*').eq('colaborador_id', idColab).eq('periodo_aquisitivo_inicio', strPAIni).eq('periodo_aquisitivo_fim', strPAFim).neq('status', 'Reprovado')
@@ -18579,16 +18583,22 @@ window.calcularDireitoFeriasAdmin = async function() {
         });
     }
 
-    // A MÁGICA DA MEMÓRIA
     window.diasJaGozadosGlobalAdmin = 0;
     window.jaVendeuAbonoGlobalAdmin = false;
-    
+    window.periodosOcupadosFeriasAdminGlobal = []; // 💾 Limpa memória admin
+
     if (resFeriasTiradas.data) {
         resFeriasTiradas.data.forEach(f => {
             const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
             const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
             window.diasJaGozadosGlobalAdmin += Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
-            if (f.observacao && f.observacao.includes('Abono Pecuniário')) window.jaVendeuAbonoGlobalAdmin = true;
+            if (f.observacao && f.observacao.includes('Abono Pecuniário')) window.jaVendeuAbonoGlobalAdminAdmin = true;
+
+            window.periodosOcupadosFeriasAdminGlobal.push({
+                inicio: new Date(f.data_inicio_ferias + 'T00:00:00'),
+                fim: new Date(f.data_fim_ferias + 'T00:00:00'),
+                label: `${formatarDataBR(f.data_inicio_ferias)} a ${formatarDataBR(f.data_fim_ferias)}`
+            });
         });
     }
 
@@ -18605,46 +18615,34 @@ window.calcularDireitoFeriasAdmin = async function() {
     }
 
     let diasAbonoCalculado = Math.floor(window.diasTotaisAdquiridosGlobalAdmin / 3);
-    if (window.jaVendeuAbonoGlobalAdmin) {
-        window.diasJaGozadosGlobalAdmin += diasAbonoCalculado; 
-    }
+    if (window.jaVendeuAbonoGlobalAdmin) { window.diasJaGozadosGlobalAdmin += diasAbonoCalculado; }
     
     let saldoRestante = window.diasTotaisAdquiridosGlobalAdmin - window.diasJaGozadosGlobalAdmin;
     if (saldoRestante < 0) saldoRestante = 0;
-    
     window.diasDeDireitoGlobalAdmin = saldoRestante;
 
     document.getElementById('ferias-admin-pa').innerText = `${formatarDataBR(strPAIni)} a ${formatarDataBR(strPAFim)}`;
     document.getElementById('ferias-admin-limite').innerText = formatarDataBR(limiteConcessao.toISOString().split('T')[0]);
     document.getElementById('ferias-admin-faltas').innerText = faltas;
-    
     document.getElementById('ferias-admin-total-adquirido').innerText = `${window.diasTotaisAdquiridosGlobalAdmin} dias`;
     document.getElementById('ferias-admin-ja-usados').innerText = `${window.diasJaGozadosGlobalAdmin} dias`;
     document.getElementById('ferias-admin-dias-direito').innerText = `${saldoRestante} dias`;
 
-    const chkAbono = document.getElementById('ferias-admin-vender-abono');
     const boxAbono = document.getElementById('box-abono-ferias-admin');
-    chkAbono.checked = false;
-    
-    if (window.jaVendeuAbonoGlobalAdmin || saldoRestante === 0) {
-        boxAbono.classList.add('hidden');
-    } else {
-        boxAbono.classList.remove('hidden');
-        document.getElementById('txt-aviso-abono-admin').innerText = `Se marcado, venderá ${diasAbonoCalculado} dias. O limite de descanso cai para ${saldoRestante - diasAbonoCalculado} dias.`;
-    }
+    document.getElementById('ferias-admin-vender-abono').checked = false;
+    if (window.jaVendeuAbonoGlobalAdmin || saldoRestante === 0) { boxAbono.classList.add('hidden'); } 
+    else { boxAbono.classList.remove('hidden'); document.getElementById('txt-aviso-abono-admin').innerText = `Se marcado, venderá ${diasAbonoCalculado} dias. O limite de descanso cai para ${saldoRestante - diasAbonoCalculado} dias.`; }
 
     if (perdeuDireito || saldoRestante === 0) {
-        alertaPerda.innerHTML = perdeuDireito ? `<i class='fa-solid fa-ban'></i> <b>Perdeu o Direito a Férias:</b> ${motivoPerda}` : `<i class='fa-solid fa-check-double'></i> <b>Sem saldo:</b> O colaborador já usufruiu ou agendou as férias.`;
+        alertaPerda.innerHTML = perdeuDireito ? `<i class='fa-solid fa-ban'></i> <b>Perdeu o Direito:</b> ${motivoPerda}` : `<i class='fa-solid fa-check-double'></i> <b>Sem saldo livre</b> cadastrado.`;
         alertaPerda.classList.remove('hidden');
         btnSalvar.disabled = true;
     } else {
         alertaPerda.classList.add('hidden');
         btnSalvar.disabled = false;
-        
         const minVal = new Date().toISOString().split('T')[0];
         document.getElementById('ferias-admin-data-inicio').setAttribute('min', minVal);
         document.getElementById('ferias-admin-data-inicio').setAttribute('max', limiteConcessao.toISOString().split('T')[0]);
-
         document.getElementById('ferias-admin-dias-gozo').max = saldoRestante;
         document.getElementById('ferias-admin-dias-gozo').value = saldoRestante;
     }
@@ -18653,14 +18651,12 @@ window.calcularDireitoFeriasAdmin = async function() {
     projetarFimFeriasAdmin();
 };
       
-// ===============================================
-// MÁGICA: PROJETAR FIM DE FÉRIAS E VENDA (ADMIN)
-// ===============================================
 window.projetarFimFeriasAdmin = function() {
     const inicioStr = document.getElementById('ferias-admin-data-inicio').value;
     const inputDias = document.getElementById('ferias-admin-dias-gozo');
     const obsTextarea = document.getElementById('ferias-admin-observacao');
     const chkVender = document.getElementById('ferias-admin-vender-abono');
+    const btnSalvar = document.getElementById('btn-salvar-ferias-admin');
     
     let diasGozo = parseInt(inputDias.value) || 0;
     let tetoAtual = window.diasDeDireitoGlobalAdmin; 
@@ -18669,7 +18665,6 @@ window.projetarFimFeriasAdmin = function() {
     if (chkVender && chkVender.checked) {
         diasVendidos = Math.floor(window.diasTotaisAdquiridosGlobalAdmin / 3);
         tetoAtual -= diasVendidos; 
-        
         const textoVenda = `[SISTEMA]: Colaborador vendeu ${diasVendidos} dias de férias (Abono Pecuniário).`;
         if (obsTextarea.value.trim() === '' || !obsTextarea.value.includes('Abono Pecuniário')) {
             obsTextarea.value = textoVenda + '\n' + obsTextarea.value;
@@ -18679,16 +18674,37 @@ window.projetarFimFeriasAdmin = function() {
     }
 
     if (diasGozo > tetoAtual) {
-        mostrarAlerta(`Atenção: O saldo disponível para descanso nesta fração é de ${tetoAtual} dias.`, 'aviso');
-        diasGozo = tetoAtual;
-        inputDias.value = tetoAtual;
+        mostrarAlerta(`O saldo disponível para descanso nesta fração é de ${tetoAtual} dias.`, 'aviso');
+        diasGozo = tetoAtual; inputDias.value = tetoAtual;
     }
 
     if (!inicioStr || diasGozo <= 0) return;
 
     const dIni = new Date(inicioStr + 'T00:00:00');
-    dIni.setDate(dIni.getDate() + (diasGozo - 1));
-    document.getElementById('ferias-admin-data-fim').value = dIni.toISOString().split('T')[0];
+    const dFim = new Date(dIni);
+    dFim.setDate(dFim.getDate() + (diasGozo - 1));
+
+    let colidiu = false;
+    let periodoConflitoStr = '';
+
+    for (let p of window.periodosOcupadosFeriasAdminGlobal) {
+        if (dIni <= p.fim && dFim >= p.inicio) {
+            colidiu = true;
+            periodoConflitoStr = p.label;
+            break;
+        }
+    }
+
+    if (colidiu) {
+        mostrarAlerta(`<b>Conflito de Agenda (Admin)!</b><br><br>O colaborador já possui férias registradas no período de <b>${periodoConflitoStr}</b>.`, "erro", "⛔ Período Ocupado");
+        document.getElementById('ferias-admin-data-inicio').value = '';
+        document.getElementById('ferias-admin-data-fim').value = '';
+        btnSalvar.disabled = true;
+        return;
+    }
+
+    btnSalvar.disabled = false;
+    document.getElementById('ferias-admin-data-fim').value = dFim.toISOString().split('T')[0];
 };
 
 // --- ADMIN: GERENCIAR FÉRIAS ---
