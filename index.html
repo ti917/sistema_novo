@@ -52853,244 +52853,237 @@ window.carregarVencimentosFeriasAdmin = async function() {
 
 window.atualizarListaVencimentosFerias = async function() {
     const unidade = document.getElementById('filtro-unidade-venc-ferias').value;
-    const containerLista = document.getElementById('lista-vencimentos-ferias-render');
-    const containerRadar = document.getElementById('container-radar-vencimentos-ferias');
-    const displayRadarTxt = document.getElementById('txt-radar-vencimentos');
+    const container = document.getElementById('lista-vencimentos-ferias-render');
+    const radarPassivos = document.getElementById('container-radar-vencimentos-ferias');
+    const txtRadar = document.getElementById('txt-radar-vencimentos');
+    const termoBusca = window.removerAcentos(document.getElementById('busca-venc-ferias-admin').value.toLowerCase());
 
     if (!unidade) {
-        containerRadar.classList.add('hidden');
-        containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Selecione uma unidade operacional para carregar os relatórios.</p>';
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Selecione uma unidade operacional para carregar os relatórios.</p>';
+        if (radarPassivos) radarPassivos.classList.add('hidden');
         return;
     }
 
-    containerRadar.classList.add('hidden');
-    containerLista.innerHTML = '<p style="text-align: center; color: #ffd54f; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Executando varredura e cruzando histórico de períodos aquisitivos...</p>';
+    container.innerHTML = '<p style="text-align: center; color: #ffd54f; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Mapeando passivos e calculando saldos de frações...</p>';
 
     try {
-        let queryColabs = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo').eq('unidade', unidade);
-        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
-            queryColabs = queryColabs.eq('empresa', empresaSelecionadaFiltro);
-        }
+        // 1. Busca os colaboradores ativos da unidade
+        const { data: colabs, error: errC } = await supabaseClient.from('perfis')
+            .select('id, nome, unidade, empresa, dados_admissao, status')
+            .eq('perfil', 'Colaborador')
+            .eq('status', 'Ativo')
+            .eq('unidade', unidade);
 
-        const { data: colabs, error: errC } = await queryColabs;
         if (errC) throw errC;
 
         if (!colabs || colabs.length === 0) {
-            containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador ativo nesta unidade.</p>';
+            container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador ativo nesta unidade.</p>';
+            if (radarPassivos) radarPassivos.classList.add('hidden');
             return;
         }
 
-        const idsColabs = colabs.map(c => c.id);
-        const { data: feriasDB, error: errF } = await supabaseClient.from('solicitacoes_ferias').select('*').in('status', ['Aprovado', 'Pendente']).in('colaborador_id', idsColabs);
-        if (errF) throw errF;
+        // Filtra pela busca de texto na tela
+        const colabsFiltrados = colabs.filter(c => window.removerAcentos(c.nome.toLowerCase()).includes(termoBusca));
 
-        const hoje = new Date();
-        hoje.setHours(0,0,0,0);
+        if (colabsFiltrados.length === 0) {
+            container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador encontrado para essa busca.</p>';
+            return;
+        }
 
-        let dadosProcessadosGeral = [];
-        let countVencidosGeral = 0;
-        let countCriticosGeral = 0;
+        const idsColabs = colabsFiltrados.map(c => c.id);
 
-        colabs.forEach(colab => {
-            const adm = colab.dados_admissao || {};
-            const dataAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
-            if (!dataAdmStr) return;
+        // 2. Busca todas as ausências (Faltas) e todas as férias lançadas da galera filtrada de uma vez só (Desempenho puro)
+        const [resOcorrencias, resFerias] = await Promise.all([
+            supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').eq('sigla', 'FA').in('colaborador_id', idsColabs),
+            supabaseClient.from('solicitacoes_ferias').select('*').neq('status', 'Reprovado').in('colaborador_id', idsColabs)
+        ]);
 
-            const dAdmissao = new Date(dataAdmStr + 'T00:00:00');
-            const minhasFerias = (feriasDB || []).filter(f => String(f.colaborador_id) === String(colab.id));
+        const todasAusencias = resOcorrencias.data || [];
+        const todasFerias = resFerias.data || [];
 
-            let totalAnosEmpresa = hoje.getFullYear() - dAdmissao.getFullYear();
-            let aniversarioEsteAno = new Date(dAdmissao);
-            aniversarioEsteAno.setFullYear(hoje.getFullYear());
-            if (hoje < aniversarioEsteAno) totalAnosEmpresa--;
+        const hoje = new Date(); hoje.setHours(0,0,0,0);
+        let htmlCardsLista = '';
+        let totalPassivosCriticosGlobal = 0;
 
-            let periodosLista = [];
-            let pesoMaximoUrgencia = 0;
+        // 3. Varre colaborador por colaborador montando a linha do tempo de PAs
+        colabsFiltrados.sort((a,b) => a.nome.localeCompare(b.nome)).forEach(c => {
+            const adm = c.dados_admissao || {};
+            const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
+            if (!dataInicioStr) return;
 
-            for (let i = 0; i <= totalAnosEmpresa; i++) {
-                let paIni = new Date(dAdmissao);
-                paIni.setFullYear(paIni.getFullYear() + i);
+            const dAdmissao = new Date(dataInicioStr + 'T00:00:00');
+            let anosDeEmpresa = hoje.getFullYear() - dAdmissao.getFullYear();
+            let anivEsteAno = new Date(dAdmissao); anivEsteAno.setFullYear(hoje.getFullYear());
+            if (hoje < anivEsteAno) anosDeEmpresa--;
 
-                let paFim = new Date(paIni);
-                paFim.setFullYear(paFim.getFullYear() + 1);
-                paFim.setDate(paFim.getDate() - 1);
+            // Se ele tem menos de 1 ano de empresa, não tem PA concluído ainda, mas vamos listar o atual em andamento
+            let htmlPAsColaborador = '';
 
-                let limiteConcessao = new Date(paFim);
-                limiteConcessao.setFullYear(limiteConcessao.getFullYear() + 1);
-                limiteConcessao.setDate(limiteConcessao.getDate() - 40);
-                window.dataLimiteGlobalAdmin = limiteConcessao;
+            // Varre do ano de admissão até o ciclo atual (cria os blocos de PA dinamicamente)
+            for (let i = 0; i <= anosDeEmpresa; i++) {
+                let paIniObj = new Date(dAdmissao); paIniObj.setFullYear(paIniObj.getFullYear() + i);
+                let paFimObj = new Date(paIniObj); paFimObj.setFullYear(paFimObj.getFullYear() + 1); paFimObj.setDate(paFimObj.getDate() - 1);
 
-                let limiteLegalReal = new Date(paFim);
-                limiteLegalReal.setFullYear(limiteLegalReal.getFullYear() + 1);
+                const strIni = paIniObj.toISOString().split('T')[0];
+                const strFim = paFimObj.toISOString().split('T')[0];
 
-                // 👇 A CORREÇÃO AQUI: Trocando "paInicio" por "paIni" que é a variável correta 👇
-                const strPAIni = paIni.toISOString().split('T')[0];
-                const strPAFim = paFim.toISOString().split('T')[0];
-                const strLimite = limiteConcessao.toISOString().split('T')[0];
-                const strLimiteLegal = limiteLegalReal.toISOString().split('T')[0]; // Nova String para o banco virtual
+                // Limite legal da CLT (Fim Concessivo) = 1 ano após o vencimento do PA
+                const prazoLegalMaximo = new Date(paFimObj); prazoLegalMaximo.setFullYear(prazoLegalMaximo.getFullYear() + 1);
+                // Recomendado = 40 dias antes de estourar o limite concessivo
+                const limiteRecomendado = new Date(prazoLegalMaximo); limiteRecomendado.setDate(limiteRecomendado.getDate() - 40);
 
-                const feriasDestePA = minhasFerias.find(f => f.periodo_aquisitivo_inicio === strPAIni);
+                // Conta faltas injustificadas NESTE período específico
+                const faltasNoPA = todasAusencias.filter(a => a.colaborador_id === c.id && a.data_inicio >= strIni && a.data_inicio <= strFim).length;
 
-                let statusPA = 'Aberto (A Tirar)';
-                let corPA = 'var(--cor-acento)'; 
-                let iconPA = 'fa-hourglass-half';
-                let diasRestantesText = '';
+                // Calcula direito adquirido baseado nas faltas da CLT
+                let direitoAdquiridoTotal = 30;
+                if (faltasNoPA >= 6 && faltasNoPA <= 14) direitoAdquiridoTotal = 24;
+                else if (faltasNoPA >= 15 && faltasNoPA <= 23) direitoAdquiridoTotal = 18;
+                else if (faltasNoPA >= 24 && faltasNoPA <= 32) direitoAdquiridoTotal = 12;
+                else if (faltasNoPA > 32) direitoAdquiridoTotal = 0;
 
-                if (hoje < paFim) {
-                    statusPA = 'Em Andamento (Ciclo Atual)';
-                    corPA = '#4fc3f7'; 
-                    iconPA = 'fa-spinner fa-spin-pulse';
-                    diasRestantesText = `<span style="color:#4fc3f7;">Acumulando...</span>`;
-                } 
-                else if (feriasDestePA) {
-                    if (feriasDestePA.status === 'Aprovado') {
-                        const dFimFer = new Date(feriasDestePA.data_fim_ferias + 'T23:59:59');
-                        if (hoje > dFimFer) {
-                            statusPA = 'Férias Já Tiradas';
-                            corPA = '#28a745'; 
-                            iconPA = 'fa-circle-check';
-                            diasRestantesText = `<span style="color:#28a745; font-weight:bold;">Ciclo Concluído</span>`;
-                        } else {
-                            statusPA = `Férias Agendadas (${formatarDataBR(feriasDestePA.data_inicio_ferias)} a ${formatarDataBR(feriasDestePA.data_fim_ferias)})`;
-                            corPA = '#20c997'; 
-                            iconPA = 'fa-calendar-check';
-                            diasRestantesText = `<span style="color:#20c997; font-weight:bold;">Agendado</span>`;
-                            if (pesoMaximoUrgencia < 1) pesoMaximoUrgencia = 1;
+                // Captura todas as frações/lançamentos criados para ESTE período aquisitivo específico
+                const fracoesDestePA = todasFerias.filter(f => f.colaborador_id === c.id && f.periodo_aquisitivo_inicio === strIni && f.periodo_aquisitivo_fim === strFim);
+
+                let diasGozadosOuVendidos = 0;
+                let fracoesHtmlLista = '';
+
+                if (fracoesDestePA.length > 0) {
+                    fracoesDestePA.forEach((f, idx) => {
+                        const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
+                        const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
+                        const diasFracao = Math.floor((d2 - d1) / (1000 * 3600 * 24)) + 1;
+                        
+                        let isAbono = f.observacao && f.observacao.includes('Abono Pecuniário');
+                        if (isAbono) {
+                            const abonoMins = Math.floor(direitoAdquiridoTotal / 3);
+                            diasGozadosOuVendidos += abonoMins;
                         }
-                    } else {
-                        statusPA = 'Férias Solicitadas (Aguardando Aprovação)';
-                        corPA = '#ff9800'; 
-                        iconPA = 'fa-paper-plane';
-                        diasRestantesText = `<span style="color:#ff9800; font-weight:bold;">Em Análise</span>`;
-                        if (pesoMaximoUrgencia < 1) pesoMaximoUrgencia = 1;
-                    }
-                } 
-                else {
-                    const diffTempoLimite = limiteConcessao - hoje;
-                    const diffDiasLimite = Math.floor(diffTempoLimite / (1000 * 3600 * 24));
 
-                    if (hoje > limiteConcessao) {
-                        const diasVencidos = Math.floor((hoje - limiteConcessao) / (1000 * 3600 * 24));
-                        statusPA = 'VENCIDO (Risco de Multa/Férias em Dobro)';
-                        corPA = 'var(--cor-perigo)'; 
-                        iconPA = 'fa-triangle-exclamation';
-                        countVencidosGeral++;
-                        pesoMaximoUrgencia = 3;
-                        diasRestantesText = `<b style="color:var(--cor-perigo);">Prazo ESGOTADO há ${diasVencidos} dias!</b>`;
+                        diasGozadosOuVendidos += diasFracao;
+
+                        let statusBadgeCor = f.status === 'Aprovado' ? '#28a745' : '#ff9800';
+                        fracoesHtmlLista += `
+                            <div style="display: inline-flex; align-items: center; background: rgba(255,255,255,0.05); padding: 5px 10px; border-radius: 6px; border: 1px solid var(--cor-borda); font-size: 0.8rem; gap: 8px;">
+                                <i class="fa-solid fa-plane-departure" style="color: ${statusBadgeCor};"></i>
+                                <span>Fração ${idx + 1}: <b>${diasFracao} dias</b> (${formatarDataBR(f.data_inicio_ferias)} à ${formatarDataBR(f.data_fim_ferias)})</span>
+                                <span style="background: ${statusBadgeCor}22; color: ${statusBadgeCor}; font-size: 0.65rem; padding: 1px 4px; border-radius: 4px; font-weight: bold; border: 0.5px solid ${statusBadgeCor}50;">${f.status.toUpperCase()}</span>
+                            </div>
+                        `;
+                    });
+                }
+
+                let saldoLivreRestante = direitoAdquiridoTotal - diasGozadosOuVendidos;
+                if (saldoLivreRestante < 0) saldoLivreRestante = 0;
+
+                const diffTimeLimite = limiteRecomendado - hoje;
+                const diasRestantesPrazo = Math.ceil(diffTimeCivil = diffTimeLimite / (1000 * 3600 * 24));
+
+                let statusCicloHTML = '';
+                let corStatusBorda = '#64748b'; // Cinza padrão em andamento
+
+                // LÓGICA DE STATUS DINÂMICO BASEADO NO SALDO CORRENTE
+                if (hoje < paFimObj) {
+                    statusCicloHTML = `<span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda);">Período em Andamento</span>`;
+                    corStatusBorda = 'rgba(255,255,255,0.15)';
+                } else if (saldoLivreRestante === 0) {
+                    statusCicloHTML = `<span class="badge ativo"><i class="fa-solid fa-check-double"></i> Totalmente Quitadas</span>`;
+                    corStatusBorda = 'var(--cor-sucesso)';
+                } else {
+                    // Tem saldo restante e o PA já venceu -> CLT ativa!
+                    if (diasRestantesPrazo < 0) {
+                        totalPassivosCriticosGlobal++;
+                        statusCicloHTML = `<span class="badge desligado">⚠️ PRAZO ESTOURADO (Risco de Dobro)</span>`;
+                        corStatusBorda = 'var(--cor-perigo)';
+                    } else if (diasRestantesPrazo <= 90) {
+                        totalPassivosCriticosGlobal++;
+                        statusCicloHTML = `<span class="badge pendente">⏳ Alerta Crítico: Vence em ${diasRestantesPrazo} dias!</span>`;
+                        corStatusBorda = '#ff9800';
                     } else {
-                        if (diffDiasLimite <= 90) { 
-                            statusPA = `CRÍTICO (Vence em ${diffDiasLimite} dias!)`;
-                            corPA = '#ff9800'; 
-                            iconPA = 'fa-circle-exclamation';
-                            countCriticosGeral++;
-                            if (pesoMaximoUrgencia < 2) pesoMaximoUrgencia = 2;
-                            diasRestantesText = `<b style="color:#ff9800;">Restam apenas ${diffDiasLimite} dias!</b>`;
-                        } else {
-                            diasRestantesText = `<span style="color:var(--cor-texto-principal);">Restam ${diffDiasLimite} dias (Regular)</span>`;
-                        }
+                        statusCicloHTML = `<span class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7;">Regular (Saldo de ${saldoLivreRestante}d)</span>`;
+                        corStatusBorda = '#4fc3f7';
                     }
                 }
 
-                periodosLista.push({
-                    paTexto: `${formatarDataBR(strPAIni)} a ${formatarDataBR(strPAFim)}`,
-                    limiteTexto: formatarDataBR(strLimite),
-                    limiteLegalTexto: formatarDataBR(strLimiteLegal), // 👈 SALVA O PRAZO LEGAL MÁXIMO NO OBJETO
-                    status: statusPA,
-                    cor: corPA,
-                    icon: iconPA,
-                    diasRestantes: diasRestantesText
-                });
+                // Injeta a linha da linha do tempo do PA
+                htmlPAsColaborador += `
+                    <div style="background: rgba(0,0,0,0.15); border: 1px solid var(--cor-borda); border-left: 4px solid ${corStatusBorda}; border-radius: 8px; padding: 15px; margin-bottom: 10px; page-break-inside: avoid;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(255,255,255,0.1); padding-bottom: 8px; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
+                            <strong style="font-size: 0.95rem; color: #fff;">PA: ${formatarDataBR(strIni)} a ${formatarDataBR(strFim)}</strong>
+                            ${statusCicloHTML}
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-bottom: 10px;">
+                            <div>Recomendado para início:<br><b style="color: #fff;">${formatarDataBR(limiteRecomendado.toISOString().split('T')[0])}</b></div>
+                            <div>Prazo Legal Máximo (Fim):<br><b style="color: var(--cor-perigo);">${formatarDataBR(prazoLegalMaximo.toISOString().split('T')[0])}</b></div>
+                            <div>Faltas no PA: <b style="color: #fff;">${faltasNoPA}</b></div>
+                            <div style="text-align: right;">Saldo Atual Restante:<br><b style="color: ${saldoLivreRestante > 0 ? '#ff9800' : 'var(--cor-sucesso)'}; font-size: 1rem;">${saldoLivreRestante} dias</b></div>
+                        </div>
+
+                        ${fracoesHtmlLista ? `
+                        <div style="margin-top: 10px; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; display: flex; flex-direction: column; gap: 5px;">
+                            <small style="color: var(--cor-texto-secundario); font-weight: bold; text-transform: uppercase; font-size: 0.65rem;">Frações e Períodos Agendados:</small>
+                            <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;">${fracoesHtmlLista}</div>
+                        </div>` : ''}
+                    </div>
+                `;
             }
 
-            dadosProcessadosGeral.push({
-                nome: colab.nome,
-                cargo: adm.cargo || '-',
-                admissao: formatarDataBR(dataAdmStr),
-                periodos: periodosLista.reverse(), 
-                peso: pesoMaximoUrgencia
-            });
+            htmlCardsLista += `
+                <div class="admissao-card" style="flex-direction: column; align-items: stretch; padding: 20px; border-radius: 12px; margin-bottom: 15px; background: rgba(0,25,51,0.6);">
+                    <div style="border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <div>
+                            <strong style="font-size: 1.2rem; color: var(--cor-acento);"><i class="fa-solid fa-user"></i> ${c.nome}</strong>
+                            <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 2px;"><i class="fa-solid fa-briefcase"></i> ${adm.cargo || '-'} &nbsp;|&nbsp; Admissão: ${formatarDataBR(dataInicioStr)}</span>
+                        </div>
+                    </div>
+                    <div>${htmlPAsColaborador}</div>
+                </div>
+            `;
         });
 
-        if (countVencidosGeral > 0 || countCriticosGeral > 0) {
-            displayRadarTxt.innerHTML = `Detectamos <b style="color:#fff; background:var(--cor-perigo); padding:2px 6px; border-radius:4px;">${countVencidosGeral} direito(s) já vencido(s)</b> com risco de pagamento em dobro e <b>${countCriticosGeral} período(s) em estado crítico</b> (menos de 90 dias de margem legal). Agende o gozo imediatamente.`;
-            containerRadar.classList.remove('hidden');
-        } else {
-            displayRadarTxt.innerHTML = `Nenhum passivo duplo ou estouro de prazo legal detectado. Todos os períodos concessivos desta unidade encontram-se regulares.`;
-            containerRadar.classList.remove('hidden');
+        container.innerHTML = htmlCardsLista;
+
+        // 4. ATUALIZA O DESIGN DO RADAR SUPERIOR NEON
+        if (radarPassivos && txtRadar) {
+            if (totalPassivosCriticosGlobal > 0) {
+                radarPassivos.classList.remove('hidden');
+                radarPassivos.firstElementChild.style.borderTop = '5px solid var(--cor-perigo)';
+                radarPassivos.firstElementChild.style.background = 'linear-gradient(135deg, rgba(220, 53, 69, 0.15) 0%, rgba(0,0,0,0.3) 100%)';
+                radarPassivos.firstElementChild.style.borderColor = 'rgba(220, 53, 69, 0.4)';
+                radarPassivos.firstElementChild.querySelector('.fa-circle-exclamation, .fa-triangle-exclamation').style.color = 'var(--cor-perigo)';
+                radarPassivos.firstElementChild.querySelector('.fa-circle-exclamation, .fa-triangle-exclamation').parentElement.style.background = 'rgba(220, 53, 69, 0.2)';
+                radarPassivos.firstElementChild.querySelector('.fa-circle-exclamation, .fa-triangle-exclamation').parentElement.style.borderColor = 'rgba(220, 53, 69, 0.4)';
+                
+                txtRadar.innerHTML = `Detectamos <b>${totalPassivosCriticosGlobal} período(s) concessivo(s) crítico(s) ou vencido(s) com saldo pendente</b> nesta unidade. Alerte as lideranças para agendarem os descansos IMEDIATAMENTE e evitarem multas trabalhistas.`;
+            } else {
+                radarPassivos.classList.remove('hidden');
+                radarPassivos.firstElementChild.style.borderTop = '5px solid var(--cor-sucesso)';
+                radarPassivos.firstElementChild.style.background = 'linear-gradient(135deg, rgba(40, 167, 69, 0.15) 0%, rgba(0,0,0,0.3) 100%)';
+                radarPassivos.firstElementChild.style.borderColor = 'rgba(40, 167, 69, 0.4)';
+                
+                const iconRadar = radarPassivos.firstElementChild.querySelector('.fa-circle-exclamation, .fa-triangle-exclamation');
+                if(iconRadar) {
+                    iconRadar.className = 'fa-solid fa-circle-check fa-2x';
+                    iconRadar.style.color = 'var(--cor-sucesso)';
+                    iconRadar.parentElement.style.background = 'rgba(40, 167, 69, 0.2)';
+                    iconRadar.parentElement.style.borderColor = 'rgba(40, 167, 69, 0.4)';
+                }
+                
+                txtRadar.innerHTML = `Nenhum passivo duplo ou estouro de prazo legal detectado. Todos os períodos concessivos com saldo em aberto nesta unidade encontram-se regulares dentro dos prazos de segurança da CLT.`;
+            }
         }
 
-        window.dadosVencimentosGlobais = dadosProcessadosGeral;
-        window.filtrarVencimentosVisual();
-
     } catch (e) {
-        console.error(e);
-        containerLista.innerHTML = `<p style="color: var(--cor-perigo); text-align: center; padding: 20px;">Erro de processing: ${e.message}</p>`;
+        console.error("Erro no radar de vencimentos de férias:", e);
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro crítico ao processar o radar.</p>';
     }
 };
 
-     window.filtrarVencimentosVisual = function() {
-    const inputBusca = document.getElementById('busca-venc-ferias-admin');
-    const termo = window.removerAcentos(inputBusca ? inputBusca.value.toLowerCase() : '');
-    const containerLista = document.getElementById('lista-vencimentos-ferias-render');
 
-    const filtrados = (window.dadosVencimentosGlobais || []).filter(item => {
-        return window.removerAcentos(item.nome.toLowerCase()).includes(termo);
-    });
-
-    containerLista.innerHTML = '';
-    
-    if (filtrados.length === 0) {
-        containerLista.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador encontrado com esse nome.</p>';
-        return;
-    }
-
-    filtrados.forEach(item => {
-        let blocoLinhasLinhaDoTempo = '';
-        
-        item.periodos.forEach(p => {
-            blocoLinhasLinhaDoTempo += `
-            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 8px 15px; border-radius: 6px; border-left: 3px solid ${p.cor}; border: 1px solid var(--cor-borda); margin-top: 5px;">
-                <div style="flex: 1; min-width: 0;">
-                    <strong style="color: #fff; font-size: 0.85rem;">PA: ${p.paTexto}</strong>
-                    
-                    <span style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">
-                        <i class="fa-regular fa-calendar-xmark" style="color: ${p.cor};"></i> Limite p/ Início (Recomendado): <b style="color: #fff;">${p.limiteTexto}</b>
-                    </span>
-                    
-                    <span style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">
-                        <i class="fa-solid fa-gavel" style="color: ${p.cor};"></i> Prazo Legal Máximo (Fim Concessivo): <b style="color: #fff;">${p.limiteLegalTexto}</b>
-                    </span>
-                    
-                    <span style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">
-                        <i class="fa-solid fa-hourglass-half" style="color: ${p.cor};"></i> Tempo Limite: ${p.diasRestantes}
-                    </span>
-                </div>
-                <div style="text-align: right; color: ${p.cor}; font-size: 0.8rem; font-weight: bold; padding-left: 10px; flex-shrink: 0;">
-                    <i class="fa-solid ${p.icon}"></i> ${p.status}
-                </div>
-            </div>`;
-        });
-
-        let bordaEsquerdaCard = 'rgba(255,255,255,0.1)';
-        let flashAlertaIcon = '';
-        if (item.peso === 3) { bordaEsquerdaCard = 'var(--cor-perigo)'; flashAlertaIcon = '<i class="fa-solid fa-triangle-exclamation fa-fade" style="color:var(--cor-perigo); margin-right:6px;"></i> '; }
-        else if (item.peso === 2) { bordaEsquerdaCard = '#ff9800'; flashAlertaIcon = '<i class="fa-solid fa-circle-exclamation" style="color:#ff9800; margin-right:6px;"></i> '; }
-        else if (item.peso === 1) { bordaEsquerdaCard = '#20c997'; }
-
-        containerLista.innerHTML += `
-            <div class="admissao-card" style="border-left: 4px solid ${bordaEsquerdaCard}; flex-direction: column; align-items: stretch; padding: 15px;">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
-                    <div>
-                        <strong style="font-size: 1.15rem; color: var(--cor-texto-principal);">${flashAlertaIcon}${item.nome}</strong><br>
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-briefcase"></i> ${item.cargo} &nbsp;|&nbsp; <i class="fa-regular fa-calendar-check"></i> Admissão: <b>${item.admissao}</b></span>
-                    </div>
-                </div>
-                <div style="margin-top: 5px; display: flex; flex-direction: column; gap: 5px;">
-                    ${blocoLinhasLinhaDoTempo}
-                </div>
-            </div>
-        `;
-    });
+    // Vincula a busca por digitação rápida direto no motor novo para atualizar o filtro na hora
+window.filtrarVencimentosVisual = function() {
+    window.atualizarListaVencimentosFerias();
 };
 
       // ========================================================
