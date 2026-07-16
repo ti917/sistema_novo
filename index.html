@@ -23033,19 +23033,36 @@ window.desarquivarRescisaoAdmin = async function(idColab) {
         ausDataFim.addEventListener('change', atualizarPainelAusenciaTempoReal);
 
       // ========================================================
-// 🚨 RADAR GLOBAL ANTI-CONFLITO DE AGENDAS (ATUALIZADO) 🚨
+// 🚨 RADAR GLOBAL ANTI-CONFLITO DE AGENDAS (ATUALIZADO E HUMANO) 🚨
 // ========================================================
 window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck, ignorarTroca = false) {
-    // 1. Checa Ausências / Atestados / Faltas (Ignora DECL para permitir abates no mesmo dia)
+    // Dicionário para traduzir siglas para humanos
+    const dicionarioSiglas = {
+        'FA': 'uma Falta Injustificada (FA)',
+        'ATM': 'um Atestado Médico (ATM)',
+        'ATC': 'um Atestado de Acompanhante (ATC)',
+        'ATOB': 'um Atestado de Óbito (ATOB)',
+        'AF': 'um Afastamento pelo INSS (AF)',
+        'LDM': 'uma Licença Maternidade (LDM)',
+        'LDP': 'uma Licença Paternidade (LDP)',
+        'LG': 'uma Licença Gala/Casamento (LG)',
+        'FE': 'uma Folga Extra (FE)',
+        'DECL': 'uma Declaração de Horas (DECL)'
+    };
+
+    // 1. Checa Ausências / Atestados / Faltas
     const { data: confA } = await supabaseClient.from('ausencias')
         .select('sigla')
         .eq('colaborador_id', idColab)
         .in('status', ['Pendente', 'Aprovado'])
-        .neq('sigla', 'DECL') 
+        .neq('sigla', 'DECL') // Permite Declaração no mesmo dia que folgas/faltas
         .lte('data_inicio', dataFimCheck)
         .gte('data_fim', dataIniCheck);
         
-    if (confA && confA.length > 0) return confA[0].sigla;
+    if (confA && confA.length > 0) {
+        const siglaConf = confA[0].sigla;
+        return dicionarioSiglas[siglaConf] || `uma Ausência/Licença (${siglaConf})`;
+    }
 
     // 2. Checa Férias
     const { data: confFer } = await supabaseClient.from('solicitacoes_ferias')
@@ -23055,22 +23072,22 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         .lte('data_inicio_ferias', dataFimCheck)
         .gte('data_fim_ferias', dataIniCheck);
         
-    if (confFer && confFer.length > 0) return 'Férias';
+    if (confFer && confFer.length > 0) return 'um período de Férias';
 
     // 3. Checa Horas Extras e Folgas Programadas (FT / FP)
     const { data: confF } = await supabaseClient.from('horas_extras_ft')
-        .select('data_inicio, data_fim')
+        .select('data_inicio, data_fim, sigla')
         .eq('colaborador_id', idColab)
         .in('status', ['Pendente', 'Aprovado']);
         
     if (confF && confF.length > 0) {
         for (let f of confF) {
-            if (f.data_inicio >= dataIniCheck && f.data_inicio <= dataFimCheck) return 'FT/Hora Extra';
-            if (f.data_fim && f.data_fim >= dataIniCheck && f.data_fim <= dataFimCheck) return 'Folga Programada (FP)';
+            if (f.data_inicio >= dataIniCheck && f.data_inicio <= dataFimCheck) return `um registro de ${f.sigla === 'FT' ? 'Folga Trabalhada (FT)' : 'Hora Extra (HE/H+)'}`;
+            if (f.data_fim && f.data_fim >= dataIniCheck && f.data_fim <= dataFimCheck) return 'um agendamento de Folga Programada (FP) / Abate do Banco';
         }
     }
 
-    // 4. Checa Trocas de Turno (TP / FP) - AGORA COM PERMISSÃO DE SOBREPOSIÇÃO PARA EXTRAS/ABATES
+    // 4. Checa Trocas de Turno (TP / FP)
     if (!ignorarTroca) {
         const { data: confT } = await supabaseClient.from('trocas_turno')
             .select('dia_solicitante_ira, dia_substituto_ira')
@@ -23079,8 +23096,8 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
             
         if (confT && confT.length > 0) {
             for (let t of confT) {
-                if (t.dia_solicitante_ira >= dataIniCheck && t.dia_solicitante_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
-                if (t.dia_substituto_ira >= dataIniCheck && t.dia_substituto_ira <= dataFimCheck) return 'Troca de Turno (TP/FP)';
+                if (t.dia_solicitante_ira >= dataIniCheck && t.dia_solicitante_ira <= dataFimCheck) return 'uma Troca de Turno pendente';
+                if (t.dia_substituto_ira >= dataIniCheck && t.dia_substituto_ira <= dataFimCheck) return 'uma Troca de Turno pendente';
             }
         }
     }
@@ -23263,7 +23280,12 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     const motivoConflito = await window.checarConflitoGlobal(idColab, dataInicio, dataFim, ['ATR', 'ABD', 'DECL'].includes(sigla));
     if (motivoConflito) {
         btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Enviar Solicitação';
-        return mostrarAlerta(`Bloqueado: O colaborador ${colabNome} já possui <b>${motivoConflito}</b> na escala neste período.`, "erro");
+        
+        let textoDatas = (dataInicio === dataFim) 
+            ? `no dia <b>${formatarDataBR(dataInicio)}</b>` 
+            : `no período de <b>${formatarDataBR(dataInicio)} a ${formatarDataBR(dataFim)}</b>`;
+            
+        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>O colaborador <b>${colabNome}</b> já possui <b>${motivoConflito}</b> na escala ${textoDatas}.<br><br>Caso seja um erro, exclua ou cancele o registro anterior antes de lançar um novo.`, "erro", "⛔ Conflito de Agendas");
     }
 
     if (cobObj) {
@@ -34228,17 +34250,19 @@ window.calcularVRAgora = async function() {
             let statusExcel = 'Base Cheia';
             let labelExtra = '';
 
-            // PROJEÇÃO PROPORCIONAL DE RESCISÃO ATUALIZADA
+           // PROJEÇÃO PROPORCIONAL DE RESCISÃO ATUALIZADA
             if (colab.statusReal === 'Desligado') {
                 const match = colab.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
                     const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]), 23, 59, 59);
 
-                    if (dataUltimoDia <= dataFimMesPagamento) {
+                    if (dataUltimoDia <= dF) { // <-- Limitado à data final do filtro
                         diasPadraoCalculado = 0; 
                         
-                        let dCalc = new Date(dataInicioMesPagamento);
-                        while (dCalc <= dataUltimoDia) {
+                        let limiteUso = dataUltimoDia < dF ? dataUltimoDia : dF;
+                        let dCalc = new Date(dI); // <-- A MÁGICA: Começa a contar exatamente do Início do Filtro!
+
+                        while (dCalc <= limiteUso) {
                             const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
                             if (!window.isDiaDeFolga(colab, isoStr)) {
                                 diasPadraoCalculado++; 
@@ -42387,7 +42411,12 @@ document.getElementById('form-ausencia-admin').addEventListener('submit', async 
     const motivoConflito = await window.checarConflitoGlobal(idColab, dataI, dataF, ['ATR', 'ABD', 'DECL'].includes(sigla));
     if (motivoConflito) {
         btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Lançar e Aprovar Automaticamente';
-        return mostrarAlerta(`Conflito de datas com: <b>${motivoConflito}</b>`, "erro");
+        
+        let textoDatas = (dataI === dataF) 
+            ? `no dia <b>${formatarDataBR(dataI)}</b>` 
+            : `no período de <b>${formatarDataBR(dataI)} a ${formatarDataBR(dataF)}</b>`;
+            
+        return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br>O colaborador <b>${colabNome}</b> já possui <b>${motivoConflito}</b> na escala ${textoDatas}.<br><br>Para prosseguir com este lançamento, exclua a ocorrência anterior daquele dia.`, "erro", "⛔ Conflito de Agendas");
     }
 
     let cidFinalAdmin = null;
