@@ -40778,11 +40778,16 @@ window.filtrarContratos = function() {
     const isAdmin = usuarioAtual.perfil === 'Admin';
     const suffix = isAdmin ? '-admin' : '-gestor';
 
-    // Proteção para caso o input não exista na tela
     const inputBusca = document.getElementById('busca-contratos' + suffix);
     const termo = inputBusca ? window.removerAcentos(inputBusca.value.toLowerCase()) : '';
     
     const inputStatus = document.getElementById('filtro-status-contratos' + suffix);
+    
+    // 👇 BLINDAGEM: Injeta a nova opção de filtro na tela do Admin se ela não existir
+    if (isAdmin && inputStatus && !inputStatus.innerHTML.includes('Pendente Ficha SUS')) {
+        inputStatus.insertAdjacentHTML('beforeend', '<option value="Pendente Ficha SUS">⚠️ Pendente: Ficha SUS</option>');
+    }
+    
     const statusFiltro = inputStatus ? inputStatus.value : 'Todos';
     
     const inputMes = document.getElementById('filtro-mes-ctr' + suffix);
@@ -40793,19 +40798,20 @@ window.filtrarContratos = function() {
     let filtrados = todosContratosGlobais.filter(c => {
         const adm = c.dados_admissao || {};
         const ctr = adm.contrato || {}; 
-        
-        // Força o status padrão se não existir
         const statusReal = ctr.status || 'Aguardando RH';
 
         const matchNome = window.removerAcentos((c.nome || '').toLowerCase()).includes(termo) || 
                           (c.unidade && window.removerAcentos((c.unidade || '').toLowerCase()).includes(termo)); 
         
-       // 👇 A MÁGICA DO FILTRO DUPLO: Se escolher "Pendentes Gestor", ele aceita os dois status!
+        // 👇 INTEGRAÇÃO: Validação do novo filtro de Ficha SUS pendente
         let matchStatus = false;
         if (statusFiltro === 'Todos') {
             matchStatus = true;
         } else if (statusFiltro === 'Pendentes Gestor') {
             matchStatus = (statusReal === 'Aguardando Assinatura' || statusReal === 'Aguardando Prorrogação');
+        } else if (statusFiltro === 'Pendente Ficha SUS') {
+            // Captura qualquer contrato que já avançou mas não possui o documento anexado
+            matchStatus = (!ctr.doc_ficha_sus && (statusReal === 'Concluído' || statusReal === 'Aguardando Prorrogação'));
         } else {
             matchStatus = (statusReal === statusFiltro);
         }
@@ -40813,7 +40819,6 @@ window.filtrarContratos = function() {
         let matchData = true;
         if (mesFiltro) {
             const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
-            
             if (dataInicioColab.match(/^\d{4}-\d{2}-\d{2}$/)) {
                 if (!dataInicioColab.startsWith(mesFiltro)) matchData = false;
             } else if (dataInicioColab.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
@@ -40839,11 +40844,10 @@ window.filtrarContratos = function() {
         return 5;
     };
 
-   filtrados.sort((a, b) => {
+    filtrados.sort((a, b) => {
         const sA = a.dados_admissao?.contrato?.status || 'Aguardando RH';
         const sB = b.dados_admissao?.contrato?.status || 'Aguardando RH';
         
-        // 👇 A MÁGICA: Só puxa notificação do Admin se o status fizer sentido!
         const tipoNotifA = isAdmin ? ((sA === 'Aguardando Prorrogação' || sA === 'Concluído') ? 'Contrato_Admin' : 'BLOQUEADO') : 'Contrato_Gestor';
         const tipoNotifB = isAdmin ? ((sB === 'Aguardando Prorrogação' || sB === 'Concluído') ? 'Contrato_Admin' : 'BLOQUEADO') : 'Contrato_Gestor';
 
@@ -40863,7 +40867,6 @@ window.filtrarContratos = function() {
         return a.nome.localeCompare(b.nome);
     });
 
-    // 👇 A MÁGICA AQUI: Salva a lista na Memória Global para o PDF e o Excel enxergarem! 👇
     contratosFiltrados = filtrados;
     window.contratosFiltrados = filtrados; 
     
@@ -41246,27 +41249,46 @@ window.renderizarPaginacaoContratos = function() {
                         </div>
                     </div>`;
             }
-        } else if (txtStatus === 'Concluído') {
+       } else if (txtStatus === 'Concluído') {
             corStatus = '#28a745';
             let btnProrrogacao = ctr.doc_prorrogacao ? `<a href="${ctr.doc_prorrogacao}" target="_blank" class="badge" style="background: rgba(156, 39, 176, 0.1); color: #9c27b0; border: 1px solid #9c27b0; text-decoration: none; padding: 8px 12px;"><i class="fa-solid fa-file-signature"></i> Prorrogação</a>` : '';
             let btnFichaSus = ctr.doc_ficha_sus ? `<a href="${ctr.doc_ficha_sus}" target="_blank" class="badge" style="background: rgba(0,188,212,0.1); color: #00bcd4; border: 1px solid #00bcd4; text-decoration: none; padding: 8px 12px;"><i class="fa-solid fa-notes-medical"></i> Ficha SUS</a>` : '';
             
             if (isAdmin) {
-                acoesHtml = `
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; width: 100%;">
-                        <a href="${ctr.doc_rh}" target="_blank" class="badge admin" style="text-decoration: none; padding: 8px 12px; align-self: center;"><i class="fa-solid fa-file-pdf"></i> Base</a>
-                        
-                        <div style="display: flex; gap: 5px; align-items: center; border: 1px dashed rgba(40,167,69,0.3); padding: 4px; border-radius: 6px;">
-                            <a href="${ctr.doc_assinado}" target="_blank" class="badge ativo" style="text-decoration: none; padding: 8px 12px; margin: 0;"><i class="fa-solid fa-file-signature"></i> 1ª Etapa</a>
-                            <button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; margin: 0;" onclick="refazerContratoAdmin('${c.id}')" title="Devolver 1ª Assinatura"><i class="fa-solid fa-rotate-left"></i> Refazer 1ª</button>
+                // 👇 MÁGICA: Constrói a tarja de alerta e o campo de Upload Direto para o Admin hackear o envio
+                let avisoFichaSusAdmin = '';
+                if (!ctr.doc_ficha_sus) {
+                    avisoFichaSusAdmin = `
+                        <div style="background: rgba(0, 188, 212, 0.08); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #00bcd4; text-align: left; width: 100%; margin-bottom: 8px; box-sizing: border-box;">
+                            <span style="font-size: 0.75rem; color: var(--cor-texto-principal); line-height: 1.3; display: block;"><b style="color: #00bcd4;"><i class="fa-solid fa-triangle-exclamation"></i> Pendência de Documento:</b> Contrato concluído pelo Gestor, mas a <b>Ficha SUS não foi anexada</b>.</span>
                         </div>
+                        <div style="display: flex; gap: 6px; align-items: center; background: rgba(0,188,212,0.04); border: 1px dashed #00bcd4; border-radius: 6px; padding: 6px 8px; width: 100%; max-width: 350px; margin-bottom: 10px; box-sizing: border-box;">
+                            <input type="file" id="upload-fichasus-posterior-acao-${c.id}" accept="image/*,.pdf" style="flex: 1; min-width: 0; font-size: 0.75rem;">
+                            <button class="btn-success" style="background: #00bcd4; color: #000; border: none; font-weight: bold; font-size: 0.75rem; padding: 6px 10px; white-space: nowrap;" onclick="enviarFichaSusPosteriorAcao('${c.id}', '${c.nome.replace(/'/g, "\\'")}', '${c.unidade}', '${c.empresa}')">
+                                <i class="fa-solid fa-bolt"></i> Inserir SUS
+                            </button>
+                        </div>
+                    `;
+                }
 
-                        ${ctr.doc_prorrogacao ? `
-                        <div style="display: flex; gap: 5px; align-items: center; border: 1px dashed rgba(156, 39, 176, 0.3); padding: 4px; border-radius: 6px;">
-                            ${btnProrrogacao}
-                            <button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; margin: 0;" onclick="refazerProrrogacaoAdmin('${c.id}')" title="Devolver Prorrogação"><i class="fa-solid fa-rotate-left"></i> Refazer 2ª</button>
-                        </div>` : btnProrrogacao}
-                        ${btnFichaSus}
+                acoesHtml = `
+                    <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; align-items: flex-end;">
+                        ${avisoFichaSusAdmin}
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; width: 100%;">
+                            <a href="${ctr.doc_rh}" target="_blank" class="badge admin" style="text-decoration: none; padding: 8px 12px; align-self: center;"><i class="fa-solid fa-file-pdf"></i> Base</a>
+                            
+                            <div style="display: flex; gap: 5px; align-items: center; border: 1px dashed rgba(40,167,69,0.3); padding: 4px; border-radius: 6px;">
+                                <a href="${ctr.doc_assinado}" target="_blank" class="badge ativo" style="text-decoration: none; padding: 8px 12px; margin: 0;"><i class="fa-solid fa-file-signature"></i> 1ª Etapa</a>
+                                <button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; margin: 0;" onclick="refazerContratoAdmin('${c.id}')" title="Devolver 1ª Assinatura"><i class="fa-solid fa-rotate-left"></i> Refazer 1ª</button>
+                            </div>
+
+                            ${ctr.doc_prorrogacao ? `
+                            <div style="display: flex; gap: 5px; align-items: center; border: 1px dashed rgba(156, 39, 176, 0.3); padding: 4px; border-radius: 6px;">
+                                ${btnProrrogacao}
+                                <button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; margin: 0;" onclick="refazerProrrogacaoAdmin('${c.id}')" title="Devolver Prorrogação"><i class="fa-solid fa-rotate-left"></i> Refazer 2ª</button>
+                            </div>` : btnProrrogacao}
+                            ${btnFichaSus}
+                        </div>
                     </div>
                 `;
             } else {
