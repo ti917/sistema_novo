@@ -44477,17 +44477,45 @@ window.filtrarAsoAdmin = function() {
     const container = document.getElementById('lista-aso-container-admin');
     
     if (!container) return;
+
+    // 👇 Injeta os status organizados e FORÇA o "selecione" na primeira vez, ignorando o selected do HTML 👇
+    if (statusInput && !statusInput.innerHTML.includes('Selecione um status')) {
+        statusInput.innerHTML = `
+            <option value="selecione" disabled selected>Selecione um status...</option>
+            <option value="Todos">Todos os Status (Geral)</option>
+            <option value="Aguardando Admissional">Aguardando Admissional</option>
+            <option value="Aguardando Periodico">Aguardando Periódico (Vencendo/Vencidos)</option>
+            <option value="A Vencer">↳ Somente a Vencer (30 dias)</option>
+            <option value="Vencido">↳ Somente Vencidos (Atrasados)</option>
+            <option value="Pendentes">Aguardando Todos Pendentes</option>
+            <option value="Ativo">Concluídos (Regulares)</option>
+        `;
+        statusInput.value = "selecione"; // Força o estado inicial limpo
+    }
     
     const termo = termoInput ? window.removerAcentos(termoInput.value.toLowerCase()) : '';
     const mesFiltro = mesInput ? mesInput.value : '';
-    const statusFiltro = statusInput ? statusInput.value : 'Todos';
+    const statusFiltro = statusInput ? statusInput.value : 'selecione';
 
     container.innerHTML = '';
+
+    // 👇 TELA LIMPA INICIAL (Economia de processamento e banco) 👇
+    if (statusFiltro === 'selecione' && termo === '') {
+        window.colabsAsoFiltrados = []; 
+        container.innerHTML = `
+            <div style="text-align: center; color: var(--cor-texto-secundario); padding: 40px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px dashed var(--cor-borda);">
+                <i class="fa-solid fa-filter fa-3x" style="margin-bottom: 15px; opacity: 0.5; color: #00bcd4;"></i><br>
+                <h4 style="color: #fff; margin-bottom: 5px;">Aguardando Seleção</h4>
+                <p style="font-size: 0.9rem;">Utilize o filtro <b>"Selecione um status..."</b> acima ou pesquise pelo nome para carregar os exames.</p>
+            </div>
+        `;
+        return;
+    }
 
     const filtrados = todosColabsAso.filter(c => {
         const adm = c.dados_admissao || {};
       
-        // Escudo: Esconde os PJs e Isentos da tela de Controle de ASO
+        // Escudo: Esconde os PJs e Isentos
         if (adm.isenta_aso === true) return false;
         
         // 1. Filtro de Nome ou Unidade
@@ -44495,17 +44523,10 @@ window.filtrarAsoAdmin = function() {
         const uniStr = c.unidade ? window.removerAcentos(c.unidade.toLowerCase()) : '';
         const matchTexto = nomeStr.includes(termo) || uniStr.includes(termo);
         
-        // 2. Filtro de Mês da Admissão
-        let matchData = true;
-        if (mesFiltro) {
-            const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
-            if (!dataInicioColab.startsWith(mesFiltro)) {
-                matchData = false;
-            }
-        }
-
         const isAdmissionalPendente = (c.status === 'Aguardando ASO');
-        let isPeriodicoPendenteFilter = false;
+        let isPeriodicoAVencer = false;
+        let isPeriodicoVencido = false;
+        let dVencimentoStr = ''; // Guarda o mês do vencimento (YYYY-MM)
 
         if (c.status === 'Ativo') {
             const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
@@ -44514,28 +44535,47 @@ window.filtrarAsoAdmin = function() {
                 const dVencimento = new Date(dBase);
                 dVencimento.setFullYear(dVencimento.getFullYear() + 1); 
                 
-                const hojeData = new Date(); hojeData.setHours(0,0,0,0);
-                const diffVencimento = Math.ceil((dVencimento - hojeData) / (1000 * 60 * 60 * 24));
+                // Formata para bater com a busca da caixinha (YYYY-MM)
+                const anoV = dVencimento.getFullYear();
+                const mesV = String(dVencimento.getMonth() + 1).padStart(2, '0');
+                dVencimentoStr = `${anoV}-${mesV}`;
                 
-                if (diffVencimento <= 30) {
-                    isPeriodicoPendenteFilter = true;
+                const hojeData = new Date(); hojeData.setHours(0,0,0,0);
+                const diffVencimento = Math.ceil((dVencimento.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
+                
+                if (diffVencimento < 0) {
+                    isPeriodicoVencido = true;
+                } else if (diffVencimento <= 30) {
+                    isPeriodicoAVencer = true;
                 }
             }
         }
 
-        // 3. Roteamento inteligente do Filtro de Status solicitado
+        // 2. Roteamento inteligente do Filtro de Status
         let matchStatus = true;
         if (statusFiltro === 'Aguardando Admissional') {
             matchStatus = isAdmissionalPendente;
-        } 
-        else if (statusFiltro === 'Aguardando Periodico') {
-            matchStatus = isPeriodicoPendenteFilter;
-        } 
-        else if (statusFiltro === 'Pendentes') {
-            matchStatus = (isAdmissionalPendente || isPeriodicoPendenteFilter);
-        } 
-        else if (statusFiltro === 'Ativo') {
-            matchStatus = (c.status === 'Ativo' && !isPeriodicoPendenteFilter);
+        } else if (statusFiltro === 'Aguardando Periodico') {
+            matchStatus = isPeriodicoAVencer || isPeriodicoVencido;
+        } else if (statusFiltro === 'A Vencer') {
+            matchStatus = isPeriodicoAVencer;
+        } else if (statusFiltro === 'Vencido') {
+            matchStatus = isPeriodicoVencido;
+        } else if (statusFiltro === 'Pendentes') {
+            matchStatus = (isAdmissionalPendente || isPeriodicoAVencer || isPeriodicoVencido);
+        } else if (statusFiltro === 'Ativo') {
+            matchStatus = (c.status === 'Ativo' && !isPeriodicoAVencer && !isPeriodicoVencido);
+        }
+
+        // 3. Filtro de Mês Inteligente (Admissão para novos vs Vencimento para periódicos)
+        let matchData = true;
+        if (mesFiltro) {
+            if (isAdmissionalPendente) {
+                const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
+                if (!dataInicioColab.startsWith(mesFiltro)) matchData = false;
+            } else {
+                if (dVencimentoStr !== mesFiltro) matchData = false;
+            }
         }
 
         return matchTexto && matchStatus && matchData;
@@ -44543,11 +44583,34 @@ window.filtrarAsoAdmin = function() {
 
     window.colabsAsoFiltrados = filtrados;
 
-    // Ordenação: Pendentes graves sempre no topo da triagem do RH
+    // Ordenação: Admissional Pendente > Vencido > A Vencer > Regulares
     filtrados.sort((a, b) => {
-        if (a.status === 'Aguardando ASO' && b.status !== 'Aguardando ASO') return -1;
-        if (a.status !== 'Aguardando ASO' && b.status === 'Aguardando ASO') return 1;
-        return a.nome.localeCompare(b.nome);
+        const getPeso = (colab) => {
+            if (colab.status === 'Aguardando ASO') return 1;
+            const adm = colab.dados_admissao || {};
+            const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
+            if (dataBaseAso) {
+                const dBase = new Date(dataBaseAso + 'T00:00:00');
+                const dVencimento = new Date(dBase);
+                dVencimento.setFullYear(dVencimento.getFullYear() + 1);
+                const hojeData = new Date(); hojeData.setHours(0,0,0,0);
+                const diffVencimento = Math.ceil((dVencimento.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
+                if (diffVencimento < 0) return 2; // Vencidos
+                if (diffVencimento <= 30) return 3; // A Vencer
+            }
+            return 4; // Regulares
+        };
+        const pesoA = getPeso(a);
+        const pesoB = getPeso(b);
+        if (pesoA !== pesoB) return pesoA - pesoB;
+        
+        // Se a Lupa estiver limpa, ordena por unidade e depois nome. Se tiver texto na lupa, ordena estritamente por nome.
+        if (termo === "") {
+            if((a.unidade || '') !== (b.unidade || '')) return (a.unidade || '').localeCompare(b.unidade || '');
+            return (a.nome || '').localeCompare(b.nome || '');
+        } else {
+            return (a.nome || '').localeCompare(b.nome || '');
+        }
     });
 
     // Renderização dos cards físicos na listagem
@@ -44556,7 +44619,6 @@ window.filtrarAsoAdmin = function() {
         const cargo = adm.cargo || 'Sem cargo';
         const isAtivo = (c.status === 'Ativo'); 
         
-        // 👇 A MÁGICA DA CORREÇÃO: Calculando a variável dentro do escopo correto do forEach! 👇
         let isPeriodicoPendente = false;
         if (isAtivo) {
             const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
@@ -44565,13 +44627,12 @@ window.filtrarAsoAdmin = function() {
                 const dVencimento = new Date(dBase);
                 dVencimento.setFullYear(dVencimento.getFullYear() + 1);
                 const hojeData = new Date(); hojeData.setHours(0,0,0,0);
-                const diffVencimento = Math.ceil((dVencimento - hojeData) / (1000 * 60 * 60 * 24));
+                const diffVencimento = Math.ceil((dVencimento.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
                 if (diffVencimento <= 30) {
                     isPeriodicoPendente = true;
                 }
             }
         }
-        // 👆 ----------------------------------------------------------------------- 👆
 
         const regra = configsAsoGlobais.find(r => r.unidade === c.unidade && r.cargo === cargo);
         
@@ -44621,22 +44682,22 @@ window.filtrarAsoAdmin = function() {
                 dBloqueio.setDate(dBloqueio.getDate() + 30); 
                 
                 const hojeData = new Date(); hojeData.setHours(0,0,0,0);
-                const diffVencimento = Math.ceil((dVencimento - hojeData) / (1000 * 60 * 60 * 24));
+                const diffVencimento = Math.ceil((dVencimento.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
                 
                 if (hojeData > dBloqueio) {
                     statusPeridicoHtml = `<div style="background: rgba(220, 53, 69, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid var(--cor-perigo); margin-top: 10px;">
                         <span style="color: var(--cor-perigo); font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-lock"></i> ASO PERIÓDICO VENCIDO E BLOQUEADO</span><br>
-                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">O colaborador está suspenso da escala até o envio do novo exame.</span>
+                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Venceu em: <b>${formatarDataBR(dVencimento.toISOString().split('T')[0])}</b>. O colaborador está suspenso da escala.</span>
                     </div>`;
                 } else if (diffVencimento < 0) { 
                     statusPeridicoHtml = `<div style="background: rgba(255, 152, 0, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid #ff9800; margin-top: 10px;">
                         <span style="color: #ff9800; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> ASO VENCIDO (Carência Ativa)</span><br>
-                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Venceu em ${formatarDataBR(dVencimento.toISOString().split('T')[0])}. Bloqueio de escala em ${30 - Math.abs(diffVencimento)} dias.</span>
+                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Venceu em: <b>${formatarDataBR(dVencimento.toISOString().split('T')[0])}</b>. Bloqueio de escala em ${30 - Math.abs(diffVencimento)} dias.</span>
                     </div>`;
                 } else if (diffVencimento <= 30) {
                     statusPeridicoHtml = `<div style="background: rgba(255, 193, 7, 0.1); padding: 10px; border-radius: 6px; border-left: 3px solid #ffc107; margin-top: 10px;">
                         <span style="color: #ffc107; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-clock"></i> ASO Periódico Vence em ${diffVencimento} dia(s)</span><br>
-                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Vencimento oficial: ${formatarDataBR(dVencimento.toISOString().split('T')[0])}.</span>
+                        <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Vencimento oficial: <b>${formatarDataBR(dVencimento.toISOString().split('T')[0])}</b>.</span>
                     </div>`;
                 } else {
                     statusPeridicoHtml = `<div style="margin-top: 10px;"><span style="color: var(--cor-texto-secundario); font-size: 0.75rem;"><i class="fa-solid fa-calendar-check" style="color: #28a745;"></i> Próximo vencimento do Periódico: <b>${formatarDataBR(dVencimento.toISOString().split('T')[0])}</b></span></div>`;
@@ -44695,7 +44756,7 @@ window.filtrarAsoAdmin = function() {
             </div>`;
     });
 };
-
+      
       // ==========================================
 // FUNÇÃO EXCLUSIVA PARA APAGAR ASO E RECALCULAR PRAZO
 // ==========================================
@@ -45122,7 +45183,7 @@ window.exportarRelatorioAso = async function() {
     }
 
     try {
-        mostrarAlerta("Construindo planilha de custos de ASO...", "sucesso");
+        mostrarAlerta("Construindo planilha de custos e vencimentos de ASO...", "sucesso");
 
         const workbook = new ExcelJS.Workbook();
         workbook.creator = 'RH Portal';
@@ -45132,23 +45193,24 @@ window.exportarRelatorioAso = async function() {
         const periodoTxt = mesAnoSelecionado ? mesAnoSelecionado.split('-').reverse().join('/') : 'Todos os meses';
         const dataHoje = new Date().toLocaleDateString('pt-BR');
 
-        sheet.mergeCells('A1:G1');
+        sheet.mergeCells('A1:H1');
         const titulo = sheet.getCell('A1');
-        titulo.value = 'RELATÓRIO DE CUSTOS DE EXAMES ADMISSIONAIS (ASO)';
+        titulo.value = 'RELATÓRIO DE EXAMES ADMISSIONAIS E PERIÓDICOS (ASO)';
         titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
         titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
         titulo.alignment = { vertical: 'middle', horizontal: 'center' };
 
-        sheet.mergeCells('A2:G2');
+        sheet.mergeCells('A2:H2');
         const subtitulo = sheet.getCell('A2');
-        subtitulo.value = `PERÍODO: ${periodoTxt}   |   GERADO EM: ${dataHoje}`;
+        subtitulo.value = `PERÍODO (VENCIMENTO / ADMISSÃO): ${periodoTxt}   |   GERADO EM: ${dataHoje}`;
         subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
         subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
         subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
 
         sheet.addRow([]);
 
-        const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "CARGO", "STATUS", "CLÍNICA / EMPRESA", "CUSTO (R$)"]);
+        // 👇 A MÁGICA: Coluna de Vencimento Adicionada! 👇
+        const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "CARGO", "STATUS GERAL", "DATA DE VENCIMENTO", "CLÍNICA / EMPRESA", "CUSTO (R$)"]);
         headerRow.font = { bold: true, color: { argb: 'FF000000' } };
         headerRow.height = 25;
         headerRow.eachCell((cell) => {
@@ -45157,17 +45219,27 @@ window.exportarRelatorioAso = async function() {
             cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
         });
 
+        // Ajuste de larguras para caber a nova coluna
         sheet.columns = [
             { width: 40 }, { width: 16 }, { width: 25 }, { width: 25 }, 
-            { width: 18 }, { width: 35 }, { width: 18 }
+            { width: 20 }, { width: 22 }, { width: 35 }, { width: 18 }
         ];
 
         let currentRow = 5;
         let somaTotal = 0;
 
+        // 👇 A MÁGICA: Verifica o que está escrito na Lupa de Busca! 👇
+        const termoBuscaLupa = document.getElementById('busca-aso-admin') ? document.getElementById('busca-aso-admin').value.trim() : '';
+
         window.colabsAsoFiltrados.sort((a, b) => {
-            if(a.unidade !== b.unidade) return a.unidade.localeCompare(b.unidade);
-            return a.nome.localeCompare(b.nome);
+            if (termoBuscaLupa === "") {
+                // 1. Lupa Vazia (Mostrando todos): Ordena por UNIDADE e depois por NOME
+                if((a.unidade || '') !== (b.unidade || '')) return (a.unidade || '').localeCompare(b.unidade || '');
+                return (a.nome || '').localeCompare(b.nome || '');
+            } else {
+                // 2. Com Lupa preenchida (Ex: HMA): Ordena direto pelo NOME alfabeticamente
+                return (a.nome || '').localeCompare(b.nome || '');
+            }
         });
 
         window.colabsAsoFiltrados.forEach(c => {
@@ -45181,15 +45253,59 @@ window.exportarRelatorioAso = async function() {
 
             somaTotal += valor;
 
-            const row = sheet.addRow([c.nome, cpf, c.unidade, cargo, c.status, clinica, valor]);
+            // 👇 A MÁGICA: Calcula a data exata e pinta as palavras corretas pro Excel 👇
+            let dataVencimentoFormatada = '-';
+            let statusPlanilha = c.status;
+            let isVencidoExcel = false;
+            let isAvisoExcel = false;
 
-            row.getCell(7).numFmt = '"R$ "#,##0.00';
-            row.getCell(7).font = { bold: true, color: { argb: 'FFDC3545' } }; 
+            if (c.status === 'Aguardando ASO') {
+                dataVencimentoFormatada = 'Admissional Pendente';
+                statusPlanilha = 'Aguardando Admissional';
+            } else if (c.status === 'Ativo') {
+                const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
+                if (dataBaseAso) {
+                    const dBase = new Date(dataBaseAso + 'T00:00:00');
+                    const dVencimento = new Date(dBase);
+                    dVencimento.setFullYear(dVencimento.getFullYear() + 1); // Soma 1 ano
+                    dataVencimentoFormatada = formatarDataBR(dVencimento.toISOString().split('T')[0]);
+                    
+                    const hojeData = new Date(); hojeData.setHours(0,0,0,0);
+                    const diffVencimento = Math.ceil((dVencimento - hojeData) / (1000 * 60 * 60 * 24));
+                    
+                    if (diffVencimento < 0) {
+                        statusPlanilha = 'Periódico Vencido';
+                        isVencidoExcel = true;
+                    } else if (diffVencimento <= 30) {
+                        statusPlanilha = `Vence em ${diffVencimento} dias`;
+                        isAvisoExcel = true;
+                    } else {
+                        statusPlanilha = 'Regular / Ativo';
+                    }
+                } else {
+                    dataVencimentoFormatada = 'Sem Data Base';
+                }
+            }
+
+            // Manda a linha para o Excel
+            const row = sheet.addRow([c.nome, cpf, c.unidade, cargo, statusPlanilha, dataVencimentoFormatada, clinica, valor]);
+
+            row.getCell(8).numFmt = '"R$ "#,##0.00';
+            row.getCell(8).font = { bold: true, color: { argb: 'FFDC3545' } }; 
             
-            if (c.status === 'Ativo') {
-                row.getCell(5).font = { color: { argb: 'FF28A745' }, bold: true }; 
+            // 👇 COLORE O STATUS E A DATA DE ACORDO COM A URGÊNCIA 👇
+            if (c.status === 'Aguardando ASO') {
+                row.getCell(5).font = { color: { argb: 'FF00BCD4' }, bold: true }; // Azul
+                row.getCell(6).font = { color: { argb: 'FF00BCD4' }, bold: true }; 
+            } else if (isVencidoExcel) {
+                row.getCell(5).font = { color: { argb: 'FFDC3545' }, bold: true }; // Vermelho
+                row.getCell(6).font = { color: { argb: 'FFDC3545' }, bold: true }; 
+            } else if (isAvisoExcel) {
+                row.getCell(5).font = { color: { argb: 'FFFF9800' }, bold: true }; // Laranja
+                row.getCell(6).font = { color: { argb: 'FFFF9800' }, bold: true }; 
             } else {
-                row.getCell(5).font = { color: { argb: 'FF00BCD4' }, bold: true }; 
+                row.getCell(5).font = { color: { argb: 'FF28A745' }, bold: true }; // Verde
+                row.getCell(6).font = { color: { argb: 'FF28A745' }, bold: true }; 
             }
 
             row.eachCell((cell, colNumber) => {
@@ -45204,14 +45320,14 @@ window.exportarRelatorioAso = async function() {
         });
 
         sheet.addRow([]);
-        const totalRow = sheet.addRow(["", "", "", "", "", "CUSTO TOTAL DE EXAMES:", { formula: `SUM(G5:G${currentRow-1})`, result: somaTotal }]);
+        const totalRow = sheet.addRow(["", "", "", "", "", "", "CUSTO TOTAL DE EXAMES:", { formula: `SUM(H5:H${currentRow-1})`, result: somaTotal }]);
         
-        totalRow.getCell(6).font = { bold: true, size: 12, color: { argb: 'FF00BCD4' } };
-        totalRow.getCell(6).alignment = { horizontal: 'right' };
-        totalRow.getCell(7).font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
-        totalRow.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
-        totalRow.getCell(7).numFmt = '"R$ "#,##0.00';
-        totalRow.getCell(7).alignment = { horizontal: 'center' };
+        totalRow.getCell(7).font = { bold: true, size: 12, color: { argb: 'FF00BCD4' } };
+        totalRow.getCell(7).alignment = { horizontal: 'right' };
+        totalRow.getCell(8).font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+        totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+        totalRow.getCell(8).numFmt = '"R$ "#,##0.00';
+        totalRow.getCell(8).alignment = { horizontal: 'center' };
 
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -45219,7 +45335,7 @@ window.exportarRelatorioAso = async function() {
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         const nomeData = periodoTxt.replace('/', '-');
-        link.download = `Custos_ASO_${nomeData}.xlsx`;
+        link.download = `Controle_ASO_${nomeData}.xlsx`;
         link.click();
         URL.revokeObjectURL(link.href);
 
@@ -45227,7 +45343,7 @@ window.exportarRelatorioAso = async function() {
         console.error(err);
         mostrarAlerta("Erro ao gerar Excel: " + err.message, "erro");
     }
-};    
+};
 
         // =========================================================================
 // MÓDULO DE CHAMADOS / HELP DESK INTERNO
