@@ -2274,11 +2274,20 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                     criado_por: usuarioAtual.nome
                 };
 
+                const nomeAntigoForn = fornecedor.nome; // Nome como estava antes da edição, para sincronizar depois
+
                 try {
                     if (idForn) {
                         const { error } = await supabaseClient.from('financeiro_fornecedores').update(payload).eq('id', idForn);
                         if (error) throw error;
-                        mostrarAlerta("Fornecedor atualizado com sucesso!", "sucesso");
+
+                        // Se o nome mudou, propaga a mudança para Centros de Custo e Lançamentos já feitos
+                        if (nomeAntigoForn && nomeAntigoForn !== payload.nome) {
+                            btnSalvar.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Atualizando registros vinculados...';
+                            await sincronizarNomeFornecedor(nomeAntigoForn, payload.nome);
+                        }
+
+                        mostrarAlerta("Fornecedor atualizado com sucesso! Nome padronizado em Centros de Custo e Lançamentos.", "sucesso");
                     } else {
                         const { error } = await supabaseClient.from('financeiro_fornecedores').insert([payload]);
                         if (error) throw error;
@@ -2295,6 +2304,65 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                     btnSalvar.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Fornecedor';
                 }
             });
+        };
+
+        // Propaga a mudança de nome de um fornecedor para os Centros de Custo (onde ele está vinculado)
+        // e para os Lançamentos (movimentações) já cadastrados, mantendo tudo padronizado.
+        window.sincronizarNomeFornecedor = async function(nomeAntigo, nomeNovo) {
+            if (!nomeAntigo || !nomeNovo || nomeAntigo === nomeNovo) return;
+
+            // 1. Atualiza o nome gravado em todos os lançamentos (histórico) que usam esse fornecedor
+            try {
+                const { error: errLanc } = await supabaseClient
+                    .from('financeiro_lancamentos')
+                    .update({ fornecedor_nome: nomeNovo })
+                    .eq('fornecedor_nome', nomeAntigo);
+                if (errLanc) console.error('Erro ao sincronizar fornecedor nos lançamentos:', errLanc);
+            } catch (e) { console.error(e); }
+
+            // 2. Atualiza o nome dentro da lista de fornecedores vinculados em cada Centro de Custo
+            try {
+                const { data: centros, error: errBusca } = await supabaseClient
+                    .from('financeiro_centros_custo')
+                    .select('id, fornecedores');
+                if (errBusca) { console.error('Erro ao buscar centros de custo:', errBusca); return; }
+
+                for (const cc of (centros || [])) {
+                    let lista = [];
+                    try { lista = typeof cc.fornecedores === 'string' ? JSON.parse(cc.fornecedores) : cc.fornecedores; } catch (e) { lista = []; }
+                    if (!Array.isArray(lista) || lista.length === 0) continue;
+
+                    let mudou = false;
+                    lista = lista.map(f => {
+                        const nomeF = typeof f === 'string' ? f : f.nome;
+                        if (nomeF === nomeAntigo) {
+                            mudou = true;
+                            return typeof f === 'string' ? nomeNovo : { ...f, nome: nomeNovo };
+                        }
+                        return f;
+                    });
+
+                    if (mudou) {
+                        const { error: errUpdate } = await supabaseClient
+                            .from('financeiro_centros_custo')
+                            .update({ fornecedores: lista })
+                            .eq('id', cc.id);
+                        if (errUpdate) console.error('Erro ao atualizar fornecedores do centro de custo', cc.id, errUpdate);
+                    }
+                }
+
+                // Mantém a lista global de centros de custo em memória sincronizada também
+                if (typeof todosCentrosCustoGlobais !== 'undefined' && Array.isArray(todosCentrosCustoGlobais)) {
+                    todosCentrosCustoGlobais.forEach(cc => {
+                        let lista = [];
+                        try { lista = typeof cc.fornecedores === 'string' ? JSON.parse(cc.fornecedores) : cc.fornecedores; } catch (e) { lista = []; }
+                        if (!Array.isArray(lista)) return;
+                        lista.forEach(f => {
+                            if (typeof f === 'object' && f && f.nome === nomeAntigo) f.nome = nomeNovo;
+                        });
+                    });
+                }
+            } catch (e) { console.error(e); }
         };
 
         // 2. Lixeira de Fornecedores
@@ -3360,10 +3428,15 @@ window.removerLinhaPagamento = function(idLinha) {
     }
 };
 
-        window.abrirModalEdicaoLancamento = function(idLancamento) {
+        window.abrirModalEdicaoLancamento = async function(idLancamento) {
             // Puxa da memória o lançamento que ele clicou
             const lanc = window.lancamentosAtuaisEmMemoria.find(l => l.id === idLancamento);
             if (!lanc) return mostrarAlerta("Lançamento não encontrado.", "erro");
+
+            // Garante que a lista de categorias esteja carregada antes de montar o select
+            if (typeof todasCategoriasGlobais === 'undefined' || todasCategoriasGlobais.length === 0) {
+                await carregarCategorias(true);
+            }
 
            // Pega o ID do Centro de Custo do PRÓPRIO lançamento, para funcionar tanto dentro da unidade quanto no dashboard!
             const idCc = lanc.centro_custo_id;
@@ -3380,6 +3453,19 @@ window.removerLinhaPagamento = function(idLinha) {
                     optionsFornHTML += `<option value="${nomeForn}" ${selected}>${nomeForn}</option>`;
                 });
             }
+
+            // Monta as options de Categoria filtradas pelo Tipo do lançamento (Despesa/Receita)
+            window.montarOptionsCategoriaEdicao = function(tipoSelecionado, catAtual) {
+                let html = '<option value="">Selecione uma Categoria...</option>';
+                todasCategoriasGlobais.forEach(c => {
+                    if (c.tipo === tipoSelecionado || c.tipo === 'Ambos') {
+                        const sel = c.nome === catAtual ? 'selected' : '';
+                        html += `<option value="${c.nome}" ${sel}>${c.nome}</option>`;
+                    }
+                });
+                return html;
+            };
+            const optionsCatHTML = window.montarOptionsCategoriaEdicao(lanc.tipo, lanc.categoria);
 
             // Formata a data do banco (YYYY-MM-DD) para a tela (DD/MM/YYYY)
             const dataParts = lanc.data_pagamento.split('-'); 
@@ -3402,7 +3488,7 @@ window.removerLinhaPagamento = function(idLinha) {
                         <div style="display: flex; gap: 15px; margin-bottom: 15px;">
                             <div style="flex: 1;">
                                 <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Tipo <span style="color: var(--cor-perigo);">*</span></label>
-                                <select id="edit-lanc-tipo" class="modern-input" required onchange="document.getElementById('box-edit-fornecedor').style.display = (this.value === 'Receita') ? 'none' : 'block'; if(this.value === 'Receita') document.getElementById('edit-lanc-fornecedor').value = '';">
+                                <select id="edit-lanc-tipo" class="modern-input" required onchange="document.getElementById('box-edit-fornecedor').style.display = (this.value === 'Receita') ? 'none' : 'block'; if(this.value === 'Receita') document.getElementById('edit-lanc-fornecedor').value = ''; document.getElementById('edit-lanc-categoria').innerHTML = window.montarOptionsCategoriaEdicao(this.value, '');">
                                     <option value="Despesa" ${lanc.tipo === 'Despesa' ? 'selected' : ''}>Despesa (Saída)</option>
                                     <option value="Receita" ${lanc.tipo === 'Receita' ? 'selected' : ''}>Receita (Entrada)</option>
                                 </select>
@@ -3411,6 +3497,11 @@ window.removerLinhaPagamento = function(idLinha) {
                                 <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Fornecedor Vinculado</label>
                                 <select id="edit-lanc-fornecedor" class="modern-input">${optionsFornHTML}</select>
                             </div>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                            <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Categoria <span style="color: var(--cor-perigo);">*</span></label>
+                            <select id="edit-lanc-categoria" class="modern-input" required>${optionsCatHTML}</select>
                         </div>
 
                         <div style="margin-bottom: 15px;">
@@ -3512,8 +3603,12 @@ window.removerLinhaPagamento = function(idLinha) {
                         }
                     }
 
+                    const categoriaEdit = document.getElementById('edit-lanc-categoria').value;
+                    if (!categoriaEdit) throw new Error("Por favor, selecione uma categoria obrigatória.");
+
                     const payload = {
                         tipo: document.getElementById('edit-lanc-tipo').value,
+                        categoria: categoriaEdit,
                         fornecedor_nome: document.getElementById('edit-lanc-fornecedor').value || null,
                         descricao: document.getElementById('edit-lanc-descricao').value.trim(),
                         mes_referencia: document.getElementById('edit-lanc-mes').value,
@@ -4306,20 +4401,40 @@ if (formClara) {
                     criado_por: usuarioAtual.nome
                 };
 
+                const nomeAntigoCat = cat.nome; // Nome como estava antes da edição, para sincronizar depois
+
                 try {
                     if (id) {
                         const { error } = await supabaseClient.from('financeiro_categorias').update(payload).eq('id', id);
                         if (error) throw error;
+
+                        // Se o nome mudou, propaga a mudança para os Lançamentos já feitos
+                        if (nomeAntigoCat && nomeAntigoCat !== payload.nome) {
+                            btnSalvar.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Atualizando registros vinculados...';
+                            await sincronizarNomeCategoria(nomeAntigoCat, payload.nome);
+                        }
                     } else {
                         const { error } = await supabaseClient.from('financeiro_categorias').insert([payload]);
                         if (error) throw error;
                     }
-                    mostrarAlerta("Categoria salva com sucesso!", "sucesso");
+                    mostrarAlerta("Categoria salva com sucesso! Nome padronizado nos lançamentos.", "sucesso");
                     document.getElementById('modal-categoria').remove();
                     carregarCategorias();
                 } catch (err) { mostrarAlerta(err.message, "erro"); }
                 finally { btnSalvar.disabled = false; btnSalvar.innerHTML = '<i class="fa-solid fa-save"></i> Salvar'; }
             });
+        };
+
+        // Propaga a mudança de nome de uma categoria para todos os lançamentos (histórico) que já usam esse nome
+        window.sincronizarNomeCategoria = async function(nomeAntigo, nomeNovo) {
+            if (!nomeAntigo || !nomeNovo || nomeAntigo === nomeNovo) return;
+            try {
+                const { error } = await supabaseClient
+                    .from('financeiro_lancamentos')
+                    .update({ categoria: nomeNovo })
+                    .eq('categoria', nomeAntigo);
+                if (error) console.error('Erro ao sincronizar categoria nos lançamentos:', error);
+            } catch (e) { console.error(e); }
         };
 
         window.excluirCategoria = async function(id) {
