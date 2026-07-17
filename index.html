@@ -14607,20 +14607,39 @@ async function escutarTempoReal() {
         query = query.eq('empresa', empresaSelecionadaFiltro);
     }
 
-    // Otimização: Buscamos apenas as tabelas estritamente necessárias para o Headcount contratual
-    const [resUni, resAtivos] = await Promise.all([
+    const hojeIso = new Date().toISOString().split('T')[0];
+
+    // Buscamos as unidades, os perfis e também os afastados de hoje (Ausências e Férias) para bater com o modal
+    const [resUni, resAtivos, resAusencias, resFerias] = await Promise.all([
         query,
-        supabaseClient.from('perfis').select('id, nome, status, status_aprovacao, unidade, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador')
+        supabaseClient.from('perfis').select('id, nome, status, status_aprovacao, unidade, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador'),
+        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).neq('sigla', 'FA'),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
     ]);
 
     if (resUni.error) return;
 
-    // 🌟 CORREÇÃO CELESTIAL: Férias e Afastados permanecem computados no Headcount Geral da Unidade!
+    // Cria o conjunto de IDs de quem está afastado ou gozando férias hoje
+    const setAfastados = new Set([
+        ...(resAusencias.data || []).map(a => a.colaborador_id),
+        ...(resFerias.data || []).map(f => f.colaborador_id)
+    ]);
+
+    // 🌟 EQUALIZADOR MATRIZ: Filtra os ocupantes ativos da vaga seguindo 100% a lógica do modal
     const ocupantesGeral = (resAtivos.data || []).filter(c => {
-        const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
-        // Removemos o filtro de afastados/férias daqui para manter a consistência de contratos ativos
-        if (emRescisao) return false; 
-        return c.status === 'Ativo' || c.status === 'Aguardando ASO';
+        // Precisa estar com status Ativo ou Aguardando ASO
+        if (c.status !== 'Ativo' && c.status !== 'Aguardando ASO') return false;
+
+        // Exclui do headcount ativo se estiver cumprindo aviso prévio / processo rescisório
+        const isAviso = c.status_aprovacao === 'Rescisão Pendente' || 
+                        c.status_aprovacao === 'Aguardando Assinatura' || 
+                        c.status === 'Desligado';
+        if (isAviso) return false;
+
+        // Exclui do headcount ativo se estiver afastado por licença médica ou férias hoje
+        if (setAfastados.has(c.id)) return false;
+
+        return true;
     });
 
     tbody.innerHTML = '';
@@ -14644,7 +14663,7 @@ async function escutarTempoReal() {
             vtBadges = '<span style="color: var(--cor-texto-secundario); font-size: 0.8rem;">Não possui VT</span>';
         }
 
-        // Filtra os ocupantes reais da unidade (agora incluindo o colaborador de férias perfeitamente!)
+        // Filtra os ocupantes ativos validados desta unidade (agora batendo 100% com as pílulas do modal)
         const ativosDaUnidade = ocupantesGeral.filter(c => c.unidade === u.nome);
         const totalAtivos = ativosDaUnidade.length;
         const limiteGeral = u.capacidade_limite || '∞';
@@ -14670,7 +14689,7 @@ async function escutarTempoReal() {
         }
 
         tbody.innerHTML += `
-        <tr class="linha-unidade-oficial" style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
+        <tr class="linha-unidade-oficial" style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda); row-height: auto;">
             <td style="text-align: left; padding: 12px;">${u.empresa}</td>
             <td style="text-align: left; padding: 12px;">
                 <strong style="color: var(--cor-acento); display: block; margin-bottom: 4px; font-size: 1.1rem;">${u.nome}</strong>
