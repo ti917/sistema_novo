@@ -14584,12 +14584,11 @@ async function escutarTempoReal() {
     }
 }
 
-     window.carregarTabelaUnidades = async function() {
+    window.carregarTabelaUnidades = async function() {
     if (usuarioAtual.perfil !== 'Admin') return;
     const tbody = document.getElementById('lista-unidades-oficiais-body');
     if (!tbody) return;
 
-    // 👇 CORREÇÃO: Busca a linha do cabeçalho de forma infalível partindo do próprio tbody!
     const theadTr = tbody.closest('table').querySelector('thead tr');
     if (theadTr) {
         theadTr.innerHTML = `
@@ -14608,13 +14607,30 @@ async function escutarTempoReal() {
         query = query.eq('empresa', empresaSelecionadaFiltro);
     }
 
-    // Buscamos as unidades E os colaboradores ativos ao mesmo tempo
-    const [resUni, resAtivos] = await Promise.all([
+    const hojeIso = new Date().toISOString().split('T')[0];
+
+    // CORREÇÃO: Buscamos a base completa, ausências e férias ativas hoje para sincronizar o headcount em lote
+    const [resUni, resAtivos, resAusencias, resFerias] = await Promise.all([
         query,
-        supabaseClient.from('perfis').select('unidade, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo')
+        supabaseClient.from('perfis').select('id, nome, status, status_aprovacao, unidade, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador'),
+        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).neq('sigla', 'FA'),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
     ]);
 
     if (resUni.error) return;
+
+    // Mapeia quem está de férias ou licença médica hoje para liberar a vaga física na lotação
+    const setAfastados = new Set([
+        ...(resAusencias.data || []).map(a => a.colaborador_id),
+        ...(resFerias.data || []).map(f => f.colaborador_id)
+    ]);
+
+    // Aplica a mesma regra matemática de ocupantes do BI e do Modal Detalhado
+    const ocupantesGeral = (resAtivos.data || []).filter(c => {
+        const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+        if (emRescisao || setAfastados.has(c.id)) return false;
+        return c.status === 'Ativo' || c.status === 'Aguardando ASO';
+    });
 
     tbody.innerHTML = '';
     if (resUni.data.length === 0) {
@@ -14627,7 +14643,6 @@ async function escutarTempoReal() {
     resUni.data.forEach(u => {
         const enderecoExibicao = u.endereco ? u.endereco : 'Endereço não cadastrado';
 
-        // Lógica do VT
         let vtBadges = '';
         if (u.empresa_vt) {
             const vts = u.empresa_vt.split(' || ');
@@ -14638,8 +14653,8 @@ async function escutarTempoReal() {
             vtBadges = '<span style="color: var(--cor-texto-secundario); font-size: 0.8rem;">Não possui VT</span>';
         }
 
-        // 👇 MÁGICA DA LOTAÇÃO POR CARGO 👇
-        const ativosDaUnidade = (resAtivos.data || []).filter(c => c.unidade === u.nome);
+        // Filtra os ocupantes validados (incluindo ASO Pendente) desta unidade específica
+        const ativosDaUnidade = ocupantesGeral.filter(c => c.unidade === u.nome);
         const totalAtivos = ativosDaUnidade.length;
         const limiteGeral = u.capacidade_limite || '∞';
         let corTotal = (u.capacidade_limite && totalAtivos > u.capacidade_limite) ? 'var(--cor-perigo)' : 'var(--cor-sucesso)';
@@ -14663,7 +14678,6 @@ async function escutarTempoReal() {
             detalheCargosHtml = `<span style="font-size: 0.8rem; color: var(--cor-texto-secundario);">Limites por cargo não definidos.</span>`;
         }
 
-        // 👇 A MÁGICA DO BOTÃO DE OLHO AQUI DENTRO (Adicionamos o display: flex e o button) 👇
         tbody.innerHTML += `
         <tr class="linha-unidade-oficial" style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
             <td style="text-align: left; padding: 12px;">${u.empresa}</td>
@@ -14675,10 +14689,10 @@ async function escutarTempoReal() {
             </td>
             
             <td style="text-align: left; padding: 12px;">
-                <div style="background: rgba(0,0,0,0.2); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05);">
+                <div style="background: var(--cor-fundo-input, rgba(0,0,0,0.2)); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05);">
                     <div style="margin-bottom: 5px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 5px; display: flex; justify-content: space-between; align-items: center;">
                         <b style="color: ${corTotal}; font-size: 0.95rem;">TOTAL: ${totalAtivos} ativos / ${limiteGeral} limite</b>
-                        <button type="button" class="btn-secondary" style="padding: 2px 8px; font-size: 0.75rem; border-radius: 4px; border-color: #4fc3f7; color: #4fc3f7; background: transparent; cursor: pointer;" onclick="abrirModalLotacaoDetalhada('${u.nome.replace(/'/g, "\\'")}')" title="Ver nomes dos colaboradores"><i class="fa-solid fa-eye"></i></button>
+                        <button type="button" class="btn-secondary" style="padding: 2px 8px; font-size: 0.75rem; border-radius: 4px; border-color: #4fc3f7; color: #4fc3f7; background: transparent; cursor: pointer;" onclick="event.stopPropagation(); abrirModalLotacaoDetalhada('${u.nome.replace(/'/g, "\\\\'")}')" title="Ver nomes dos colaboradores"><i class="fa-solid fa-eye"></i></button>
                     </div>
                     ${detalheCargosHtml}
                 </div>
