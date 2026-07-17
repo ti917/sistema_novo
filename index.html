@@ -11481,8 +11481,8 @@ window.gerarDadosBI = async function() {
             return; 
         }
 
-        // ========================================================
-        // 🏢 LÓGICA DA LOTAÇÃO DE UNIDADES
+       // ========================================================
+        // 🏢 LÓGICA DA LOTAÇÃO DE UNIDADES CORRIGIDA (INCLUI PENDENTES ASO)
         // ========================================================
         if (indicador === 'Lotacao') {
             containerCardsTopo.style.display = 'none';
@@ -11502,7 +11502,7 @@ window.gerarDadosBI = async function() {
                 unidadesLimit.forEach(u => {
                     let limitesCargosObj = {};
                     try { if (u.limites_cargos) limitesCargosObj = JSON.parse(u.limites_cargos); } catch(e){}
-                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, ativosPorCargo: {} };
+                    dadosLotacao[u.nome] = { limiteTotal: u.capacidade_limite, limitesCargos: limitesCargosObj, ativosTotal: 0, avisoTotal: 0, inssTotal: 0, asoTotal: 0, ativosPorCargo: {} };
                 });
             }
 
@@ -11522,22 +11522,29 @@ window.gerarDadosBI = async function() {
                 });
             }
 
-            let procLot = 0; // Contador de Respiro
-            // 👇 MÁGICA 3: Usando for..of no Lotação para o navegador respirar
-            for (let p of perfis) {
+            // CORREÇÃO: Forçando a query mãe de perfis a carregar tanto Ativos quanto Aguardando ASO
+            const { data: perfisComAso } = await supabaseClient.from('perfis')
+                .select('id, nome, empresa, unidade, status, status_aprovacao, dados_admissao, dados_rescisao')
+                .eq('perfil', 'Colaborador')
+                .in('status', ['Ativo', 'Aguardando ASO']);
+
+            let procLot = 0; 
+            for (let p of (perfisComAso || [])) {
                 procLot++;
-                if (procLot % 50 === 0) await new Promise(r => setTimeout(r, 0)); // Anti-Travamento!
+                if (procLot % 50 === 0) await new Promise(r => setTimeout(r, 0)); 
 
                 if (!dadosLotacao[p.unidade]) continue; 
 
                 const cargo = (p.dados_admissao && p.dados_admissao.cargo) ? p.dados_admissao.cargo : 'Sem Cargo';
                 
-                let isAtivo = false; let isAviso = false; let isInss = false; let dadosInss = null;
+                let isAtivo = false; let isAviso = false; let isInss = false; let isAso = false; let dadosInss = null;
 
                 const emProcessoRescisao = p.status_aprovacao === 'Rescisão Pendente' || p.status_aprovacao === 'Aguardando Assinatura';
 
                 if (emProcessoRescisao) {
                     isAviso = true;
+                } else if (p.status === 'Aguardando ASO') {
+                    isAso = true; // 🔴 Identifica o travado sem ASO
                 } else if (p.status === 'Ativo') {
                     if (mapaAfastamentos[p.id]) {
                         isInss = true;
@@ -11549,19 +11556,24 @@ window.gerarDadosBI = async function() {
                 else if (p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia) {
                     const udRegex = p.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                     if (udRegex) {
-                        const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
-                        ud.setHours(0,0,0,0); const hoje = new Date(); hoje.setHours(0,0,0,0);
-                        if (hoje <= ud) isAviso = true;
+                        const dataDesligamento = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
+                        dataDesligamento.setHours(0,0,0,0); const hoje = new Date(); hoje.setHours(0,0,0,0);
+                        if (hoje <= dataDesligamento) isAviso = true;
                     }
                 }
 
-                if (isAtivo || isAviso || isInss) {
-                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
+                if (isAtivo || isAviso || isInss || isAso) {
+                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [] };
                     
                     if (isAtivo) {
                         dadosLotacao[p.unidade].ativosTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAtivos++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAtivos.push(p.nome);
+                    } else if (isAso) {
+                        dadosLotacao[p.unidade].ativosTotal++; // Conta no preenchimento físico da vaga
+                        dadosLotacao[p.unidade].asoTotal++;
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAso++;
+                        dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAso.push(p.nome);
                     } else if (isAviso) {
                         dadosLotacao[p.unidade].avisoTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAviso++;
@@ -11574,7 +11586,7 @@ window.gerarDadosBI = async function() {
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesInss.push({ nome: p.nome, data: dataRetorno, sigla: dadosInss.sigla });
                     }
                 }
-            } // Fim do loop de Lotação
+            } 
 
             rankDiv.innerHTML = '';
             rankDiv.previousElementSibling.innerHTML = `
@@ -11590,7 +11602,7 @@ window.gerarDadosBI = async function() {
             let htmlCartoesLotacao = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; padding-bottom: 20px; margin-top: 15px;">';
 
             Object.entries(dadosLotacao).forEach(([unidade, dados]) => {
-                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && dados.inssTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
+                if (!dados.limiteTotal && dados.ativosTotal === 0 && dados.avisoTotal === 0 && dados.inssTotal === 0 && dados.asoTotal === 0 && Object.keys(dados.limitesCargos).length === 0) return;
                 
                 const totalPessoas = dados.ativosTotal;
                 const limiteGeral = dados.limiteTotal || '∞';
@@ -11609,9 +11621,9 @@ window.gerarDadosBI = async function() {
                 let cargosUnicos = new Set([...Object.keys(dados.limitesCargos), ...Object.keys(dados.ativosPorCargo)]);
 
                 cargosUnicos.forEach(cargo => {
-                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [] };
+                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
-                    const totalNoCargo = infoCargo.qtdAtivos; 
+                    const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAso; 
                     let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
 
                     if (limiteCargo !== '∞') {
@@ -11629,6 +11641,23 @@ window.gerarDadosBI = async function() {
                                        <div style="font-size: 0.8rem; color: #a6b0cf; display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.02); padding: 4px 6px; border-radius: 4px;">
                                            <i class="fa-solid fa-check-circle" style="color: #4fc3f7; font-size: 0.7rem;"></i> 
                                            <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${n}</span>
+                                       </div>
+                                   `).join('')}
+                               </div>
+                           </div>`
+                        : '';
+
+                    // CORREÇÃO: Injetando sub-lista de falta de ASO nos cards do BI Lotação
+                    let listAso = infoCargo.nomesAso && infoCargo.nomesAso.length > 0
+                        ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
+                               <small style="color: #00bcd4; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
+                                   <i class="fa-solid fa-notes-medical"></i> Falta Exame ASO (${infoCargo.nomesAso.length})
+                               </small>
+                               <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
+                                   ${infoCargo.nomesAso.map(n => `
+                                       <div style="font-size: 0.8rem; color: #00bcd4; display: flex; align-items: center; gap: 6px; background: rgba(0,188,212,0.05); padding: 4px 6px; border-radius: 4px;">
+                                           <i class="fa-solid fa-notes-medical" style="color: #00bcd4; font-size: 0.7rem;"></i> 
+                                           <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight:bold;">${n}</span>
                                        </div>
                                    `).join('')}
                                </div>
@@ -11667,20 +11696,21 @@ window.gerarDadosBI = async function() {
                            </div>`
                         : '';
                         
-                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0 && infoCargo.nomesInss.length === 0) {
+                    if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0 && infoCargo.nomesInss.length === 0 && infoCargo.nomesAso.length === 0) {
                         listAtivos = `<div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado.</div>`;
                     }
 
                     detalhesCargos += `
                         <div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); border-left: 3px solid ${corCargo}; padding: 12px; border-radius: 8px; margin-bottom: 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <strong style="color: #e2e8f0; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"><i class="fa-solid fa-user-tie" style="color: var(--cor-texto-secundario); margin-right: 5px;"></i> ${cargo}</strong>
+                                <strong style="color: #e2e8f0; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${cargo}"><i class="fa-solid fa-user-tie" style="color: var(--cor-texto-secundario); margin-right: 5px;"></i> ${cargo}</strong>
                                 <span style="background: ${corCargo}22; color: ${corCargo}; padding: 2px 8px; border-radius: 12px; font-weight: bold; font-size: 0.75rem; border: 1px solid ${corCargo}55; flex-shrink: 0;">${totalNoCargo} / ${limiteCargo}</span>
                             </div>
                             <div style="width: 100%; height: 4px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
                                 <div style="width: ${pctCargoBarra}%; height: 100%; background: ${corCargo}; border-radius: 4px; transition: width 1s ease-in-out;"></div>
                             </div>
                             ${listAtivos}
+                            ${listAso}
                             ${listInss}
                             ${listAviso}
                         </div>
@@ -43137,7 +43167,7 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
         let limites = {};
         try { if (uniData.limites_cargos) limites = JSON.parse(uniData.limites_cargos); } catch(e){}
         
-        // 2. Busca os colaboradores vinculados a essa unidade
+        // CORREÇÃO: Buscando Ativos E colaboradores Aguardando ASO na mesma unidade
         const { data: colabsDB, error: errC } = await supabaseClient.from('perfis')
             .select('id, nome, status, status_aprovacao, dados_admissao, dados_rescisao')
             .eq('perfil', 'Colaborador')
@@ -43146,10 +43176,11 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
             
         if (errC) return mostrarAlerta("Erro ao buscar colaboradores.", "erro");
         
-        // Passa no nosso filtro inteligente para trazer só quem tá ativo OU cumprindo aviso!
-        const colabs = window.filtrarAtivosE_AvisoPrevio(colabsDB || []);
+        // Filtra os ativos normais/aviso e resgata manualmente os pendentes de ASO
+        const ativosReais = window.filtrarAtivosE_AvisoPrevio(colabsDB || []);
+        const asoPendentes = (colabsDB || []).filter(c => c.status === 'Aguardando ASO');
+        const colabs = [...ativosReais, ...asoPendentes];
         
-        // 3. Busca afastamentos do dia para isolá-los
         const hojeIsoDet = new Date().toISOString().split('T')[0];
         const { data: ausDet } = await supabaseClient.from('ausencias')
             .select('colaborador_id')
@@ -43161,23 +43192,24 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
         
         let lotacaoPorCargo = {};
         
-        // Preenche primeiro os cargos que têm limite definido (para aparecerem mesmo vazios)
         Object.keys(limites).forEach(c => {
-            lotacaoPorCargo[c] = { limite: limites[c], ativos: [], aviso: [], afastados: [] };
+            lotacaoPorCargo[c] = { limite: limites[c], ativos: [], aviso: [], afastados: [], aso: [] };
         });
         
-        // Separa a galera
+        // Separação correta dos blocos por criticidade
         colabs.forEach(c => {
             const cargo = c.dados_admissao?.cargo || 'Sem Cargo';
             
-            // Se ele tiver um cargo que não tem limite cadastrado, cria a caixinha pra ele também
-            if (!lotacaoPorCargo[cargo]) lotacaoPorCargo[cargo] = { limite: '∞', ativos: [], aviso: [], afastados: [] };
+            if (!lotacaoPorCargo[cargo]) lotacaoPorCargo[cargo] = { limite: '∞', ativos: [], aviso: [], afastados: [], aso: [] };
             
             const isAviso = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura' || c.status === 'Desligado';
             const isAfastado = idsAfastadosDet.includes(c.id);
-            
+            const isFaltaAso = c.status === 'Aguardando ASO';
+
             if (isAviso) {
                 lotacaoPorCargo[cargo].aviso.push(c.nome);
+            } else if (isFaltaAso) {
+                lotacaoPorCargo[cargo].aso.push(c.nome); // 🔴 Aloca na lista de falta ASO
             } else if (isAfastado) {
                 lotacaoPorCargo[cargo].afastados.push(c.nome);
             } else {
@@ -43185,17 +43217,15 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
             }
         });
         
-        // 3. Montar o Visual
         let htmlCargos = '';
         
         Object.keys(lotacaoPorCargo).sort().forEach(cargo => {
             const data = lotacaoPorCargo[cargo];
-            const totalNoCargo = data.ativos.length; // 👈 A MÁGICA: Só contabiliza os ativos efetivos
+            // CORREÇÃO: Colaboradores com falta ASO somam no headcount ocupado da unidade
+            const totalNoCargo = data.ativos.length + data.aso.length; 
             
-            // Ignora se o cargo não tem limite e também não tem ninguém dentro
-            if (data.limite === '∞' && totalNoCargo === 0 && data.aviso.length === 0 && data.afastados.length === 0) return;
+            if (data.limite === '∞' && totalNoCargo === 0 && data.aviso.length === 0 && data.afastados.length === 0 && data.aso.length === 0) return;
             
-            // Controle de cor das bordas e bolinhas (Verde, Vermelho, Azul)
             let corCargo = '#4fc3f7';
             if (data.limite !== '∞') {
                 if (totalNoCargo > data.limite) corCargo = 'var(--cor-perigo)';
@@ -43204,22 +43234,24 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
                 corCargo = 'var(--cor-sucesso)'; 
             }
             
-            // HTML da listinha de quem tá Ativo
             let listAtivos = data.ativos.length > 0 
                 ? `<div style="margin-top: 12px;"><small style="color: #4fc3f7; font-weight: bold; text-transform: uppercase;">Ativos Efetivos (${data.ativos.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.ativos.map(n => `<i class="fa-solid fa-check" style="color: #4fc3f7; font-size:0.75rem; margin-right:6px;"></i> ${n}`).join('<br>')}</div></div>`
                 : '';
                 
-            // HTML da listinha de quem tá de Aviso Prévio
+            // CORREÇÃO: Nova sub-lista visual injetada para exibir quem está sem ASO na Unidade
+            let listAso = data.aso.length > 0
+                ? `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(255,255,255,0.1);"><small style="color: #00bcd4; font-weight: bold; text-transform: uppercase;"><i class="fa-solid fa-notes-medical"></i> Falta Exame ASO (${data.aso.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.aso.map(n => `<i class="fa-solid fa-notes-medical" style="color: #00bcd4; font-size:0.75rem; margin-right:6px;"></i> <span style="color:#00bcd4; font-weight:bold;">${n}</span>`).join('<br>')}</div></div>`
+                : '';
+                
             let listAviso = data.aviso.length > 0
                 ? `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(255,255,255,0.1);"><small style="color: #ff9800; font-weight: bold; text-transform: uppercase;">Cumprindo Aviso / Rescisão (${data.aviso.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.aviso.map(n => `<i class="fa-solid fa-clock" style="color: #ff9800; font-size:0.75rem; margin-right:6px;"></i> ${n}`).join('<br>')}</div></div>`
                 : '';
                 
-            // HTML da listinha de quem tá Afastado/Férias
             let listAfastados = data.afastados.length > 0
                 ? `<div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(255,255,255,0.1);"><small style="color: #c4b5fd; font-weight: bold; text-transform: uppercase;">Afastados / Licenças (${data.afastados.length}):</small><div style="color: var(--cor-texto-principal); font-size: 0.9rem; line-height: 1.6; margin-top: 6px; padding-left: 5px;">${data.afastados.map(n => `<i class="fa-solid fa-bed-pulse" style="color: #c4b5fd; font-size:0.75rem; margin-right:6px;"></i> ${n}`).join('<br>')}</div></div>`
                 : '';
                 
-            if(data.ativos.length === 0 && data.aviso.length === 0 && data.afastados.length === 0) {
+            if(data.ativos.length === 0 && data.aviso.length === 0 && data.afastados.length === 0 && data.aso.length === 0) {
                 listAtivos = `<div style="margin-top: 10px; font-size: 0.85rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado nesta função.</div>`;
             }
 
@@ -43230,6 +43262,7 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
                         <span style="background: ${corCargo}22; color: ${corCargo}; padding: 4px 10px; border-radius: 12px; font-weight: bold; font-size: 0.85rem; border: 1px solid ${corCargo}55;">${totalNoCargo} / ${data.limite} vagas</span>
                     </div>
                     ${listAtivos}
+                    ${listAso}
                     ${listAviso}
                     ${listAfastados}
                 </div>
@@ -43250,13 +43283,13 @@ window.abrirModalLotacaoDetalhada = async function(nomeUnidade) {
             </div>
         </div>`;
         
-        document.getElementById('toast-container').innerHTML = ''; // Limpa o aviso de "Buscando..."
+        document.getElementById('toast-container').innerHTML = ''; 
         document.body.insertAdjacentHTML('beforeend', modalHtml);
         
     } catch (e) {
         mostrarAlerta("Erro ao carregar detalhes: " + e.message, "erro");
     }
-}
+};
 
 window.atualizarFiltroCargosPorUnidade = function(dadosEscala) {
     const selectCargo = document.getElementById('filtro-cargo-escala');
