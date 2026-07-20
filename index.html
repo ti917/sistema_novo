@@ -12858,7 +12858,7 @@ window.enviarTRCTAssinadoGestor = async function(idColab, nomeColab, unidadeCola
 
         document.getElementById('btnLogout').addEventListener('click', async () => { await supabaseClient.auth.signOut(); location.reload(); });
 
-     window.getUnidadesPermitidasGestor = async function() {
+    window.getUnidadesPermitidasGestor = async function() {
     console.log("🔍 [DEBUG - getUnidadesPermitidasGestor] Iniciando busca...");
     
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.empresa) {
@@ -12872,39 +12872,74 @@ window.enviarTRCTAssinadoGestor = async function(idColab, nomeColab, unidadeCola
     
     console.log("🔍 [DEBUG] Empresas atreladas ao Gestor:", empresasGestor);
     console.log("🔍 [DEBUG] O que tem no JSON de permissões?", usuarioAtual.permissoes);
+
+    // 1. Busca no banco APENAS as unidades que estão ATIVAS para as empresas do Gestor
+    const { data: resUnidades, error: errUnidades } = await supabaseClient
+        .from('unidades_oficiais')
+        .select('nome')
+        .in('empresa', empresasGestor)
+        .eq('ativo', true);
+
+    if (errUnidades) {
+        console.error("🔍 [DEBUG] Erro ao buscar unidades ativas:", errUnidades);
+    }
+
+    // Monta o conjunto com os nomes das unidades ativas
+    let setAtivas = new Set();
+    if (resUnidades) {
+        resUnidades.forEach(u => { if (u.nome) setAtivas.add(u.nome.trim()); });
+    }
+
+    console.log("🔍 [DEBUG] Unidades ativas encontradas no banco:", Array.from(setAtivas));
     
-    // 👇 A MÁGICA: Se ele tem a Visão Global ativada, puxa TODAS as unidades da empresa!
-    if (usuarioAtual.permissoes?.escala_global === true) {
-        console.log("🔍 [DEBUG] ✅ Gestor tem escala_global TRUE! Indo no Supabase buscar as unidades...");
+    // 👇 A MÁGICA: Se ele tem a Visão Global ativada, puxa TODAS as unidades ATIVAS da empresa!
+    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true) {
+        console.log("🔍 [DEBUG] ✅ Gestor tem escala_global TRUE! Buscando unidades ativas...");
         
-        // Busca dupla para garantir que não vai falhar
-        const [resUnidades, resPerfis] = await Promise.all([
-            supabaseClient.from('unidades_oficiais').select('nome').in('empresa', empresasGestor),
-            supabaseClient.from('perfis').select('unidade').in('empresa', empresasGestor).not('unidade', 'is', null)
-        ]);
+        // Busca unidades de perfis por compatibilidade, mas valida se continuam ativas
+        const { data: resPerfis } = await supabaseClient
+            .from('perfis')
+            .select('unidade')
+            .in('empresa', empresasGestor)
+            .not('unidade', 'is', null);
 
-        console.log("🔍 [DEBUG] Resposta do Banco (unidades_oficiais):", resUnidades.data);
-        console.log("🔍 [DEBUG] Erro no Banco (unidades_oficiais)?", resUnidades.error);
-        console.log("🔍 [DEBUG] Resposta do Banco (perfis):", resPerfis.data);
-
-        let uSet = new Set();
-        if (resUnidades.data) resUnidades.data.forEach(u => { if (u.nome) uSet.add(u.nome.trim()); });
-        if (resPerfis.data) {
-            resPerfis.data.forEach(p => {
-                if (p.unidade) p.unidade.split(',').forEach(uni => uSet.add(uni.trim()));
+        let uSet = new Set(setAtivas);
+        if (resPerfis) {
+            resPerfis.forEach(p => {
+                if (p.unidade) {
+                    p.unidade.split(',').forEach(uni => {
+                        const uniTrim = uni.trim();
+                        // Garante que só inclui se a unidade estiver ATIVA no cadastro oficial
+                        if (setAtivas.has(uniTrim)) {
+                            uSet.add(uniTrim);
+                        }
+                    });
+                }
             });
         }
 
-        const unidsFinais = [...uSet].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+        const unidsFinais = [...uSet].filter(x => x !== "" && x !== "Todas" && x !== "Matriz").sort();
         
-        console.log("🔍 [DEBUG] 🏆 Array final de Unidades que o Gestor Global vai ver:", unidsFinais);
+        console.log("🔍 [DEBUG] 🏆 Array final de Unidades Ativas que o Gestor Global vai ver:", unidsFinais);
         
         if (unidsFinais.length > 0) return unidsFinais;
     }
     
-    console.log("🔍 [DEBUG] ❌ Gestor não é global OU o banco retornou vazio. Usando unidade local:", usuarioAtual.unidade);
-    // 👇 TRAVA: Se NÃO tiver visão global (ou se der erro), devolve SÓ a unidade registrada nele.
-    return usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
+    console.log("🔍 [DEBUG] ❌ Gestor não é global OU busca vacilou. Filtrando unidades ativas do perfil local:", usuarioAtual.unidade);
+    
+    // 👇 TRAVA LOCAL: Se NÃO tiver visão global, pega as unidades salvas nele e FILTRA mantendo SÓ as ATIVAS
+    if (usuarioAtual.unidade) {
+        const unidsLocaisAtivas = usuarioAtual.unidade
+            .split(',')
+            .map(u => u.trim())
+            .filter(u => u !== "" && setAtivas.has(u))
+            .sort();
+
+        console.log("🔍 [DEBUG] 🏆 Unidades locais autorizadas e ATIVAS:", unidsLocaisAtivas);
+        return unidsLocaisAtivas;
+    }
+
+    return [];
 };
 
      // 👇 1. SUBSTITUA A FUNÇÃO INTEIRA POR ESTA VERSÃO TURBO 👇
@@ -17404,26 +17439,15 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
     const selectFiltroU = document.getElementById('filtro-unidade-escala');
     if (!selectFiltroU) return;
     
+    selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
+
     if (usuarioAtual.perfil === 'Gestor') {
-        const perms = usuarioAtual.permissoes || {};
-        selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
-
-        let unidadesParaSelect = [];
-
-        if (perms.escala_global && usuarioAtual.empresa) {
-            if (!window.cacheUnidadesGestor || window.cacheUnidadesGestor.length === 0) {
-                 window.cacheUnidadesGestor = await window.getUnidadesPermitidasGestor();
-            }
-            unidadesParaSelect = window.cacheUnidadesGestor;
-        } 
-        else if (usuarioAtual.unidade) {
-            unidadesParaSelect = usuarioAtual.unidade.split(',').map(u => u.trim());
-        }
-
-        unidadesParaSelect.sort().forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
+        // 👇 Puxa apenas as unidades autorizadas que estão ATIVAS (seja Gestor Global ou Local)
+        const unidadesParaSelect = await window.getUnidadesPermitidasGestor();
+        unidadesParaSelect.forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
 
     } else if (usuarioAtual.perfil === 'Admin') {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
+        // 👇 BUSCA APENAS UNIDADES ATIVAS NO BANCO
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
@@ -17431,9 +17455,8 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
         }
 
         const { data } = await query;
-        if(data) {
+        if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
-            selectFiltroU.innerHTML = '<option value="">Selecione a unidade...</option>';
             uSet.sort().forEach(u => selectFiltroU.innerHTML += `<option value="${u}">${u}</option>`);
         }
     }
@@ -18459,10 +18482,10 @@ async function abrirAbaFerias() {
     const selectUnidade = document.getElementById('ferias-unidade');
     let options = '<option value="">Selecione a unidade...</option>';
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
     } else {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -18470,7 +18493,7 @@ async function abrirAbaFerias() {
         const { data } = await query;
         if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-            uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
+            uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
         }
     }
     selectUnidade.innerHTML = options;
@@ -22183,19 +22206,18 @@ window.verHistoricoTransferencias = async function(idColab) {
         // ==========================================
         let listaColaboradoresAtivosRescisao = [];
 
-       async function abrirAbaRescisao() {
+      async function abrirAbaRescisao() {
     const selectUnidade = document.getElementById('resc-unidade');
     selectUnidade.innerHTML = '<option value="">Carregando unidades...</option>';
     document.getElementById('form-rescisao').reset();
     document.getElementById('resc-ultimo-dia-display').innerText = '-';
     document.getElementById('box-opcoes-aviso').classList.add('hidden');
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
         selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
         unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
     } else {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -22204,7 +22226,7 @@ window.verHistoricoTransferencias = async function(idColab) {
         if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
             selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-            uSet.sort().forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+            uSet.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
         }
     }
 }
@@ -24542,12 +24564,12 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
     selectUnidade.innerHTML = '<option value="">Carregando unidades...</option>';
     document.getElementById('form-ausencia').reset();
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
-        selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-        unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+    let options = '<option value="">Selecione a unidade...</option>';
+
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
     } else {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -24555,10 +24577,10 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
         const { data } = await query;
         if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-            selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-            uSet.sort().forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+            uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
         }
     }
+    selectUnidade.innerHTML = options;
 }
 
        window.reprovarAusenciaAdmin = async function(id) {
@@ -25949,23 +25971,31 @@ adm.dependentes = listaDependentes;
     selectColab.innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
     selectColab.disabled = true;
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
-        selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-        unids.forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
-    } else {
-        let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
+    if (usuarioAtual.perfil === 'Gestor') {
+        // 👇 Puxa apenas as unidades autorizadas e ATIVAS do Gestor
+        const unids = await window.getUnidadesPermitidasGestor();
         
-        // 👇 APLICA A TRAVA DA EMPRESA AQUI 👇
-        if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
+        let optionsHtml = '<option value="">Selecione a unidade...</option>';
+        unids.forEach(u => optionsHtml += `<option value="${u}">${u}</option>`);
+        selectUnidade.innerHTML = optionsHtml;
+
+    } else if (usuarioAtual.perfil === 'Admin') {
+        // 👇 BUSCA APENAS UNIDADES ATIVAS NA TABELA OFICIAL
+        let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
+        
+        // APLICA A TRAVA DA EMPRESA AQUI
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
         }
 
-        const { data } = await query;
-        const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-        
-        selectUnidade.innerHTML = '<option value="">Selecione a unidade...</option>';
-        uSet.sort().forEach(u => selectUnidade.innerHTML += `<option value="${u}">${u}</option>`);
+        const { data, error } = await query;
+        if (!error && data) {
+            const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+            
+            let optionsHtml = '<option value="">Selecione a unidade...</option>';
+            uSet.forEach(u => optionsHtml += `<option value="${u}">${u}</option>`);
+            selectUnidade.innerHTML = optionsHtml;
+        }
     }
 }
 
@@ -28530,10 +28560,11 @@ async function abrirAbaTrocaTurno() {
     const selectUnidadeSub = document.getElementById('troca-unidade-substituto');
 
     let options = '<option value="">Selecione a unidade...</option>';
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
     } else {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -28541,7 +28572,7 @@ async function abrirAbaTrocaTurno() {
         const { data } = await query;
         if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-            uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
+            uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
         }
     }
     selectUnidadeSol.innerHTML = options;
@@ -31787,18 +31818,20 @@ window.prepararAbaWhatsApp = async function() {
         // Carrega a lista de Unidades para as outras abas (Ponto, Boas-Vindas e Comunicados)
         let options = '<option value="">Selecione a unidade...</option>';
 
-        if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-            const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
+        if (usuarioAtual.perfil === 'Gestor') {
+            // 👇 Puxa apenas as unidades permitidas e ATIVAS do Gestor
+            const unids = await window.getUnidadesPermitidasGestor();
             unids.forEach(u => options += `<option value="${u}">${u}</option>`);
         } else {
-            let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
+            // 👇 BUSCA APENAS UNIDADES ATIVAS NA TABELA OFICIAL
+            let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
             if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
                 query = query.eq('empresa', empresaSelecionadaFiltro);
             }
             const { data, error } = await query;
             if (!error && data) {
-                const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
-                uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
+                const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+                uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
             }
         }
 
@@ -33099,10 +33132,10 @@ async function abrirAbaNovaOcorrencia() {
     const selectUnidade = document.getElementById('oco-unidade');
     let options = '<option value="">Selecione a unidade...</option>';
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
     } else {
-        // 👇 BUSCA APENAS UNIDADES ATIVAS
         let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
@@ -33110,7 +33143,7 @@ async function abrirAbaNovaOcorrencia() {
         const { data } = await query;
         if (data) {
             const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
-            uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
+            uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
         }
     }
     selectUnidade.innerHTML = options;
@@ -33710,19 +33743,18 @@ window.abrirAbaDocumentos = async function() {
 
     let options = '<option value="">Selecione a unidade...</option>';
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        // Gestor vê somente as unidades vinculadas a ele
-        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
     } else {
-        // Admin vê todas (respeitando o filtro do topo da tela)
-        let query = supabaseClient.from('perfis').select('unidade').not('unidade', 'is', null);
+        let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
         }
 
         const { data } = await query;
         if (data) {
-            const uSet = [...new Set(data.map(i => i.unidade ? i.unidade.split(',') : []).flat().map(x => x.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
+            const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "" && x !== "Todas" && x !== "Matriz");
             uSet.sort().forEach(u => options += `<option value="${u}">${u}</option>`);
         }
     }
@@ -37265,8 +37297,19 @@ async function abrirAbaEnviarDocumentos() {
     const selectUnidade = document.getElementById('doc-envio-unidade');
     let options = '<option value="">Selecione a unidade...</option>';
 
-    if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
-        usuarioAtual.unidade.split(',').forEach(u => options += `<option value="${u.trim()}">${u.trim()}</option>`);
+    if (usuarioAtual.perfil === 'Gestor') {
+        const unids = await window.getUnidadesPermitidasGestor();
+        unids.forEach(u => options += `<option value="${u}">${u}</option>`);
+    } else {
+        let query = supabaseClient.from('unidades_oficiais').select('nome').eq('ativo', true).order('nome');
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+            query = query.eq('empresa', empresaSelecionadaFiltro);
+        }
+        const { data } = await query;
+        if (data) {
+            const uSet = [...new Set(data.map(i => i.nome.trim()))].filter(x => x !== "");
+            uSet.forEach(u => options += `<option value="${u}">${u}</option>`);
+        }
     }
     selectUnidade.innerHTML = options;
 }
