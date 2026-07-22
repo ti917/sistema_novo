@@ -61496,7 +61496,7 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
 });
 
   window.exportarRelatorioDescontoSindicalExcel = async function() {
-    mostrarAlerta("Gerando relatório mensal de contribuição sindical (SP)...", "sucesso");
+    mostrarAlerta("Gerando relatório executivo de contribuição sindical (SP)...", "sucesso");
 
     try {
         let query = supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').eq('status', 'Ativo');
@@ -61506,44 +61506,160 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
         }
 
         const { data: colabs, error } = await query;
-        if (error || !colabs) return mostrarAlerta("Erro ao carregar dados.", "erro");
+        if (error || !colabs) return mostrarAlerta("Erro ao carregar dados do banco.", "erro");
 
-        const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Desconto Sindical SIEMACO-SP');
-
-        sheet.addRow(["NOME DO COLABORADOR", "CPF", "EMPRESA", "UNIDADE", "CARGO", "SALÁRIO BASE", "SINDICALIZADO", "VALOR DESCONTO (1% TETO R$ 50,96)"]);
-
-        colabs.forEach(c => {
+        // 1. Filtra apenas colaboradores elegíveis de SP que aceitaram a filiação
+        const elegiveis = colabs.filter(c => {
             const adm = c.dados_admissao || {};
             const sind = adm.sindicato || {};
-            
-            // Só filtra colaboradores de SP e que aceitaram a filiação (Sim)
-            if (sind.aplicavel && sind.sindicalizado) {
-                const salario = parseFloat(adm.salario || 0);
-                const valorDesconto = Math.min(salario * 0.01, 50.96);
-
-                sheet.addRow([
-                    c.nome,
-                    adm.cpf ? mascaraCPF(adm.cpf) : 'Não informado',
-                    c.empresa,
-                    c.unidade,
-                    adm.cargo || '-',
-                    salario,
-                    'SIM',
-                    valorDesconto
-                ]);
-            }
+            return sind.aplicavel && sind.sindicalizado;
         });
 
-        sheet.getColumn(6).numFmt = '"R$ "#,##0.00';
-        sheet.getColumn(8).numFmt = '"R$ "#,##0.00';
+        if (elegiveis.length === 0) {
+            return mostrarAlerta("Nenhum colaborador com desconto sindical ativo foi encontrado para esta empresa.", "aviso");
+        }
 
+        // 2. Ordena por ordem alfabética
+        elegiveis.sort((a, b) => a.nome.localeCompare(b.nome));
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH GoScripts';
+        workbook.calcProperties.fullCalcOnLoad = true;
+
+        const sheet = workbook.addWorksheet('Desconto SIEMACO-SP');
+        const dataHoje = new Date().toLocaleDateString('pt-BR');
+        const empresaTxt = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') ? empresaSelecionadaFiltro : 'TODAS AS EMPRESAS';
+
+        // --- BANNER DE TÍTULO PRINCIPAL ---
+        sheet.mergeCells('A1:H1');
+        const titulo = sheet.getCell('A1');
+        titulo.value = 'RELATÓRIO EXECUTIVO - DEMONSTRATIVO DE DESCONTO SINDICAL (SIEMACO-SP)';
+        titulo.font = { size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
+        titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+        titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+        // --- SUBTÍTULO / METADADOS ---
+        sheet.mergeCells('A2:H2');
+        const subtitulo = sheet.getCell('A2');
+        subtitulo.value = `EMPRESA: ${empresaTxt.toUpperCase()}   |   EMISSÃO: ${dataHoje}   |   REGRA: 1% DO SALÁRIO BASE (TETO R$ 50,96)`;
+        subtitulo.font = { size: 10, bold: true, color: { argb: 'FF002347' } };
+        subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+        subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+        sheet.addRow([]); // Espaço de respiro
+
+        // --- CABEÇALHO DA TABELA ---
+        const headerRow = sheet.addRow([
+            "NOME DO COLABORADOR", 
+            "CPF", 
+            "EMPRESA", 
+            "UNIDADE", 
+            "CARGO", 
+            "SALÁRIO BASE", 
+            "SINDICALIZADO", 
+            "VALOR DESCONTO"
+        ]);
+
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        headerRow.height = 24;
+        headerRow.eachCell((cell) => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF8B5CF6' } }; // Roxo SIEMACO
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        });
+
+        // Configuração de larguras das colunas
+        sheet.columns = [
+            { width: 42 }, // Nome
+            { width: 18 }, // CPF
+            { width: 22 }, // Empresa
+            { width: 25 }, // Unidade
+            { width: 25 }, // Cargo
+            { width: 18 }, // Salário
+            { width: 16 }, // Status
+            { width: 22 }  // Desconto
+        ];
+
+        let currentRow = 5;
+        let somaTotalDesconto = 0;
+
+        // --- PREENCHIMENTO DOS DADOS ---
+        elegiveis.forEach(c => {
+            const adm = c.dados_admissao || {};
+            const salario = parseFloat(adm.salario || 0);
+            const valorDesconto = Math.min(salario * 0.01, 50.96);
+            somaTotalDesconto += valorDesconto;
+
+            const row = sheet.addRow([
+                c.nome,
+                adm.cpf ? mascaraCPF(adm.cpf) : 'Não informado',
+                c.empresa || '-',
+                c.unidade || '-',
+                adm.cargo || '-',
+                salario,
+                'SIM',
+                valorDesconto
+            ]);
+
+            // Formatações por célula
+            row.getCell(2).alignment = { horizontal: 'center' };
+            row.getCell(3).alignment = { horizontal: 'center' };
+            row.getCell(4).alignment = { horizontal: 'center' };
+            row.getCell(5).alignment = { horizontal: 'center' };
+
+            row.getCell(6).numFmt = '"R$ "#,##0.00';
+            row.getCell(6).alignment = { horizontal: 'center' };
+
+            row.getCell(7).alignment = { horizontal: 'center' };
+            row.getCell(7).font = { bold: true, color: { argb: 'FF28A745' } };
+
+            row.getCell(8).numFmt = '"R$ "#,##0.00';
+            row.getCell(8).font = { bold: true, color: { argb: 'FF8B5CF6' } };
+            row.getCell(8).alignment = { horizontal: 'center' };
+
+            // Bordas
+            row.eachCell((cell) => {
+                cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+            });
+
+            // Zebrastriping (fundo intercalado)
+            if (currentRow % 2 === 0) {
+                row.eachCell(cell => cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } });
+            }
+
+            currentRow++;
+        });
+
+        // --- RODAPÉ COM FÓRMULAS E TOTAIS ---
+        sheet.addRow([]);
+        const lastDataRow = currentRow - 1;
+
+        const totalRow = sheet.addRow([
+            `TOTAL DE COLABORADORES: ${elegiveis.length}`, "", "", "", "", "", "TOTAL DESCONTOS:",
+            { formula: `SUM(H5:H${lastDataRow})`, result: somaTotalDesconto }
+        ]);
+
+        totalRow.height = 25;
+        
+        totalRow.getCell(1).font = { bold: true, size: 10, color: { argb: 'FF002347' } };
+        totalRow.getCell(1).alignment = { vertical: 'middle' };
+
+        totalRow.getCell(7).font = { bold: true, size: 11, color: { argb: 'FF8B5CF6' } };
+        totalRow.getCell(7).alignment = { horizontal: 'right', vertical: 'middle' };
+
+        totalRow.getCell(8).font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+        totalRow.getCell(8).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+        totalRow.getCell(8).numFmt = '"R$ "#,##0.00';
+        totalRow.getCell(8).alignment = { horizontal: 'center', vertical: 'middle' };
+
+        // --- GERAÇÃO DO DOWNLOAD ---
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = `Desconto_Sindical_SIEMACO_SP_${new Date().toISOString().split('T')[0]}.xlsx`;
+        link.download = `Desconto_SIEMACO_SP_${new Date().toISOString().split('T')[0]}.xlsx`;
         link.click();
+        URL.revokeObjectURL(link.href);
 
     } catch (e) {
         mostrarAlerta("Erro ao gerar Excel: " + e.message, "erro");
