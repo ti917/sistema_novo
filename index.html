@@ -15422,6 +15422,25 @@ window.deletarUnidadeOficial = async function(id) {
         return;
     }
 
+    // 👇 NOVO: Busca em Lote na tabela 'documentos_avulsos' quem já recebeu os termos da Clara 👇
+    const idsColaboradores = (resPerfis.data || []).map(u => u.id);
+    let setColabsComTermo = new Set();
+
+    if (idsColaboradores.length > 0) {
+        const { data: resTermos } = await supabaseClient
+            .from('documentos_avulsos')
+            .select('colaborador_id')
+            .in('colaborador_id', idsColaboradores)
+            .in('titulo_documento', [
+                'REGIMENTO INTERNO E PROCEDIMENTOS CORPORATIVOS',
+                'ORIENTAÇÃO SOBRE A MARCAÇÃO DE PONTO'
+            ]);
+
+        if (resTermos) {
+            resTermos.forEach(t => setColabsComTermo.add(t.colaborador_id));
+        }
+    }
+
     // Mapeia quem está de fora hoje
     const mapaAfastamentos = {};
     if (resAusencias.data) resAusencias.data.forEach(a => mapaAfastamentos[a.colaborador_id] = { tipo: a.sigla });
@@ -15430,12 +15449,13 @@ window.deletarUnidadeOficial = async function(id) {
     // Injeta os dados
     const dadosCompletos = resPerfis.data.map(u => {
         if (mapaAfastamentos[u.id]) u.ausencia_atual = mapaAfastamentos[u.id];
+        u.ja_recebeu_termos_clara = setColabsComTermo.has(u.id); // 👈 REGISTRA A FLAG NA MEMÓRIA
         return u;
     });
 
     dadosCompletos.sort((a, b) => new Date(b.dados_admissao?.data_envio || 0).getTime() - new Date(a.dados_admissao?.data_envio || 0).getTime());
     todasAdmissoesAprovadas = dadosCompletos;
-       window.popularFiltroCargosAdmissoes();
+    window.popularFiltroCargosAdmissoes();
     filtrarAdmissoes();
     
     if (silencioso) {
@@ -15443,10 +15463,9 @@ window.deletarUnidadeOficial = async function(id) {
     }
 }
 
-        function filtrarAdmissoes() {
+function filtrarAdmissoes() {
     const termoBusca = window.removerAcentos(document.getElementById('busca-admissoes').value);
     
-    // 👇 A MÁGICA DO SELECT: Se as novas opções ainda não existirem, o sistema injeta elas! 👇
     const selectFiltro = document.getElementById('filtro-status-admissoes');
     if (selectFiltro && !selectFiltro.innerHTML.includes('Afastado')) {
         selectFiltro.innerHTML = `
@@ -15511,7 +15530,7 @@ window.deletarUnidadeOficial = async function(id) {
     renderizarPaginacaoAdmissoes();
 }
         
-    window.renderizarPaginacaoAdmissoes = function() {
+window.renderizarPaginacaoAdmissoes = function() {
     const containerLista = document.getElementById('lista-admissoes-container');
     const containerBotoes = document.getElementById('paginacao-admissoes');
     const notifsBanco = notificacoesGlobais;
@@ -15531,7 +15550,6 @@ window.deletarUnidadeOficial = async function(id) {
         const dataInicio = formatarDataBR(adm.jornada?.data_inicio || adm.data_inicio);
         const salario = Number(adm.salario || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
         
-        // 🧠 EXTRAÇÃO E PROCESSAMENTO DE HORÁRIOS PARA O SUB-GRID INLINE (44H)
         let exibicaoHorarioHtml = '';
         let exibicaoHorarioCardFimHtml = ''; 
         const tipoJornadaStr = adm.jornada?.tipo || '';
@@ -15576,7 +15594,6 @@ window.deletarUnidadeOficial = async function(id) {
 
         let btnNotifHtml = '';
 
-        // FIX: Substituído notifDesteContrato por notifDesteColab para sanar o ReferenceError
         if (notifDesteColab) {
             const isLida = notifDesteColab.lida;
             const classeBotao = isLida ? 'btn-secondary' : 'btn-success';
@@ -15682,6 +15699,24 @@ window.deletarUnidadeOficial = async function(id) {
             }
         }
 
+        // 👇 NOVO: BOTÃO DINÂMICO DA CLARA (ENVIAR CLARA OU MANDAR NOVAMENTE) 👇
+        let btnClaraHtml = '';
+        if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
+            const jaRecebeu = a.ja_recebeu_termos_clara === true;
+            const btnTexto = jaRecebeu ? '<i class="fa-brands fa-whatsapp"></i> Mandar Novamente' : '<i class="fa-brands fa-whatsapp"></i> Enviar Clara';
+            const btnEstilo = jaRecebeu 
+                ? 'border-color: #25D366; color: #25D366; transition: 0.2s;' 
+                : 'background: #25D366; color: #fff; font-weight: bold; border: none; transition: 0.2s;';
+
+            btnClaraHtml = `
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; cursor: pointer; ${btnEstilo}" 
+                    onclick="dispararBoasVindasETermosManuais('${a.id}', '${a.nome.replace(/'/g, "\\'")}', '${a.empresa}', '${a.unidade}')"
+                    title="${jaRecebeu ? 'Gatilhos da Clara já enviados anteriormente. Clique para reenviar.' : 'Enviar Boas-Vindas e Termos Obrigatórios via WhatsApp'}">
+                    ${btnTexto}
+                </button>
+            `;
+        }
+
         containerLista.innerHTML += `
             <div class="admissao-card" id="card-adm-${a.id}" style="border-left: 4px solid ${corDestaqueCard}; flex-direction: column; align-items: stretch; padding: 0; overflow: hidden; margin-bottom: 15px;">
                 <div style="background: rgba(0,0,0,0.2); padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cor-borda); flex-wrap: wrap; gap: 10px;">
@@ -15731,6 +15766,7 @@ window.deletarUnidadeOficial = async function(id) {
                         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; border-color: var(--cor-acento); color: var(--cor-acento); font-weight: bold;" onclick="verDetalhesFichaAprovada('${a.id}')">
                             <i class="fa-solid fa-address-card"></i> Ver Ficha
                         </button>
+                        ${btnClaraHtml}
                         ${btnAdminAcoes}
                         ${btnCancelar}
                         ${btnNotifHtml}
@@ -45652,20 +45688,17 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
     mostrarAlerta("Processando ativação...", "aviso");
 
     try {
-        // Puxa o JSON de admissão atual
         const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
         let adm = perfil.dados_admissao || {};
 
-        // Faz o Upload do ASO para o Storage da Empresa/Unidade
         const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(unidadeColab)}/${formatarNomePasta(nomeColab)}/Admissoes`;
         const urls = await subirDocumentos(caminhoBase, fileInput.files, 'Exame_ASO_Admissional');
 
-        // Salva o link do documento dentro da pasta "Admissão" do Arquivo Digital do colaborador
         if (!adm.documentos_extras) adm.documentos_extras = {};
         if (!adm.documentos_extras['Admissão']) adm.documentos_extras['Admissão'] = [];
         adm.documentos_extras['Admissão'].push({ url: urls[0], nome: 'Exame ASO Admissional' });
 
-        // Atualiza o banco mudando o status para 'Ativo'
+        // Atualiza o status para Ativo
         const { error } = await supabaseClient.from('perfis').update({ 
             status: 'Ativo', 
             dados_admissao: adm 
@@ -45675,33 +45708,16 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
 
         mostrarAlerta("Sucesso! Colaborador Ativo e liberado na escala.", "sucesso");
         
-        // Recarrega a tela de ASO pra atualizar os botões
         window.carregarAsoAdmin();
+        if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
         atualizarContador();
 
-        // Se a tela de escala estiver aberta lá atrás, manda atualizar pra incluir o cara
         if(!document.getElementById('tela-escala').classList.contains('hidden')) {
             if(typeof processarEscala === 'function') processarEscala();
         }
 
-        // 👇 A MÁGICA ENTRA AQUI: DISPARO AUTOMÁTICO DE BOAS VINDAS 👇
-        if (adm.telefone) {
-            const primeiroNome = nomeColab.split(' ')[0];
-            const enviouOk = await enviarMensagemGraphAPI(
-                adm.telefone, 
-                'boas_vindas_clara', 
-                [primeiroNome], 
-                null, 
-                null
-            );
-            
-            if (enviouOk) {
-                mostrarAlerta(`Mensagem de boas-vindas enviada automaticamente no WhatsApp de ${primeiroNome}!`, "sucesso");
-                
-                // 👇 ADICIONE ESTA LINHA AQUI 👇
-                await window.gerarDocumentosAutomaticosPosAso(idColab, nomeColab, empresaColab, unidadeColab, adm);
-            }
-        }
+        // ⚠️ DISPARO AUTOMÁTICO REMOVIDO DAQUI! 
+        // Agora o envio é feito exclusivamente pelo botão manual no Controle de Admissões.
 
     } catch (err) {
         mostrarAlerta("Erro ao ativar colaborador: " + err.message, "erro");
@@ -61132,6 +61148,50 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
         novaJanela.onafterprint = function() { novaJanela.close(); };
         novaJanela.print();
     }, 600);
+};
+
+      window.dispararBoasVindasETermosManuais = async function(idColab, nomeColab, empresaColab, unidadeColab) {
+    const btn = event.currentTarget;
+    const textoOriginal = btn.innerHTML;
+    
+    const confirmado = await mostrarConfirmacao(`Deseja disparar a sequência de Boas-Vindas e os Termos Obrigatórios para o WhatsApp de <b>${nomeColab}</b>?`, "Enviar Mensagens da Clara");
+    if (!confirmado) return;
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Disparando...';
+
+    try {
+        const { data: perfil, error } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        if (error || !perfil || !perfil.dados_admissao) throw new Error("Não foi possível carregar o perfil do colaborador.");
+
+        const adm = perfil.dados_admissao;
+        if (!adm.telefone) return mostrarAlerta("Este colaborador não possui telefone/WhatsApp cadastrado!", "erro");
+
+        const primeiroNome = nomeColab.split(' ')[0];
+
+        // 1. Mensagem de Boas-Vindas
+        mostrarAlerta("1/3: Enviando mensagem de boas-vindas...", "aviso");
+        await enviarMensagemGraphAPI(adm.telefone, 'boas_vindas_clara', [primeiroNome], null, null);
+        
+        await new Promise(r => setTimeout(r, 1500)); // Pausa de segurança
+
+        // 2 e 3. Termos Obrigatórios (Regimento + Ponto)
+        mostrarAlerta("2/3 e 3/3: Gerando e enviando termos obrigatórios...", "aviso");
+        await window.gerarDocumentosAutomaticosPosAso(idColab, nomeColab, empresaColab, unidadeColab, adm);
+
+        mostrarAlerta(`Sequência enviada com sucesso para o WhatsApp de ${primeiroNome}!`, "sucesso");
+
+        // Recarrega a lista de admissões para o botão atualizar para "Mandar Novamente"
+        if (typeof carregarAdmissoesParaAdmin === 'function') {
+            carregarAdmissoesParaAdmin();
+        }
+
+    } catch (err) {
+        mostrarAlerta("Erro ao disparar mensagens: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = textoOriginal;
+    }
 };
       
         window.ultimoContadorSino = 0;
