@@ -5427,12 +5427,12 @@ window.excluirNotaReceber = async function(id) {
     if (!confirmado) return;
 
     try {
-        // Apaga qualquer receita associada a essa nota do Centro de Custo
-        await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%[NF-REC:${id}]%`);
+        // Apaga qualquer receita associada a essa nota do Centro de Custo (Usando ILIKE para segurança)
+        await supabaseClient.from('financeiro_lancamentos').delete().ilike('descricao', `%[NF-REC:${id}]%`);
 
         const { error } = await supabaseClient.from('financeiro_notas_receber').delete().eq('id', id);
         if (error) throw error;
-        mostrarAlerta("Nota excluída!", "sucesso");
+        mostrarAlerta("Nota excluída com sucesso!", "sucesso");
         carregarNotasReceber();
     } catch (err) {
         mostrarAlerta("Erro ao excluir: " + err.message, "erro");
@@ -5453,19 +5453,16 @@ window.mudarEmpresaFinanceiro = function(empresa) {
 // ==========================================
 window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
     if (!notaObj || !notaObj.id) return;
-    const tagBusca = `[NF-REC:${notaObj.id}]`;
+    const tagBusca = `[NF-REC:${notaObj.id}]`.toUpperCase();
 
     try {
-        // Se a situação for PAGO, criamos/atualizamos a Receita no Centro de Custo
         if (notaObj.situacao === 'PAGO') {
             if (typeof todosCentrosCustoGlobais === 'undefined' || todosCentrosCustoGlobais.length === 0) {
                 await carregarCentrosCusto(true);
             }
 
-            // Tenta encontrar o Centro de Custo oficial pela Empresa do Cliente
             const cc = todosCentrosCustoGlobais.find(c => c.nome_unidade === notaObj.nome_empresa_cliente);
 
-            // Se for um Centro de Custo oficial registrado:
             if (cc) {
                 const dataPagto = notaObj.data_pagamento || new Date().toISOString().substring(0, 10);
                 let mesRefStr = notaObj.mes_referencia || '';
@@ -5474,11 +5471,16 @@ window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
                     mesRefStr = `${parts[1]}/${parts[2]}`; // MM/YYYY
                 }
 
-                // Checa se já existia o lançamento no extrato do Centro de Custo
+                // Pega o Valor Real Pago se preenchido, senão usa o Valor Líquido
+                const valorEfetivoNoCaixa = (notaObj.valor_real_pago !== null && notaObj.valor_real_pago > 0)
+                    ? notaObj.valor_real_pago
+                    : notaObj.valor_liquido;
+
+                // 👇 BUSCA INSENSÍVEL A MAIÚSCULAS/MINÚSCULAS (ILIKE) 👇
                 const { data: existente } = await supabaseClient
                     .from('financeiro_lancamentos')
                     .select('id')
-                    .like('descricao', `%${tagBusca}%`);
+                    .ilike('descricao', `%[NF-REC:${notaObj.id}]%`);
 
                 const payloadLancamento = {
                     centro_custo_id: cc.id,
@@ -5487,8 +5489,8 @@ window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
                     descricao: `${tagBusca} RECEBIMENTO NF: ${notaObj.nome_empresa_cliente} - ${notaObj.descricao}`.toUpperCase(),
                     data_pagamento: dataPagto,
                     mes_referencia: mesRefStr,
-                    valor_parcela: notaObj.valor_liquido,
-                    valor_total: notaObj.valor_liquido,
+                    valor_parcela: valorEfetivoNoCaixa,
+                    valor_total: valorEfetivoNoCaixa,
                     parcela_atual: 1,
                     total_parcelas: 1,
                     status: 'Pago',
@@ -5497,17 +5499,23 @@ window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
                 };
 
                 if (existente && existente.length > 0) {
+                    // Atualiza o registro principal
                     await supabaseClient.from('financeiro_lancamentos').update(payloadLancamento).eq('id', existente[0].id);
+
+                    // 🧹 AUTO-LIMPEZA: Se houver duplicatas antigas no banco, apaga as sobressalentes
+                    if (existente.length > 1) {
+                        const idsDuplicados = existente.slice(1).map(item => item.id);
+                        await supabaseClient.from('financeiro_lancamentos').delete().in('id', idsDuplicados);
+                    }
                 } else {
+                    // Se não existia nada, insere um único registro
                     await supabaseClient.from('financeiro_lancamentos').insert([payloadLancamento]);
                 }
             } else {
-                // Se for Avulso (não cadastrado nos Centros de Custo), limpa se por acaso existia algo
-                await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%${tagBusca}%`);
+                await supabaseClient.from('financeiro_lancamentos').delete().ilike('descricao', `%[NF-REC:${notaObj.id}]%`);
             }
         } else {
-            // Se NÃO for PAGO (A Receber / Atrasado), remove qualquer Receita do Centro de Custo
-            await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%${tagBusca}%`);
+            await supabaseClient.from('financeiro_lancamentos').delete().ilike('descricao', `%[NF-REC:${notaObj.id}]%`);
         }
     } catch (e) {
         console.error("Erro ao sincronizar baixa com Centro de Custo:", e);
