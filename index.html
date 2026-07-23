@@ -4457,13 +4457,18 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         <i class="fa-solid fa-folder-tree"></i> Arquivo Digital do Colaborador
     </h3>
     <div style="display: flex; gap: 10px; align-items: center;">
-        <button class="btn-secondary" onclick="abrirAjuda('arquivo_digital')" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 20px; border-color: rgba(255,255,255,0.3); color: var(--cor-texto-secundario); transition: 0.2s;" onmouseover="this.style.color='#fff'; this.style.borderColor='#fff'" onmouseout="this.style.color='var(--cor-texto-secundario)'; this.style.borderColor='rgba(255,255,255,0.3)'">
-            <i class="fa-solid fa-circle-question"></i> Como funciona?
-        </button>
-        <button id="btn-nova-pasta" class="btn-success hidden" onclick="criarNovaPasta()" style="padding: 10px 15px;">
-            <i class="fa-solid fa-folder-plus"></i> Nova Pasta Manual
-        </button>
-    </div>
+    <button class="btn-secondary" onclick="abrirAjuda('arquivo_digital')" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 20px; border-color: rgba(255,255,255,0.3); color: var(--cor-texto-secundario); transition: 0.2s;">
+        <i class="fa-solid fa-circle-question"></i> Como funciona?
+    </button>
+    <button id="btn-nova-pasta" class="btn-success hidden" onclick="criarNovaPasta()" style="padding: 10px 15px;">
+        <i class="fa-solid fa-folder-plus"></i> Nova Pasta Manual
+    </button>
+
+    <!-- 👇 NOVO BOTÃO DE BAIXAR DOSSIÊ COMPLETO 👇 -->
+    <button id="btn-baixar-dossie" class="btn-secondary hidden" onclick="window.baixarDossieCompletoColaborador()" style="border-color: #00bcd4; color: #00bcd4; font-weight: bold; padding: 10px 15px;">
+        <i class="fa-solid fa-file-zipper"></i> Baixar Dossiê Completo (.ZIP)
+    </button>
+</div>
 </div>
                         
                         <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 20px;">Selecione um colaborador para visualizar e gerenciar todos os seus documentos. Adicione arquivos avulsos nas pastas padrão ou crie as suas próprias.</p>
@@ -34366,22 +34371,238 @@ window.buscarColaboradoresParaDocumentos = async function() {
     selectColab.disabled = false;
 };
 
+      // =========================================================================
+// 📦 GERADOR DE DOSSIÊ COMPLETO (.ZIP) DO COLABORADOR
+// =========================================================================
+window.baixarDossieCompletoColaborador = async function() {
+    const selectColab = document.getElementById('doc-colaborador');
+    const idColab = selectColab ? selectColab.value : '';
+    
+    if (!idColab || idColab === 'INSTITUCIONAL') {
+        return mostrarAlerta("Selecione um colaborador primeiro para baixar o dossiê!", "aviso");
+    }
+
+    const opt = selectColab.options[selectColab.selectedIndex];
+    const nomeColab = opt.getAttribute('data-nome') || docNomeAlvo || 'Colaborador';
+    const btn = document.getElementById('btn-baixar-dossie');
+
+    const textoOriginal = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Coletando arquivos...';
+
+    mostrarAlerta(`Coletando documentos de <b>${nomeColab}</b>... Aguarde uns instantes.`, "aviso");
+
+    try {
+        // 1. Busca todos os registros/links vinculados a este colaborador
+        const [resPerfil, resAus, resAdv, resAlt, resPonto, resEPI, resDes, resAvulsos] = await Promise.all([
+            supabaseClient.from('perfis').select('dados_admissao, dados_rescisao').eq('id', idColab).single(),
+            supabaseClient.from('ausencias').select('motivo, data_inicio, documento').eq('colaborador_id', idColab).not('documento', 'is', null),
+            supabaseClient.from('advertencias').select('motivo, evidencias, carta_rh, documento_assinado').eq('colaborador_id', idColab),
+            supabaseClient.from('solicitacoes_alteracao').select('anexo, created_at').eq('colaborador_id', idColab).not('anexo', 'is', null),
+            supabaseClient.from('ocorrencias_ponto').select('data_falha, doc_rh, doc_colaborador').eq('colaborador_id', idColab),
+            supabaseClient.from('recibos_epi').select('mes_ano, documento_pdf').eq('colaborador_id', idColab).eq('status', 'Assinado').not('documento_pdf', 'is', null),
+            supabaseClient.from('avaliacoes_desempenho').select('documento, documento_assinado').eq('colaborador_id', idColab),
+            supabaseClient.from('documentos_avulsos').select('titulo_documento, documento_pdf').eq('colaborador_id', idColab).eq('status', 'Assinado').not('documento_pdf', 'is', null)
+        ]);
+
+        const zip = new JSZip();
+        let totalArquivos = 0;
+
+        // Função interna para buscar o Blob da nuvem e salvar na pasta correta do ZIP
+        const adicionarAoZip = async (folder, url, nomeArquivo) => {
+            if (!url || typeof url !== 'string' || !url.startsWith('http')) return;
+            try {
+                const res = await fetch(url);
+                if (!res.ok) return;
+                const blob = await res.blob();
+                folder.file(nomeArquivo, blob);
+                totalArquivos++;
+            } catch (e) {
+                console.warn("Falha ao baixar arquivo para o ZIP:", url, e);
+            }
+        };
+
+        // 📁 Pasta 1: Admissão e Contratos
+        const folderAdm = zip.folder("01_Admissao_e_Contratos");
+        const adm = resPerfil.data?.dados_admissao || {};
+        if (adm.documentos) {
+            for (let i = 0; i < adm.documentos.length; i++) {
+                const ext = adm.documentos[i].split('.').pop().split('?')[0] || 'pdf';
+                await adicionarAoZip(folderAdm, adm.documentos[i], `Doc_Admissao_${i + 1}.${ext}`);
+            }
+        }
+
+        // 📁 Pasta 2: Rescisão
+        const folderResc = zip.folder("02_Rescisao");
+        const resc = resPerfil.data?.dados_rescisao;
+        if (resc) {
+            if (resc.documentos) {
+                for (let i = 0; i < resc.documentos.length; i++) {
+                    const ext = resc.documentos[i].split('.').pop().split('?')[0] || 'pdf';
+                    await adicionarAoZip(folderResc, resc.documentos[i], `Doc_Gestor_${i + 1}.${ext}`);
+                }
+            }
+            if (resc.doc_gerado_rh && resc.doc_gerado_rh.startsWith('http')) {
+                await adicionarAoZip(folderResc, resc.doc_gerado_rh, `Termo_Oficial_RH.pdf`);
+            }
+            if (resc.doc_assinado) {
+                await adicionarAoZip(folderResc, resc.doc_assinado, `Termo_Rescisao_Assinado.pdf`);
+            }
+        }
+
+        // 📁 Pasta 3: Atestados e Licenças
+        const folderAus = zip.folder("03_Atestados_e_Licencas");
+        if (resAus.data) {
+            for (let i = 0; i < resAus.data.length; i++) {
+                const a = resAus.data[i];
+                const ext = a.documento.split('.').pop().split('?')[0] || 'pdf';
+                await adicionarAoZip(folderAus, a.documento, `Atestado_${a.data_inicio}_${i + 1}.${ext}`);
+            }
+        }
+
+        // 📁 Pasta 4: Advertências
+        const folderAdv = zip.folder("04_Medidas_Disciplinares");
+        if (resAdv.data) {
+            for (let i = 0; i < resAdv.data.length; i++) {
+                const adv = resAdv.data[i];
+                if (adv.carta_rh) await adicionarAoZip(folderAdv, adv.carta_rh, `Carta_RH_${i + 1}.pdf`);
+                if (adv.documento_assinado) await adicionarAoZip(folderAdv, adv.documento_assinado, `Medida_Assinada_${i + 1}.pdf`);
+                if (adv.evidencias) {
+                    for (let j = 0; j < adv.evidencias.length; j++) {
+                        const ext = adv.evidencias[j].split('.').pop().split('?')[0] || 'jpg';
+                        await adicionarAoZip(folderAdv, adv.evidencias[j], `Evidencia_${i + 1}_${j + 1}.${ext}`);
+                    }
+                }
+            }
+        }
+
+        // 📁 Pasta 5: Alterações Cadastrais
+        const folderAlt = zip.folder("05_Alteracoes_Cadastrais");
+        if (resAlt.data) {
+            for (let i = 0; i < resAlt.data.length; i++) {
+                const alt = resAlt.data[i];
+                const ext = alt.anexo.split('.').pop().split('?')[0] || 'pdf';
+                await adicionarAoZip(folderAlt, alt.anexo, `Alteracao_${i + 1}.${ext}`);
+            }
+        }
+
+        // 📁 Pasta 6: Justificativas de Ponto
+        const folderPonto = zip.folder("06_Justificativas_Ponto");
+        if (resPonto.data) {
+            for (let i = 0; i < resPonto.data.length; i++) {
+                const p = resPonto.data[i];
+                if (p.doc_rh) await adicionarAoZip(folderPonto, p.doc_rh, `Espelho_RH_${p.data_falha}.pdf`);
+                if (p.doc_colaborador) await adicionarAoZip(folderPonto, p.doc_colaborador, `Justificativa_Colab_${p.data_falha}.pdf`);
+            }
+        }
+
+        // 📁 Pasta 7: Recibos de EPI
+        const folderEPI = zip.folder("07_Recibos_EPI");
+        if (resEPI.data) {
+            for (let i = 0; i < resEPI.data.length; i++) {
+                const epi = resEPI.data[i];
+                const mesClean = epi.mes_ano.replace('/', '_');
+                await adicionarAoZip(folderEPI, epi.documento_pdf, `Recibo_EPI_${mesClean}.pdf`);
+            }
+        }
+
+        // 📁 Pasta 8: Avaliações de Desempenho
+        const folderDes = zip.folder("08_Avaliacoes_Desempenho");
+        if (resDes.data) {
+            for (let i = 0; i < resDes.data.length; i++) {
+                const d = resDes.data[i];
+                if (d.documento) await adicionarAoZip(folderDes, d.documento, `Avaliacao_Notas_${i + 1}.pdf`);
+                if (d.documento_assinado) await adicionarAoZip(folderDes, d.documento_assinado, `Termo_Desempenho_Assinado_${i + 1}.pdf`);
+            }
+        }
+
+        // 📁 Pasta 9: Termos Avulsos (Assinados no WhatsApp)
+        const folderAvulsos = zip.folder("09_Termos_Avulsos");
+        if (resAvulsos.data) {
+            for (let i = 0; i < resAvulsos.data.length; i++) {
+                const av = resAvulsos.data[i];
+                const titClean = (av.titulo_documento || 'Termo').replace(/[^a-zA-Z0-9]/g, '_');
+                await adicionarAoZip(folderAvulsos, av.documento_pdf, `${titClean}_${i + 1}.pdf`);
+            }
+        }
+
+        // 📁 Pasta 10: Documentos Manuais / Pastas Extras
+        if (adm.documentos_extras) {
+            for (let nomePasta in adm.documentos_extras) {
+                const arrDocs = adm.documentos_extras[nomePasta];
+                if (Array.isArray(arrDocs) && arrDocs.length > 0) {
+                    const folderExtra = zip.folder(`10_Extras_${formatarNomePasta(nomePasta)}`);
+                    for (let i = 0; i < arrDocs.length; i++) {
+                        const docExtra = arrDocs[i];
+                        const ext = (docExtra.nome || 'file').split('.').pop() || 'pdf';
+                        const nomeClean = (docExtra.nome || `Doc_${i + 1}`).replace(/[^a-zA-Z0-9._-]/g, '_');
+                        await adicionarAoZip(folderExtra, docExtra.url, nomeClean);
+                    }
+                }
+            }
+        }
+
+        if (totalArquivos === 0) {
+            mostrarAlerta("Nenhum documento ou PDF encontrado no histórico deste colaborador para compactar.", "aviso");
+            return;
+        }
+
+        btn.innerHTML = '<i class="fa-solid fa-file-zipper fa-spin"></i> Criando arquivo ZIP...';
+
+        // Gera o pacote compactado na memória
+        const content = await zip.generateAsync({ type: "blob" });
+        
+        // Dispara o Download do arquivo no navegador
+        const nomeZip = `Dossie_Completo_${formatarNomePasta(nomeColab)}.zip`;
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(content);
+        a.download = nomeZip;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        mostrarAlerta(`Dossiê gerado com sucesso! <b>${totalArquivos} arquivo(s)</b> organizados em <b>${nomeZip}</b>.`, "sucesso");
+
+    } catch (err) {
+        console.error("Erro ao gerar dossiê:", err);
+        mostrarAlerta("Erro ao compactar o dossiê: " + err.message, "erro");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = textoOriginal;
+    }
+};
+
 window.carregarDocumentosColaborador = async function() {
     const selectColab = document.getElementById('doc-colaborador');
-    const idColab = selectColab.value;
+    const idColab = selectColab ? selectColab.value : '';
     const unidadeSelecionada = document.getElementById('doc-unidade').value;
     const container = document.getElementById('lista-documentos-container');
     
+    // Controles de botões no topo
+    const btnNovaPasta = document.getElementById('btn-nova-pasta');
+    const btnDossie = document.getElementById('btn-baixar-dossie');
+    
     if (!idColab) {
-        container.innerHTML = '';
-        document.getElementById('btn-nova-pasta').classList.add('hidden');
+        if (container) container.innerHTML = '';
+        if (btnNovaPasta) btnNovaPasta.classList.add('hidden');
+        if (btnDossie) btnDossie.classList.add('hidden');
         return;
     }
 
-    // O DESVIO PARA OS DOCUMENTOS DA UNIDADE
+    // O DESVIO PARA OS DOCUMENTOS INSTITUCIONAIS DA UNIDADE
     if (idColab === 'INSTITUCIONAL') {
+        if (btnNovaPasta) btnNovaPasta.classList.add('hidden');
+        if (btnDossie) btnDossie.classList.add('hidden');
         renderizarDocumentosInstitucionais(unidadeSelecionada);
         return;
+    }
+
+    // Exibe os botões de ação do topo
+    if (btnDossie) btnDossie.classList.remove('hidden');
+    if (usuarioAtual.perfil === 'Admin' && btnNovaPasta) {
+        btnNovaPasta.classList.remove('hidden');
+    } else if (btnNovaPasta) {
+        btnNovaPasta.classList.add('hidden');
     }
 
     // Guarda dados na global para o Upload
@@ -34389,28 +34610,23 @@ window.carregarDocumentosColaborador = async function() {
     docEmpresaAlvo = optSelecionada.getAttribute('data-empresa') || 'Sem_Empresa';
     docNomeAlvo = optSelecionada.getAttribute('data-nome');
 
-    // Mostra o botão mestre de Nova Pasta Manual apenas para Admin
-    if (usuarioAtual.perfil === 'Admin') {
-        document.getElementById('btn-nova-pasta').classList.remove('hidden');
-    } else {
-        document.getElementById('btn-nova-pasta').classList.add('hidden');
-    }
-    container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Coletando arquivo digital no banco de dados...</p>';
+    container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 40px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #00bcd4; margin-bottom: 15px;"></i><br><br>Coletando arquivo digital no banco de dados...</p>';
 
     try {
-        // 👇 MÁGICA 1: Adicionamos a busca dos Termos Avulsos no Promise.all 👇
+        // 👇 Busca unificada de todos os módulos vinculados ao colaborador 👇
         const [resPerfil, resAus, resAdv, resAlt, resPonto, resEPI, resDesempenho, resAvulsos] = await Promise.all([
-            supabaseClient.from('perfis').select('dados_admissao, dados_rescisao').eq('id', idColab).single(),
+            supabaseClient.from('perfis').select('id, dados_admissao, dados_rescisao').eq('id', idColab).single(),
             supabaseClient.from('ausencias').select('motivo, data_inicio, documento').eq('colaborador_id', idColab).not('documento', 'is', null),
             supabaseClient.from('advertencias').select('motivo, evidencias, carta_rh, documento_assinado, created_at').eq('colaborador_id', idColab),
             supabaseClient.from('solicitacoes_alteracao').select('*').eq('colaborador_id', idColab).not('anexo', 'is', null),
             supabaseClient.from('ocorrencias_ponto').select('data_falha, doc_rh, doc_colaborador').eq('colaborador_id', idColab),
             supabaseClient.from('recibos_epi').select('*').eq('colaborador_id', idColab).eq('status', 'Assinado'),
             supabaseClient.from('avaliacoes_desempenho').select('*').eq('colaborador_id', idColab).in('status', ['Aprovado', 'Alerta_RH', 'Concluído']),
-            supabaseClient.from('documentos_avulsos').select('*').eq('colaborador_id', idColab).eq('status', 'Assinado') // <-- NOVO!
+            supabaseClient.from('documentos_avulsos').select('*').eq('colaborador_id', idColab).eq('status', 'Assinado')
         ]);
 
-        // Alimenta a variável global para que o modal consiga ler os dados ao ser clicado
+        // Alimenta o cache global de Termos Avulsos
+        if (!window.dadosAvulsosAtuais) window.dadosAvulsosAtuais = [];
         if (resAvulsos.data) {
             resAvulsos.data.forEach(doc => {
                 if (!window.dadosAvulsosAtuais.find(d => d.id === doc.id)) {
@@ -34419,7 +34635,7 @@ window.carregarDocumentosColaborador = async function() {
             });
         }
 
-      // 👇 ADICIONE ESTE BLOCO AQUI PARA OS EPIs 👇
+        // Alimenta o cache global de EPIs
         if (!window.dadosEpiAtuais) window.dadosEpiAtuais = [];
         if (resEPI.data) {
             resEPI.data.forEach(epi => {
@@ -34433,17 +34649,15 @@ window.carregarDocumentosColaborador = async function() {
         if (!adm.documentos_extras) adm.documentos_extras = {};
         const extras = adm.documentos_extras;
 
-        // 👇 A MÁGICA DE TRAVA DE ACESSO AQUI 👇
         const isAdmin = usuarioAtual.perfil === 'Admin';
 
-        // Função construtora de Caixas (Pastas) - AGORA COM CLASSES LIMPAS E SCROLL!
+        // Função construtora das caixas de pastas
         const criarCaixaPasta = (titulo, icon, cor, htmlSistema, nomePastaChave, isCustomizada = false) => {
             let linksExtraHTML = '';
             
-            // Renderiza os arquivos que o Admin jogou manualmente nesta pasta
+            // Renderiza os arquivos que o Admin adicionou manualmente nesta pasta
             if (extras[nomePastaChave] && extras[nomePastaChave].length > 0) {
                 extras[nomePastaChave].forEach((doc, index) => {
-                    // Lixeira oculta para gestores
                     let btnLixeiraItem = isAdmin ? `<i class="fa-solid fa-trash btn-lixeira-item" onclick="excluirDocumentoExtra('${idColab}', '${nomePastaChave}', ${index})" title="Apagar este arquivo"></i>` : '';
                     
                     linksExtraHTML += `
@@ -34470,7 +34684,6 @@ window.carregarDocumentosColaborador = async function() {
                 </div>`;
             }
 
-            // Oculta os botões de gestão da pasta para quem não é Admin
             let btnUploadPasta = isAdmin ? `
                 <button class="btn-secondary btn-ged-add" style="border-color: ${cor}; color: ${cor};" onclick="abrirUploadExtra('${nomePastaChave}')">
                     <i class="fa-solid fa-plus"></i> Inserir Documento
@@ -34511,12 +34724,9 @@ window.carregarDocumentosColaborador = async function() {
         if (r) {
             if (r.documentos) r.documentos.forEach((lnk, i) => htmlResc += `<a href="${lnk}" target="_blank" class="badge" style="background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid #dc3545; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-pdf"></i> Doc Gestor ${i+1}</a>`);
             
-            // 👇 A MÁGICA DA CORREÇÃO AQUI: Se for gerado pelo sistema, ele vira um botão que abre a carta na tela!
             if (r.doc_gerado_rh) {
                 if (r.doc_gerado_rh === 'GERADO_SISTEMA') {
-                    // Pega o ID do colaborador ativo (ajuste caso sua variável tenha outro nome)
                     const idColabRec = resPerfil.data.id; 
-                    
                     htmlResc += `<button type="button" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; cursor: pointer; font-family: inherit; font-weight: bold;" onclick="abrirModalAvisoPrevio('${idColabRec}')"><i class="fa-solid fa-print"></i> Termo RH (Visualizar/Imprimir)</button>`;
                 } else {
                     htmlResc += `<a href="${r.doc_gerado_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-export"></i> Termo RH</a>`;
@@ -34561,12 +34771,9 @@ window.carregarDocumentosColaborador = async function() {
         if (resPonto.data && resPonto.data.length > 0) {
             resPonto.data.forEach(o => {
                 let l = '';
-                // 👇 Botão Espelho RH atualizado com a nova classe 👇
                 if(o.doc_rh) l += `<a href="${o.doc_rh}" target="_blank" class="badge badge-espelho-rh" style="text-decoration: none; padding: 5px 10px; margin-right: 5px; margin-bottom: 5px;"><i class="fa-solid fa-file-pdf"></i> Espelho RH</a>`;
-                
                 if(o.doc_colaborador) l += `<a href="${o.doc_colaborador}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 5px 10px; margin-right: 5px; margin-bottom: 5px;"><i class="fa-solid fa-file-signature"></i> Justificativa Colaborador</a>`;
                 
-                // 👇 Caixinha interna atualizada com a nova classe 👇
                 if(l) htmlPonto += `<div class="ged-inner-box"><strong style="color:var(--cor-texto-secundario); font-size:0.8rem; display:block; margin-bottom:5px;">Data da Falha: ${formatarDataBR(o.data_falha)}</strong>${l}</div>`;
             });
         }
@@ -34576,11 +34783,8 @@ window.carregarDocumentosColaborador = async function() {
         let htmlEPI = '';
         if (resEPI.data && resEPI.data.length > 0) {
             resEPI.data.sort((a, b) => new Date(b.assinado_em) - new Date(a.assinado_em));
-            
             resEPI.data.forEach(epi => {
                 const dataAssinado = new Date(epi.assinado_em).toLocaleDateString('pt-BR');
-                
-                // 👇 A MÁGICA: Agora é um botão bonitão que chama a função do Modal! 👇
                 htmlEPI += `
                     <button type="button" class="btn-secondary" style="background: rgba(0, 188, 212, 0.1); color: #00bcd4; border: 1px solid rgba(0, 188, 212, 0.3); padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; border-radius: 6px; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='#00bcd4'; this.style.color='#000'" onmouseout="this.style.background='rgba(0, 188, 212, 0.1)'; this.style.color='#00bcd4'" onclick="visualizarReciboEPIMontado('${epi.id}')">
                         <i class="fa-solid fa-file-signature"></i> Recibo EPI - ${epi.mes_ano} <small>(${dataAssinado})</small>
@@ -34592,37 +34796,29 @@ window.carregarDocumentosColaborador = async function() {
         // 8. AVALIAÇÕES DE DESEMPENHO
         let htmlDesempenho = '';
         if (resDesempenho.data && resDesempenho.data.length > 0) {
-            // Ordena os ciclos pelo mais recente
             resDesempenho.data.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            
             resDesempenho.data.forEach(d => {
                 const dataFormat = new Date(d.created_at).toLocaleDateString('pt-BR');
                 let links = '';
-                
                 if (d.documento) {
-                    // 👇 A MÁGICA: Agora é um botão que chama a função do Modal para renderizar as notas na tela!
                     links += `<button type="button" class="badge" style="background: rgba(0, 188, 212, 0.1); color: #00bcd4; border: 1px solid #00bcd4; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; cursor: pointer; font-weight: bold; font-family: inherit;" onclick="visualizarDesempenhoMontado('${d.id}')"><i class="fa-solid fa-file-invoice"></i> Ver Avaliação Completa na Tela</button>`;
                 }
                 if (d.documento_assinado) {
                     links += `<a href="${d.documento_assinado}" target="_blank" class="badge ativo" style="background: rgba(40,167,69,0.1); color: #28a745; border: 1px solid #28a745; text-decoration: none; padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; display: inline-block;"><i class="fa-solid fa-file-signature"></i> Termo Assinado</a>`;
                 }
-                
                 if (links) {
                     htmlDesempenho += `<div style="margin-bottom: 10px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;"><strong style="color:#00bcd4; font-size:0.8rem; display:block; margin-bottom:5px;">Ciclo Trimestral: ${dataFormat}</strong>${links}</div>`;
                 }
             });
         }
         htmlFinal += criarCaixaPasta('Avaliações de Desempenho', 'fa-chart-line', '#00bcd4', htmlDesempenho, 'Desempenho');
-        // 9. TERMOS AVULSOS E CONTRATOS MÁGICOS
+
+        // 9. TERMOS AVULSOS
         let htmlAvulsos = '';
         if (resAvulsos && resAvulsos.data && resAvulsos.data.length > 0) {
-            // Ordena do mais recente para o mais antigo
             resAvulsos.data.sort((a, b) => new Date(b.created_at || b.criado_em) - new Date(a.created_at || a.criado_em));
-            
             resAvulsos.data.forEach(doc => {
                 const dataAssinado = new Date(doc.assinado_em || doc.created_at || doc.criado_em).toLocaleDateString('pt-BR');
-                
-                // 👇 A MÁGICA: O botão chama exatamente a mesma função que já monta o PDF na outra tela!
                 htmlAvulsos += `
                     <button type="button" class="btn-secondary" style="background: rgba(37, 211, 102, 0.1); color: #25D366; border: 1px solid rgba(37, 211, 102, 0.3); padding: 6px 10px; margin-right: 5px; margin-bottom: 5px; border-radius: 6px; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='#25D366'; this.style.color='#fff'" onmouseout="this.style.background='rgba(37, 211, 102, 0.1)'; this.style.color='#25D366'" onclick="visualizarDocumentoAvulsoMontado('${doc.id}')">
                         <i class="fa-solid fa-file-signature"></i> ${doc.titulo_documento || doc.titulo} (${dataAssinado})
@@ -34631,10 +34827,10 @@ window.carregarDocumentosColaborador = async function() {
         }
         htmlFinal += criarCaixaPasta('Termos Avulsos (Assinados via WhatsApp)', 'fa-file-contract', '#25D366', htmlAvulsos, 'Termos_Avulsos');
 
-        // 10. PASTAS CUSTOMIZADAS (Criadas manualmente pelo Admin)
-        const chavesPadrão = ['Admissão', 'Rescisão', 'Atestados', 'Advertências', 'Alterações', 'Justificativas de Ponto', 'Recibos de EPI', 'Desempenho', 'Termos_Avulsos'];
+        // 10. PASTAS CUSTOMIZADAS (Manuais)
+        const chavesPadrao = ['Admissão', 'Rescisão', 'Atestados', 'Advertências', 'Alterações', 'Justificativas de Ponto', 'Recibos de EPI', 'Desempenho', 'Termos_Avulsos'];
         Object.keys(extras).forEach(pastaNome => {
-            if (!chavesPadrão.includes(pastaNome)) {
+            if (!chavesPadrao.includes(pastaNome)) {
                 htmlFinal += criarCaixaPasta(pastaNome, 'fa-folder', '#ffc107', '', pastaNome, true);
             }
         });
@@ -34642,6 +34838,7 @@ window.carregarDocumentosColaborador = async function() {
         container.innerHTML = htmlFinal;
 
     } catch (err) {
+        console.error("Erro no arquivo digital:", err);
         container.innerHTML = `<p style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao montar arquivo digital: ${err.message}</p>`;
     }
 };
