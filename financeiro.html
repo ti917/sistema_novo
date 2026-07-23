@@ -4904,13 +4904,11 @@ window.filtrarNotasReceberLocal = function() {
     let situacoesSelecionadas = tsFiltroNotasSituacao ? tsFiltroNotasSituacao.getValue() : [];
     if (!Array.isArray(situacoesSelecionadas)) situacoesSelecionadas = situacoesSelecionadas ? [situacoesSelecionadas] : [];
 
-    // Pegando as datas selecionadas do Calendário Duplo
     let dataInicioFiltro = "";
     let dataFimFiltro = "";
     if (fpNotasPeriodo && fpNotasPeriodo.selectedDates.length === 2) {
         const d1 = fpNotasPeriodo.selectedDates[0];
         const d2 = fpNotasPeriodo.selectedDates[1];
-        // Converte para AAAA-MM-DD para comparar fácil
         dataInicioFiltro = `${d1.getFullYear()}-${String(d1.getMonth()+1).padStart(2,'0')}-${String(d1.getDate()).padStart(2,'0')}`;
         dataFimFiltro = `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,'0')}-${String(d2.getDate()).padStart(2,'0')}`;
     }
@@ -4925,24 +4923,35 @@ window.filtrarNotasReceberLocal = function() {
 
         if (situacoesSelecionadas.length > 0 && !situacoesSelecionadas.includes(nota.situacao)) return false;
 
-        // 👇 NOVA REGRA INTELIGENTE DE ESPELHAMENTO 👇
+        // FILTRAGEM DE DATA POR COMPETÊNCIA E REGIME DE CAIXA
         if (dataInicioFiltro && dataFimFiltro) {
             const dataRefBrasil = nota.mes_referencia || ""; // Ex: 01/06/2026
+            let dataRefISO = "";
             if (dataRefBrasil.length === 10) {
                 const [dia, mes, ano] = dataRefBrasil.split('/');
-                const dataRefISO = `${ano}-${mes}-${dia}`;
-                
-                // 1. Se a nota for do FUTURO (ex: filtro em Julho, nota de Agosto), esconde.
-                if (dataRefISO > dataFimFiltro) return false;
-                
-                // 2. Se a nota for do PASSADO (ex: filtro em Julho, nota de Junho)...
-                if (dataRefISO < dataInicioFiltro) {
-                    // Se JÁ FOI PAGA, esconde do mês atual (ela só vai aparecer se filtrar o mês antigo dela).
-                    if (nota.situacao === 'PAGO') {
-                        return false;
-                    }
-                    // Se NÃO FOI PAGA, permite que ela "fure" o filtro de data e apareça na tela (Espelhamento!)
+                dataRefISO = `${ano}-${mes}-${dia}`;
+            }
+
+            const dataPagtoISO = nota.data_pagamento || ""; // Ex: 2026-07-14
+
+            // 1. Se a nota está PAGA:
+            if (nota.situacao === 'PAGO') {
+                // Exibe no mês em que foi PAGA (Caixa)
+                if (dataPagtoISO >= dataInicioFiltro && dataPagtoISO <= dataFimFiltro) {
+                    return true;
                 }
+                // Exibe também no mês da REFERÊNCIA histórica
+                if (dataRefISO >= dataInicioFiltro && dataRefISO <= dataFimFiltro) {
+                    return true;
+                }
+                return false;
+            }
+
+            // 2. Se NÃO está PAGA (Pendente / Atrasada):
+            if (dataRefISO) {
+                if (dataRefISO > dataFimFiltro) return false; // Futuro esconde
+                if (dataRefISO < dataInicioFiltro) return true; // Passado em aberto espelha
+                if (dataRefISO >= dataInicioFiltro && dataRefISO <= dataFimFiltro) return true;
             }
         }
 
@@ -4957,11 +4966,22 @@ window.filtrarNotasReceberLocal = function() {
             kpiVolume += nota.valor_liquido;
             kpiImpostos += imposto;
 
+            const dataPagtoISO = nota.data_pagamento || "";
             let valorParaPago = nota.valor_real_pago !== null && nota.valor_real_pago > 0 ? nota.valor_real_pago : nota.valor_liquido;
-            if (nota.situacao === 'PAGO') kpiPago += valorParaPago;
-            else if (nota.situacao === 'ATRASADO') kpiAtrasado += nota.valor_liquido;
-            else if (nota.situacao === 'MUITO ATRASADO') kpiCritico += nota.valor_liquido;
-            else kpiPendente += nota.valor_liquido;
+
+            // CÁLCULO DE KPIS RESPEITANDO A DATA EFETIVA DE PAGAMENTO (REGIME DE CAIXA)
+            if (nota.situacao === 'PAGO') {
+                // Só soma no TOTAL PAGO se o pagamento REAL ocorreu no período filtrado!
+                if (!dataInicioFiltro || (dataPagtoISO >= dataInicioFiltro && dataPagtoISO <= dataFimFiltro)) {
+                    kpiPago += valorParaPago;
+                }
+            } else if (nota.situacao === 'ATRASADO') {
+                kpiAtrasado += nota.valor_liquido;
+            } else if (nota.situacao === 'MUITO ATRASADO') {
+                kpiCritico += nota.valor_liquido;
+            } else {
+                kpiPendente += nota.valor_liquido;
+            }
 
             let corBadge = '#fff';
             let bgBadge = 'transparent';
@@ -4976,7 +4996,7 @@ window.filtrarNotasReceberLocal = function() {
                 dataPagtoStr = `${parts[2]}/${parts[1]}/${parts[0]}`;
             }
 
-            // 👇 NOVA MÁGICA: CÁLCULO DOS DIAS DE ATRASO 👇
+            // CÁLCULO DOS DIAS DE ATRASO
             let diasAtrasoHtml = '';
             if (nota.situacao !== 'PAGO' && nota.mes_referencia && nota.mes_referencia.length === 10) {
                 const partesRef = nota.mes_referencia.split('/');
@@ -4988,13 +5008,10 @@ window.filtrarNotasReceberLocal = function() {
                 if (hojeAtraso > dataVencObj) {
                     const diffTime = hojeAtraso.getTime() - dataVencObj.getTime();
                     const diffDays = Math.round(diffTime / (1000 * 3600 * 24));
-                    
-                    // Se o atraso for maior que 30 dias, fica vermelho forte, senão fica laranja
                     let corTextoAtraso = diffDays > 30 ? '#e74c3c' : '#f39c12'; 
                     diasAtrasoHtml = `<div style="margin-top: 8px; font-size: 0.7rem; color: ${corTextoAtraso}; font-weight: bold; text-align: center;"><i class="fa-solid fa-triangle-exclamation"></i> Atraso: ${diffDays} dia${diffDays > 1 ? 's' : ''}</div>`;
                 }
             }
-            // 👆 FIM DO CÁLCULO 👇
 
             const formatarTabela = (v) => v.toLocaleString('pt-BR', {minimumFractionDigits: 2});
 
@@ -5265,10 +5282,15 @@ window.abrirModalNotaReceber = async function(id = null) {
             if (idNota) {
                 const { error } = await supabaseClient.from('financeiro_notas_receber').update(payload).eq('id', idNota);
                 if (error) throw error;
+                payload.id = idNota;
+                await window.sincronizarBaixaNotaComCentroCusto(payload);
                 mostrarAlerta("Nota atualizada com sucesso!", "sucesso");
             } else {
-                const { error } = await supabaseClient.from('financeiro_notas_receber').insert([payload]);
+                const { data: notaInserida, error } = await supabaseClient.from('financeiro_notas_receber').insert([payload]).select();
                 if (error) throw error;
+                if (notaInserida && notaInserida.length > 0) {
+                    await window.sincronizarBaixaNotaComCentroCusto(notaInserida[0]);
+                }
                 mostrarAlerta("Nota registrada com sucesso!", "sucesso");
             }
             
@@ -5310,40 +5332,44 @@ window.calcularImpostoRetidoLocal = function() {
 // MÁGICA: ATUALIZAR STATUS DA NOTA DIRETO NA TABELA
 // ==========================================
 window.atualizarSituacaoNotaRapido = async function(idNota, novaSituacao, selectElement) {
-    // Salva as cores originais pra caso a internet caia e dê erro
     const corOriginal = selectElement.style.color;
     const bgOriginal = selectElement.style.background;
     
-    // Efeito visual de carregamento (deixa o botão cinza enquanto salva)
     selectElement.style.background = 'rgba(255,255,255,0.1)';
     selectElement.style.color = '#a0aec0';
     selectElement.style.borderColor = 'transparent';
     
     try {
-        // 1. Atualiza direto no Supabase
+        const notaIndex = window.notasReceberEmMemoria.findIndex(n => n.id === idNota);
+        let notaObj = notaIndex > -1 ? window.notasReceberEmMemoria[notaIndex] : null;
+
+        let updatePayload = { situacao: novaSituacao };
+        
+        // Se marcou PAGO e não tinha data de pagamento definida, insere o dia de HOJE
+        if (novaSituacao === 'PAGO' && notaObj && !notaObj.data_pagamento) {
+            updatePayload.data_pagamento = new Date().toISOString().substring(0, 10);
+        }
+
         const { error } = await supabaseClient
             .from('financeiro_notas_receber')
-            .update({ situacao: novaSituacao })
+            .update(updatePayload)
             .eq('id', idNota);
             
         if (error) throw error;
         
-        // 2. Atualiza na memória local para não ter que baixar tudo do banco de novo
-        const notaIndex = window.notasReceberEmMemoria.findIndex(n => n.id === idNota);
-        if (notaIndex > -1) {
-            window.notasReceberEmMemoria[notaIndex].situacao = novaSituacao;
+        if (notaObj) {
+            notaObj.situacao = novaSituacao;
+            if (updatePayload.data_pagamento) notaObj.data_pagamento = updatePayload.data_pagamento;
+            
+            // 👇 DISPARA O LANÇAMENTO AUTOMÁTICO NO CENTRO DE CUSTO
+            await window.sincronizarBaixaNotaComCentroCusto(notaObj);
         }
         
-        // 3. Mostra a mensagem de sucesso
         mostrarAlerta("Situação atualizada!", "sucesso");
-        
-        // 4. Refaz os cálculos do Dashboard e recolore os botões automaticamente
         filtrarNotasReceberLocal();
         
     } catch (err) {
         mostrarAlerta("Erro ao atualizar status: " + err.message, "erro");
-        
-        // Se deu erro, desfaz a animação e volta o select para o que estava antes
         selectElement.style.background = bgOriginal;
         selectElement.style.color = corOriginal;
         selectElement.style.borderColor = corOriginal;
@@ -5357,6 +5383,9 @@ window.excluirNotaReceber = async function(id) {
     if (!confirmado) return;
 
     try {
+        // Apaga qualquer receita associada a essa nota do Centro de Custo
+        await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%[NF-REC:${id}]%`);
+
         const { error } = await supabaseClient.from('financeiro_notas_receber').delete().eq('id', id);
         if (error) throw error;
         mostrarAlerta("Nota excluída!", "sucesso");
@@ -5372,6 +5401,72 @@ window.mudarEmpresaFinanceiro = function(empresa) {
     if (typeof oldMudarEmpresaFinanceiroNotas === 'function') oldMudarEmpresaFinanceiroNotas(empresa);
     if (!document.getElementById('tela-notas-receber').classList.contains('hidden')) {
         carregarNotasReceber();
+    }
+};
+
+        // ==========================================
+// MÁGICA: SINCRONIZAÇÃO AUTOMÁTICA COM O CENTRO DE CUSTO
+// ==========================================
+window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
+    if (!notaObj || !notaObj.id) return;
+    const tagBusca = `[NF-REC:${notaObj.id}]`;
+
+    try {
+        // Se a situação for PAGO, criamos/atualizamos a Receita no Centro de Custo
+        if (notaObj.situacao === 'PAGO') {
+            if (typeof todosCentrosCustoGlobais === 'undefined' || todosCentrosCustoGlobais.length === 0) {
+                await carregarCentrosCusto(true);
+            }
+
+            // Tenta encontrar o Centro de Custo oficial pela Empresa do Cliente
+            const cc = todosCentrosCustoGlobais.find(c => c.nome_unidade === notaObj.nome_empresa_cliente);
+
+            // Se for um Centro de Custo oficial registrado:
+            if (cc) {
+                const dataPagto = notaObj.data_pagamento || new Date().toISOString().substring(0, 10);
+                let mesRefStr = notaObj.mes_referencia || '';
+                if (mesRefStr.length === 10) {
+                    const parts = mesRefStr.split('/');
+                    mesRefStr = `${parts[1]}/${parts[2]}`; // MM/YYYY
+                }
+
+                // Checa se já existia o lançamento no extrato do Centro de Custo
+                const { data: existente } = await supabaseClient
+                    .from('financeiro_lancamentos')
+                    .select('id')
+                    .like('descricao', `%${tagBusca}%`);
+
+                const payloadLancamento = {
+                    centro_custo_id: cc.id,
+                    tipo: 'Receita',
+                    categoria: notaObj.descricao || 'FATURAMENTO',
+                    descricao: `${tagBusca} RECEBIMENTO NF: ${notaObj.nome_empresa_cliente} - ${notaObj.descricao}`.toUpperCase(),
+                    data_pagamento: dataPagto,
+                    mes_referencia: mesRefStr,
+                    valor_parcela: notaObj.valor_liquido,
+                    valor_total: notaObj.valor_liquido,
+                    parcela_atual: 1,
+                    total_parcelas: 1,
+                    status: 'Pago',
+                    empresa: notaObj.empresa,
+                    criado_por: usuarioAtual ? usuarioAtual.nome : 'Sistema Automático'
+                };
+
+                if (existente && existente.length > 0) {
+                    await supabaseClient.from('financeiro_lancamentos').update(payloadLancamento).eq('id', existente[0].id);
+                } else {
+                    await supabaseClient.from('financeiro_lancamentos').insert([payloadLancamento]);
+                }
+            } else {
+                // Se for Avulso (não cadastrado nos Centros de Custo), limpa se por acaso existia algo
+                await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%${tagBusca}%`);
+            }
+        } else {
+            // Se NÃO for PAGO (A Receber / Atrasado), remove qualquer Receita do Centro de Custo
+            await supabaseClient.from('financeiro_lancamentos').delete().like('descricao', `%${tagBusca}%`);
+        }
+    } catch (e) {
+        console.error("Erro ao sincronizar baixa com Centro de Custo:", e);
     }
 };
     </script>
