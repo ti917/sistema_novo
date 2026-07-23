@@ -4700,6 +4700,331 @@ if (formClara) {
             if(todasCategoriasGlobais.length === 0) carregarCategorias(true).then(() => toggleFiltrosLancamento('Despesa'));
             else toggleFiltrosLancamento('Despesa');
         }, 100);
+
+        // ==========================================
+// MÓDULO: NOTAS A RECEBER
+// ==========================================
+window.notasReceberEmMemoria = [];
+let tsFiltroNotasSituacao = null;
+
+// Inicializa a aba quando clicada
+document.querySelector('.sidebar-item[data-target="tela-notas-receber"]')?.addEventListener('click', () => {
+    // Seta o mês atual como padrão no filtro se estiver vazio
+    const inputMes = document.getElementById('filtro-notas-mes');
+    if (!inputMes.value) {
+        const hj = new Date();
+        inputMes.value = `${hj.getFullYear()}-${String(hj.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    // Inicializa o TomSelect do filtro de situação se não existir
+    if (!tsFiltroNotasSituacao) {
+        tsFiltroNotasSituacao = new TomSelect('#filtro-notas-situacao', {
+            plugins: ['remove_button'],
+            mode: 'multi',
+            placeholder: "Selecione as situações (Deixe vazio para TODAS)",
+            onChange: function() { filtrarNotasReceberLocal(); }
+        });
+    }
+
+    carregarNotasReceber();
+});
+
+window.carregarNotasReceber = async function() {
+    const tbody = document.getElementById('lista-notas-body');
+    if(tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
+
+    let query = supabaseClient.from('financeiro_notas_receber').select('*').order('created_at', { ascending: false });
+    if (empresaFinanceiraSelecionada !== 'Todas') query = query.eq('empresa', empresaFinanceiraSelecionada);
+
+    const { data, error } = await query;
+
+    if (error) {
+        if(tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar notas.</td></tr>';
+        return;
+    }
+
+    window.notasReceberEmMemoria = data || [];
+    filtrarNotasReceberLocal();
+};
+
+window.filtrarNotasReceberLocal = function() {
+    const termo = document.getElementById('filtro-notas-busca').value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    
+    // Pega o array do TomSelect. Se for null ou array vazio, significa "TODAS AS SITUAÇÕES"
+    let situacoesSelecionadas = tsFiltroNotasSituacao ? tsFiltroNotasSituacao.getValue() : [];
+    if (!Array.isArray(situacoesSelecionadas)) {
+        situacoesSelecionadas = situacoesSelecionadas ? [situacoesSelecionadas] : [];
+    }
+
+    // Trata o Mês
+    const filtroMesVal = document.getElementById('filtro-notas-mes').value; // Formato AAAA-MM
+    let mesFormatadoFiltro = "";
+    if (filtroMesVal) {
+        const [ano, mes] = filtroMesVal.split('-');
+        mesFormatadoFiltro = `${mes}/${ano}`;
+    }
+
+    let kpiPendente = 0, kpiAtrasado = 0, kpiCritico = 0, kpiPago = 0, kpiVolume = 0, kpiImpostos = 0;
+    const tbody = document.getElementById('lista-notas-body');
+    tbody.innerHTML = '';
+
+    const filtrados = window.notasReceberEmMemoria.filter(nota => {
+        // Filtro Busca Livre
+        const textoBusca = `${nota.nome_empresa_cliente} ${nota.descricao}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (termo && !textoBusca.includes(termo)) return false;
+
+        // Filtro Mês
+        if (mesFormatadoFiltro && nota.mes_referencia !== mesFormatadoFiltro) return false;
+
+        // Filtro Situação (Se o array tiver itens, a nota tem que estar dentro das selecionadas)
+        if (situacoesSelecionadas.length > 0 && !situacoesSelecionadas.includes(nota.situacao)) return false;
+
+        return true;
+    });
+
+    if (filtrados.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma nota encontrada neste filtro.</td></tr>';
+    } else {
+        filtrados.forEach(nota => {
+            // Regra do Imposto = Bruto - Liquido
+            const imposto = nota.valor_bruto - nota.valor_liquido;
+            
+            // Regras de KPI e Volume
+            kpiVolume += nota.valor_liquido;
+            kpiImpostos += imposto;
+
+            // Tratamento do Total Pago baseado no "Valor Real Pago" (Regra: se preenchido, usa ele, senão usa o líquido)
+            let valorParaPago = nota.valor_real_pago !== null && nota.valor_real_pago > 0 ? nota.valor_real_pago : nota.valor_liquido;
+
+            if (nota.situacao === 'PAGO') {
+                kpiPago += valorParaPago;
+            } else if (nota.situacao === 'ATRASADO') {
+                kpiAtrasado += nota.valor_liquido;
+            } else if (nota.situacao === 'MUITO ATRASADO') {
+                kpiCritico += nota.valor_liquido;
+            } else { // A RECEBER
+                kpiPendente += nota.valor_liquido;
+            }
+
+            // Cores das Badges de Situação (Estilo da Imagem)
+            let corBadge = '#fff';
+            let bgBadge = 'transparent';
+            if (nota.situacao === 'PAGO') { bgBadge = '#2ecc71'; }
+            else if (nota.situacao === 'ATRASADO') { bgBadge = '#f39c12'; }
+            else if (nota.situacao === 'MUITO ATRASADO') { bgBadge = '#c0392b'; }
+            else { bgBadge = 'rgba(255,255,255,0.1)'; corBadge = '#3498db'; }
+
+            // Data formatação
+            let dataPagtoStr = '-';
+            if (nota.data_pagamento) {
+                const parts = nota.data_pagamento.split('-');
+                dataPagtoStr = `${parts[2]}/${parts[1]}/${parts[0]}`;
+            }
+
+            const formatarTabela = (v) => v.toLocaleString('pt-BR', {minimumFractionDigits: 2});
+
+            tbody.innerHTML += `
+                <tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
+                    <td style="padding: 15px; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-check-square" style="color: #2ecc71; margin-right: 8px;"></i>${nota.nome_empresa_cliente}</td>
+                    <td style="padding: 15px; font-size: 0.85rem;">${nota.descricao}</td>
+                    <td style="padding: 15px; font-weight: bold; font-size: 0.85rem;">R$ ${formatarTabela(nota.valor_bruto)}</td>
+                    <td style="padding: 15px; color: #9b59b6; font-size: 0.85rem;">R$ ${formatarTabela(imposto)}</td>
+                    <td style="padding: 15px; font-weight: bold; color: #3498db; font-size: 0.85rem;">R$ ${formatarTabela(nota.valor_liquido)}</td>
+                    <td style="padding: 15px; font-size: 0.85rem; color: var(--cor-texto-secundario);">${dataPagtoStr}</td>
+                    <td style="padding: 15px; text-align: center;">
+                        <div style="background: ${bgBadge}; color: ${corBadge}; padding: 6px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; text-align: center;">${nota.situacao}</div>
+                    </td>
+                    <td style="padding: 15px; text-align: center; white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: #f1c40f; color: #f1c40f;" onclick="abrirModalNotaReceber('${nota.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                        <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: #e74c3c; color: #e74c3c; margin-left: 3px;" onclick="excluirNotaReceber('${nota.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
+                    </td>
+                </tr>
+            `;
+        });
+    }
+
+    // Atualiza KPIs
+    const formatarKPI = (v) => v.toLocaleString('pt-BR', {minimumFractionDigits: 2});
+    document.getElementById('kpi-notas-apagar').innerText = 'R$ ' + formatarKPI(kpiPendente);
+    document.getElementById('kpi-notas-atrasado').innerText = 'R$ ' + formatarKPI(kpiAtrasado);
+    document.getElementById('kpi-notas-critico').innerText = 'R$ ' + formatarKPI(kpiCritico);
+    document.getElementById('kpi-notas-pago').innerText = 'R$ ' + formatarKPI(kpiPago);
+    document.getElementById('kpi-notas-volume').innerText = 'R$ ' + formatarKPI(kpiVolume);
+    document.getElementById('kpi-notas-impostos').innerText = 'R$ ' + formatarKPI(kpiImpostos);
+};
+
+// Modal de Lançamento / Edição
+window.abrirModalNotaReceber = function(id = null) {
+    const modalAntigo = document.getElementById('modal-nota-receber');
+    if (modalAntigo) modalAntigo.remove();
+
+    let nota = { nome_empresa_cliente: '', descricao: '', valor_bruto: '', valor_liquido: '', valor_real_pago: '', data_pagamento: '', situacao: 'A RECEBER', mes_referencia: '' };
+    let tituloModal = '<i class="fa-solid fa-plus"></i> Lançar Nova Nota';
+    
+    if (id) {
+        const found = window.notasReceberEmMemoria.find(n => n.id === id);
+        if (found) {
+            nota = { ...found };
+            if (nota.valor_bruto) nota.valor_bruto = 'R$ ' + nota.valor_bruto.toLocaleString('pt-BR', {minimumFractionDigits: 2});
+            if (nota.valor_liquido) nota.valor_liquido = 'R$ ' + nota.valor_liquido.toLocaleString('pt-BR', {minimumFractionDigits: 2});
+            if (nota.valor_real_pago) nota.valor_real_pago = 'R$ ' + nota.valor_real_pago.toLocaleString('pt-BR', {minimumFractionDigits: 2});
+            
+            // Corrige Data
+            if (nota.data_pagamento) {
+                const dParts = nota.data_pagamento.split('-');
+                nota.data_pagamento = `${dParts[2]}/${dParts[1]}/${dParts[0]}`;
+            }
+        }
+        tituloModal = '<i class="fa-solid fa-pen"></i> Editar Nota';
+    } else {
+        // Se é novo, pega o mês atual para o filtro de mes_referencia padrão
+        const hj = new Date();
+        nota.mes_referencia = `${String(hj.getMonth() + 1).padStart(2, '0')}/${hj.getFullYear()}`;
+    }
+
+    const modalHtml = `
+    <div id="modal-nota-receber" class="modal-overlay" style="z-index: 100050;">
+        <div class="glass-card" style="width: 100%; max-width: 650px; border-top: 4px solid var(--cor-acento); position: relative; padding: 25px;">
+            <button type="button" onclick="document.getElementById('modal-nota-receber').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.5rem;"><i class="fa-solid fa-xmark"></i></button>
+            
+            <h2 style="color: var(--cor-acento); margin-top: 0; margin-bottom: 20px;">${tituloModal}</h2>
+            
+            <form id="form-salvar-nota-receber">
+                <input type="hidden" id="nota-id" value="${id || ''}">
+                
+                <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+                    <div style="flex: 2;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Nome da Empresa <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="nota-empresa" class="modern-input" required placeholder="Ex: HMUT LIMPEZA" value="${nota.nome_empresa_cliente}">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Mês Referência <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="nota-mes-ref" class="modern-input" required placeholder="MM/AAAA" maxlength="7" value="${nota.mes_referencia}" oninput="this.value = this.value.replace(/\\D/g, '').replace(/^(\\d{2})(\\d)/, '$1/$2').substring(0, 7)">
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Descrição do Serviço/Produto <span style="color: var(--cor-perigo);">*</span></label>
+                    <input type="text" id="nota-descricao" class="modern-input" required placeholder="Ex: Faturamento Março 2026" value="${nota.descricao}">
+                </div>
+
+                <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Valor Bruto (R$) <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="nota-bruto" class="modern-input" required placeholder="R$ 0,00" value="${nota.valor_bruto}" oninput="mascaraMoeda(this)" style="font-weight: bold;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="color: #3498db; font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Valor Líquido (R$) <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="nota-liquido" class="modern-input" required placeholder="R$ 0,00" value="${nota.valor_liquido}" oninput="mascaraMoeda(this)" style="font-weight: bold; border-color: #3498db; color: #3498db;">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="color: #2ecc71; font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Valor Real Pago (Opcional)</label>
+                        <input type="text" id="nota-real-pago" class="modern-input" placeholder="R$ 0,00" value="${nota.valor_real_pago}" oninput="mascaraMoeda(this)" style="border-color: rgba(46, 204, 113, 0.4);">
+                    </div>
+                </div>
+
+                <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+                    <div style="flex: 1;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Data de Pagamento</label>
+                        <input type="text" id="nota-data-pagto" class="modern-input" placeholder="DD/MM/AAAA" maxlength="10" oninput="mascaraDataManual(this)" value="${nota.data_pagamento}">
+                    </div>
+                    <div style="flex: 1;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Situação Atual <span style="color: var(--cor-perigo);">*</span></label>
+                        <select id="nota-situacao" class="modern-input" required>
+                            <option value="A RECEBER" ${nota.situacao === 'A RECEBER' ? 'selected' : ''}>A PAGAR / PENDENTE</option>
+                            <option value="ATRASADO" ${nota.situacao === 'ATRASADO' ? 'selected' : ''}>ATRASADO</option>
+                            <option value="MUITO ATRASADO" ${nota.situacao === 'MUITO ATRASADO' ? 'selected' : ''}>MUITO ATRASADO</option>
+                            <option value="PAGO" ${nota.situacao === 'PAGO' ? 'selected' : ''}>PAGO</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                    <button type="button" class="btn-secondary" onclick="document.getElementById('modal-nota-receber').remove()">Cancelar</button>
+                    <button type="submit" id="btn-salvar-nota-banco" class="btn-success" style="background: var(--cor-acento); color: #000;"><i class="fa-solid fa-save"></i> Salvar Nota</button>
+                </div>
+            </form>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    document.getElementById('form-salvar-nota-receber').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btnSalvar = document.getElementById('btn-salvar-nota-banco');
+        btnSalvar.disabled = true;
+        btnSalvar.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+
+        const idNota = document.getElementById('nota-id').value;
+        const brutoFloat = desmascararMoeda(document.getElementById('nota-bruto').value);
+        const liquidoFloat = desmascararMoeda(document.getElementById('nota-liquido').value);
+        const realPagoFloat = desmascararMoeda(document.getElementById('nota-real-pago').value);
+        
+        let dataIso = null;
+        const inputDataStr = document.getElementById('nota-data-pagto').value;
+        if (inputDataStr && inputDataStr.length === 10) {
+            const partes = inputDataStr.split('/');
+            dataIso = `${partes[2]}-${partes[1]}-${partes[0]}`;
+        }
+
+        const payload = {
+            nome_empresa_cliente: document.getElementById('nota-empresa').value.trim(),
+            descricao: document.getElementById('nota-descricao').value.trim(),
+            mes_referencia: document.getElementById('nota-mes-ref').value,
+            valor_bruto: brutoFloat,
+            valor_liquido: liquidoFloat,
+            valor_real_pago: realPagoFloat > 0 ? realPagoFloat : null,
+            data_pagamento: dataIso,
+            situacao: document.getElementById('nota-situacao').value,
+            empresa: empresaFinanceiraSelecionada === 'Todas' ? null : empresaFinanceiraSelecionada,
+            criado_por: usuarioAtual.nome
+        };
+
+        try {
+            if (idNota) {
+                const { error } = await supabaseClient.from('financeiro_notas_receber').update(payload).eq('id', idNota);
+                if (error) throw error;
+                mostrarAlerta("Nota atualizada com sucesso!", "sucesso");
+            } else {
+                const { error } = await supabaseClient.from('financeiro_notas_receber').insert([payload]);
+                if (error) throw error;
+                mostrarAlerta("Nota registrada com sucesso!", "sucesso");
+            }
+            
+            document.getElementById('modal-nota-receber').remove();
+            carregarNotasReceber();
+
+        } catch (err) {
+            mostrarAlerta("Erro ao salvar: " + err.message, "erro");
+        } finally {
+            btnSalvar.disabled = false;
+            btnSalvar.innerHTML = '<i class="fa-solid fa-save"></i> Salvar Nota';
+        }
+    });
+};
+
+window.excluirNotaReceber = async function(id) {
+    const confirmado = await mostrarConfirmacao("Tem certeza que deseja excluir este lançamento de Nota a Receber?", "Excluir Nota");
+    if (!confirmado) return;
+
+    try {
+        const { error } = await supabaseClient.from('financeiro_notas_receber').delete().eq('id', id);
+        if (error) throw error;
+        mostrarAlerta("Nota excluída!", "sucesso");
+        carregarNotasReceber();
+    } catch (err) {
+        mostrarAlerta("Erro ao excluir: " + err.message, "erro");
+    }
+};
+
+// Vincula a troca de empresa do topo para também recarregar as Notas
+const oldMudarEmpresaFinanceiroNotas = window.mudarEmpresaFinanceiro;
+window.mudarEmpresaFinanceiro = function(empresa) {
+    if (typeof oldMudarEmpresaFinanceiroNotas === 'function') oldMudarEmpresaFinanceiroNotas(empresa);
+    if (!document.getElementById('tela-notas-receber').classList.contains('hidden')) {
+        carregarNotasReceber();
+    }
+};
     </script>
 </body>
 </html>
