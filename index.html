@@ -34587,7 +34587,7 @@ window.baixarDossieCompletoColaborador = async function() {
 };
 
 // =========================================================================
-// 📄 GERADOR AUXILIAR: MONTA O PDF REAL DO TERMO AVULSO EM MEMÓRIA
+// 📄 GERADOR AUXILIAR: MONTA O PDF REAL DO TERMO AVULSO VIA IFRAME
 // =========================================================================
 window.gerarPdfBlobTermoAvulso = async function(doc) {
     const dataAssinatura = doc.assinado_em 
@@ -34599,6 +34599,29 @@ window.gerarPdfBlobTermoAvulso = async function(doc) {
         urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
     }
 
+    // 🚀 CONVERSOR BASE64: Converte Logo e Assinatura para matar bloqueios de imagem branca (CORS)
+    const urlParaBase64 = async (url) => {
+        if (!url || typeof url !== 'string' || !url.startsWith('http')) return '';
+        try {
+            const res = await fetch(url);
+            const blob = await res.blob();
+            return await new Promise((resBase) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resBase(reader.result);
+                reader.readAsDataURL(blob);
+            });
+        } catch (e) {
+            console.warn("Erro ao converter imagem para Base64:", url, e);
+            return '';
+        }
+    };
+
+    // Baixa as imagens em memória antes de montar a folha
+    const [logoBase64, assingBase64] = await Promise.all([
+        urlParaBase64(urlLogoReal),
+        urlParaBase64(doc.documento_pdf)
+    ]);
+
     let paragrafosHtml = (doc.conteudo_texto || '')
         .replace(/\r\n/g, '\n')
         .split('\n')
@@ -34607,50 +34630,83 @@ window.gerarPdfBlobTermoAvulso = async function(doc) {
             return `<div style="margin-bottom: 8px; line-height: 1.5; text-align: justify;">${linha}</div>`;
         }).join('');
 
-    // Cria um container invisível na tela para renderizar o layout
-    const containerTemp = document.createElement('div');
-    containerTemp.style.position = 'absolute';
-    containerTemp.style.left = '-9999px';
-    containerTemp.style.top = '0';
-    containerTemp.style.width = '700px';
-    containerTemp.style.background = '#ffffff';
-    containerTemp.style.padding = '40px';
-    containerTemp.style.boxSizing = 'border-box';
-    containerTemp.style.fontFamily = 'Arial, sans-serif';
-    containerTemp.style.color = '#000000';
+    // 🌐 CRIAÇÃO DO IFRAME INVISÍVEL PARA RENDERIZAÇÃO PERFEITA
+    return new Promise((resolve, reject) => {
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '100vw'; // Posiciona fora da visão do usuário sem esconder da GPU
+        iframe.style.top = '0';
+        iframe.style.width = '800px';
+        iframe.style.height = '1100px';
+        iframe.style.border = 'none';
+        iframe.style.opacity = '0';
+        iframe.style.pointerEvents = 'none';
+        iframe.style.zIndex = '-9999';
 
-    containerTemp.innerHTML = `
-        <div style="text-align: center; margin-bottom: 25px;">
-            <img src="${urlLogoReal}" crossorigin="anonymous" style="max-width: 120px; margin-bottom: 12px;">
-            <h2 style="font-size: 16px; text-transform: uppercase; margin: 0; color: #002347;">${doc.titulo_documento || doc.titulo || 'TERMO'}</h2>
-        </div>
-        <div style="font-size: 13px;">
-            ${paragrafosHtml}
-        </div>
-        <div style="margin-top: 35px; text-align: center; page-break-inside: avoid;">
-            ${doc.documento_pdf && doc.documento_pdf.startsWith('http') ? `<img src="${doc.documento_pdf}" crossorigin="anonymous" style="max-height: 75px; max-width: 250px; object-fit: contain; margin: 0 auto 8px auto; display: block;">` : `<div style="height: 35px;"></div>`}
-            <div style="border-top: 1px solid #000; width: 280px; margin: 0 auto 5px auto;"></div>
-            <b style="font-size: 13px; color: #000; display: block; margin: 0;">${doc.nome_colaborador || doc.nome}</b>
-            <span style="font-size: 11px; color: #555; display: block; margin-top: 2px;">CPF: ${doc.cpf || 'Não informado'}</span>
-            <span style="font-size: 9px; color: #888; margin-top: 12px; display: block;">Assinado digitalmente em: ${dataAssinatura}</span>
-            <span style="font-size: 9px; color: #888; display: block;">Hash/Token: ${doc.token || 'N/A'}</span>
-        </div>
-    `;
+        document.body.appendChild(iframe);
 
-    document.body.appendChild(containerTemp);
-    await new Promise(resolve => setTimeout(resolve, 300)); // Aguarda o navegador carregar as imagens do HTML
+        const iframeDoc = iframe.contentWindow.document;
+        iframeDoc.open();
+        iframeDoc.write(`
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        color: #000000;
+                        margin: 0;
+                        padding: 35px;
+                        background: #ffffff;
+                        width: 730px;
+                        box-sizing: border-box;
+                    }
+                </style>
+            </head>
+            <body>
+                <div style="text-align: center; margin-bottom: 25px;">
+                    ${logoBase64 ? `<img src="${logoBase64}" style="max-width: 120px; margin-bottom: 12px;">` : ''}
+                    <h2 style="font-size: 16px; text-transform: uppercase; margin: 0; color: #002347;">${doc.titulo_documento || doc.titulo || 'TERMO'}</h2>
+                </div>
+                
+                <div style="font-size: 13px;">
+                    ${paragrafosHtml}
+                </div>
 
-    const opt = {
-        margin: [10, 10, 10, 10],
-        filename: 'Termo.pdf',
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, logging: false, useCORS: true },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-    };
+                <div style="margin-top: 35px; text-align: center; page-break-inside: avoid;">
+                    ${assingBase64 ? `<img src="${assingBase64}" style="max-height: 75px; max-width: 250px; object-fit: contain; margin: 0 auto 8px auto; display: block;">` : `<div style="height: 35px;"></div>`}
+                    <div style="border-top: 1px solid #000000; width: 280px; margin: 0 auto 5px auto;"></div>
+                    <b style="font-size: 13px; color: #000000; display: block; margin: 0;">${doc.nome_colaborador || doc.nome}</b>
+                    <span style="font-size: 11px; color: #555555; display: block; margin-top: 2px;">CPF: ${doc.cpf || 'Não informado'}</span>
+                    <span style="font-size: 9px; color: #888888; margin-top: 12px; display: block;">Assinado digitalmente em: ${dataAssinatura}</span>
+                    <span style="font-size: 9px; color: #888888; display: block;">Hash/Token: ${doc.token || 'N/A'}</span>
+                </div>
+            </body>
+            </html>
+        `);
+        iframeDoc.close();
 
-    const pdfBlob = await html2pdf().set(opt).from(containerTemp).outputPdf('blob');
-    document.body.removeChild(containerTemp);
-    return pdfBlob;
+        // Aguarda a renderização das fontes e imagens no Iframe
+        setTimeout(async () => {
+            try {
+                const opt = {
+                    margin: [10, 10, 10, 10],
+                    filename: 'Termo.pdf',
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { scale: 2, logging: false, useCORS: true, windowWidth: 800 },
+                    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                };
+
+                const pdfBlob = await html2pdf().set(opt).from(iframeDoc.body).outputPdf('blob');
+                document.body.removeChild(iframe); // Limpa o Iframe da memória
+                resolve(pdfBlob);
+            } catch (err) {
+                if (document.body.contains(iframe)) document.body.removeChild(iframe);
+                reject(err);
+            }
+        }, 600);
+    });
 };
 
 window.carregarDocumentosColaborador = async function() {
