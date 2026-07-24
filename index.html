@@ -27,7 +27,10 @@
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-    <!-- jspdf.umd.min.js removido: não é usado em nenhum lugar do código (o html2pdf.bundle.min.js já traz o jsPDF embutido) -->
+    <!-- 👇 jsPDF + AutoTable: usados na exportação VETORIAL da escala no celular (desenha a tabela como
+         texto/linhas de verdade, em vez de tirar "foto" da tela — não sofre com o limite de imagem do Android) -->
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -20562,6 +20565,386 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
 };
         
 // =========================================================================
+// 📄 EXPORTAÇÃO VETORIAL DA ESCALA (jsPDF + AutoTable)
+// -------------------------------------------------------------------------
+// POR QUE ISSO EXISTE: o método antigo do celular tirava uma "foto" da tela
+// (html2canvas). O Android limita o tamanho máximo de imagem (~16 milhões de
+// pixels), então escalas grandes eram CORTADAS silenciosamente — ora nas
+// colunas, ora nos últimos colaboradores. Aqui o PDF é DESENHADO como texto e
+// linhas de verdade: não existe limite de pixel, o texto fica nítido e
+// selecionável, o arquivo fica pequeno, a quebra de página é automática e o
+// resultado é idêntico em qualquer aparelho.
+// =========================================================================
+
+// Converte '#rrggbb' para [r,g,b] que o jsPDF entende
+window._hexParaRGB = function(hex) {
+    const h = (hex || '#000000').replace('#', '');
+    return [parseInt(h.substring(0,2),16), parseInt(h.substring(2,4),16), parseInt(h.substring(4,6),16)];
+};
+
+// Mapa oficial de cores das siglas (fundo + texto). As cores de texto aqui usam
+// os tons mais escuros da legenda, para ficarem legíveis quando impressas.
+window._CORES_SIGLAS_PDF = {
+    'D':    { bg: '#e3f2fd', txt: '#0284c7' },
+    'N':    { bg: '#f3e5f5', txt: '#7b1fa2' },
+    'F':    { bg: '#e8f5e9', txt: '#2e7d32' },
+    'FP':   { bg: '#e0f2f1', txt: '#20c997' },
+    'FE':   { bg: '#e0f2f1', txt: '#2e7d32' },
+    'FER':  { bg: '#fff8e1', txt: '#f57f17' },
+    'ATM':  { bg: '#fff3e0', txt: '#b55d00' },
+    'ATC':  { bg: '#fff3e0', txt: '#b55d00' },
+    'ATOB': { bg: '#fff3e0', txt: '#b55d00' },
+    'DECL': { bg: '#fff3e0', txt: '#b55d00' },
+    'LDM':  { bg: '#fff3e0', txt: '#b55d00' },
+    'LDP':  { bg: '#fff3e0', txt: '#b55d00' },
+    'LG':   { bg: '#fff3e0', txt: '#b55d00' },
+    'AF':   { bg: '#fff5f6', txt: '#e91e63' },
+    'FT':   { bg: '#ecfccb', txt: '#4d7c0f' },
+    'HE':   { bg: '#e3f2fd', txt: '#1976d2' },
+    'TP':   { bg: '#fdf4ff', txt: '#c026d3' },
+    'FA':   { bg: '#ffebee', txt: '#d32f2f' },
+    'FRD':  { bg: '#f3e8ff', txt: '#7e22ce' },
+    'DES':  { bg: '#ffebee', txt: '#d32f2f' },
+    'AD':   { bg: '#f1f5f9', txt: '#475569' },
+    'AL':   { bg: '#f1f5f9', txt: '#475569' },
+    'TR':   { bg: '#f1f5f9', txt: '#475569' }
+};
+
+// Lê a tabela da tela e devolve os dados já organizados (sem HTML)
+window._extrairDadosEscala = function(tabelaDOM) {
+    const trs = tabelaDOM.querySelectorAll('tr');
+    const cabecalho = [];
+
+    trs[0].querySelectorAll('th').forEach((th, index) => {
+        if (index === 0) { cabecalho.push('COLABORADOR'); return; }
+        if (index === 1) { cabecalho.push('CARGO'); return; }
+        const divs = th.querySelectorAll('div');
+        if (divs.length >= 2) {
+            cabecalho.push(divs[0].innerText.trim() + '\n' + divs[1].innerText.trim());
+        } else {
+            cabecalho.push(th.innerText.trim());
+        }
+    });
+
+    const corpo = [];
+    const detalhes = []; // guarda info extra de cada célula (cor, H+/H-, inativo)
+
+    for (let i = 1; i < trs.length; i++) {
+        if (trs[i].style.display === 'none') continue; // respeita o filtro da tela
+
+        const tds = trs[i].querySelectorAll('td');
+        if (!tds.length) continue;
+
+        const linha = [];
+        const linhaDetalhe = [];
+
+        tds.forEach((td, index) => {
+            const clone = td.cloneNode(true);
+
+            const badge = clone.querySelector('.dia-num-badge');
+            if (badge) badge.remove();
+
+            // Retira as marcações de hora extra (H+/H-/HE) do texto principal
+            let marcaHora = '';
+            let corMarcaHora = '';
+            clone.querySelectorAll('span').forEach(s => {
+                const t = (s.textContent || '').toLowerCase();
+                if (t.includes('h+') || t.includes('he')) { marcaHora = s.textContent.trim(); corMarcaHora = '#ff9800'; s.remove(); }
+                else if (t.includes('h-')) { marcaHora = s.textContent.trim(); corMarcaHora = '#dc3545'; s.remove(); }
+            });
+
+            let txt = (clone.textContent || '').trim().replace(/\n/g, '');
+            const inativo = td.classList.contains('bg-hachurado') || td.classList.contains('celula-inativo');
+            if (txt === '-') txt = '';
+
+            linha.push(txt);
+            linhaDetalhe.push({ sigla: txt, marcaHora: marcaHora, corMarcaHora: corMarcaHora, inativo: inativo });
+        });
+
+        corpo.push(linha);
+        detalhes.push(linhaDetalhe);
+    }
+
+    return { cabecalho: cabecalho, corpo: corpo, detalhes: detalhes };
+};
+
+// Baixa a imagem da assinatura e converte pra dataURL (o jsPDF só aceita assim).
+// Se falhar por qualquer motivo, devolve null e o PDF sai só com a linha de assinatura.
+window._imagemParaDataURL = async function(url) {
+    if (!url) return null;
+    if (String(url).startsWith('data:')) return url;
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) return null;
+        const blob = await resp.blob();
+        return await new Promise((resolve) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(fr.result);
+            fr.onerror = () => resolve(null);
+            fr.readAsDataURL(blob);
+        });
+    } catch (e) {
+        return null;
+    }
+};
+
+window.exportarEscalaPDFVetorial = async function(ctx) {
+    // ctx = { tabelaDOM, unidade, empresaPDF, cargoPDF, mes, ano, dataGeracao, assinatura, nomeAssinatura }
+
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        mostrarAlerta("A biblioteca de PDF ainda está carregando. Tente novamente em 2 segundos.", "aviso");
+        return;
+    }
+
+    const { jsPDF } = window.jspdf;
+    const dados = window._extrairDadosEscala(ctx.tabelaDOM);
+
+    if (!dados.corpo.length) {
+        return mostrarAlerta("Nenhum colaborador visível na escala para exportar!", "aviso");
+    }
+
+    const totalDias = Math.max(0, dados.cabecalho.length - 2);
+
+    // Página sob medida: quanto mais dias, mais larga. Assim as colunas nunca
+    // ficam espremidas e nunca sobra espaço estranho.
+    const LARG_NOME = 42;
+    const LARG_CARGO = 30;
+    const LARG_DIA = 7.2;
+    const MARGEM = 6;
+    const larguraPagina = Math.max(297, MARGEM * 2 + LARG_NOME + LARG_CARGO + (totalDias * LARG_DIA));
+    const alturaPagina = 210; // A4 deitado de altura; o AutoTable cria novas páginas sozinho
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: [larguraPagina, alturaPagina] });
+    const larguraUtil = larguraPagina - (MARGEM * 2);
+
+    const assinaturaDataUrl = await window._imagemParaDataURL(ctx.assinatura);
+
+    // ---------- CABEÇALHO (desenhado no topo de TODA página) ----------
+    const ALTURA_CABECALHO = 22;
+    const desenharCabecalho = function() {
+        // Caixa da logo
+        doc.setFillColor(0, 35, 71);
+        doc.roundedRect(MARGEM, 6, 26, 11, 1.5, 1.5, 'F');
+        doc.setTextColor(255, 193, 7);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
+        doc.text('RH SOUL', MARGEM + 13, 11, { align: 'center' });
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(4.5);
+        doc.text('Gestão Inteligente', MARGEM + 13, 14.5, { align: 'center' });
+
+        // Título
+        doc.setTextColor(0, 35, 71);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text('ESCALA DE PLANTÕES OFICIAL', MARGEM + 30, 11);
+
+        // Subtítulo com os filtros
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7);
+        doc.setTextColor(71, 85, 105);
+        doc.text(
+            `Empresa: ${ctx.empresaPDF}   |   Unidade: ${ctx.unidade}   |   Referência: ${ctx.mes}/${ctx.ano}   |   Filtro: ${ctx.cargoPDF}`,
+            MARGEM + 30, 15.5
+        );
+
+        // Data de emissão (canto direito)
+        doc.setFontSize(6);
+        doc.setTextColor(100, 116, 139);
+        doc.text('Emissão e Autenticação:', larguraPagina - MARGEM, 10, { align: 'right' });
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(7);
+        doc.text(String(ctx.dataGeracao), larguraPagina - MARGEM, 14, { align: 'right' });
+
+        // Linha divisória
+        doc.setDrawColor(0, 35, 71);
+        doc.setLineWidth(0.5);
+        doc.line(MARGEM, 19, larguraPagina - MARGEM, 19);
+    };
+
+    // ---------- ESTILO POR COLUNA ----------
+    const estiloColunas = { 0: { cellWidth: LARG_NOME, halign: 'left', fontStyle: 'bold' },
+                            1: { cellWidth: LARG_CARGO, halign: 'left', fontSize: 4.2, textColor: [100, 116, 139] } };
+    for (let d = 2; d < dados.cabecalho.length; d++) {
+        estiloColunas[d] = { cellWidth: LARG_DIA };
+    }
+
+    doc.autoTable({
+        head: [dados.cabecalho],
+        body: dados.corpo,
+        startY: ALTURA_CABECALHO,
+        margin: { left: MARGEM, right: MARGEM, top: ALTURA_CABECALHO, bottom: 12 },
+        theme: 'grid',
+        tableWidth: 'wrap',
+        styles: {
+            font: 'helvetica',
+            fontSize: 5,
+            cellPadding: { top: 1.1, right: 0.4, bottom: 1.1, left: 0.4 },
+            halign: 'center',
+            valign: 'middle',
+            lineColor: [222, 226, 230],
+            lineWidth: 0.1,
+            textColor: [45, 55, 72],
+            overflow: 'hidden'
+        },
+        headStyles: {
+            fillColor: [0, 35, 71],
+            textColor: [255, 193, 7],
+            fontSize: 4.6,
+            fontStyle: 'bold',
+            halign: 'center',
+            valign: 'middle',
+            cellPadding: { top: 1.2, right: 0.4, bottom: 1.2, left: 0.4 }
+        },
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: estiloColunas,
+
+        // Pinta cada célula conforme a sigla (mesmas cores da legenda)
+        didParseCell: function(data) {
+            if (data.section !== 'body') return;
+            const det = (dados.detalhes[data.row.index] || [])[data.column.index];
+            if (!det) return;
+
+            if (data.column.index <= 1) return; // nome e cargo ficam sem pintura
+
+            if (det.inativo) {
+                data.cell.styles.fillColor = [237, 242, 247];
+                return;
+            }
+
+            const cor = window._CORES_SIGLAS_PDF[det.sigla];
+            if (cor) {
+                data.cell.styles.fillColor = window._hexParaRGB(cor.bg);
+                data.cell.styles.textColor = window._hexParaRGB(cor.txt);
+                data.cell.styles.fontStyle = 'bold';
+            }
+        },
+
+        // Escreve a marcação de hora extra (H+/H-) no cantinho da célula
+        didDrawCell: function(data) {
+            if (data.section !== 'body' || data.column.index <= 1) return;
+            const det = (dados.detalhes[data.row.index] || [])[data.column.index];
+            if (!det || !det.marcaHora) return;
+
+            const rgb = window._hexParaRGB(det.corMarcaHora || '#ff9800');
+            doc.setFontSize(3.2);
+            doc.setFont('helvetica', 'bold');
+            doc.setTextColor(rgb[0], rgb[1], rgb[2]);
+            doc.text(det.marcaHora, data.cell.x + 0.6, data.cell.y + 2);
+        },
+
+        didDrawPage: function() {
+            desenharCabecalho();
+
+            // Rodapé com número da página
+            const pagina = doc.internal.getNumberOfPages();
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(6);
+            doc.setTextColor(148, 163, 184);
+            doc.text(`Página ${pagina}`, larguraPagina - MARGEM, alturaPagina - 5, { align: 'right' });
+        }
+    });
+
+    // ---------- LEGENDA ----------
+    const LEGENDA = [
+        ['D', 'Diurno'], ['N', 'Noturno'], ['F', 'Folga Padrão'], ['FP', 'Folga Prog.'],
+        ['FE', 'Folga Extra'], ['FER', 'Férias'], ['ATM', 'Atestado'], ['ATC', 'Atest. Acomp.'],
+        ['ATOB', 'Óbito'], ['DECL', 'Declaração'], ['LDM', 'Licença Mat/Pat'], ['AF', 'INSS'],
+        ['FT', 'Folga Trab.'], ['HE', 'Hora Extra'], ['TP', 'Troca Turno'], ['FA', 'Falta Injust.'],
+        ['FRD', 'Feriado'], ['AL', 'Transf. Unidade'], ['DES', 'Desligado']
+    ];
+
+    let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 6;
+    const alturaBlocoLegenda = 22;
+    if (y + alturaBlocoLegenda > alturaPagina - 10) {
+        doc.addPage();
+        desenharCabecalho();
+        y = ALTURA_CABECALHO + 4;
+    }
+
+    doc.setFillColor(248, 250, 252);
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.2);
+    doc.roundedRect(MARGEM, y, larguraUtil, alturaBlocoLegenda - 3, 1, 1, 'FD');
+    doc.setFillColor(0, 35, 71);
+    doc.rect(MARGEM, y, 1.5, alturaBlocoLegenda - 3, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(0, 35, 71);
+    doc.text('LEGENDA OFICIAL DE SIGLAS E CORES', MARGEM + 4, y + 4.5);
+
+    const colunasLegenda = 7;
+    const larguraItem = (larguraUtil - 8) / colunasLegenda;
+    LEGENDA.forEach((item, idx) => {
+        const linha = Math.floor(idx / colunasLegenda);
+        const coluna = idx % colunasLegenda;
+        const ix = MARGEM + 4 + (coluna * larguraItem);
+        const iy = y + 8 + (linha * 4);
+
+        const cor = window._CORES_SIGLAS_PDF[item[0]] || { bg: '#ffffff', txt: '#333333' };
+        const rgbBg = window._hexParaRGB(cor.bg);
+        const rgbTxt = window._hexParaRGB(cor.txt);
+
+        doc.setFillColor(rgbBg[0], rgbBg[1], rgbBg[2]);
+        doc.setDrawColor(rgbTxt[0], rgbTxt[1], rgbTxt[2]);
+        doc.setLineWidth(0.15);
+        doc.roundedRect(ix, iy - 2.2, 3.4, 2.8, 0.4, 0.4, 'FD');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(4.4);
+        doc.setTextColor(rgbTxt[0], rgbTxt[1], rgbTxt[2]);
+        doc.text(item[0] + ':', ix + 4.4, iy);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(51, 65, 85);
+        doc.text(item[1], ix + 4.4 + (item[0].length * 1.5) + 2.2, iy);
+    });
+
+    // ---------- ASSINATURA ----------
+    let yAssinatura = y + alturaBlocoLegenda + 4;
+    if (yAssinatura + 22 > alturaPagina - 8) {
+        doc.addPage();
+        desenharCabecalho();
+        yAssinatura = ALTURA_CABECALHO + 8;
+    }
+
+    const centroAssinatura = larguraPagina - MARGEM - 40;
+
+    if (assinaturaDataUrl) {
+        try {
+            doc.addImage(assinaturaDataUrl, 'PNG', centroAssinatura - 20, yAssinatura - 2, 40, 13, undefined, 'FAST');
+        } catch (e) { /* se a imagem falhar, segue só com a linha */ }
+    }
+
+    doc.setDrawColor(0, 35, 71);
+    doc.setLineWidth(0.3);
+    doc.line(centroAssinatura - 32, yAssinatura + 13, centroAssinatura + 32, yAssinatura + 13);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(0, 35, 71);
+    doc.text(String(ctx.nomeAssinatura || 'Assinatura do Responsável').toUpperCase(), centroAssinatura, yAssinatura + 17, { align: 'center' });
+
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(5);
+    doc.setTextColor(71, 85, 105);
+    doc.text(
+        ctx.assinatura ? 'Escala trancada e homologada eletronicamente.' : 'Documento preliminar (Escala Aberta no Sistema)',
+        centroAssinatura, yAssinatura + 20, { align: 'center' }
+    );
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(4.5);
+    doc.setTextColor(148, 163, 184);
+    doc.text(`Data de Emissão: ${ctx.dataGeracao}`, centroAssinatura, yAssinatura + 23, { align: 'center' });
+
+    doc.save(`Escala_${ctx.unidade}_${ctx.mes}-${ctx.ano}.pdf`);
+};
+
+// =========================================================================
 // EXPORTAÇÃO PARA PDF OFICIAL (BLINDADO PARA PC E MOBILE/ANDROID)
 // =========================================================================
 window.exportarPDF = function() {
@@ -20776,111 +21159,34 @@ window.exportarPDF = function() {
     `;
 
    // 📱 DETECTOR DE DISPOSITIVOS MÓVEIS (ANDROID / IOS / TABLETS)
-    // OBS: window.print() nativo trava ("preparando visualização" infinito) em vários Android/WebViews,
-    // por isso TODO mobile (Android incluso) usa o método de captura de tela abaixo, não o print nativo.
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
     if (isMobile) {
-        mostrarAlerta("Clara IA está montando a escala na memória... Isso pode levar alguns segundos.", "aviso");
-        
-        // CRIANDO UMA TELA DE PC INVISÍVEL ULTRAWIDE (IFRAME)
-        // 🩹 CORREÇÃO (corte na lateral): 1400px era estreito demais pra 31 colunas de dia + nome + cargo,
-        // a tabela estourava esse limite e tudo que passava de 1400px ficava de fora da "foto". Aumentamos
-        // a largura disponível pra 2200px, folga suficiente pra qualquer mês (28 a 31 dias) não se apertar.
-        const LARGURA_TELA_PDF = 2200;
-        const iframe = document.createElement('iframe');
-        iframe.style.position = 'fixed';
-        iframe.style.right = '100vw'; // Joga a tela pra fora do celular
-        iframe.style.top = '0';
-        iframe.style.width = LARGURA_TELA_PDF + 'px';
-        iframe.style.height = '8000px'; // 🩹 Bem generoso de propósito: nunca mais depende de medição pra não cortar ninguém
-        iframe.style.zIndex = '-9999';
-        iframe.style.opacity = '0'; // Invisível
-        
-        document.body.appendChild(iframe);
+        // ✅ CELULAR: PDF VETORIAL (texto de verdade, não "foto" da tela).
+        // O método antigo tirava um print com html2canvas e esbarrava no limite de
+        // imagem do Android (~16 milhões de pixels), cortando colunas ou os últimos
+        // colaboradores sem avisar. Agora a tabela é DESENHADA no PDF: não tem limite
+        // de tamanho, não corta ninguém, o texto fica nítido/selecionável, o arquivo
+        // fica leve e a quebra de página é automática.
+        mostrarAlerta("Gerando PDF da escala... só um instante.", "aviso");
 
-        const iframeDoc = iframe.contentWindow.document;
+        window.exportarEscalaPDFVetorial({
+            tabelaDOM: tabelaDOM,
+            unidade: unidade,
+            empresaPDF: empresaPDF,
+            cargoPDF: cargoPDF,
+            mes: mes,
+            ano: ano,
+            dataGeracao: dataGeracao,
+            assinatura: (typeof assinaturaEscalaAtual !== 'undefined' ? assinaturaEscalaAtual : null),
+            nomeAssinatura: window.nomeAssinaturaEscala
+        }).then(() => {
+            mostrarAlerta("Download do PDF concluído com sucesso!", "sucesso");
+        }).catch(err => {
+            console.error("Erro no PDF vetorial:", err);
+            mostrarAlerta("Erro ao gerar o PDF: " + (err && err.message ? err.message : err), "erro");
+        });
 
-        iframeDoc.open();
-        iframeDoc.write(`
-            <!DOCTYPE html>
-            <html lang="pt-BR">
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #1e293b; margin: 0; background: #ffffff; }
-                    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-                    .color-block { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-                </style>
-            </head>
-            <body>
-                <!-- 👇 A MÁGICA: Espaço de sobra para a tabela de 31 dias não se esmagar 👇 -->
-                <div id="alvo-do-pdf" style="width: ${LARGURA_TELA_PDF}px; background: #fff; padding: 25px; box-sizing: border-box;">
-                    ${mioloHTML}
-                </div>
-            </body>
-            </html>
-        `);
-        iframeDoc.close();
-
-        // Dá 1.5 segundos para carregar as imagens (Logo e Assinatura) da nuvem
-        setTimeout(() => {
-            const elementoAlvo = iframeDoc.getElementById('alvo-do-pdf');
-            const SCALE_CAPTURA = 2;
-            const margemMM = 5;
-            const pxParaMM = (px) => (px / 96) * 25.4;
-
-            // 🩹 CORREÇÃO 3 (colaboradores sumindo no final): medir a altura do conteúdo ANTES de tirar a
-            // "foto" (via scrollHeight) se mostrou não-confiável nesse ambiente — em dois testes reais a altura
-            // medida saiu idêntica mesmo com conteúdos diferentes, cortando gente no final da lista.
-            // Agora fazemos o oposto: deixamos o html2canvas capturar a escala INTEIRA sozinho (ele mede o
-            // próprio conteúdo internamente, sem limite de largura/altura impostos por nós) e só DEPOIS de
-            // capturada a "foto" é que olhamos o tamanho real dela (canvas.width/height) pra montar a página
-            // do PDF do tamanho exato — não tem como sobrar nem faltar ninguém, porque a página nasce do
-            // tamanho da foto já pronta, não de uma estimativa feita antes.
-            const opt = {
-                margin: [margemMM, margemMM, margemMM, margemMM],
-                filename: `Escala_${unidade}_${mes}-${ano}.pdf`,
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: { 
-                    scale: SCALE_CAPTURA, // 👈 AUMENTADO: Garante alta definição quando o PDF encolher a tabela
-                    useCORS: true,
-                    logging: false,
-                    windowWidth: LARGURA_TELA_PDF + 200, // Folga só pra layout, não limita a captura
-                    windowHeight: 8000 // Folga generosa só pra layout (não corta nada, só evita reflow estranho)
-                    // 👇 Sem "width"/"height" manuais aqui de propósito: deixa o html2canvas medir e capturar
-                    // o tamanho REAL do elemento sozinho (é o jeito mais confiável de não cortar nada)
-                },
-                jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' } // Placeholder; é substituído abaixo com o tamanho real da foto
-            };
-
-            // Tira a foto inteira LÁ DE DENTRO do Iframe, mede o tamanho real dela, aí sim monta o PDF e baixa
-            html2pdf().set(opt).from(elementoAlvo).toCanvas().then(function () {
-                // 🩹 CORREÇÃO: o html2pdf não entrega o canvas como parâmetro do .then() — ele fica guardado
-                // em "this.prop.canvas". Aqui já temos a foto pronta: canvas.width/height é o tamanho REAL
-                // capturado (em pixels, já multiplicado pela escala 2x). Convertendo pra mm, criamos uma
-                // página do tamanho exato dessa foto + a margem de 5mm — garantindo que cabe tudo e fica
-                // sempre centralizada.
-                const canvas = this.prop.canvas;
-                const larguraPaginaMM = pxParaMM(canvas.width / SCALE_CAPTURA) + (margemMM * 2);
-                const alturaPaginaMM = pxParaMM(canvas.height / SCALE_CAPTURA) + (margemMM * 2);
-
-                // ⚠️ IMPORTANTE: tem que ser via .set({jsPDF: ...}) e NÃO "this.opt.jsPDF = ...".
-                // O html2pdf calcula o tamanho da página (this.prop.pageSize) no momento do .set() inicial;
-                // mexer direto no this.opt depois NÃO recalcula, e o PDF sai no tamanho A4 antigo (foi
-                // exatamente o que aconteceu: página saía 842pt de A4 e a escala não encaixava).
-                // O .set() dispara o recálculo do tamanho da página corretamente.
-                return this.set({
-                    jsPDF: { unit: 'mm', format: [larguraPaginaMM, alturaPaginaMM], orientation: larguraPaginaMM >= alturaPaginaMM ? 'landscape' : 'portrait' }
-                });
-            }).toPdf().save().then(() => {
-                document.body.removeChild(iframe); 
-                mostrarAlerta("Download do PDF concluído com sucesso!", "sucesso");
-            }).catch(err => {
-                if (document.body.contains(iframe)) document.body.removeChild(iframe);
-                mostrarAlerta("Erro ao processar PDF no celular: " + err.message, "erro");
-            });
-        }, 1500);
 
     } else {
         // --- COMPORTAMENTO ORIGINAL PARA COMPUTADOR (CTRL+P) ---
