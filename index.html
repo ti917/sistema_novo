@@ -46086,7 +46086,7 @@ window.carregarAsoAdmin = async function() {
 };
 
 // =========================================================================
-// 🏥 MOTOR DE FILTRAGEM E RENDERIZAÇÃO DAS 3 ABAS DE ASO (ADMIN)
+// ⚡ MOTOR OTIMIZADO DE FILTRAGEM E RENDERIZAÇÃO DE ASO (MÁXIMA VELOCIDADE)
 // =========================================================================
 window.filtrarAsoAdmin = function() {
     const container = document.getElementById('lista-aso-container-admin');
@@ -46100,36 +46100,53 @@ window.filtrarAsoAdmin = function() {
     const mesFiltro = mesInput ? mesInput.value : '';
     const statusFiltro = statusInput ? statusInput.value : 'Todos';
 
-    // Aba ativa selecionada no topo ('admissional', 'periodico' ou 'demissional')
     const aba = window.abaAsoAtual || 'admissional';
 
-    container.innerHTML = '';
+    // Fonte de dados
+    const baseColabs = typeof todosColabsAsoGeral !== 'undefined' && todosColabsAsoGeral.length > 0
+        ? todosColabsAsoGeral 
+        : (typeof todosColabsAso !== 'undefined' ? todosColabsAso : []);
 
-    // Fonte de dados (Aceita tanto a variável global antiga quanto a nova)
-    const baseColabs = typeof todosColabsAsoGeral !== 'undefined' ? todosColabsAsoGeral : (typeof todosColabsAso !== 'undefined' ? todosColabsAso : []);
+    if (!baseColabs || baseColabs.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 30px;">Nenhum colaborador carregado.</p>';
+        return;
+    }
+
+    // ⚡ OTIMIZAÇÃO 1: Instancia a data atual uma única vez
+    const hojeData = new Date(); 
+    hojeData.setHours(0,0,0,0);
+
+    // ⚡ OTIMIZAÇÃO 2: Cria um Mapa $O(1)$ para busca ultra-rápida de Clínicas por Unidade+Cargo
+    const mapaClinicas = new Map();
+    const listaConfigs = typeof configsAsoGlobais !== 'undefined' ? configsAsoGlobais : [];
+    for (let i = 0; i < listaConfigs.length; i++) {
+        const r = listaConfigs[i];
+        mapaClinicas.set(`${r.unidade}_${r.cargo}`, r);
+    }
 
     // -------------------------------------------------------------
-    // 1. APLICAÇÃO DOS FILTROS INTELIGENTES
+    // 1. FILTRAGEM RÁPIDA EM MEMÓRIA
     // -------------------------------------------------------------
-    const filtrados = baseColabs.filter(c => {
+    const filtrados = [];
+
+    for (let i = 0; i < baseColabs.length; i++) {
+        const c = baseColabs[i];
         const adm = c.dados_admissao || {};
         const resc = c.dados_rescisao || {};
 
-        // Escudo: Esconde contratados PJ / Isentos de ASO
-        if (adm.isenta_aso === true) return false;
+        if (adm.isenta_aso === true) continue;
 
         // Filtro por Nome ou Unidade
         const nomeStr = c.nome ? window.removerAcentos(c.nome.toLowerCase()) : '';
         const uniStr = c.unidade ? window.removerAcentos(c.unidade.toLowerCase()) : '';
-        const matchTexto = nomeStr.includes(termo) || uniStr.includes(termo);
+        if (termo && !nomeStr.includes(termo) && !uniStr.includes(termo)) continue;
 
-        // Identificação do status do colaborador
+        // Identificação dos estados
         const isEmProcessoRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
         const isDesligado = c.status === 'Desligado';
         const isDemissionalGeral = isDesligado || isEmProcessoRescisao;
         const isAdmissionalPendente = (c.status === 'Aguardando ASO');
 
-        // Cálculo do Periódico
         let isPeriodicoAVencer = false;
         let isPeriodicoVencido = false;
         let dVencimentoStr = '';
@@ -46145,96 +46162,86 @@ window.filtrarAsoAdmin = function() {
                 const mesV = String(dVencimento.getMonth() + 1).padStart(2, '0');
                 dVencimentoStr = `${anoV}-${mesV}`;
 
-                const hojeData = new Date(); hojeData.setHours(0,0,0,0);
                 const diffVencimento = Math.ceil((dVencimento.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
 
-                if (diffVencimento < 0) {
-                    isPeriodicoVencido = true;
-                } else if (diffVencimento <= 30) {
-                    isPeriodicoAVencer = true;
-                }
+                if (diffVencimento < 0) isPeriodicoVencido = true;
+                else if (diffVencimento <= 30) isPeriodicoAVencer = true;
             }
         }
 
         // --- DIVISÃO POR ABA ---
-        if (aba === 'admissional') {
-            if (!isAdmissionalPendente) return false;
-        } 
-        else if (aba === 'periodico') {
-            if (c.status !== 'Ativo' || isDemissionalGeral) return false;
-
-            // Filtro interno do Dropdown de Status (quando na aba Periódico)
-            if (statusFiltro === 'A Vencer' && !isPeriodicoAVencer) return false;
-            if (statusFiltro === 'Vencido' && !isPeriodicoVencido) return false;
-            if (statusFiltro === 'Pendentes' && (!isPeriodicoAVencer && !isPeriodicoVencido)) return false;
-            if (statusFiltro === 'Ativo' && (isPeriodicoAVencer || isPeriodicoVencido)) return false;
-        } 
-        else if (aba === 'demissional') {
-            if (!isDemissionalGeral) return false;
+        if (aba === 'admissional' && !isAdmissionalPendente) continue;
+        if (aba === 'periodico') {
+            if (c.status !== 'Ativo' || isDemissionalGeral) continue;
+            if (statusFiltro === 'A Vencer' && !isPeriodicoAVencer) continue;
+            if (statusFiltro === 'Vencido' && !isPeriodicoVencido) continue;
+            if (statusFiltro === 'Pendentes' && (!isPeriodicoAVencer && !isPeriodicoVencido)) continue;
+            if (statusFiltro === 'Ativo' && (isPeriodicoAVencer || isPeriodicoVencido)) continue;
         }
+        if (aba === 'demissional' && !isDemissionalGeral) continue;
 
-        // --- FILTRO DE MÊS DE REFERÊNCIA ---
-        let matchData = true;
+        // --- FILTRO DE MÊS ---
         if (mesFiltro) {
             if (aba === 'admissional') {
                 const dataInicioColab = adm.jornada?.data_inicio || adm.data_inicio || '';
-                if (!dataInicioColab.startsWith(mesFiltro)) matchData = false;
+                if (!dataInicioColab.startsWith(mesFiltro)) continue;
             } else if (aba === 'periodico') {
-                if (dVencimentoStr !== mesFiltro) matchData = false;
+                if (dVencimentoStr !== mesFiltro) continue;
             } else if (aba === 'demissional') {
                 const dataDem = resc.ultimo_dia ? resc.ultimo_dia.split(' ')[0] : '';
                 if (dataDem.includes('/')) {
                     const [d, m, a] = dataDem.split('/');
-                    if (`${a}-${m}` !== mesFiltro) matchData = false;
+                    if (`${a}-${m}` !== mesFiltro) continue;
                 }
             }
         }
 
-        return matchTexto && matchData;
-    });
+        filtrados.push(c);
+    }
 
     window.colabsAsoFiltrados = filtrados;
 
     // -------------------------------------------------------------
-    // 2. MENSAGEM CASO A LISTA ESTEJA VAZIA
+    // 2. MENSAGEM SE NÃO HOUVER REGISTROS
     // -------------------------------------------------------------
     if (filtrados.length === 0) {
-        let msgVazia = 'Nenhum registro encontrado para estes filtros.';
+        let msgVazia = 'Nenhum registro encontrado nesta aba.';
         if (aba === 'admissional') msgVazia = 'Nenhum colaborador aguardando ASO Admissional.';
         if (aba === 'periodico') msgVazia = 'Nenhum colaborador com ASO Periódico encontrado.';
-        if (aba === 'demissional') msgVazia = 'Nenhum colaborador em processo de desligamento ou rescisão encontrado.';
+        if (aba === 'demissional') msgVazia = 'Nenhum colaborador em desligamento/rescisão encontrado.';
 
         container.innerHTML = `
             <div style="text-align: center; color: var(--cor-texto-secundario); padding: 40px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px dashed var(--cor-borda);">
                 <i class="fa-solid fa-notes-medical fa-3x" style="margin-bottom: 15px; opacity: 0.4; color: #00bcd4;"></i>
-                <h4 style="color: #fff; margin-bottom: 5px;">Aba Vazia</h4>
+                <h4 style="color: #fff; margin-bottom: 5px;">Sem Registros</h4>
                 <p style="font-size: 0.9rem;">${msgVazia}</p>
-            </div>
-        `;
+            </div>`;
         return;
     }
 
     // -------------------------------------------------------------
-    // 3. RENDERIZAÇÃO DOS CARDS
+    // 3. CONSTRUÇÃO DO HTML EM MEMÓRIA (ARRAY DE BUFFER)
     // -------------------------------------------------------------
-    filtrados.sort((a, b) => a.nome.localeCompare(b.nome)).forEach(c => {
+    filtrados.sort((a, b) => a.nome.localeCompare(b.nome));
+
+    const htmlBuffer = [];
+
+    for (let i = 0; i < filtrados.length; i++) {
+        const c = filtrados[i];
         const adm = c.dados_admissao || {};
         const resc = c.dados_rescisao || {};
         const cargo = adm.cargo || 'Sem cargo';
         
-        const regra = (typeof configsAsoGlobais !== 'undefined' ? configsAsoGlobais : []).find(r => r.unidade === c.unidade && r.cargo === cargo);
+        // ⚡ Busca em $O(1)$ no Mapa
+        const regra = mapaClinicas.get(`${c.unidade}_${cargo}`);
         
-        let infoClinica = regra  
+        const infoClinica = regra  
             ? `<span style="color: #00bcd4; font-size: 0.85rem;"><i class="fa-solid fa-hospital"></i> <b>${regra.clinica}</b> (R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')})</span>`
             : `<span style="color: var(--cor-perigo); font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> Clínica não configurada</span>`;
 
-        let cardHtml = '';
-
-        // =========================================================
-        // ABA 1: ADMISSIONAL
-        // =========================================================
+        // --- 1. ABA ADMISSIONAL ---
         if (aba === 'admissional') {
-            cardHtml = `
+            htmlBuffer.push(`
             <div class="admissao-card" style="border-left: 4px solid #00bcd4; flex-direction: column; align-items: stretch; padding: 15px; margin-bottom: 12px; background: rgba(0,0,0,0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
                     <div>
@@ -46259,12 +46266,10 @@ window.filtrarAsoAdmin = function() {
                         <i class="fa-solid fa-check-double"></i> Aprovar ASO Admissional e Ativar
                     </button>
                 </div>
-            </div>`;
+            </div>`);
         }
 
-        // =========================================================
-        // ABA 2: PERIÓDICO (ANUAL)
-        // =========================================================
+        // --- 2. ABA PERIÓDICO ---
         else if (aba === 'periodico') {
             const dataBaseAso = adm.data_ultimo_aso || adm.jornada?.data_inicio || adm.data_inicio;
             let statusPeridicoHtml = '';
@@ -46274,12 +46279,11 @@ window.filtrarAsoAdmin = function() {
             if (dataBaseAso) {
                 const dBase = new Date(dataBaseAso + 'T00:00:00');
                 const dVenc = new Date(dBase); dVenc.setFullYear(dVenc.getFullYear() + 1);
-                const hojeData = new Date(); hojeData.setHours(0,0,0,0);
                 const diffVenc = Math.ceil((dVenc.getTime() - hojeData.getTime()) / (1000 * 60 * 60 * 24));
 
                 if (diffVenc < 0) {
                     corStatus = '#dc3545'; labelBadge = 'VENCIDO';
-                    statusPeridicoHtml = `<span style="color:#dc3545; font-weight:bold; font-size:0.8rem;"><i class="fa-solid fa-triangle-exclamation"></i> Venceu em ${formatarDataBR(dVenc.toISOString().split('T')[0])} (${Math.abs(diffVenc)} dia(s) de atraso)</span>`;
+                    statusPeridicoHtml = `<span style="color:#dc3545; font-weight:bold; font-size:0.8rem;"><i class="fa-solid fa-triangle-exclamation"></i> Venceu em ${formatarDataBR(dVenc.toISOString().split('T')[0])} (${Math.abs(diffVenc)} dia(s) em atraso)</span>`;
                 } else if (diffVenc <= 30) {
                     corStatus = '#ff9800'; labelBadge = 'A VENCER';
                     statusPeridicoHtml = `<span style="color:#ff9800; font-weight:bold; font-size:0.8rem;"><i class="fa-solid fa-clock"></i> Vence em ${diffVenc} dia(s) (${formatarDataBR(dVenc.toISOString().split('T')[0])})</span>`;
@@ -46288,7 +46292,6 @@ window.filtrarAsoAdmin = function() {
                 }
             }
 
-            // Mapeia histórico de exames anexados
             let asoListHtml = '';
             let asoDocs = [];
             if (adm.documentos_extras && adm.documentos_extras['Admissão']) {
@@ -46299,7 +46302,9 @@ window.filtrarAsoAdmin = function() {
                 asoListHtml = '<div style="margin-top: 10px; display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.15); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05);">';
                 asoListHtml += '<strong style="font-size: 0.75rem; color: var(--cor-texto-secundario); text-transform: uppercase;"><i class="fa-solid fa-folder-open"></i> Histórico de Exames Anexados:</strong>';
                 
-                asoDocs.slice().reverse().forEach((doc) => {
+                const docsReversos = asoDocs.slice().reverse();
+                for (let k = 0; k < docsReversos.length; k++) {
+                    const doc = docsReversos[k];
                     const realIndex = adm.documentos_extras['Admissão'].findIndex(d => d.url === doc.url);
                     const isLab = doc.nome.includes('Laboratorial');
                     const iconeDoc = isLab ? 'fa-vial-virus' : 'fa-file-medical';
@@ -46310,15 +46315,15 @@ window.filtrarAsoAdmin = function() {
                             <a href="${doc.url}" target="_blank" style="color: ${corDoc}; text-decoration: none; font-size: 0.85rem; font-weight: bold;">
                                 <i class="fa-solid ${iconeDoc}"></i> ${doc.nome}
                             </a>
-                            <button class="btn-danger-mini" style="padding: 4px 10px; font-size: 0.75rem; border-radius: 4px;" onclick="excluirAso('${c.id}', ${realIndex})" title="Apagar este exame do histórico">
+                            <button class="btn-danger-mini" style="padding: 4px 10px; font-size: 0.75rem; border-radius: 4px;" onclick="excluirAso('${c.id}', ${realIndex})" title="Apagar este exame">
                                 <i class="fa-solid fa-xmark"></i>
                             </button>
                         </div>`;
-                });
+                }
                 asoListHtml += '</div>';
             }
 
-            cardHtml = `
+            htmlBuffer.push(`
             <div class="admissao-card" style="border-left: 4px solid ${corStatus}; flex-direction: column; align-items: stretch; padding: 15px; margin-bottom: 12px; background: rgba(0,0,0,0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
                     <div>
@@ -46345,12 +46350,10 @@ window.filtrarAsoAdmin = function() {
                         </button>
                     </div>
                 </div>
-            </div>`;
+            </div>`);
         }
 
-        // =========================================================
-        // ABA 3: DEMISSIONAL (EXCLUSIVA)
-        // =========================================================
+        // --- 3. ABA DEMISSIONAL ---
         else if (aba === 'demissional') {
             const docDemissional = (adm.documentos_extras && adm.documentos_extras['Rescisão']) 
                 ? adm.documentos_extras['Rescisão'].find(d => d.nome.includes('Exame ASO Demissional'))
@@ -46360,7 +46363,7 @@ window.filtrarAsoAdmin = function() {
             const corDem = docDemissional ? '#28a745' : '#dc3545';
             const statusTxt = docDemissional ? 'ASO DEMISSIONAL ANEXADO' : 'PENDENTE DEMISSIONAL';
 
-            cardHtml = `
+            htmlBuffer.push(`
             <div class="admissao-card" style="border-left: 4px solid ${corDem}; flex-direction: column; align-items: stretch; padding: 15px; margin-bottom: 12px; background: rgba(0,0,0,0.15);">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;">
                     <div>
@@ -46397,11 +46400,12 @@ window.filtrarAsoAdmin = function() {
                         </div>
                     `}
                 </div>
-            </div>`;
+            </div>`);
         }
+    }
 
-        container.innerHTML += cardHtml;
-    });
+    // ⚡ INSERE TUDO NO DOM EM UMA ÚNICA OPERAÇÃO INSTANTÂNEA
+    container.innerHTML = htmlBuffer.join('');
 };
 
       // =========================================================================
