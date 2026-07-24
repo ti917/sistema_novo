@@ -62638,45 +62638,38 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
     container.innerHTML = '<p style="text-align: center; color: #8b5cf6; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando unidades e colaboradores de SP...</p>';
 
     try {
-        // 1. PRIMEIRO: Busca as unidades oficiais no banco para verificar quais pertencem a SP
+        // 1. Busca as unidades oficiais no banco
         const { data: unidadesDB } = await supabaseClient.from('unidades_oficiais').select('nome, endereco');
         
         const nomesUnidadesSP = new Set();
         (unidadesDB || []).forEach(u => {
             const end = (u.endereco || '').toUpperCase();
             const nomeU = (u.nome || '').toUpperCase();
-            
-            // Se o endereço ou o nome tiver indicação do Estado de São Paulo
             if (end.includes('/SP') || end.includes('- SP') || end.includes('SÃO PAULO') || end.includes('SAO PAULO') || nomeU.includes('SP')) {
                 nomesUnidadesSP.add(u.nome.trim().toUpperCase());
             }
         });
 
-        // 2. BUSCA OS COLABORADORES (Ativos e Aguardando ASO)
+        // 2. Busca colaboradores
         let query = supabaseClient.from('perfis')
             .select('*')
             .eq('perfil', 'Colaborador')
             .in('status', ['Ativo', 'Aguardando ASO']);
 
-        // Se for Gestor: filtra pelas unidades vinculadas ao perfil dele
         if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
             const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
             query = query.in('unidade', unids);
-        } 
-        // Se for Admin: filtra pela Empresa selecionada no topo
-        else if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+        } else if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
         }
 
         const { data: colabs, error } = await query;
         if (error) throw error;
 
-        // 3. FILTRA APENAS QUEM PERTENCE A UMA UNIDADE DE SP OU TEM SP NO NOME
+        // 3. Filtra apenas unidades de SP
         const colabsSP = (colabs || []).filter(c => {
             if (!c.unidade) return false;
             const unidadesDoColab = c.unidade.split(',').map(u => u.trim().toUpperCase());
-            
-            // Retorna verdadeiro se qualquer unidade do colaborador for de SP
             return unidadesDoColab.some(uNome => nomesUnidadesSP.has(uNome) || uNome.includes('SP'));
         });
 
@@ -62685,7 +62678,6 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
             return;
         }
 
-        // 👇 ADICIONE ESTA PARTE PARA OS FILTROS DO HTML FUNCIONAREM 👇
         const termoBusca = (document.getElementById(ehGestor ? 'busca-sindicato-gestor' : 'busca-sindicato-admin')?.value || '').toLowerCase();
         const filtroStatus = document.getElementById(ehGestor ? 'filtro-status-sindicato-gestor' : 'filtro-status-sindicato')?.value || 'Todos';
 
@@ -62695,18 +62687,13 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
             const isConcluido = !!sind.doc_termo_assinado;
             const isFiliado = sind.sindicalizado === true;
 
-            // 1. Filtro de Texto (Nome ou Unidade)
             const matchBusca = c.nome.toLowerCase().includes(termoBusca) || (c.unidade || '').toLowerCase().includes(termoBusca);
             if (!matchBusca) return false;
 
-            // 2. Filtro de Status
             if (filtroStatus !== 'Todos') {
                 if (filtroStatus === 'Pendente' && isConcluido) return false;
-                // Concluido (select do Gestor) = Já assinou, independente de ter aderido ou não
                 if (filtroStatus === 'Concluido' && !isConcluido) return false;
-                // Aceito = Já assinou E é sindicalizado (Desconto) — select do Admin
                 if (filtroStatus === 'Aceito' && (!isConcluido || !isFiliado)) return false;
-                // Recusado = Já assinou E NÃO é sindicalizado (Carta de Oposição) — select do Admin
                 if (filtroStatus === 'Recusado' && (!isConcluido || isFiliado)) return false;
             }
 
@@ -62717,10 +62704,8 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
             container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum termo encontrado para os filtros atuais.</p>';
             return;
         }
-        // 👆 FIM DA ADIÇÃO DOS FILTROS 👆
 
         let html = '';
-        // Mude aqui de colabsSP para colabsFinais 👇
         colabsFinais.forEach(c => { 
             const adm = c.dados_admissao || {};
             const sind = adm.sindicato || { sindicalizado: false };
@@ -62737,46 +62722,82 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
                 ? '<span class="badge ativo"><i class="fa-solid fa-check"></i> Termo Anexado</span>' 
                 : '<span class="badge pendente"><i class="fa-solid fa-clock"></i> Pendente de Assinatura</span>';
 
+            // Dados do colaborador para o gerador de PDF
+            const colabPayloadObj = {
+                nome: c.nome.replace(/'/g, "\\'"),
+                cpf: adm.cpf || '',
+                cargo: adm.cargo || '',
+                empresa: c.empresa || '',
+                unidade: c.unidade || '',
+                data_admissao: adm.jornada?.data_inicio || adm.data_inicio || ''
+            };
+            const payloadStr = JSON.stringify(colabPayloadObj).replace(/"/g, '&quot;');
+
+            // 1. MÁGICA DO SELETOR: Gestor tem Select interativo / Admin tem Texto Fixo
+            let htmlOpcaoDisplay = '';
+            if (ehGestor) {
+                htmlOpcaoDisplay = `
+                    <select onchange="window.alterarOpcaoSindicatoGestor('${c.id}', this.value)" 
+                            style="padding: 4px 8px; border-radius: 6px; background: rgba(139, 92, 246, 0.15); color: #8b5cf6; border: 1px solid #8b5cf6; font-weight: bold; font-size: 0.8rem; outline: none; cursor: pointer;">
+                        <option value="true" ${isFiliado ? 'selected' : ''}>Filiação (Com Desconto 1%)</option>
+                        <option value="false" ${!isFiliado ? 'selected' : ''}>Oposição (Isento de Desconto)</option>
+                    </select>
+                `;
+            } else {
+                htmlOpcaoDisplay = `<b style="color: #8b5cf6;">${tipoTermoTxt}</b>`;
+            }
+
+            // 2. MÁGICA DOS BOTÕES DE IMPRESSÃO: Gestor vê ambas as cartas / Admin vê só a selecionada
+            let htmlBotoesImpressao = '';
+            if (ehGestor) {
+                htmlBotoesImpressao = `
+                    <button type="button" class="btn-secondary" style="border-color: #28a745; color: #28a745; font-weight: bold; padding: 6px 10px; font-size: 0.75rem;" 
+                            onclick="window.gerarTermoSindicalPDF(${payloadStr}, 'SINDICALIZADO')" title="Imprimir Carta de Filiação">
+                        <i class="fa-solid fa-print"></i> Carta Filiação
+                    </button>
+                    <button type="button" class="btn-secondary" style="border-color: #ff9800; color: #ff9800; font-weight: bold; padding: 6px 10px; font-size: 0.75rem;" 
+                            onclick="window.gerarTermoSindicalPDF(${payloadStr}, 'OPOSICAO')" title="Imprimir Carta de Oposição">
+                        <i class="fa-solid fa-print"></i> Carta Oposição
+                    </button>
+                `;
+            } else {
+                htmlBotoesImpressao = `
+                    <button type="button" class="btn-secondary" style="border-color: #8b5cf6; color: #8b5cf6; font-weight: bold; padding: 8px 15px;" 
+                            onclick="window.gerarTermoSindicalPDF(${payloadStr}, '${tipoTermoChave}')">
+                        <i class="fa-solid fa-print"></i> 1. Imprimir Carta (${isFiliado ? 'Filiação' : 'Oposição'})
+                    </button>
+                `;
+            }
+
             html += `
                 <div class="admissao-card" id="card-sind-${c.id}" style="border-left: 4px solid ${corStatus}; padding: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; margin-bottom: 10px;">
                     <div>
                         <strong style="font-size: 1.1rem; color: #fff;"><i class="fa-solid fa-user"></i> ${c.nome}</strong> ${badgeStatus}<br>
-                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
-                            <i class="fa-solid fa-building"></i> ${c.unidade} | Opção: <b style="color: #8b5cf6;">${tipoTermoTxt}</b>
+                        <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap;">
+                            <i class="fa-solid fa-building"></i> ${c.unidade} | Opção: ${htmlOpcaoDisplay}
                         </span>
                     </div>
 
-                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <!-- BOTÃO 1: GERAR E IMPRIMIR O TERMO AUTOMÁTICO -->
-                        <button type="button" class="btn-secondary" style="border-color: #8b5cf6; color: #8b5cf6; font-weight: bold; padding: 8px 15px;" 
-                                onclick="window.gerarTermoSindicalPDF({
-                                    nome: '${c.nome.replace(/'/g, "\\'")}',
-                                    cpf: '${adm.cpf || ''}',
-                                    cargo: '${adm.cargo || ''}',
-                                    empresa: '${c.empresa || ''}',
-                                    unidade: '${c.unidade || ''}',
-                                    data_admissao: '${adm.jornada?.data_inicio || adm.data_inicio || ''}'
-                                }, '${tipoTermoChave}')">
-                            <i class="fa-solid fa-print"></i> 1. Imprimir Carta (${isFiliado ? 'Filiação' : 'Oposição'})
-                        </button>
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        ${htmlBotoesImpressao}
 
                         ${isConcluido ? `
-                            <a href="${docAssinadoUrl}" target="_blank" class="badge ativo" style="padding: 10px 15px; text-decoration: none; font-size: 0.85rem;">
+                            <a href="${docAssinadoUrl}" target="_blank" class="badge ativo" style="padding: 8px 12px; text-decoration: none; font-size: 0.8rem;">
                                 <i class="fa-solid fa-file-pdf"></i> Ver Documento Assinado
                             </a>
                             ${!ehGestor ? `
-                                <button type="button" class="btn-secondary" style="border-color: #dc3545; color: #dc3545; font-weight: bold; padding: 8px 15px;" 
+                                <button type="button" class="btn-secondary" style="border-color: #dc3545; color: #dc3545; font-weight: bold; padding: 6px 10px; font-size: 0.75rem;" 
                                         onclick="window.recusarTermoSindicalAssinado('${c.id}', '${c.nome.replace(/'/g, "\\'")}')" title="Recusar assinatura e pedir para o Gestor refazer">
                                     <i class="fa-solid fa-rotate-left"></i> Recusar / Refazer
                                 </button>
                             ` : ''}
                         ` : `
-                            <!-- BOTÃO 2: ANEXAR A CARTA ASSINADA -->
+                            <!-- BOTÃO DE ANEXAR A CARTA ASSINADA -->
                             <div style="display: flex; gap: 5px; align-items: center;">
                                 <input type="file" id="upload-sind-${c.id}" accept="image/*,.pdf" style="font-size: 0.75rem; width: 180px;">
-                                <button type="button" class="btn-success" style="padding: 8px 15px; font-weight: bold;" 
+                                <button type="button" class="btn-success" style="padding: 6px 12px; font-weight: bold; font-size: 0.8rem;" 
                                         onclick="window.salvarTermoSindicalAssinado('${c.id}', '${c.nome.replace(/'/g, "\\'")}', '${c.unidade}', '${c.empresa}')">
-                                    <i class="fa-solid fa-upload"></i> 2. Salvar
+                                    <i class="fa-solid fa-upload"></i> Salvar
                                 </button>
                             </div>
                         `}
@@ -63210,6 +63231,44 @@ window.renderizarArquivadasFeriasAdmin = function() {
             paginaAtualArquivadasFerias = novaPag;
             renderizarArquivadasFeriasAdmin();
         });
+    }
+};
+
+      // =========================================================================
+// MÁGICA DO GESTOR: ALTERAR A OPÇÃO SINDICAL DIRETO NO CARD
+// =========================================================================
+window.alterarOpcaoSindicatoGestor = async function(idColab, novoStatusBool) {
+    try {
+        mostrarAlerta("Atualizando opção sindical...", "aviso");
+        
+        const { data: perfil, error: errFetch } = await supabaseClient
+            .from('perfis')
+            .select('dados_admissao')
+            .eq('id', idColab)
+            .single();
+
+        if (errFetch || !perfil) throw new Error("Não foi possível carregar os dados do colaborador.");
+
+        let adm = perfil.dados_admissao || {};
+        if (typeof adm === 'string') {
+            try { adm = JSON.parse(adm); } catch(e) { adm = {}; }
+        }
+        if (!adm.sindicato) adm.sindicato = {};
+
+        // Atualiza a opção no JSON
+        adm.sindicato.sindicalizado = (novoStatusBool === true || novoStatusBool === 'true');
+
+        const { error: errUpdate } = await supabaseClient
+            .from('perfis')
+            .update({ dados_admissao: adm })
+            .eq('id', idColab);
+
+        if (errUpdate) throw errUpdate;
+
+        mostrarAlerta("Opção sindical atualizada com sucesso!", "sucesso");
+        window.carregarListaSindicato(); // Recarrega a tela com as novas informações
+    } catch (e) {
+        mostrarAlerta("Erro ao atualizar opção: " + e.message, "erro");
     }
 };
       
