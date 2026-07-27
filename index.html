@@ -11495,6 +11495,9 @@ window.mudarEmpresaGlobal = async function(empresa) {
     empresaSelecionadaFiltro = empresa;
     localStorage.setItem('rh-empresa-salva', empresa);
     atualizarLogoApp(empresa);
+
+    // Mantém o botão de liga/desliga coerente com a empresa agora selecionada
+    if (typeof window.atualizarBotaoEmpresaAtiva === 'function') window.atualizarBotaoEmpresaAtiva();
     
     // Atualiza filtros de unidade
     setupFiltroEscala();
@@ -14145,7 +14148,10 @@ async function carregarPerfil(id) {
             // 👇 Monta as opções já marcando a empresa do cache como "selected"
             let opts = `<option value="Todas" ${empresaSalva === 'Todas' ? 'selected' : ''}>Todas as Empresas</option>`;
             [...empSet].sort().forEach(e => {
-                opts += `<option value="${e}" ${empresaSalva === e ? 'selected' : ''}>${e}</option>`;
+                // Empresa desativada continua na lista, mas marcada, para o Admin
+                // conseguir entrar nela e reativar quando quiser
+                const off = window.empresasDesativadas.has(window.chaveNormalizada(e));
+                opts += `<option value="${e}" ${empresaSalva === e ? 'selected' : ''}>${e}${off ? ' (desativada)' : ''}</option>`;
             });
             
             const seletorHtml = `
@@ -14155,9 +14161,15 @@ async function carregarPerfil(id) {
                         ${opts}
                     </select>
                     <i class="fa-solid fa-chevron-down" style="color: var(--cor-acento); font-size: 0.7rem; pointer-events: none;"></i>
+                    <button type="button" id="btn-toggle-empresa" onclick="window.alternarEmpresaAtiva(event)"
+                            title="Ativar ou desativar a empresa selecionada"
+                            style="background: none; border: none; border-left: 1px solid rgba(255,193,7,0.35); margin-left: 10px; padding: 0 0 0 10px; color: var(--cor-acento); cursor: pointer; font-size: 0.8rem; line-height: 1; display: flex; align-items: center;">
+                        <i class="fa-solid fa-power-off"></i>
+                    </button>
                 </div>
             `;
             headerBtnContainer.insertAdjacentHTML('beforebegin', seletorHtml);
+            setTimeout(window.atualizarBotaoEmpresaAtiva, 50);
             
             // Define a variável global com o que veio do cache
             empresaSelecionadaFiltro = empresaSalva;
@@ -14176,6 +14188,10 @@ async function carregarPerfil(id) {
 
       // (Dentro da função carregarPerfil, junto com as outras inicializações)
     if(usuarioAtual.perfil !== 'Colaborador') {
+        // Precisa vir ANTES de qualquer contagem: define quais unidades/empresas
+        // estão desativadas e, portanto, não entram no total de ativos.
+        await window.carregarEscopoAtivo();
+
         setupFiltroEscala();
         popularEmpresas(); 
         popularEmpresasVT();
@@ -16791,7 +16807,14 @@ window.renderizarPaginacaoAdmissoes = function() {
     // Define Cores do Header baseado no Status
     let corStatus = '#28a745';
     let textoStatus = colab.status || 'Ativo';
-    if (textoStatus === 'Desligado') corStatus = 'var(--cor-perigo)';
+
+    // Unidade/empresa desativada manda no rótulo: não é ativo de verdade.
+    // (O status gravado no banco continua o mesmo — isto é só exibição.)
+    if (window.colaboradorForaDoEscopo(colab)) {
+        corStatus = '#64748b';
+        textoStatus = 'Unidade Desativada';
+    }
+    else if (textoStatus === 'Desligado') corStatus = 'var(--cor-perigo)';
     else if (textoStatus === 'Cancelado(a)') corStatus = '#64748b';
     else if (colab.status_aprovacao === 'Rescisão Pendente' || colab.status_aprovacao === 'Aguardando Assinatura') {
         corStatus = '#ff9800'; textoStatus = 'Aviso Prévio';
@@ -30780,10 +30803,14 @@ window.editarTrocaAdmin = async function(idTroca) {
     todasAdmissoesAprovadas.forEach(c => {
         const taNoAvisoAinda = checarAvisoVigente(c);
         const statusColab = c.status || 'Ativo';
+        const foraDoEscopo = window.colaboradorForaDoEscopo(c); // unidade/empresa desativada
         
         if (statusColab !== 'Excluído') totalGeral++; // "Todos" esconde o Arquivo Morto
         
-        if (statusColab === 'Ativo' || statusColab === 'Aguardando ASO' || taNoAvisoAinda) {
+        if (foraDoEscopo) {
+            // Não é ativo de verdade: a unidade dele foi desativada
+            totalDesligados++;
+        } else if (statusColab === 'Ativo' || statusColab === 'Aguardando ASO' || taNoAvisoAinda) {
             totalAtivos++;
         } else if ((statusColab === 'Desligado' || statusColab === 'Cancelado(a)' || statusColab === 'Excluído') && !taNoAvisoAinda) {
             totalDesligados++;
@@ -30818,14 +30845,14 @@ window.editarTrocaAdmin = async function(idTroca) {
         if (statusFiltro === 'Todos') { 
             matchStatus = (statusColab !== 'Excluído'); 
         } else if (statusFiltro === 'Ativo') { 
-            matchStatus = (statusColab === 'Ativo' || isAguardandoAso || taNoAvisoAinda); 
+            matchStatus = (statusColab === 'Ativo' || isAguardandoAso || taNoAvisoAinda) && !window.colaboradorForaDoEscopo(colab); 
         } else if (statusFiltro === 'Aviso') { 
             matchStatus = isProcessoRescisorio || taNoAvisoAinda; 
         } else if (statusFiltro === 'Afastado') { 
             matchStatus = (statusColab === 'Ativo' && isAfastado && !isProcessoRescisorio); 
         } else if (statusFiltro === 'Desligado') { 
             // MAIN FIX: Permite Cancelado E Excluído passarem no filtro de Desligados
-            matchStatus = (statusColab === 'Desligado' || statusColab === 'Cancelado(a)' || statusColab === 'Excluído') && !taNoAvisoAinda; 
+            matchStatus = ((statusColab === 'Desligado' || statusColab === 'Cancelado(a)' || statusColab === 'Excluído') && !taNoAvisoAinda) || window.colaboradorForaDoEscopo(colab); 
         }
         
         let matchData = true;
@@ -43608,7 +43635,7 @@ window.carregarDashboardInicio = async function() {
         }
 
         // Buscas Originais
-        let qPerfis = supabaseClient.from('perfis').select('id, nome, unidade, status, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
+        let qPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         let qFaltas = supabaseClient.from('ausencias').select('id, nome, unidade, data_inicio').eq('sigla', 'FA').eq('status', 'Aprovado').gte('data_inicio', dataISOInicioMes).lte('data_inicio', dataISOFimMes);
         let qFerias = supabaseClient.from('solicitacoes_ferias').select('colaborador_id, id, nome, unidade, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso);
         let qAdvs = supabaseClient.from('advertencias').select('nome, unidade, gravidade, status, empresa').neq('status', 'Reprovado');
@@ -43660,6 +43687,9 @@ window.carregarDashboardInicio = async function() {
         // as mesmas que as telas usam, para os numeros baterem sempre.
         // ------------------------------------------------------------------
         (resPerfis.data || []).forEach(function(c) {
+            // Não cobra tarefa de quem está em unidade/empresa desativada
+            if (window.colaboradorForaDoEscopo(c)) return;
+
             // ASO admissional
             if (window.asoAdmissionalPendente(c)) countAsoPendente++;
 
@@ -43692,6 +43722,10 @@ window.carregarDashboardInicio = async function() {
                     }
                 }
                 
+                // Unidade/empresa desativada: não conta como ativo (o status no
+                // banco continua intacto, isso é só contagem e exibição)
+                if (window.colaboradorForaDoEscopo(c)) return;
+
                 if (c.status === 'Ativo' || c.status === 'Aguardando ASO' || taNoAvisoAinda) {
                     countAtivosGeral++;
 
@@ -47663,6 +47697,177 @@ let todosColabsAsoGeral = [];
 // Serve de "chave" da aba Admissional: enquanto nao existir o exame,
 // a pessoa continua na lista - INDEPENDENTE da assinatura do contrato.
 // =========================================================================
+// =========================================================================
+// ESCOPO ATIVO - UNIDADES E EMPRESAS DESATIVADAS
+//
+// Regra de negocio: colaborador de unidade (ou empresa) desativada NAO conta
+// como ativo. O status dele no banco continua exatamente como esta - nada e
+// alterado. Ele apenas para de ser contado e aparece como inativo nas telas.
+// Reativou a unidade, tudo volta sozinho.
+//
+// Unidades: coluna "ativo" da tabela unidades_oficiais.
+// Empresas: lista guardada em config_sistema (chave "empresas_desativadas"),
+//           porque algumas empresas sao cravadas no codigo (ex.: VILLAC) e
+//           nao teriam onde guardar essa marcacao.
+// =========================================================================
+
+window.unidadesDesativadas = new Set();
+window.empresasDesativadas = new Set();
+window.escopoAtivoCarregado = false;
+
+const chaveNormalizada = function(v) {
+    return String(v === null || v === undefined ? '' : v)
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim().toUpperCase();
+};
+window.chaveNormalizada = chaveNormalizada;
+
+window.carregarEscopoAtivo = async function() {
+    try {
+        const [resUnid, resCfg] = await Promise.all([
+            supabaseClient.from('unidades_oficiais').select('nome, ativo'),
+            supabaseClient.from('config_sistema').select('valor').eq('chave', 'empresas_desativadas').maybeSingle()
+        ]);
+
+        const setUnid = new Set();
+        (resUnid.data || []).forEach(function(u) {
+            // Trata null como ativo, para nao quebrar bases antigas sem a coluna preenchida
+            if (u.ativo === false) setUnid.add(chaveNormalizada(u.nome));
+        });
+        window.unidadesDesativadas = setUnid;
+
+        let lista = [];
+        if (resCfg && resCfg.data && resCfg.data.valor) {
+            try {
+                const v = resCfg.data.valor;
+                lista = Array.isArray(v) ? v : JSON.parse(v);
+            } catch (e) { lista = []; }
+        }
+        window.empresasDesativadas = new Set((lista || []).map(chaveNormalizada));
+
+        window.escopoAtivoCarregado = true;
+    } catch (err) {
+        // Em caso de falha, nao desativa ninguem: o sistema segue contando tudo
+        console.warn('Não foi possível carregar unidades/empresas desativadas:', err);
+        window.unidadesDesativadas = new Set();
+        window.empresasDesativadas = new Set();
+    }
+};
+
+// A unidade (ou a empresa dela) esta desativada?
+window.unidadeDesativada = function(unidade, empresa) {
+    const u = chaveNormalizada(unidade);
+    const e = chaveNormalizada(empresa);
+    if (u && window.unidadesDesativadas.has(u)) return true;
+    if (e && window.empresasDesativadas.has(e)) return true;
+    return false;
+};
+
+// O colaborador entra nas contagens de "ativo"?
+window.colaboradorForaDoEscopo = function(c) {
+    if (!c) return false;
+    return window.unidadeDesativada(c.unidade, c.empresa);
+};
+
+// Grava a lista de empresas desativadas (mesmo padrao usado no aviso_banner)
+// Deixa o botao coerente com a empresa que esta selecionada agora
+window.atualizarBotaoEmpresaAtiva = function() {
+    const btn = document.getElementById('btn-toggle-empresa');
+    const bloco = document.getElementById('bloco-filtro-empresa-header');
+    if (!btn || !bloco) return;
+
+    const sel = bloco.querySelector('select');
+    const empresa = sel ? sel.value : 'Todas';
+
+    if (!empresa || empresa === 'Todas') {
+        btn.style.display = 'none';
+        return;
+    }
+    btn.style.display = 'flex';
+
+    const desativada = window.empresasDesativadas.has(window.chaveNormalizada(empresa));
+    btn.style.color = desativada ? 'var(--cor-perigo)' : 'var(--cor-acento)';
+    btn.title = desativada
+        ? `Reativar a empresa ${empresa} (hoje ela não conta nos ativos)`
+        : `Desativar a empresa ${empresa} (os colaboradores dela deixam de contar como ativos)`;
+};
+
+// Liga/desliga a empresa selecionada no cabecalho
+window.alternarEmpresaAtiva = async function(ev) {
+    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+
+    if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') {
+        mostrarAlerta("Apenas o perfil Admin pode ativar ou desativar empresas.", "erro", "Acesso negado");
+        return;
+    }
+
+    const bloco = document.getElementById('bloco-filtro-empresa-header');
+    const sel = bloco ? bloco.querySelector('select') : null;
+    const empresa = sel ? sel.value : '';
+
+    if (!empresa || empresa === 'Todas') {
+        mostrarAlerta("Escolha uma empresa específica no seletor antes de ativar ou desativar.", "aviso");
+        return;
+    }
+
+    const chave = window.chaveNormalizada(empresa);
+    const estaDesativada = window.empresasDesativadas.has(chave);
+
+    const msg = estaDesativada
+        ? `Deseja <b>reativar</b> a empresa <b>${empresa}</b>?<br><br>Os colaboradores dela voltam a contar como ativos normalmente.`
+        : `Deseja <b>desativar</b> a empresa <b>${empresa}</b>?<br><br>` +
+          `Todas as unidades dela saem da contagem: os colaboradores deixam de aparecer como ativos no Painel e nas Admissões, ` +
+          `e param de gerar pendências de ASO e contrato.<br><br>` +
+          `<small style="color: var(--cor-texto-secundario);">Nada é alterado no cadastro deles. É só contagem — dá para reativar a qualquer momento por este mesmo botão.</small>`;
+
+    const confirmado = await mostrarConfirmacao(msg, estaDesativada ? 'Reativar Empresa' : 'Desativar Empresa');
+    if (!confirmado) return;
+
+    try {
+        const lista = [...window.empresasDesativadas];
+        let nova;
+        if (estaDesativada) {
+            nova = lista.filter(function(x) { return x !== chave; });
+        } else {
+            nova = lista.concat([chave]);
+        }
+
+        await window.salvarEmpresasDesativadas(nova);
+
+        mostrarAlerta(
+            estaDesativada ? `Empresa ${empresa} reativada.` : `Empresa ${empresa} desativada. Ela não conta mais nos ativos.`,
+            "sucesso"
+        );
+
+        window.atualizarBotaoEmpresaAtiva();
+
+        // Recalcula o que estiver na tela
+        if (typeof window.carregarDashboardInicio === 'function') window.carregarDashboardInicio();
+        if (typeof window.filtrarAdmissoes === 'function' && document.getElementById('lista-admissoes-container')) {
+            try { window.filtrarAdmissoes(); } catch (e) {}
+        }
+    } catch (err) {
+        console.error("Erro ao alternar empresa:", err);
+        mostrarAlerta("Não consegui salvar essa mudança: " + err.message, "erro");
+    }
+};
+
+window.salvarEmpresasDesativadas = async function(lista) {
+    const payload = JSON.stringify(lista || []);
+    const { data: rowExiste } = await supabaseClient
+        .from('config_sistema').select('id').eq('chave', 'empresas_desativadas').maybeSingle();
+
+    if (rowExiste && rowExiste.id) {
+        const { error } = await supabaseClient.from('config_sistema').update({ valor: payload }).eq('id', rowExiste.id);
+        if (error) throw error;
+    } else {
+        const { error } = await supabaseClient.from('config_sistema').insert([{ chave: 'empresas_desativadas', valor: payload }]);
+        if (error) throw error;
+    }
+    window.empresasDesativadas = new Set((lista || []).map(chaveNormalizada));
+};
+
 // =========================================================================
 // REGRAS OFICIAIS DE CONTAGEM - FONTE UNICA DA VERDADE
 //
