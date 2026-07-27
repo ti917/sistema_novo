@@ -4478,7 +4478,6 @@ function inicializarKanban() {
                     atualizarBadgesKanban();
 
                     if (novoStatus && cardId) {
-                        // Define qual será a última interação baseada na coluna de destino
                         let novaInteracao = 'Contato';
                         if (novoStatus === 'Visita') {
                             novaInteracao = 'Visita';
@@ -4486,13 +4485,19 @@ function inicializarKanban() {
                             novaInteracao = 'Proposta';
                         }
 
-                        // Atualiza APENAS a tabela do CRM (Sem criar histórico de metas)
+                        let payloadUpdate = { 
+                            status_funil: novoStatus,
+                            ultima_interacao: novaInteracao 
+                        };
+
+                        // Se moveu para a coluna Fechado (Ganho), salva a data do fechamento!
+                        if (novoStatus === 'Fechado') {
+                            payloadUpdate.data_fechamento = new Date().toISOString();
+                        }
+
                         const { error } = await supabaseClient
                             .from('comercial_clientes_crm')
-                            .update({ 
-                                status_funil: novoStatus,
-                                ultima_interacao: novaInteracao 
-                            })
+                            .update(payloadUpdate)
                             .eq('id', cardId);
 
                         if (error) {
@@ -7534,30 +7539,52 @@ window.comPintarKpi = function (idValor, realizado, meta, cor) {
 
 
 // =====================================================================
-// 3. KPIs DE RESULTADO — pipeline e fechado no mês
-//
-//    Os 3 KPIs que já existiam medem ATIVIDADE (contatos, visitas,
-//    propostas). Estes dois medem RESULTADO, que é o que a diretoria
-//    costuma perguntar.
+// HELPER: EXTRAIR VALOR NUMÉRICO REAL DE QUALQUER ESTRUTURA DO CRM
 // =====================================================================
+window.comExtrairValorNumerico = function (item) {
+    if (!item) return 0;
+    
+    // Busca o valor dentro de dados_adicionais ou na raiz
+    let v = item.dados_adicionais?.valor_proposta 
+         || item.valor_proposta 
+         || item.valor_estimado 
+         || 0;
+    
+    if (typeof v === 'number') return v;
+    
+    // Remove "R$", espaços, pontos de milhar e troca vírgula por ponto
+    let str = String(v).replace(/[^\d,-]/g, '').replace(',', '.');
+    return parseFloat(str) || 0;
+};
 
+// =====================================================================
+// 3. KPIs DE RESULTADO — PIPELINE E FECHADO NO MÊS
+// =====================================================================
 window.comAtualizarKpisValor = function (crm) {
     crm = crm || [];
-    const mesRef = window.comMesRef().substring(0, 7);
+    const mesRef = window.comMesRef().substring(0, 7); // Ex: "2026-07"
 
-    // Pipeline = tudo que está em aberto no funil (não fechado, não arquivado)
     let pipeline = 0, qtdPipeline = 0;
     let fechadoMes = 0, qtdFechadoMes = 0;
 
     crm.forEach(c => {
         if (c.arquivado) return;
-        const valor = Number(c.valor_proposta || c.valor_estimado || 0);
+        
+        // Pega o valor numérico tratado (ex: R$ 5.000,00 -> 5000)
+        const valor = window.comExtrairValorNumerico(c);
 
         if (c.status_funil === 'Fechado') {
-            const quando = (c.data_fechamento || c.created_at || '').substring(0, 7);
-            if (quando === mesRef) { fechadoMes += valor; qtdFechadoMes++; }
+            // Verifica a data em que o negócio foi fechado ou criado
+            const dataFech = c.data_fechamento || c.dados_adicionais?.data_entrada || c.created_at || '';
+            const quando = dataFech.substring(0, 7);
+            
+            if (quando === mesRef) { 
+                fechadoMes += valor; 
+                qtdFechadoMes++; 
+            }
         } else {
-            pipeline += valor; qtdPipeline++;
+            pipeline += valor; 
+            qtdPipeline++;
         }
     });
 
@@ -7590,7 +7617,6 @@ window.comAtualizarKpisValor = function (crm) {
     return { pipeline, fechadoMes, qtdPipeline, qtdFechadoMes };
 };
 
-
 // =====================================================================
 // 4. GRÁFICOS
 // =====================================================================
@@ -7612,8 +7638,12 @@ window.comRenderizarGraficos = async function (crm) {
             type: 'bar',
             data: {
                 labels: rotulos,
-                datasets: [{ label: 'Oportunidades', data: qtdPorEtapa,
-                             backgroundColor: COM_PALETA.slice(0, 5), borderRadius: 6 }]
+                datasets: [{ 
+                    label: 'Oportunidades', 
+                    data: qtdPorEtapa,
+                    backgroundColor: COM_PALETA.slice(0, 5), 
+                    borderRadius: 6 
+                }]
             },
             options: {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
@@ -7643,7 +7673,8 @@ window.comRenderizarGraficos = async function (crm) {
             if (fec) {
                 porMes[fec] = porMes[fec] || { entrou: 0, fechou: 0, valor: 0 };
                 porMes[fec].fechou++;
-                porMes[fec].valor += Number(c.valor_proposta || c.valor_estimado || 0);
+                // 👇 APLICAÇÃO DA EXTRAÇÃO CORRETA DO VALOR NUMÉRICO 👇
+                porMes[fec].valor += window.comExtrairValorNumerico(c);
             }
         }
     });
