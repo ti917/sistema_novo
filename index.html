@@ -27869,14 +27869,29 @@ window.editarAdmissaoAdmin = async function(idColab) {
             conta: document.getElementById('edit-adm-conta').value 
         };
 
-        // 👇 NOVO: SALVA A OPÇÃO DE SINDICATO NA EDIÇÃO 👇
+        // 👇 SALVA A OPÇÃO DE SINDICATO NA EDIÇÃO
+        // CORREÇÃO: a data_opcao era carimbada com HOJE a cada salvamento, mesmo
+        // quando ninguém mexia no sindicato. Isso apagava a data real em que o
+        // colaborador optou — justamente a data que serve de prova do desconto.
+        // Agora ela só muda quando a opção realmente muda de Sim para Não (ou vice-versa).
         const opcSindEdit = document.getElementById('edit-adm-sindicato-opcao')?.value || 'Não';
+        const sindAnterior = adm.sindicato || {};
+        const novoSindicalizado = (opcSindEdit === 'Sim');
+        const mudouOpcaoSindicato = (sindAnterior.sindicalizado !== novoSindicalizado);
+
         adm.sindicato = {
             aplicavel: window.verificarSeUnidadeEhSP(unidadeFinal),
-            sindicalizado: (opcSindEdit === 'Sim'),
-            data_opcao: new Date().toISOString().split('T')[0],
-            desconto_estimado: (opcSindEdit === 'Sim') ? Math.min(salLimpoEdit * 0.01, 50.96) : 0
+            sindicalizado: novoSindicalizado,
+            data_opcao: (mudouOpcaoSindicato || !sindAnterior.data_opcao)
+                        ? new Date().toISOString().split('T')[0]
+                        : sindAnterior.data_opcao,
+            desconto_estimado: novoSindicalizado ? Math.min(salLimpoEdit * 0.01, 50.96) : 0
         };
+
+        // Preserva o termo assinado e qualquer outro campo que já existisse
+        Object.keys(sindAnterior).forEach(function(k) {
+            if (!(k in adm.sindicato)) adm.sindicato[k] = sindAnterior[k];
+        });
         
         const precisaVT = document.getElementById('edit-adm-precisa-vt').value;
         const vtAnteriorEdicao = adm.vt || {};
@@ -33839,13 +33854,24 @@ document.getElementById('form-efetivar-alteracao').addEventListener('submit', as
             // 👇 NOVO: ATUALIZA O SINDICATO NO SUPABASE SE O CHAMADO PEDIU MUDANÇA 👇
             if (chave.toLowerCase().includes('sindicato')) {
                 const querSindicalizar = valor.includes('Sim') || valor.includes('Filiação');
-                
+                const sindAnt = adm.sindicato || {};
+
+                // Aqui a data DEVE mudar: o chamado é justamente um pedido de
+                // filiação ou cancelamento. Mas só se a opção realmente mudou.
+                const mudouOpc = (sindAnt.sindicalizado !== querSindicalizar);
+
                 adm.sindicato = {
                     aplicavel: window.verificarSeUnidadeEhSP(unidade),
                     sindicalizado: querSindicalizar,
-                    data_opcao: dataVigencia || new Date().toISOString().split('T')[0],
+                    data_opcao: (mudouOpc || !sindAnt.data_opcao)
+                                ? (dataVigencia || new Date().toISOString().split('T')[0])
+                                : sindAnt.data_opcao,
                     desconto_estimado: querSindicalizar ? Math.min(salarioLimpo * 0.01, 50.96) : 0
                 };
+
+                Object.keys(sindAnt).forEach(function(k) {
+                    if (!(k in adm.sindicato)) adm.sindicato[k] = sindAnt[k];
+                });
             }
         });
 
@@ -66331,6 +66357,43 @@ window.audNomeArquivo = function(url) {
     } catch (e) { return ''; }
 };
 
+// Salva o que der de um JSON cortado no meio.
+// Os registros gravados ANTES da correcao do SQL vieram truncados em 300
+// caracteres, virando JSON invalido. Em vez de mostrar aquele texto cru,
+// extraimos os pares "chave: valor" que sobreviveram ao corte.
+window.audRepararJson = function(t) {
+    const obj = {};
+    let achou = false;
+
+    // Chave aceita acento (ex.: "Admissão"). Valor: texto, objeto, lista,
+    // booleano ou numero — desde que tenha sobrevivido inteiro ao corte.
+    const re = /"([^"]{1,80})"\s*:\s*("(?:[^"\\]|\\.)*"|\{[^{}]*\}|\[[^\[\]]*\]|true|false|null|-?\d+(?:\.\d+)?)/g;
+    let m;
+    while ((m = re.exec(t)) !== null) {
+        let valor = m[2];
+        try { valor = JSON.parse(valor); } catch (e) { valor = String(valor).replace(/^"|"$/g, ''); }
+        obj[m[1]] = valor;
+        achou = true;
+    }
+
+    // Segunda passada: chaves cujo valor era lista ou objeto e foi cortado
+    // no meio. Nao da para recuperar o conteudo, entao vira um rotulo.
+    const reAberto = /"([^"]{1,80})"\s*:\s*(\[|\{)/g;
+    let m2;
+    while ((m2 = reAberto.exec(t)) !== null) {
+        if (!(m2[1] in obj)) {
+            obj[m2[1]] = (m2[2] === '[') ? '(lista de itens)' : '(conteúdo extenso)';
+            achou = true;
+        }
+    }
+
+    if (!achou) return null;
+
+    // Sinaliza que o conteudo pode estar incompleto por causa do corte antigo
+    if (!/\}\s*$/.test(t.trim())) obj['__truncado'] = true;
+    return obj;
+};
+
 // Tenta ler o valor como JSON. Devolve o objeto ou null.
 window.audLerJson = function(v) {
     if (v === null || v === undefined) return null;
@@ -66340,7 +66403,9 @@ window.audLerJson = function(v) {
     try {
         const o = JSON.parse(t);
         return (o && typeof o === 'object') ? o : null;
-    } catch (e) { return null; }
+    } catch (e) {
+        return window.audRepararJson(t); // 👈 JSON truncado do formato antigo
+    }
 };
 
 // Transforma um valor solto em texto legivel (nunca devolve JSON cru)
@@ -66366,8 +66431,13 @@ window.audSimples = function(v) {
 // Renderiza um objeto como lista de "rotulo: valor", sem chaves nem aspas
 window.audObjetoLegivel = function(obj, corDestaque) {
     const cor = corDestaque || 'var(--cor-texto-principal)';
-    const chaves = Object.keys(obj).filter(function(k) { return k !== 'id'; });
+    const truncado = !!obj.__truncado;
+    const chaves = Object.keys(obj).filter(function(k) { return k !== 'id' && k !== '__truncado'; });
     if (chaves.length === 0) return '<i style="opacity:0.5">vazio</i>';
+
+    const avisoCorte = truncado
+        ? '<span style="background:rgba(255,193,7,0.12); border:1px solid rgba(255,193,7,0.4); color:#ffc107; border-radius:9px; padding:2px 9px; font-size:0.72rem;" title="Registro antigo: o conteúdo foi cortado antes da correção do log">registro antigo · conteúdo parcial</span>'
+        : '';
 
     return '<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:3px;">'
         + chaves.map(function(k) {
@@ -66380,7 +66450,7 @@ window.audObjetoLegivel = function(obj, corDestaque) {
             return '<span style="background:rgba(255,255,255,0.05); border:1px solid var(--cor-borda); border-radius:9px; padding:2px 9px; font-size:0.76rem;">'
                  + '<span style="color:var(--cor-texto-secundario);">' + window.audCampo(k) + ':</span> '
                  + '<b style="color:' + cor + ';">' + String(txt).replace(/</g, '&lt;') + '</b></span>';
-        }).join('') + '</div>';
+        }).join('') + avisoCorte + '</div>';
 };
 
 window.audValor = function(v) {
@@ -66409,6 +66479,27 @@ window.audValor = function(v) {
     return t.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 };
 
+// Percorre a arvore de alteracoes em QUALQUER profundidade e devolve
+// uma lista plana de mudancas. Sem isso, um campo aninhado tres niveis
+// (dados_admissao > sindicato > data_opcao) ficava invisivel na tela.
+window.audColetarDiffs = function(obj, prefixo) {
+    const saida = [];
+    if (!obj || typeof obj !== 'object') return saida;
+
+    Object.keys(obj).forEach(function(k) {
+        const v = obj[k];
+        if (!v || typeof v !== 'object') return;
+
+        if ('de' in v || 'para' in v) {
+            saida.push({ rotulo: window.audCampo(k), prefixo: prefixo || '', de: v.de, para: v.para });
+        } else {
+            const novoPref = prefixo ? prefixo + ' › ' + window.audCampo(k) : window.audCampo(k);
+            Array.prototype.push.apply(saida, window.audColetarDiffs(v, novoPref));
+        }
+    });
+    return saida;
+};
+
 // Monta uma linha "campo: antes -> depois".
 // Se algum lado for link ou texto longo, empilha em vez de espremer na horizontal.
 window.audLinhaDiff = function(rotulo, de, para, prefixo) {
@@ -66427,7 +66518,8 @@ window.audLinhaDiff = function(rotulo, de, para, prefixo) {
                    (Array.isArray(x) && x.length === 0);
         };
 
-        const todas = Array.from(new Set(Object.keys(objDe).concat(Object.keys(objPara))));
+        const todas = Array.from(new Set(Object.keys(objDe).concat(Object.keys(objPara))))
+                           .filter(function(k) { return k !== '__truncado'; });
         const mudaram = todas.filter(function(k) {
             if (ehVazio(objDe[k]) && ehVazio(objPara[k])) return false;
             return JSON.stringify(objDe[k]) !== JSON.stringify(objPara[k]);
@@ -66435,9 +66527,13 @@ window.audLinhaDiff = function(rotulo, de, para, prefixo) {
 
         if (mudaram.length === 0) return '';
 
+        const parcial = (objDe.__truncado || objPara.__truncado)
+            ? ' <span style="background:rgba(255,193,7,0.12); border:1px solid rgba(255,193,7,0.4); color:#ffc107; border-radius:9px; padding:1px 8px; font-size:0.68rem; font-weight:normal;" title="Registro gravado antes da correção do log: o conteúdo foi cortado na origem">parcial</span>'
+            : '';
+
         const cabecObj = '<span style="color:var(--cor-texto-principal); font-weight:bold;">'
                        + (prefixo ? '<span style="color:var(--cor-texto-secundario); font-weight:normal; font-size:0.75rem;">' + prefixo + ' › </span>' : '')
-                       + rotulo + '</span>';
+                       + rotulo + '</span>' + parcial;
 
         const linhasObj = mudaram.map(function(k) {
             return window.audLinhaDiff(
@@ -66690,31 +66786,17 @@ window.renderizarAuditoria = function() {
                         + (chaves.length > 6 ? '<span style="color:var(--cor-texto-secundario); font-size:0.72rem;"> +' + (chaves.length - 6) + '</span>' : '')
                         + ' <button class="btn-secondary" style="padding:3px 10px; font-size:0.7rem; border-color:rgba(255,255,255,0.25); color:var(--cor-texto-secundario);" onclick="window.verDetalheAuditoria(' + a.id + ')">detalhes</button></div>';
             } else {
-                // UPDATE: mostra o de -> para
+                // UPDATE: mostra o de -> para (qualquer profundidade)
                 let linhas = '';
                 let contador = 0;
 
-                chaves.forEach(function(campo) {
-                    const v = alt[campo];
-
-                    // Campo simples: { de, para }
-                    if (v && typeof v === 'object' && ('de' in v)) {
-                        if (contador < 4) {
-                            const l = window.audLinhaDiff(window.audCampo(campo), v.de, v.para, '');
-                            if (l) { linhas += l; contador++; }
-                        } else { contador++; }
-                    }
-                    // Campo JSON: sub-chaves alteradas
-                    else if (v && typeof v === 'object') {
-                        Object.keys(v).forEach(function(sub) {
-                            const sv = v[sub];
-                            if (sv && typeof sv === 'object' && ('de' in sv)) {
-                                if (contador < 4) {
-                                    const l2 = window.audLinhaDiff(window.audCampo(sub), sv.de, sv.para, window.audCampo(campo));
-                                    if (l2) { linhas += l2; contador++; }
-                                } else { contador++; }
-                            }
-                        });
+                const diffs = window.audColetarDiffs(alt, '');
+                diffs.forEach(function(d) {
+                    if (contador < 4) {
+                        const l = window.audLinhaDiff(d.rotulo, d.de, d.para, d.prefixo);
+                        if (l) { linhas += l; contador++; }
+                    } else {
+                        contador++;
                     }
                 });
 
@@ -66788,19 +66870,11 @@ window.verDetalheAuditoria = function(id) {
 
     let corpo = '';
     if (a.acao === 'UPDATE' && conteudo) {
-        Object.keys(conteudo).forEach(function(campo) {
-            const v = conteudo[campo];
-            if (v && typeof v === 'object' && ('de' in v)) {
-                corpo += '<div style="padding:9px 0; border-bottom:1px solid var(--cor-borda);">' + window.audLinhaDiff(window.audCampo(campo), v.de, v.para, '') + '</div>';
-            } else if (v && typeof v === 'object') {
-                Object.keys(v).forEach(function(sub) {
-                    const sv = v[sub];
-                    if (sv && typeof sv === 'object' && ('de' in sv)) {
-                        corpo += '<div style="padding:9px 0; border-bottom:1px solid var(--cor-borda);">' + window.audLinhaDiff(window.audCampo(sub), sv.de, sv.para, window.audCampo(campo)) + '</div>';
-                    }
-                });
-            }
+        window.audColetarDiffs(conteudo, '').forEach(function(d) {
+            const l = window.audLinhaDiff(d.rotulo, d.de, d.para, d.prefixo);
+            if (l) corpo += '<div style="padding:9px 0; border-bottom:1px solid var(--cor-borda);">' + l + '</div>';
         });
+        if (!corpo) corpo = '<p style="color:var(--cor-texto-secundario); text-align:center; padding:18px;">Sem diferenças legíveis.</p>';
     } else {
         // 👇 INSERT / DELETE: tabela de "campo -> valor" em vez de JSON cru
         corpo = window.audTabelaCampos(conteudo || {}, a.acao === 'DELETE');
@@ -66928,21 +67002,9 @@ window.exportarAuditoriaExcel = async function() {
                 const reg = a.registro_removido || {};
                 resumo = 'REGISTRO APAGADO: ' + (reg.nome || reg.nome_colaborador || JSON.stringify(reg).substring(0, 300));
             } else {
-                const partes = [];
-                Object.keys(alt).forEach(function(campo) {
-                    const v = alt[campo];
-                    if (v && typeof v === 'object' && ('de' in v)) {
-                        partes.push(window.audCampo(campo) + ': ' + String(v.de).replace(/"/g, '') + ' -> ' + String(v.para).replace(/"/g, ''));
-                    } else if (v && typeof v === 'object') {
-                        Object.keys(v).forEach(function(sub) {
-                            const sv = v[sub];
-                            if (sv && typeof sv === 'object' && ('de' in sv)) {
-                                partes.push(window.audCampo(campo) + ' > ' + window.audCampo(sub) + ': ' + String(sv.de).replace(/"/g, '') + ' -> ' + String(sv.para).replace(/"/g, ''));
-                            }
-                        });
-                    } else {
-                        partes.push(window.audCampo(campo) + ': ' + window.audSimples(v));
-                    }
+                const partes = window.audColetarDiffs(alt, '').map(function(d) {
+                    const rot = d.prefixo ? d.prefixo + ' > ' + d.rotulo : d.rotulo;
+                    return rot + ': ' + window.audSimples(d.de) + ' -> ' + window.audSimples(d.para);
                 });
                 resumo = partes.join('  |  ');
             }
@@ -67012,19 +67074,8 @@ window.abrirHistoricoAuditoriaColaborador = async function(idColab, nomeColab) {
         if (a.acao === 'DELETE') { cor = '#dc3545'; txt = 'EXCLUIU'; }
 
         let linhas = '';
-        const alt = a.alteracoes || {};
-        Object.keys(alt).forEach(function(campo) {
-            const v = alt[campo];
-            if (v && typeof v === 'object' && ('de' in v)) {
-                linhas += window.audLinhaDiff(window.audCampo(campo), v.de, v.para, '');
-            } else if (v && typeof v === 'object') {
-                Object.keys(v).forEach(function(sub) {
-                    const sv = v[sub];
-                    if (sv && typeof sv === 'object' && ('de' in sv)) {
-                        linhas += window.audLinhaDiff(window.audCampo(sub), sv.de, sv.para, window.audCampo(campo));
-                    }
-                });
-            }
+        window.audColetarDiffs(a.alteracoes || {}, '').forEach(function(d) {
+            linhas += window.audLinhaDiff(d.rotulo, d.de, d.para, d.prefixo);
         });
 
         html += '<div style="border-left:3px solid ' + cor + '; background:rgba(255,255,255,0.03); border-radius:8px; padding:11px 14px; margin-bottom:9px;">'
