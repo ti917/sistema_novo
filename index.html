@@ -40936,6 +40936,47 @@ window.calcularVTAgora = async function() {
 
         const ocorrenciasGlobais = [...(ausenciasDB || []), ...(resFt || [])];
 
+        // 👇 CANCELAMENTO DE VT PEDIDO NA "ALTERAÇÃO DE DADOS" E AINDA NÃO APLICADO NA FICHA.
+        // O chamado fica Pendente até o Admin aplicar; mesmo assim o RH precisa enxergar
+        // na apuração que aquele colaborador tem corte de VT a caminho, com as duas datas.
+        const mapaCancelVTPendente = {};
+        try {
+            const { data: chamadosAlt } = await supabaseClient
+                .from('solicitacoes_alteracao')
+                .select('colaborador_id, alteracoes, status, criado_em')
+                .eq('status', 'Pendente');
+
+            (chamadosAlt || []).forEach(ch => {
+                const alts = ch.alteracoes || {};
+                let ehCancelVT = false;
+                let vigenciaBr = '';
+
+                Object.keys(alts).forEach(k => {
+                    const txt = String(alts[k] || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                    const chaveNorm = String(k).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+                    if ((chaveNorm.includes('vale transporte') || chaveNorm.includes('vt'))
+                        && (txt.includes('deixa de utilizar') || txt.includes('conta propria')
+                            || txt.includes('cancelar') || txt.includes('cancelamento'))) {
+                        ehCancelVT = true;
+                    }
+                    if (chaveNorm.includes('a partir do dia')) {
+                        const mD = String(alts[k]).match(/(\d{2}\/\d{2}\/\d{4})/);
+                        if (mD) vigenciaBr = mD[1];
+                    }
+                });
+
+                if (ehCancelVT && ch.colaborador_id) {
+                    mapaCancelVTPendente[ch.colaborador_id] = {
+                        vigencia: vigenciaBr,
+                        solicitado: ch.criado_em ? new Date(ch.criado_em).toLocaleDateString('pt-BR') : ''
+                    };
+                }
+            });
+        } catch (e) {
+            console.warn('Não consegui ler os chamados de cancelamento de VT:', e);
+        }
+
         // 👇 CORREÇÃO: filtro idêntico ao do Vale Refeição — vale o PERÍODO selecionado, não a data de hoje.
         // Quem foi desligado ANTES do início do filtro sai da lista; quem saiu DENTRO do período entra proporcional.
         const colabsAtivos = (resPerfis || []).filter(c => {
@@ -41271,6 +41312,16 @@ window.calcularVTAgora = async function() {
                 valorDiario: l.valorDiario,
                 valorTotal: diasAPagar * l.valorDiario
             }));
+
+            // 👇 CANCELAMENTO SOLICITADO E AINDA NÃO APLICADO: avisa, mas não mexe no valor
+            const pedidoCancelVT = mapaCancelVTPendente[colab.id];
+            if (pedidoCancelVT && adm.vt.precisa === 'Sim') {
+                const txtVig = pedidoCancelVT.vigencia ? ` — vigência ${pedidoCancelVT.vigencia}` : '';
+                const txtSol = pedidoCancelVT.solicitado ? ` (solicitado em ${pedidoCancelVT.solicitado})` : '';
+                labelExtra += `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-triangle-exclamation"></i> CANCELAMENTO DE VT SOLICITADO${txtVig}${txtSol} — chamado ainda pendente de aplicação</span>`;
+                situacaoExcel = (situacaoExcel === 'Base Cheia' ? '' : situacaoExcel + ' | ')
+                              + `Cancelamento de VT solicitado${txtVig}${txtSol} - chamado pendente de aplicação`;
+            }
 
             // Etiqueta permanente de cancelamento (aparece mesmo quando o corte foi antes do filtro)
             if (ehCanceladoNoPeriodo && dataCancelVTBr && !vtZeradoPorCancelamento) {
