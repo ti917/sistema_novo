@@ -7258,6 +7258,7 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
 </div>
     <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
         Cálculo baseado na jornada (<b>44h = 21.5 dias</b> / <b>12x36 = 15.5 dias</b>), abatendo qualquer ausência do mês. Os valores e passagens são lidos diretamente do cadastro de admissão.
+        <br><b style="color: #ff9800;">Proporcional automático:</b> em caso de <b>rescisão / aviso prévio</b> ou de <b>cancelamento de VT</b> lançado na Alteração de Dados, a base é contada dia a dia dentro do período selecionado, exatamente como no Vale Refeição.
     </p>
     
     <div class="controls-escala" style="background: rgba(79, 195, 247, 0.05); border: 1px solid rgba(79, 195, 247, 0.3); display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between;">
@@ -10640,6 +10641,8 @@ const guiasDeAjuda = {
             '<b style="color: #4fc3f7;">1. Leitura do Cadastro:</b> O sistema busca a viação, o valor da passagem e a quantidade diária direto da Ficha de Admissão do colaborador.',
             '<b style="color: #4fc3f7;">2. Filtro de Abatimentos:</b> As datas escolhidas no filtro servem <b>apenas para encontrar e descontar ausências</b> (Faltas, Atestados, Férias) que ocorreram nessa competência.',
             '<b style="color: #4fc3f7;">3. Cálculo Padrão e Proporcional:</b> O pagamento padrão do mês assume <b>15,5 dias</b> (escala 12x36) ou <b>21,5 dias</b> (44h semanais). Para <b>Admissões</b> ou <b>Rescisões</b>, a matemática se ajusta automaticamente para pagar só os dias trabalhados.',
+            '<b style="color: #ff9800;">3.1. Rescisão / Aviso Prévio (igual ao VR):</b> Quando o colaborador está em processo rescisório ou já desligado, a base deixa de ser fixa e passa a ser contada <b>dia a dia dentro do período selecionado</b>, até o último dia de trabalho (mais o meio dia de fechamento). Descontos posteriores a essa data não são mais aplicados.',
+            '<b style="color: #ff5252;">3.2. Cancelamento de VT:</b> Se houver um cancelamento lançado na <b>Alteração de Dados</b>, o colaborador continua aparecendo aqui e recebe proporcional <b>até o dia anterior à data de vigência do corte</b>, com a tag vermelha "VT CANCELADO" e a coluna SITUAÇÃO no Excel.',
             '<b style="color: #4fc3f7;">4. Exportação R6 e Executiva:</b> Você pode baixar o relatório gerencial completo ou a planilha simplificada em layout R6 (apenas CPF e Valor) para envio.'
         ]
     },
@@ -27707,6 +27710,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
         };
         
         const precisaVT = document.getElementById('edit-adm-precisa-vt').value;
+        const vtAnteriorEdicao = adm.vt || {};
         adm.vt = { precisa: precisaVT };
         if (precisaVT === 'Sim') {
             const idxVT = document.getElementById('edit-adm-empresa-vt').value;
@@ -27715,6 +27719,14 @@ window.editarAdmissaoAdmin = async function(idColab) {
                 adm.vt.empresa = opcoesVTEdicao[idxVT].nome;
                 adm.vt.quantidade = parseInt(qtdVT);
             } else { adm.vt.empresa = ''; adm.vt.quantidade = 0; }
+            adm.vt.cancelado_em = null;
+        } else {
+            // 👇 NOVO: preserva os dados antigos e crava a data do corte (para o VT proporcional)
+            adm.vt.empresa_anterior = vtAnteriorEdicao.empresa || vtAnteriorEdicao.empresa_anterior || '';
+            adm.vt.quantidade_anterior = vtAnteriorEdicao.quantidade || vtAnteriorEdicao.quantidade_anterior || 0;
+            adm.vt.cancelado_em = vtAnteriorEdicao.precisa === 'Sim'
+                ? (document.getElementById('edit-adm-data-cancel-vt')?.value || new Date().toISOString().split('T')[0])
+                : (vtAnteriorEdicao.cancelado_em || null);
         }
 
         const isFolguistaAgora = document.getElementById('edit-adm-is-folguista').checked;
@@ -33604,10 +33616,32 @@ document.getElementById('form-efetivar-alteracao').addEventListener('submit', as
             }
             
             if (chave.includes('Vale Transporte') || chave.toLowerCase().includes('vt')) {
-                if (String(valor).toLowerCase().includes('cancelar') || String(valor).toLowerCase().includes('nao')) {
-                    adm.vt = { precisa: 'Não' };
+                // 👇 NOVO: normaliza (tira acentos) para identificar corretamente o CANCELAMENTO
+                const valorNormalizadoVT = String(valor).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+                const ehCancelamentoVT = valorNormalizadoVT.includes('cancelar')
+                    || valorNormalizadoVT.includes('cancelamento')
+                    || valorNormalizadoVT.includes('deixa de utilizar')
+                    || valorNormalizadoVT.includes('conta propria')
+                    || valorNormalizadoVT.includes('nao precisa')
+                    || valorNormalizadoVT.trim() === 'nao';
+
+                if (ehCancelamentoVT) {
+                    // 👇 NOVO: NÃO APAGA MAIS O HISTÓRICO. Guarda a data do corte e os dados antigos
+                    // para a Calculadora de VT conseguir pagar proporcional até o dia do cancelamento.
+                    const vtAntigo = adm.vt || {};
+                    adm.vt = {
+                        precisa: 'Não',
+                        cancelado_em: dataVigencia || new Date().toISOString().split('T')[0],
+                        empresa_anterior: vtAntigo.empresa || vtAntigo.empresa_anterior || '',
+                        quantidade_anterior: vtAntigo.quantidade || vtAntigo.quantidade_anterior || 0
+                    };
                 } else {
-                    adm.vt = { precisa: 'Sim', empresa: valor.replace('Mudar VT de ', '').split(' para ')[1] || valor, quantidade: adm.vt?.quantidade || 2 };
+                    adm.vt = {
+                        precisa: 'Sim',
+                        empresa: valor.replace('Mudar VT de ', '').split(' para ')[1] || valor,
+                        quantidade: adm.vt?.quantidade || 2,
+                        cancelado_em: null
+                    };
                 }
             }
 
@@ -40388,7 +40422,23 @@ window.calcularVTAgora = async function() {
 
         const ocorrenciasGlobais = [...(ausenciasDB || []), ...(resFt || [])];
 
-        const colabsAtivos = window.filtrarAtivosE_AvisoPrevio(resPerfis || []);
+        // 👇 CORREÇÃO: filtro idêntico ao do Vale Refeição — vale o PERÍODO selecionado, não a data de hoje.
+        // Quem foi desligado ANTES do início do filtro sai da lista; quem saiu DENTRO do período entra proporcional.
+        const colabsAtivos = (resPerfis || []).filter(c => {
+            if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
+
+            let drVT = c.dados_rescisao;
+            if (typeof drVT === 'string') { try { drVT = JSON.parse(drVT); } catch(e) {} }
+
+            if (c.status === 'Desligado' && drVT && drVT.ultimo_dia) {
+                const mUd = drVT.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                if (mUd) {
+                    const dataUltimoDiaFiltro = new Date(parseInt(mUd[3]), parseInt(mUd[2]) - 1, parseInt(mUd[1]), 23, 59, 59);
+                    if (dataUltimoDiaFiltro < dI) return false;
+                }
+            }
+            return true;
+        });
 
         let unidadesProcessar = [];
         if (unidadeSelecionada === 'Todas') {
@@ -40431,7 +40481,38 @@ window.calcularVTAgora = async function() {
             if (unidadeSelecionada !== 'Todas' && !(colab.unidade || '').includes(unidadeSelecionada)) return;
 
             const adm = colab.dados_admissao || {};
-            if (!adm.vt || adm.vt.precisa !== 'Sim') return; 
+            if (!adm.vt) return;
+
+            // 👇 NOVO: CANCELAMENTO DE VT LANÇADO NA ALTERAÇÃO DE DADOS
+            // Se o VT foi cancelado, ele ainda deve aparecer aqui recebendo até o dia ANTERIOR à vigência do corte.
+            let dataCorteVT = null;   // último dia com direito a VT por causa do cancelamento
+            let dataCancelVTBr = '';
+
+            if (adm.vt.precisa !== 'Sim') {
+                if (!adm.vt.cancelado_em) return; // cancelado sem data / nunca teve VT → fora da lista
+
+                const partesCancel = String(adm.vt.cancelado_em).includes('/')
+                    ? String(adm.vt.cancelado_em).split(' ')[0].split('/').reverse().join('-')
+                    : String(adm.vt.cancelado_em).split('T')[0];
+
+                const dCancelVigencia = new Date(partesCancel + 'T00:00:00');
+                if (isNaN(dCancelVigencia.getTime())) return;
+
+                // Vigência = primeiro dia SEM VT → paga até o dia anterior
+                dataCorteVT = new Date(dCancelVigencia);
+                dataCorteVT.setDate(dataCorteVT.getDate() - 1);
+                dataCorteVT.setHours(23, 59, 59, 0);
+
+                // Se o corte aconteceu antes do período pesquisado, não há nada a pagar
+                if (dataCorteVT < dI) return;
+
+                dataCancelVTBr = dCancelVigencia.toLocaleDateString('pt-BR');
+
+                // Se o corte só acontece DEPOIS do fim do filtro, este período é cheio (não proporcionaliza)
+                if (dataCorteVT >= dF) dataCorteVT = null;
+            }
+
+            const empresaVTdoColab = adm.vt.empresa || adm.vt.empresa_anterior || '';
 
             let valorPassagem = 0;
             const unidadeRealDoColab = colab.unidade.split(',')[0].trim();
@@ -40441,7 +40522,7 @@ window.calcularVTAgora = async function() {
                 const vts = configUnidade.empresa_vt.split(' || ');
                 vts.forEach(v => {
                     const match = v.match(/(.*) \(R\$ (.*)\)/);
-                    if (match && match[1].trim() === adm.vt.empresa) {
+                    if (match && match[1].trim() === empresaVTdoColab) {
                         valorPassagem = parseFloat(match[2].replace(',', '.'));
                     }
                 });
@@ -40471,38 +40552,65 @@ window.calcularVTAgora = async function() {
             let retroativoCalculado = 0;
             let abatimentosCalculado = 0;
             let labelExtra = '';
+            let situacaoExcel = 'Base Cheia';
+            let limitePagamentoVT = new Date(dF); // até onde o VT é devido neste filtro
+            limitePagamentoVT.setHours(23, 59, 59, 0);
 
-            // 👇 PROJEÇÃO DE RESCISÃO BLINDADA (Base zera para contar apenas os dias trabalhados) 👇
+            // 👇 PROJEÇÃO PROPORCIONAL (RESCISÃO + CANCELAMENTO DE VT) — MESMA LÓGICA DO VALE REFEIÇÃO 👇
             let dadosRescisaoObjVT = colab.dados_rescisao || {};
             if (typeof dadosRescisaoObjVT === 'string') {
                 try { dadosRescisaoObjVT = JSON.parse(dadosRescisaoObjVT); } catch(e){}
             }
 
+            let dataUltimoDiaVT = null;
+            let ultimoDiaBr = '';
             if (dadosRescisaoObjVT && dadosRescisaoObjVT.ultimo_dia) {
                 const match = dadosRescisaoObjVT.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (match) {
-                    const dataUltimoDia = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]), 23, 59, 59);
+                    dataUltimoDiaVT = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]), 23, 59, 59);
+                    ultimoDiaBr = dadosRescisaoObjVT.ultimo_dia.split(' ')[0];
+                }
+            }
 
-                    if (dataUltimoDia <= dF) {
-                        diasBase = 0; 
-                        let limiteUso = dataUltimoDia < dF ? dataUltimoDia : dF;
-                        let dCalc = new Date(dI);
-                        
-                        while (dCalc <= limiteUso) {
-                            const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
-                            const siglaDoDiaNaEscala = consolidados[colab.id].diasGerais[isoStr];
-                            
-                            // Iguala a regra do VR: AD e DES não existem para a contagem
-                            if (siglaDoDiaNaEscala !== 'AD' && siglaDoDiaNaEscala !== 'DES') {
-                                if (!window.isDiaDeFolga(colab, isoStr)) {
-                                    diasBase++; 
-                                }
-                            }
-                            dCalc.setDate(dCalc.getDate() + 1);
+            // O cálculo vira proporcional se houver rescisão (em processo ou já efetivada)
+            // OU se houver cancelamento de VT lançado na Alteração de Dados.
+            if (dataUltimoDiaVT || dataCorteVT) {
+                // O limite é o menor entre: fim do filtro, último dia de trabalho e último dia com VT
+                let limiteUso = new Date(dF);
+                limiteUso.setHours(23, 59, 59, 0);
+                if (dataUltimoDiaVT && dataUltimoDiaVT < limiteUso) limiteUso = dataUltimoDiaVT;
+                if (dataCorteVT && dataCorteVT < limiteUso) limiteUso = dataCorteVT;
+                limitePagamentoVT = new Date(limiteUso);
+
+                diasBase = 0;
+                let dCalc = new Date(dI);
+
+                while (dCalc <= limiteUso) {
+                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                    const siglaDoDiaNaEscala = consolidados[colab.id]?.diasGerais?.[isoStr];
+
+                    // Iguala a regra do VR: AD e DES não existem para a contagem
+                    if (siglaDoDiaNaEscala !== 'AD' && siglaDoDiaNaEscala !== 'DES') {
+                        if (!window.isDiaDeFolga(colab, isoStr)) {
+                            diasBase++;
                         }
-                        
-                        labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Rescisão (Proporcional)</span>`;
                     }
+                    dCalc.setDate(dCalc.getDate() + 1);
+                }
+
+                // Meio dia de fechamento, exatamente como no Vale Refeição
+                if (diasBase > 0) diasBase += 0.5;
+
+                if (dataUltimoDiaVT) {
+                    const emProcesso = dataUltimoDiaVT > dF;
+                    labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> ${emProcesso ? 'Aviso Prévio' : 'Rescisão'} (Proporcional${ultimoDiaBr ? ' - sai em ' + ultimoDiaBr : ''})</span>`;
+                    situacaoExcel = `Rescisão Proporcional${ultimoDiaBr ? ' (sai em ' + ultimoDiaBr + ')' : ''}`;
+                }
+
+                if (dataCorteVT) {
+                    const dataCorteBr = dataCorteVT.toLocaleDateString('pt-BR');
+                    labelExtra += `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-ban"></i> VT CANCELADO em ${dataCancelVTBr} (pago até ${dataCorteBr})</span>`;
+                    situacaoExcel = `VT cancelado em ${dataCancelVTBr} - pago até ${dataCorteBr}`;
                 }
             }
 
@@ -40539,7 +40647,9 @@ window.calcularVTAgora = async function() {
 
             if (consolidados[colab.id] && consolidados[colab.id].diasGerais) {
                 let tempD = new Date(dI);
-                while(tempD <= dF) {
+                // 👇 CORREÇÃO: não desconta nada depois do último dia com direito
+                // (rescisão ou cancelamento de VT), senão a base proporcional seria descontada duas vezes.
+                while(tempD <= limitePagamentoVT) {
                     if (tempD >= dAdm) { 
                         const iso = `${tempD.getFullYear()}-${String(tempD.getMonth()+1).padStart(2,'0')}-${String(tempD.getDate()).padStart(2,'0')}`;
                         const siglaDia = consolidados[colab.id].diasGerais[iso];
@@ -40584,7 +40694,7 @@ window.calcularVTAgora = async function() {
             let diasAPagar = baseTotalVT - abatimentosCalculado;
             if (diasAPagar < 0) diasAPagar = 0;
 
-            let qtdPassagens = adm.vt.quantidade || 2;
+            let qtdPassagens = adm.vt.quantidade || adm.vt.quantidade_anterior || 2;
             let valorDiario = qtdPassagens * valorPassagem;
             let valorTotal = diasAPagar * valorDiario;
 
@@ -40600,7 +40710,8 @@ window.calcularVTAgora = async function() {
             window.vtCalculadoPorUnidade[unidadeRealDoColab].push({
                 nome: colab.nome,
                 cpf: cpfColab,
-                empresaVT: adm.vt.empresa,
+                empresaVT: empresaVTdoColab,
+                situacao: situacaoExcel,
                 passagensDia: qtdPassagens,
                 jornada: tipoJornada,
                 diasBase: diasBase,
@@ -40617,7 +40728,7 @@ window.calcularVTAgora = async function() {
                 </td>
                 <td>
                     <span class="badge" style="background: rgba(255,255,255,0.05); color: var(--cor-texto-secundario); border: 1px solid var(--cor-borda); margin-bottom: 5px;">${unidadeRealDoColab}</span><br>
-                    <small style="color: #4fc3f7;"><i class="fa-solid fa-bus"></i> ${adm.vt.empresa} (${qtdPassagens} un)</small>
+                    <small style="color: #4fc3f7;"><i class="fa-solid fa-bus"></i> ${empresaVTdoColab} (${qtdPassagens} un)</small>
                 </td>
                 <td style="text-align: center;">
                     <strong style="color: var(--cor-texto-principal);">${tipoJornada}</strong><br>
@@ -40719,7 +40830,7 @@ window.calcularVTAgora = async function() {
             sheet.addRow([]); // Linha 3 (Vazia de respiro)
 
             // --- CABEÇALHOS DA TABELA COM RETROATIVO ---
-            const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "JORNADA BASE", "DIAS PADRÃO", "RETROATIVO (+)", "AUSÊNCIAS (-)", "DIAS A PAGAR", "CUSTO DIÁRIO", "TOTAL LÍQUIDO"]);
+            const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "JORNADA BASE", "DIAS PADRÃO", "RETROATIVO (+)", "AUSÊNCIAS (-)", "DIAS A PAGAR", "CUSTO DIÁRIO", "TOTAL LÍQUIDO", "SITUAÇÃO"]);
             headerRow.font = { bold: true, color: { argb: 'FF000000' } };
             headerRow.height = 25;
             headerRow.eachCell((cell) => {
@@ -40731,7 +40842,7 @@ window.calcularVTAgora = async function() {
             // Largura fixa para as colunas
             sheet.columns = [
                 { width: 40 }, { width: 16 }, { width: 25 }, { width: 16 }, 
-                { width: 14 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 20 }
+                { width: 14 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 20 }, { width: 42 }
             ];
 
             let currentRow = 5; 
@@ -40748,7 +40859,8 @@ window.calcularVTAgora = async function() {
                     c.nome, c.cpf, c.unidade, c.jornada, c.diasBase, c.retroativo, c.ausencias,
                     { formula: `E${currentRow}+F${currentRow}-G${currentRow}`, result: c.diasAPagar }, 
                     c.valorDiario,
-                    { formula: `H${currentRow}*I${currentRow}`, result: c.valorTotal } 
+                    { formula: `H${currentRow}*I${currentRow}`, result: c.valorTotal },
+                    c.situacao || 'Base Cheia'
                 ]);
 
                 row.getCell(5).numFmt = '0.0';
@@ -40761,6 +40873,10 @@ window.calcularVTAgora = async function() {
                 row.getCell(9).numFmt = '"R$ "#,##0.00'; 
                 row.getCell(10).numFmt = '"R$ "#,##0.00';
                 row.getCell(10).font = { bold: true, color: { argb: 'FF28A745' } }; // Verde no total
+                // Destaque para quem está em rescisão ou teve o VT cancelado no meio do período
+                if (c.situacao && c.situacao !== 'Base Cheia') {
+                    row.getCell(11).font = { bold: true, color: { argb: 'FFDC3545' } };
+                }
 
                 row.eachCell((cell, colNumber) => {
                     cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
