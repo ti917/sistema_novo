@@ -7258,7 +7258,8 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
 </div>
     <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
         Cálculo baseado na jornada (<b>44h = 21.5 dias</b> / <b>12x36 = 15.5 dias</b>), abatendo qualquer ausência do mês. Os valores e passagens são lidos diretamente do cadastro de admissão.
-        <br><b style="color: #ff9800;">Proporcional automático:</b> em caso de <b>rescisão / aviso prévio</b> ou de <b>cancelamento de VT</b> lançado na Alteração de Dados, a base é contada dia a dia dentro do período selecionado, exatamente como no Vale Refeição.
+        <br><b style="color: #ff9800;">Rescisão / aviso prévio:</b> a base é contada dia a dia dentro do período selecionado, exatamente como no Vale Refeição.
+        <br><b style="color: #ff5252;">Cancelamento de VT:</b> o período filtrado é a apuração e o crédito é usado no <b>mês seguinte</b>. Quem teve o VT cancelado dentro da janela aparece na lista <b>zerado</b>, com a explicação embaixo do nome.
     </p>
     
     <div class="controls-escala" style="background: rgba(79, 195, 247, 0.05); border: 1px solid rgba(79, 195, 247, 0.3); display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between;">
@@ -10642,7 +10643,7 @@ const guiasDeAjuda = {
             '<b style="color: #4fc3f7;">2. Filtro de Abatimentos:</b> As datas escolhidas no filtro servem <b>apenas para encontrar e descontar ausências</b> (Faltas, Atestados, Férias) que ocorreram nessa competência.',
             '<b style="color: #4fc3f7;">3. Cálculo Padrão e Proporcional:</b> O pagamento padrão do mês assume <b>15,5 dias</b> (escala 12x36) ou <b>21,5 dias</b> (44h semanais). Para <b>Admissões</b> ou <b>Rescisões</b>, a matemática se ajusta automaticamente para pagar só os dias trabalhados.',
             '<b style="color: #ff9800;">3.1. Rescisão / Aviso Prévio (igual ao VR):</b> Quando o colaborador está em processo rescisório ou já desligado, a base deixa de ser fixa e passa a ser contada <b>dia a dia dentro do período selecionado</b>, até o último dia de trabalho (mais o meio dia de fechamento). Descontos posteriores a essa data não são mais aplicados.',
-            '<b style="color: #ff5252;">3.2. Cancelamento de VT:</b> Se houver um cancelamento lançado na <b>Alteração de Dados</b>, o colaborador continua aparecendo aqui e recebe proporcional <b>até o dia anterior à data de vigência do corte</b>, com a tag vermelha "VT CANCELADO" e a coluna SITUAÇÃO no Excel.',
+            '<b style="color: #ff5252;">3.2. Cancelamento de VT (regra do mês de crédito):</b> A janela do filtro é a <b>apuração</b>, mas o vale é usado no <b>mês seguinte</b> (filtro 26/06 a 25/07 = crédito de AGOSTO). Por isso o cancelamento é comparado com o mês de crédito: se a vigência do corte for <b>até o fim do filtro</b>, o colaborador aparece na lista <b>zerado</b>, com o motivo escrito embaixo do nome; se cair <b>dentro do mês de crédito</b>, recebe proporcional até o dia anterior ao corte; se for depois, recebe o crédito cheio e o corte vale na próxima competência.',
             '<b style="color: #4fc3f7;">4. Exportação R6 e Executiva:</b> Você pode baixar o relatório gerencial completo ou a planilha simplificada em layout R6 (apenas CPF e Valor) para envio.'
         ]
     },
@@ -40477,19 +40478,31 @@ window.calcularVTAgora = async function() {
         let totalGeral = 0;
         let contagemValidada = 0;
 
+        // 👇 MÊS DE CRÉDITO: a janela do filtro é a APURAÇÃO; o vale é usado no mês seguinte.
+        // Ex.: filtro 26/06 a 25/07  →  crédito de AGOSTO.
+        const mesCreditoIniVT = new Date(dF.getFullYear(), dF.getMonth() + 1, 1, 0, 0, 0);
+        const mesCreditoFimVT = new Date(dF.getFullYear(), dF.getMonth() + 2, 0, 23, 59, 59);
+        const nomeMesCreditoVT = mesCreditoIniVT.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase();
+
         colabsAtivos.forEach(colab => {
             if (unidadeSelecionada !== 'Todas' && !(colab.unidade || '').includes(unidadeSelecionada)) return;
 
             const adm = colab.dados_admissao || {};
             if (!adm.vt) return;
 
-            // 👇 NOVO: CANCELAMENTO DE VT LANÇADO NA ALTERAÇÃO DE DADOS
-            // Se o VT foi cancelado, ele ainda deve aparecer aqui recebendo até o dia ANTERIOR à vigência do corte.
-            let dataCorteVT = null;   // último dia com direito a VT por causa do cancelamento
+            // 👇 CANCELAMENTO DE VT LANÇADO NA ALTERAÇÃO DE DADOS
+            // REGRA: o filtro é a APURAÇÃO, mas o crédito é usado no MÊS SEGUINTE.
+            // Por isso o cancelamento é comparado com o MÊS DE CRÉDITO, e não com a janela do filtro.
+            //   • Cancelou até o fim do filtro  → não usará VT no mês de crédito → aparece ZERADO com o motivo.
+            //   • Cancelou dentro do mês de crédito → proporcional até o dia anterior à vigência.
+            //   • Cancelou depois do mês de crédito → crédito cheio (corta na próxima competência).
+            let vtZeradoPorCancelamento = false;
+            let dataCorteCreditoVT = null;
             let dataCancelVTBr = '';
+            let motivoZeroVT = '';
 
             if (adm.vt.precisa !== 'Sim') {
-                if (!adm.vt.cancelado_em) return; // cancelado sem data / nunca teve VT → fora da lista
+                if (!adm.vt.cancelado_em) return; // sem data de corte / nunca teve VT → fora da lista
 
                 const partesCancel = String(adm.vt.cancelado_em).includes('/')
                     ? String(adm.vt.cancelado_em).split(' ')[0].split('/').reverse().join('-')
@@ -40498,18 +40511,22 @@ window.calcularVTAgora = async function() {
                 const dCancelVigencia = new Date(partesCancel + 'T00:00:00');
                 if (isNaN(dCancelVigencia.getTime())) return;
 
-                // Vigência = primeiro dia SEM VT → paga até o dia anterior
-                dataCorteVT = new Date(dCancelVigencia);
-                dataCorteVT.setDate(dataCorteVT.getDate() - 1);
-                dataCorteVT.setHours(23, 59, 59, 0);
-
-                // Se o corte aconteceu antes do período pesquisado, não há nada a pagar
-                if (dataCorteVT < dI) return;
+                // Cancelamento de competências anteriores não polui mais a tela
+                if (dCancelVigencia < dI) return;
 
                 dataCancelVTBr = dCancelVigencia.toLocaleDateString('pt-BR');
 
-                // Se o corte só acontece DEPOIS do fim do filtro, este período é cheio (não proporcionaliza)
-                if (dataCorteVT >= dF) dataCorteVT = null;
+                if (dCancelVigencia <= mesCreditoIniVT) {
+                    // Cancelou até o 1º dia do mês de crédito → não usará VT nenhum dia desse mês
+                    vtZeradoPorCancelamento = true;
+                    motivoZeroVT = `VT CANCELADO em ${dataCancelVTBr} — sem crédito para ${nomeMesCreditoVT}`;
+                } else if (dCancelVigencia <= mesCreditoFimVT) {
+                    // Cancelou no meio do mês de crédito → paga só até o dia anterior
+                    dataCorteCreditoVT = new Date(dCancelVigencia);
+                    dataCorteCreditoVT.setDate(dataCorteCreditoVT.getDate() - 1);
+                    dataCorteCreditoVT.setHours(23, 59, 59, 0);
+                }
+                // Cancelamento posterior ao mês de crédito → segue o cálculo normal
             }
 
             const empresaVTdoColab = adm.vt.empresa || adm.vt.empresa_anterior || '';
@@ -40528,7 +40545,8 @@ window.calcularVTAgora = async function() {
                 });
             }
 
-            if (valorPassagem === 0) return;
+            // Se está zerado por cancelamento, ele continua aparecendo mesmo sem valor de passagem vinculado
+            if (valorPassagem === 0 && !vtZeradoPorCancelamento) return;
 
             const dataInicioAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
             if (!dataInicioAdmStr) return;
@@ -40574,12 +40592,11 @@ window.calcularVTAgora = async function() {
 
             // O cálculo vira proporcional se houver rescisão (em processo ou já efetivada)
             // OU se houver cancelamento de VT lançado na Alteração de Dados.
-            if (dataUltimoDiaVT || dataCorteVT) {
-                // O limite é o menor entre: fim do filtro, último dia de trabalho e último dia com VT
+            if (dataUltimoDiaVT) {
+                // O limite é o menor entre o fim do filtro e o último dia de trabalho
                 let limiteUso = new Date(dF);
                 limiteUso.setHours(23, 59, 59, 0);
-                if (dataUltimoDiaVT && dataUltimoDiaVT < limiteUso) limiteUso = dataUltimoDiaVT;
-                if (dataCorteVT && dataCorteVT < limiteUso) limiteUso = dataCorteVT;
+                if (dataUltimoDiaVT < limiteUso) limiteUso = dataUltimoDiaVT;
                 limitePagamentoVT = new Date(limiteUso);
 
                 diasBase = 0;
@@ -40601,17 +40618,9 @@ window.calcularVTAgora = async function() {
                 // Meio dia de fechamento, exatamente como no Vale Refeição
                 if (diasBase > 0) diasBase += 0.5;
 
-                if (dataUltimoDiaVT) {
-                    const emProcesso = dataUltimoDiaVT > dF;
-                    labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> ${emProcesso ? 'Aviso Prévio' : 'Rescisão'} (Proporcional${ultimoDiaBr ? ' - sai em ' + ultimoDiaBr : ''})</span>`;
-                    situacaoExcel = `Rescisão Proporcional${ultimoDiaBr ? ' (sai em ' + ultimoDiaBr + ')' : ''}`;
-                }
-
-                if (dataCorteVT) {
-                    const dataCorteBr = dataCorteVT.toLocaleDateString('pt-BR');
-                    labelExtra += `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-ban"></i> VT CANCELADO em ${dataCancelVTBr} (pago até ${dataCorteBr})</span>`;
-                    situacaoExcel = `VT cancelado em ${dataCancelVTBr} - pago até ${dataCorteBr}`;
-                }
+                const emProcesso = dataUltimoDiaVT > dF;
+                labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> ${emProcesso ? 'Aviso Prévio' : 'Rescisão'} (Proporcional${ultimoDiaBr ? ' - sai em ' + ultimoDiaBr : ''})</span>`;
+                situacaoExcel = `Rescisão Proporcional${ultimoDiaBr ? ' (sai em ' + ultimoDiaBr + ')' : ''}`;
             }
 
             // 👇 CÁLCULO DE RETROATIVO DE ADMISSÃO (Não interfere na Base) 👇
@@ -40682,6 +40691,35 @@ window.calcularVTAgora = async function() {
             }
             if (teveFeriado) {
                 labelExtra += `<br><span style="color: #e91e63; font-size: 0.75rem; background: rgba(233, 30, 99, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-champagne-glasses"></i> Mês com Feriado (-1 VT)</span>`;
+            }
+
+            // 👇 CANCELAMENTO NO MEIO DO MÊS DE CRÉDITO → proporcional aos dias que ele ainda vai usar
+            if (dataCorteCreditoVT) {
+                let diasNoCredito = 0;
+                let dCred = new Date(mesCreditoIniVT);
+                while (dCred <= dataCorteCreditoVT) {
+                    const isoCred = `${dCred.getFullYear()}-${String(dCred.getMonth()+1).padStart(2,'0')}-${String(dCred.getDate()).padStart(2,'0')}`;
+                    if (!window.isDiaDeFolga(colab, isoCred)) diasNoCredito++;
+                    dCred.setDate(dCred.getDate() + 1);
+                }
+                if (diasNoCredito > 0) diasNoCredito += 0.5;
+
+                // Nunca aumenta a base, apenas corta
+                if (diasNoCredito < diasBase) diasBase = diasNoCredito;
+
+                const corteCreditoBr = dataCorteCreditoVT.toLocaleDateString('pt-BR');
+                labelExtra += `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-scissors"></i> VT cancelado em ${dataCancelVTBr} — crédito de ${nomeMesCreditoVT} proporcional até ${corteCreditoBr}</span>`;
+                situacaoExcel = `VT cancelado em ${dataCancelVTBr} - crédito de ${nomeMesCreditoVT} proporcional até ${corteCreditoBr}`;
+            }
+
+            // 👇 CANCELOU DENTRO DA JANELA APURADA → aparece na lista, mas ZERADO e com o motivo escrito
+            if (vtZeradoPorCancelamento) {
+                diasBase = 0;
+                retroativoCalculado = 0;
+                abatimentosCalculado = 0;
+                labelExtra = `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-ban"></i> ${motivoZeroVT}</span>`
+                    + `<br><span style="color: var(--cor-texto-secundario); font-size: 0.72rem; display: inline-block; margin-top: 4px;">Este filtro (${dI.toLocaleDateString('pt-BR')} a ${dF.toLocaleDateString('pt-BR')}) gera o crédito de <b>${nomeMesCreditoVT}</b>. Como o VT foi cancelado em ${dataCancelVTBr}, o colaborador não utilizará vale nesse mês — por isso o valor está zerado.</span>`;
+                situacaoExcel = motivoZeroVT;
             }
 
             // Matemática Final Pura e Intocável
