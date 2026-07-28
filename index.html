@@ -67011,6 +67011,11 @@ window.carregarAuditoria = async function() {
         }
 
         window.auditoriaCarregada = data || [];
+
+        // 👇 Linhas gravadas antes da coluna registro_nome existir ficam sem
+        // o nome do colaborador. Buscamos de uma vez so, pelo id do registro.
+        await window.completarNomesAuditoria(window.auditoriaCarregada);
+
         window.auditoriaPagina = 1;
         window.filtrarAuditoria();
 
@@ -67019,6 +67024,28 @@ window.carregarAuditoria = async function() {
 
     } catch (err) {
         container.innerHTML = '<p style="text-align:center; color:var(--cor-perigo); padding:25px;">Erro: ' + err.message + '</p>';
+    }
+};
+
+// Preenche o nome do colaborador nas linhas antigas, em uma unica consulta
+window.completarNomesAuditoria = async function(linhas) {
+    const faltando = (linhas || []).filter(function(a) {
+        return !a.registro_nome && a.registro_id && a.tabela === 'perfis';
+    });
+    if (faltando.length === 0) return;
+
+    const ids = Array.from(new Set(faltando.map(function(a) { return a.registro_id; })));
+
+    try {
+        const { data } = await supabaseClient.from('perfis').select('id, nome').in('id', ids);
+        const mapa = {};
+        (data || []).forEach(function(p) { mapa[p.id] = p.nome; });
+
+        linhas.forEach(function(a) {
+            if (!a.registro_nome && mapa[a.registro_id]) a.registro_nome = mapa[a.registro_id];
+        });
+    } catch (e) {
+        console.warn('Não consegui resolver os nomes antigos da auditoria:', e);
     }
 };
 
@@ -67033,6 +67060,7 @@ window.filtrarAuditoria = function() {
         if (!termo) return true;
         const alvo = window.removerAcentos(
             (a.usuario_nome || '') + ' ' + (a.usuario_email || '') + ' ' +
+            (a.registro_nome || '') + ' ' +
             window.audRotulo(a.tabela) + ' ' + JSON.stringify(a.alteracoes || a.registro_removido || {})
         );
         return alvo.includes(termo);
@@ -67134,8 +67162,31 @@ window.renderizarAuditoria = function() {
                     }
                 });
 
+                // Sem linhas legiveis: ao menos diz QUAIS campos foram tocados,
+                // em vez de um "sem diferenca" que nao ajuda ninguem.
+                let vazio = '';
+                if (!linhas) {
+                    const tocados = [];
+                    const juntar = function(o, pre) {
+                        Object.keys(o || {}).forEach(function(k) {
+                            const val = o[k];
+                            if (val && typeof val === 'object' && !('de' in val) && !('para' in val)) {
+                                juntar(val, pre ? pre + ' › ' + window.audCampo(k) : window.audCampo(k));
+                            } else {
+                                tocados.push(pre ? pre + ' › ' + window.audCampo(k) : window.audCampo(k));
+                            }
+                        });
+                    };
+                    juntar(alt, '');
+
+                    vazio = tocados.length
+                        ? '<span style="color:var(--cor-texto-secundario); font-size:0.85rem;">Campos tocados sem mudança de conteúdo visível: <b style="color:var(--cor-texto-principal);">'
+                          + tocados.slice(0, 6).join(', ') + '</b>' + (tocados.length > 6 ? ' e mais ' + (tocados.length - 6) : '') + '.</span>'
+                        : '<span style="color:var(--cor-texto-secundario); font-size:0.85rem;">Salvamento sem alteração de conteúdo.</span>';
+                }
+
                 detalhe = '<div style="background:rgba(255,255,255,0.03); border-left:3px solid ' + cor + '; border-radius:6px; padding:10px 12px; margin-top:8px;">'
-                        + (linhas || '<span style="color:var(--cor-texto-secundario); font-size:0.85rem;">Alteração sem diferença legível.</span>')
+                        + (linhas || vazio)
                         + (contador > 4 ? '<div style="margin-top:6px;"><button class="btn-secondary" style="padding:3px 10px; font-size:0.7rem; border-color:rgba(255,255,255,0.25); color:var(--cor-texto-secundario);" onclick="window.verDetalheAuditoria(' + a.id + ')">ver as outras ' + (contador - 4) + ' alterações</button></div>' : '')
                         + '</div>';
             }
@@ -67162,7 +67213,16 @@ window.renderizarAuditoria = function() {
               + '<span style="background:' + cor + '1f; color:' + cor + '; border:1px solid ' + cor + '4d; padding:2px 9px; border-radius:10px; font-size:0.68rem; font-weight:bold; text-transform:uppercase; letter-spacing:0.4px;"><i class="fa-solid ' + icone + '"></i> ' + rotuloAcao + '</span>'
               + '<span><i class="fa-solid fa-table-list" style="opacity:0.6;"></i> ' + window.audRotulo(a.tabela) + '</span>'
               + (a.registro_id ? '<span style="opacity:0.45; font-family:monospace; font-size:0.7rem;">#' + String(a.registro_id).substring(0, 8) + '</span>' : '')
-              + '</div></div>'
+              + '</div>'
+
+              // 👇 DE QUEM é a ficha. Antes só dava para saber abrindo o anexo.
+              + (a.registro_nome
+                  ? '<div style="margin-top:6px;"><span style="background:rgba(255,255,255,0.06); border:1px solid var(--cor-borda); border-radius:9px; padding:3px 11px; font-size:0.82rem; display:inline-flex; align-items:center; gap:6px;">'
+                    + '<i class="fa-solid fa-id-badge" style="color:' + cor + ';"></i>'
+                    + '<span style="color:var(--cor-texto-secundario); font-size:0.74rem;">ficha de</span> '
+                    + '<b style="color:var(--cor-texto-principal);">' + String(a.registro_nome).replace(/</g, '&lt;') + '</b></span></div>'
+                  : '')
+              + '</div>'
 
               + '<div style="text-align:right; font-size:0.76rem; color:var(--cor-texto-secundario); white-space:nowrap; line-height:1.5;">'
               + '<div style="font-weight:bold; color:var(--cor-texto-principal); font-size:0.82rem;">' + dt.toLocaleDateString('pt-BR') + '</div>'
@@ -67222,6 +67282,7 @@ window.verDetalheAuditoria = function(id) {
         + '<b>Quem:</b> ' + (a.usuario_nome || 'Fora do sistema') + (a.usuario_email ? ' (' + a.usuario_email + ')' : '') + '<br>'
         + '<b>Quando:</b> ' + dt.toLocaleDateString('pt-BR') + ' às ' + dt.toLocaleTimeString('pt-BR') + '<br>'
         + '<b>Onde:</b> ' + window.audRotulo(a.tabela) + '<br>'
+        + (a.registro_nome ? '<b>Ficha de:</b> ' + String(a.registro_nome).replace(/</g, '&lt;') + '<br>' : '')
         + '<b>Registro:</b> <code style="font-size:0.75rem;">' + (a.registro_id || '-') + '</code></div>'
         + corpo + '</div></div>';
 
@@ -67300,14 +67361,14 @@ window.exportarAuditoriaExcel = async function() {
         const wb = new ExcelJS.Workbook();
         const sheet = wb.addWorksheet('Auditoria');
 
-        sheet.mergeCells('A1:F1');
+        sheet.mergeCells('A1:G1');
         const tit = sheet.getCell('A1');
         tit.value = 'LOG DE AUDITORIA — QUEM ALTEROU O QUÊ';
         tit.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
         tit.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A148C' } };
         tit.alignment = { vertical: 'middle', horizontal: 'center' };
 
-        sheet.mergeCells('A2:F2');
+        sheet.mergeCells('A2:G2');
         const sub = sheet.getCell('A2');
         sub.value = 'Período: ' + (document.getElementById('aud-data-ini')?.value || '') + ' a ' + (document.getElementById('aud-data-fim')?.value || '')
                   + '   |   Gerado em: ' + new Date().toLocaleString('pt-BR');
@@ -67317,7 +67378,7 @@ window.exportarAuditoriaExcel = async function() {
 
         sheet.addRow([]);
 
-        const head = sheet.addRow(['DATA E HORA', 'QUEM ALTEROU', 'PERFIL', 'AÇÃO', 'MÓDULO', 'O QUE MUDOU']);
+        const head = sheet.addRow(['DATA E HORA', 'QUEM ALTEROU', 'PERFIL', 'AÇÃO', 'MÓDULO', 'FICHA DE', 'O QUE MUDOU']);
         head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
         head.height = 24;
         head.eachCell(function(c) {
@@ -67326,7 +67387,7 @@ window.exportarAuditoriaExcel = async function() {
             c.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
         });
 
-        sheet.columns = [{ width: 20 }, { width: 26 }, { width: 12 }, { width: 12 }, { width: 26 }, { width: 90 }];
+        sheet.columns = [{ width: 20 }, { width: 26 }, { width: 12 }, { width: 12 }, { width: 26 }, { width: 30 }, { width: 90 }];
 
         window.auditoriaFiltrada.forEach(function(a) {
             let resumo = '';
@@ -67351,10 +67412,11 @@ window.exportarAuditoriaExcel = async function() {
                 a.usuario_perfil || '-',
                 acaoBr,
                 window.audRotulo(a.tabela),
+                a.registro_nome || '-',
                 resumo.substring(0, 1200)
             ]);
 
-            row.getCell(6).alignment = { wrapText: true, vertical: 'top' };
+            row.getCell(7).alignment = { wrapText: true, vertical: 'top' };
             if (a.acao === 'DELETE') row.getCell(4).font = { bold: true, color: { argb: 'FFDC3545' } };
             if (a.acao === 'INSERT') row.getCell(4).font = { bold: true, color: { argb: 'FF28A745' } };
         });
