@@ -5391,7 +5391,21 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                         <option value="Recusado">Recusou (Carta de Oposição)</option>
                     </select>
                 </div>
+
+                <!-- Relatórios para o escritório de contabilidade — só o Admin enxerga -->
+                <div id="box-relatorio-sindicato" class="hidden" style="display: flex; gap: 10px; align-items: center;">
+                    <button type="button" class="btn-secondary" style="border-color: #20c997; color: #20c997; padding: 12px 18px; font-weight: bold;"
+                            onclick="window.exportarRelatorioSindicato('excel')" title="Planilha para o escritório de contabilidade">
+                        <i class="fa-solid fa-file-excel"></i> Excel
+                    </button>
+                    <button type="button" class="btn-secondary" style="border-color: #e74c3c; color: #e74c3c; padding: 12px 18px; font-weight: bold;"
+                            onclick="window.exportarRelatorioSindicato('pdf')" title="Relatório assinável em PDF">
+                        <i class="fa-solid fa-file-pdf"></i> PDF
+                    </button>
+                </div>
             </div>
+
+            <div id="resumo-sindicato-admin" style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px;"></div>
             
             <!-- É AQUI DENTRO QUE SEU JAVASCRIPT VAI DESENHAR A LISTA -->
             <div id="lista-sindicato-container" style="display: flex; flex-direction: column; gap: 15px;"></div>
@@ -22392,8 +22406,25 @@ async function popularEmpresasVT() {
         // LIBERA CONTRATOS PARA O GESTOR
         if(abaContratos) abaContratos.classList.remove('hidden');
 
-        // 👇 LIBERA A ABA DE TERMOS SINDICAIS PARA O GESTOR 👇
-        if(abaSindicato) abaSindicato.classList.remove('hidden');
+        // 👇 ABA DE TERMOS SINDICAIS: só para gestor com unidade em SÃO PAULO
+        // O termo sindical vale para o SIEMACO-SP. Gestor de unidade de outro
+        // estado não tem o que fazer nessa aba, então ela nem aparece.
+        if (abaSindicato) {
+            abaSindicato.classList.add('hidden'); // esconde ate confirmar
+            (async function () {
+                try {
+                    const unidadesSP = await window.obterUnidadesDeSP();
+                    const minhas = (usuarioAtual.unidade || '').split(',')
+                                     .map(function (u) { return u.trim().toUpperCase(); })
+                                     .filter(function (u) { return u; });
+
+                    const temSP = minhas.some(function (u) { return unidadesSP.has(u); });
+                    if (temSP) abaSindicato.classList.remove('hidden');
+                } catch (e) {
+                    console.error('Não consegui verificar as unidades de SP:', e);
+                }
+            })();
+        }
         
         const btnCadastroGeral = document.querySelector('[data-aba="aba-cadastro-geral"]');
         if(btnCadastroGeral) btnCadastroGeral.click();
@@ -65343,21 +65374,83 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
 };
 
       // Verifica se o endereço da Unidade pertence ao Estado de São Paulo
+// =====================================================================
+// DETECÇÃO DE ESTADO (UF) A PARTIR DO ENDEREÇO CADASTRADO DA UNIDADE
+//
+// ATENÇÃO — BUG CORRIGIDO AQUI:
+// Antes o sistema fazia nomeUnidade.includes('SP'). Só que "SP" aparece
+// dentro de "HOSPITAL", "ESPIRITO", "ASPIRANTE"... Resultado: TODO
+// hospital do país era tratado como unidade de São Paulo, inclusive os
+// de outros estados. Agora a UF é lida do endereço, com fronteira de
+// palavra, e o nome da unidade nunca mais é usado como pista.
+// =====================================================================
+window.UFS_BRASIL = ['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG',
+                     'PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO'];
+
+window.detectarUF = function(endereco) {
+    if (!endereco) return null;
+
+    const txt = String(endereco)
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase();
+
+    // 1) Sigla isolada: "CAMPINAS/SP", "CAMPINAS - SP", "CAMPINAS, SP"
+    //    Pega a ULTIMA ocorrência, que é onde a UF costuma ficar.
+    const achadas = txt.match(/(?:^|[^A-Z])([A-Z]{2})(?![A-Z])/g) || [];
+    let uf = null;
+    achadas.forEach(function(bruto) {
+        const sigla = bruto.replace(/[^A-Z]/g, '');
+        if (window.UFS_BRASIL.indexOf(sigla) !== -1) uf = sigla;
+    });
+    if (uf) return uf;
+
+    // 2) Sem sigla: tenta pelo nome do estado por extenso
+    const porExtenso = {
+        'SAO PAULO': 'SP', 'RIO DE JANEIRO': 'RJ', 'MINAS GERAIS': 'MG',
+        'ESPIRITO SANTO': 'ES', 'PARANA': 'PR', 'SANTA CATARINA': 'SC',
+        'RIO GRANDE DO SUL': 'RS', 'RONDONIA': 'RO', 'BAHIA': 'BA',
+        'GOIAS': 'GO', 'MATO GROSSO DO SUL': 'MS', 'MATO GROSSO': 'MT'
+    };
+    for (const nomeEstado in porExtenso) {
+        if (txt.indexOf(nomeEstado) !== -1) return porExtenso[nomeEstado];
+    }
+
+    return null;
+};
+
 window.verificarSeUnidadeEhSP = function(nomeUnidade) {
     if (!nomeUnidade) return false;
 
-    // Busca na lista de unidades oficiais do sistema
     const listaUnidades = window.todasUnidadesOficiaisCarregadas || [];
-    const unidadeObj = listaUnidades.find(u => u.nome.trim().toUpperCase() === nomeUnidade.trim().toUpperCase());
+    const unidadeObj = listaUnidades.find(function(u) {
+        return (u.nome || '').trim().toUpperCase() === String(nomeUnidade).trim().toUpperCase();
+    });
 
+    // Só o endereço cadastrado decide. Sem endereço, não é SP —
+    // é mais seguro deixar de fora do que incluir errado.
     if (unidadeObj && unidadeObj.endereco) {
-        const end = unidadeObj.endereco.toUpperCase();
-        // Verifica variações comuns de cadastro de SP no endereço/CEP
-        return end.includes('/SP') || end.includes('- SP') || end.includes('SÃO PAULO') || end.includes('SAO PAULO');
+        return window.detectarUF(unidadeObj.endereco) === 'SP';
     }
 
-    // Fallback: Se o nome da própria unidade contiver 'SP'
-    return nomeUnidade.toUpperCase().includes('SP');
+    return false;
+};
+
+// Devolve um Set com os NOMES das unidades que ficam em São Paulo
+window.obterUnidadesDeSP = async function(forcar) {
+    if (window.__cacheUnidadesSP && !forcar) return window.__cacheUnidadesSP;
+
+    const { data: unidadesDB } = await supabaseClient
+        .from('unidades_oficiais').select('nome, endereco');
+
+    const set = new Set();
+    (unidadesDB || []).forEach(function(u) {
+        if (window.detectarUF(u.endereco) === 'SP') {
+            set.add((u.nome || '').trim().toUpperCase());
+        }
+    });
+
+    window.__cacheUnidadesSP = set;
+    return set;
 };
 
       document.getElementById('novo-unidade-select')?.addEventListener('change', function() {
@@ -65582,6 +65675,252 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
     );
 };
 
+// =====================================================================
+// RESUMO E RELATÓRIOS DOS TERMOS SINDICAIS (SIEMACO-SP)
+// Só o Admin exporta — o material vai para o escritório de contabilidade.
+// =====================================================================
+window.sindicatoListaAtual = [];
+
+window.montarResumoSindicato = function(lista, ehGestor) {
+    const box = document.getElementById('resumo-sindicato-admin');
+    const boxBtns = document.getElementById('box-relatorio-sindicato');
+
+    // Botões de relatório: exclusivos do Admin
+    const ehAdmin = (usuarioAtual.perfil === 'Admin');
+    if (boxBtns) boxBtns.classList.toggle('hidden', !ehAdmin);
+
+    if (!box || ehGestor) { if (box) box.innerHTML = ''; return; }
+
+    let filiados = 0, opositores = 0, assinados = 0;
+    (lista || []).forEach(function(c) {
+        const sind = (c.dados_admissao || {}).sindicato || {};
+        if (sind.sindicalizado === true) filiados++; else opositores++;
+        if (sind.doc_termo_assinado) assinados++;
+    });
+
+    const pendentes = (lista || []).length - assinados;
+
+    const card = function(cor, icone, valor, texto) {
+        return '<div style="flex:1; min-width:150px; background:' + cor + '15; border:1px solid ' + cor + '44; border-radius:12px; padding:12px 16px;">'
+             + '<div style="color:' + cor + '; font-size:0.7rem; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;"><i class="fa-solid ' + icone + '"></i> ' + texto + '</div>'
+             + '<div style="font-size:1.6rem; font-weight:900; color:var(--cor-texto-principal); line-height:1.2;">' + valor + '</div></div>';
+    };
+
+    box.innerHTML = card('#8b5cf6', 'fa-users', (lista || []).length, 'Colaboradores SP')
+                  + card('#28a745', 'fa-hand-holding-dollar', filiados, 'Optaram (desconto 1%)')
+                  + card('#ff9800', 'fa-ban', opositores, 'Oposição (isentos)')
+                  + card('#4fc3f7', 'fa-file-signature', assinados, 'Termo anexado')
+                  + card('#dc3545', 'fa-clock', pendentes, 'Sem termo');
+};
+
+// Junta os dados na ordem em que o contador precisa
+window.montarLinhasRelatorioSindicato = function() {
+    return (window.sindicatoListaAtual || []).map(function(c) {
+        const adm = c.dados_admissao || {};
+        const sind = adm.sindicato || {};
+        const filiado = sind.sindicalizado === true;
+
+        let dataOpcao = '';
+        if (sind.data_opcao) {
+            dataOpcao = String(sind.data_opcao).indexOf('-') > -1
+                ? String(sind.data_opcao).split('T')[0].split('-').reverse().join('/')
+                : String(sind.data_opcao);
+        }
+
+        let admissao = adm.jornada?.data_inicio || adm.data_inicio || '';
+        if (admissao) admissao = String(admissao).split('T')[0].split('-').reverse().join('/');
+
+        return {
+            nome: c.nome || '',
+            cpf: c.cpf || adm.cpf || '',
+            cargo: adm.cargo || '',
+            empresa: c.empresa || '',
+            unidade: c.unidade || '',
+            admissao: admissao,
+            opcao: filiado ? 'FILIADO (desconta 1%)' : 'OPOSIÇÃO (isento)',
+            filiado: filiado,
+            salario: parseFloat(adm.salario) || 0,
+            desconto: filiado ? (parseFloat(sind.desconto_estimado) || Math.min((parseFloat(adm.salario) || 0) * 0.01, 50.96)) : 0,
+            dataOpcao: dataOpcao,
+            termo: sind.doc_termo_assinado ? 'Anexado' : 'Pendente'
+        };
+    }).sort(function(a, b) {
+        if (a.filiado !== b.filiado) return a.filiado ? -1 : 1; // optantes primeiro
+        return a.nome.localeCompare(b.nome);
+    });
+};
+
+window.exportarRelatorioSindicato = async function(formato) {
+    if (usuarioAtual.perfil !== 'Admin') {
+        return mostrarAlerta('Apenas o Administrador pode gerar este relatório.', 'erro', 'Acesso negado');
+    }
+
+    const linhas = window.montarLinhasRelatorioSindicato();
+    if (linhas.length === 0) {
+        return mostrarAlerta('Não há colaboradores na lista para exportar. Ajuste os filtros e tente de novo.', 'aviso');
+    }
+
+    const hoje = new Date().toLocaleDateString('pt-BR');
+    const totalFiliados = linhas.filter(function(l) { return l.filiado; }).length;
+    const totalOposicao = linhas.length - totalFiliados;
+    const somaDesconto = linhas.reduce(function(acc, l) { return acc + l.desconto; }, 0);
+    const empresaTit = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas')
+                       ? empresaSelecionadaFiltro : 'TODAS AS EMPRESAS';
+
+    // ---------------------------- EXCEL ----------------------------
+    if (formato === 'excel') {
+        try {
+            mostrarAlerta('Montando a planilha para a contabilidade...', 'sucesso');
+
+            const wb = new ExcelJS.Workbook();
+            wb.creator = 'RH Portal';
+
+            const criarAba = function(nomeAba, dados, cor) {
+                const sh = wb.addWorksheet(nomeAba);
+
+                sh.mergeCells('A1:J1');
+                const t = sh.getCell('A1');
+                t.value = 'RELAÇÃO DE OPÇÃO SINDICAL — SIEMACO-SP';
+                t.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+                t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A148C' } };
+                t.alignment = { vertical: 'middle', horizontal: 'center' };
+
+                sh.mergeCells('A2:J2');
+                const st = sh.getCell('A2');
+                st.value = 'EMPRESA: ' + empresaTit + '   |   UNIDADES DO ESTADO DE SÃO PAULO   |   GERADO EM: ' + hoje;
+                st.font = { size: 10, bold: true, color: { argb: 'FF4A148C' } };
+                st.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+                st.alignment = { vertical: 'middle', horizontal: 'center' };
+
+                sh.addRow([]);
+
+                const head = sh.addRow(['NOME DO COLABORADOR', 'CPF', 'CARGO', 'EMPRESA', 'UNIDADE',
+                                        'ADMISSÃO', 'OPÇÃO', 'DATA DA OPÇÃO', 'DESCONTO (R$)', 'TERMO']);
+                head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+                head.height = 24;
+                head.eachCell(function(cel) {
+                    cel.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: cor } };
+                    cel.alignment = { vertical: 'middle', horizontal: 'center' };
+                    cel.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+                });
+
+                sh.columns = [{ width: 36 }, { width: 16 }, { width: 24 }, { width: 20 },
+                              { width: 30 }, { width: 13 }, { width: 24 }, { width: 15 }, { width: 15 }, { width: 12 }];
+
+                dados.forEach(function(l) {
+                    const r = sh.addRow([l.nome, l.cpf, l.cargo, l.empresa, l.unidade,
+                                         l.admissao, l.opcao, l.dataOpcao, l.desconto, l.termo]);
+                    r.getCell(9).numFmt = '"R$ "#,##0.00';
+                    r.getCell(7).font = { bold: true, color: { argb: l.filiado ? 'FF28A745' : 'FFFF9800' } };
+                    if (l.termo === 'Pendente') r.getCell(10).font = { bold: true, color: { argb: 'FFDC3545' } };
+                    r.eachCell(function(cel, n) {
+                        cel.border = { top: {style:'thin', color:{argb:'FFDDDDDD'}}, bottom: {style:'thin', color:{argb:'FFDDDDDD'}} };
+                        if (n > 1) cel.alignment = { horizontal: 'center' };
+                    });
+                });
+
+                sh.addRow([]);
+                const tot = sh.addRow(['', '', '', '', '', '', 'TOTAL: ' + dados.length + ' colaborador(es)', '',
+                                       dados.reduce(function(a, x) { return a + x.desconto; }, 0), '']);
+                tot.getCell(7).font = { bold: true, size: 11 };
+                tot.getCell(9).numFmt = '"R$ "#,##0.00';
+                tot.getCell(9).font = { bold: true, size: 11, color: { argb: 'FFFFFFFF' } };
+                tot.getCell(9).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4A148C' } };
+            };
+
+            criarAba('GERAL', linhas, 'FF8B5CF6');
+            criarAba('OPTANTES', linhas.filter(function(l) { return l.filiado; }), 'FF28A745');
+            criarAba('OPOSICAO', linhas.filter(function(l) { return !l.filiado; }), 'FFFF9800');
+
+            const buf = await wb.xlsx.writeBuffer();
+            const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'Opcao_Sindical_SIEMACO_SP_' + new Date().toISOString().split('T')[0] + '.xlsx';
+            link.click();
+
+            mostrarAlerta('Planilha gerada com ' + linhas.length + ' colaborador(es).', 'sucesso');
+        } catch (err) {
+            mostrarAlerta('Erro ao gerar a planilha: ' + err.message, 'erro');
+        }
+        return;
+    }
+
+    // ----------------------------- PDF -----------------------------
+    try {
+        mostrarAlerta('Montando o relatório em PDF...', 'sucesso');
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+        doc.setFillColor(74, 20, 140);
+        doc.rect(0, 0, 297, 20, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(13);
+        doc.setFont(undefined, 'bold');
+        doc.text('RELAÇÃO DE OPÇÃO SINDICAL — SIEMACO-SP', 148.5, 9, { align: 'center' });
+        doc.setFontSize(8);
+        doc.setFont(undefined, 'normal');
+        doc.text('Unidades do Estado de São Paulo   |   ' + empresaTit + '   |   Gerado em ' + hoje, 148.5, 15, { align: 'center' });
+
+        doc.setTextColor(60, 60, 60);
+        doc.setFontSize(9);
+        doc.text('Total: ' + linhas.length + ' colaborador(es)   ·   Optantes pelo desconto: ' + totalFiliados
+               + '   ·   Oposição (isentos): ' + totalOposicao
+               + '   ·   Desconto mensal estimado: R$ ' + somaDesconto.toFixed(2).replace('.', ','), 14, 27);
+
+        doc.autoTable({
+            startY: 31,
+            head: [['NOME', 'CPF', 'CARGO', 'UNIDADE', 'ADMISSÃO', 'OPÇÃO', 'DATA OPÇÃO', 'DESC. (R$)', 'TERMO']],
+            body: linhas.map(function(l) {
+                return [l.nome, l.cpf, l.cargo, l.unidade, l.admissao,
+                        l.filiado ? 'FILIADO' : 'OPOSIÇÃO', l.dataOpcao,
+                        l.filiado ? l.desconto.toFixed(2).replace('.', ',') : '-', l.termo];
+            }),
+            styles: { fontSize: 7, cellPadding: 1.6, overflow: 'linebreak' },
+            headStyles: { fillColor: [139, 92, 246], textColor: 255, fontStyle: 'bold', fontSize: 7.5 },
+            alternateRowStyles: { fillColor: [248, 249, 250] },
+            columnStyles: {
+                0: { cellWidth: 52 }, 1: { cellWidth: 26 }, 2: { cellWidth: 34 },
+                3: { cellWidth: 52 }, 4: { cellWidth: 20, halign: 'center' },
+                5: { cellWidth: 22, halign: 'center', fontStyle: 'bold' },
+                6: { cellWidth: 22, halign: 'center' }, 7: { cellWidth: 20, halign: 'right' },
+                8: { cellWidth: 20, halign: 'center' }
+            },
+            didParseCell: function(dados) {
+                if (dados.section === 'body' && dados.column.index === 5) {
+                    dados.cell.styles.textColor = (dados.cell.raw === 'FILIADO') ? [40, 167, 69] : [230, 126, 34];
+                }
+                if (dados.section === 'body' && dados.column.index === 8 && dados.cell.raw === 'Pendente') {
+                    dados.cell.styles.textColor = [220, 53, 69];
+                }
+            },
+            didDrawPage: function(dados) {
+                const total = doc.internal.getNumberOfPages();
+                doc.setFontSize(7);
+                doc.setTextColor(130, 130, 130);
+                doc.text('Documento gerado pelo sistema de RH · Página ' + dados.pageNumber + ' de ' + total,
+                         148.5, doc.internal.pageSize.getHeight() - 6, { align: 'center' });
+            }
+        });
+
+        // Espaço para assinatura do responsável
+        let y = doc.lastAutoTable.finalY + 18;
+        if (y > doc.internal.pageSize.getHeight() - 30) { doc.addPage(); y = 40; }
+        doc.setDrawColor(120, 120, 120);
+        doc.line(30, y, 120, y);
+        doc.setFontSize(8);
+        doc.setTextColor(90, 90, 90);
+        doc.text('Responsável pelo Departamento Pessoal', 75, y + 5, { align: 'center' });
+
+        doc.save('Opcao_Sindical_SIEMACO_SP_' + new Date().toISOString().split('T')[0] + '.pdf');
+        mostrarAlerta('PDF gerado com ' + linhas.length + ' colaborador(es).', 'sucesso');
+
+    } catch (err) {
+        mostrarAlerta('Erro ao gerar o PDF: ' + err.message, 'erro');
+    }
+};
+
  window.carregarListaSindicato = async function() {
     const ehGestor = usuarioAtual.perfil === 'Gestor';
     const container = document.getElementById(ehGestor ? 'lista-sindicato-container-gestor' : 'lista-sindicato-container');
@@ -65590,17 +65929,8 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
     container.innerHTML = '<p style="text-align: center; color: #8b5cf6; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando unidades e colaboradores de SP...</p>';
 
     try {
-        // 1. Busca as unidades oficiais no banco
-        const { data: unidadesDB } = await supabaseClient.from('unidades_oficiais').select('nome, endereco');
-        
-        const nomesUnidadesSP = new Set();
-        (unidadesDB || []).forEach(u => {
-            const end = (u.endereco || '').toUpperCase();
-            const nomeU = (u.nome || '').toUpperCase();
-            if (end.includes('/SP') || end.includes('- SP') || end.includes('SÃO PAULO') || end.includes('SAO PAULO') || nomeU.includes('SP')) {
-                nomesUnidadesSP.add(u.nome.trim().toUpperCase());
-            }
-        });
+        // 1. Unidades de SP pelo ENDEREÇO cadastrado (nunca pelo nome)
+        const nomesUnidadesSP = await window.obterUnidadesDeSP(true);
 
         // 2. Busca colaboradores
         let query = supabaseClient.from('perfis')
@@ -65618,11 +65948,11 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
         const { data: colabs, error } = await query;
         if (error) throw error;
 
-        // 3. Filtra apenas unidades de SP
+        // 3. Só entra quem está lotado numa unidade de São Paulo
         const colabsSP = (colabs || []).filter(c => {
             if (!c.unidade) return false;
             const unidadesDoColab = c.unidade.split(',').map(u => u.trim().toUpperCase());
-            return unidadesDoColab.some(uNome => nomesUnidadesSP.has(uNome) || uNome.includes('SP'));
+            return unidadesDoColab.some(function(uNome) { return nomesUnidadesSP.has(uNome); });
         });
 
         if (colabsSP.length === 0) {
@@ -65651,6 +65981,10 @@ window.verificarSeUnidadeEhSP = function(nomeUnidade) {
 
             return true;
         });
+
+        // 👇 Guarda o resultado para o relatório e monta o resumo/contadores
+        window.sindicatoListaAtual = colabsFinais;
+        window.montarResumoSindicato(colabsFinais, ehGestor);
 
         if (colabsFinais.length === 0) {
             container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum termo encontrado para os filtros atuais.</p>';
