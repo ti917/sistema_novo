@@ -40944,7 +40944,7 @@ window.calcularVTAgora = async function() {
             const { data: chamadosAlt } = await supabaseClient
                 .from('solicitacoes_alteracao')
                 .select('colaborador_id, alteracoes, status, criado_em')
-                .eq('status', 'Pendente');
+                .in('status', ['Pendente', 'Concluído', 'Concluido']);
 
             (chamadosAlt || []).forEach(ch => {
                 const alts = ch.alteracoes || {};
@@ -40967,10 +40967,19 @@ window.calcularVTAgora = async function() {
                 });
 
                 if (ehCancelVT && ch.colaborador_id) {
-                    mapaCancelVTPendente[ch.colaborador_id] = {
-                        vigencia: vigenciaBr,
-                        solicitado: ch.criado_em ? new Date(ch.criado_em).toLocaleDateString('pt-BR') : ''
-                    };
+                    const concluido = String(ch.status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() === 'concluido';
+                    const vigenciaIso = vigenciaBr ? vigenciaBr.split('/').reverse().join('-') : '';
+                    const anterior = mapaCancelVTPendente[ch.colaborador_id];
+
+                    // Se houver mais de um chamado, o já CONCLUÍDO manda
+                    if (!anterior || (concluido && !anterior.concluido)) {
+                        mapaCancelVTPendente[ch.colaborador_id] = {
+                            vigencia: vigenciaBr,
+                            vigenciaIso: vigenciaIso,
+                            concluido: concluido,
+                            solicitado: ch.criado_em ? new Date(ch.criado_em).toLocaleDateString('pt-BR') : ''
+                        };
+                    }
                 }
             });
         } catch (e) {
@@ -41058,33 +41067,49 @@ window.calcularVTAgora = async function() {
             let dataCancelVTBr = '';
             let motivoZeroVT = '';
 
-            if (adm.vt.precisa !== 'Sim') {
-                if (!adm.vt.cancelado_em) return; // sem data de corte / nunca teve VT → fora da lista
+            const pedidoCancelVT = mapaCancelVTPendente[colab.id];
+            let cancelVeioDoChamado = false;
 
-                const partesCancel = String(adm.vt.cancelado_em).includes('/')
+            // A data do corte pode vir de dois lugares:
+            //  1) da própria ficha (quando o Admin aplicou a alteração), ou
+            //  2) de um chamado de cancelamento JÁ CONCLUÍDO que não chegou a mexer na ficha.
+            let isoCancelVT = '';
+            if (adm.vt.precisa !== 'Sim' && adm.vt.cancelado_em) {
+                isoCancelVT = String(adm.vt.cancelado_em).includes('/')
                     ? String(adm.vt.cancelado_em).split(' ')[0].split('/').reverse().join('-')
                     : String(adm.vt.cancelado_em).split('T')[0];
+            } else if (pedidoCancelVT && pedidoCancelVT.concluido && pedidoCancelVT.vigenciaIso) {
+                isoCancelVT = pedidoCancelVT.vigenciaIso;
+                cancelVeioDoChamado = true;
+            }
 
-                const dCancelVigencia = new Date(partesCancel + 'T00:00:00');
-                if (isNaN(dCancelVigencia.getTime())) return;
+            // Marcado como "não precisa" e sem nenhuma data de corte → nunca teve VT, fica fora
+            if (adm.vt.precisa !== 'Sim' && !isoCancelVT) return;
 
-                // Só some quem cancelou em competências ANTERIORES ao mês do filtro.
-                // Cancelou dentro do mês apurado (mesmo antes do dia inicial) → aparece zerado, com a data.
-                if (dCancelVigencia < inicioMesFiltroVT) return;
+            if (isoCancelVT) {
+                const dCancelVigencia = new Date(isoCancelVT + 'T00:00:00');
 
-                dataCancelVTBr = dCancelVigencia.toLocaleDateString('pt-BR');
+                if (isNaN(dCancelVigencia.getTime())) {
+                    if (adm.vt.precisa !== 'Sim') return;
+                } else if (dCancelVigencia < inicioMesFiltroVT) {
+                    // Só some quem cancelou em competências ANTERIORES ao mês do filtro
+                    if (adm.vt.precisa !== 'Sim') return;
+                } else {
+                    dataCancelVTBr = dCancelVigencia.toLocaleDateString('pt-BR');
+                    const origem = cancelVeioDoChamado ? ' (conforme chamado de alteração concluído)' : '';
 
-                if (dCancelVigencia <= mesCreditoIniVT) {
-                    // Cancelou até o 1º dia do mês de crédito → não usará VT nenhum dia desse mês
-                    vtZeradoPorCancelamento = true;
-                    motivoZeroVT = `VT CANCELADO em ${dataCancelVTBr} — sem crédito para ${nomeMesCreditoVT} (valor zerado)`;
-                } else if (dCancelVigencia <= mesCreditoFimVT) {
-                    // Cancelou no meio do mês de crédito → paga só até o dia anterior
-                    dataCorteCreditoVT = new Date(dCancelVigencia);
-                    dataCorteCreditoVT.setDate(dataCorteCreditoVT.getDate() - 1);
-                    dataCorteCreditoVT.setHours(23, 59, 59, 0);
+                    if (dCancelVigencia <= mesCreditoIniVT) {
+                        // Cancelou até o 1º dia do mês de crédito → não usará VT nenhum dia desse mês
+                        vtZeradoPorCancelamento = true;
+                        motivoZeroVT = `VT CANCELADO em ${dataCancelVTBr} — sem crédito para ${nomeMesCreditoVT} (valor zerado)${origem}`;
+                    } else if (dCancelVigencia <= mesCreditoFimVT) {
+                        // Cancelou no meio do mês de crédito → paga só até o dia anterior
+                        dataCorteCreditoVT = new Date(dCancelVigencia);
+                        dataCorteCreditoVT.setDate(dataCorteCreditoVT.getDate() - 1);
+                        dataCorteCreditoVT.setHours(23, 59, 59, 0);
+                    }
+                    // Cancelamento posterior ao mês de crédito → segue o cálculo normal
                 }
-                // Cancelamento posterior ao mês de crédito → segue o cálculo normal
             }
 
             const unidadeRealDoColab = colab.unidade.split(',')[0].trim();
@@ -41112,7 +41137,7 @@ window.calcularVTAgora = async function() {
             const valorDiarioLinhas = linhasVTdoColab.reduce((a, l) => a + l.valorDiario, 0);
 
             // Se está zerado por cancelamento, ele continua aparecendo mesmo sem valor de passagem vinculado
-            const ehCanceladoNoPeriodo = (adm.vt.precisa !== 'Sim');
+            const ehCanceladoNoPeriodo = (adm.vt.precisa !== 'Sim') || cancelVeioDoChamado;
             if (valorDiarioLinhas === 0 && !vtZeradoPorCancelamento && !ehCanceladoNoPeriodo) return;
 
             const dataInicioAdmStr = adm.jornada?.data_inicio || adm.data_inicio;
@@ -41314,13 +41339,17 @@ window.calcularVTAgora = async function() {
             }));
 
             // 👇 CANCELAMENTO SOLICITADO E AINDA NÃO APLICADO: avisa, mas não mexe no valor
-            const pedidoCancelVT = mapaCancelVTPendente[colab.id];
-            if (pedidoCancelVT && adm.vt.precisa === 'Sim') {
+            if (pedidoCancelVT && !pedidoCancelVT.concluido && adm.vt.precisa === 'Sim') {
                 const txtVig = pedidoCancelVT.vigencia ? ` — vigência ${pedidoCancelVT.vigencia}` : '';
                 const txtSol = pedidoCancelVT.solicitado ? ` (solicitado em ${pedidoCancelVT.solicitado})` : '';
                 labelExtra += `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-triangle-exclamation"></i> CANCELAMENTO DE VT SOLICITADO${txtVig}${txtSol} — chamado ainda pendente de aplicação</span>`;
                 situacaoExcel = (situacaoExcel === 'Base Cheia' ? '' : situacaoExcel + ' | ')
                               + `Cancelamento de VT solicitado${txtVig}${txtSol} - chamado pendente de aplicação`;
+            }
+
+            // Chamado concluído mas ficha não atualizada: avisa para o RH acertar o cadastro
+            if (cancelVeioDoChamado && dataCancelVTBr) {
+                labelExtra += `<br><span style="color: #ffd54f; font-size: 0.72rem; display: inline-block; margin-top: 4px;"><i class="fa-solid fa-triangle-exclamation"></i> Cancelamento veio do chamado de alteração (concluído). A ficha do colaborador ainda está marcada como "usa VT" — vale ajustar o cadastro.</span>`;
             }
 
             // Etiqueta permanente de cancelamento (aparece mesmo quando o corte foi antes do filtro)
