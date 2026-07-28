@@ -18230,10 +18230,10 @@ window.corrigirFichaDevolvida = async function(idColab) {
             await carregarOpcoesVTDaUnidade();
             setTimeout(() => {
                 // Recarrega TODAS as linhas ja salvas (formato novo ou antigo)
-                const linhasSalvas = window.vtLinhasDoColaborador(adm.vt).map(function(l) {
+                const linhasSalvas = window.vtLinhasAtuaisDoColaborador(adm.vt).map(function(l) {
                     const naUnidade = (window.opcoesVTDestaUnidade || []).find(function(o) { return o.nome === l.nome; });
-                    return { nome: l.nome, valor: naUnidade ? naUnidade.valor : l.valor, quantidade: l.quantidade };
-                });
+                    return naUnidade ? { nome: naUnidade.nome, valor: naUnidade.valor, quantidade: l.quantidade } : null;
+                }).filter(Boolean);
                 window.vtMultiDefinir('admissao', linhasSalvas);
             }, 500); // Dá um fôlego pro Supabase carregar a lista de VTs daquela unidade
         }
@@ -27593,7 +27593,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
                         <div class="form-row">
                             <div class="form-group" style="margin-bottom: 0;">
                                 <label style="color: var(--cor-acento);"><i class="fa-solid fa-bus"></i> Precisa de VT?</label>
-                                <select id="edit-adm-precisa-vt" onchange="document.getElementById('edit-box-vt-detalhes').classList.toggle('hidden', this.value !== 'Sim')">
+                                <select id="edit-adm-precisa-vt" onchange="document.getElementById('edit-box-vt-detalhes').classList.toggle('hidden', this.value !== 'Sim'); if (this.value === 'Sim' && typeof window.carregarVTParaEdicao === 'function') window.carregarVTParaEdicao();">
                                     <option value="Não" ${vt.precisa === 'Não' ? 'selected' : ''}>Não</option>
                                     <option value="Sim" ${vt.precisa === 'Sim' ? 'selected' : ''}>Sim</option>
                                 </select>
@@ -27698,7 +27698,9 @@ window.editarAdmissaoAdmin = async function(idColab) {
     tratarNacionalidade('edit-adm'); 
 
     let opcoesVTEdicao = [];
-    window.vtEdicaoJaCarregou = false; // a cada abertura da ficha, recarrega as linhas salvas
+    // A cada ficha aberta a lista comeca do zero, senao sobra o VT do colaborador anterior
+    window.vtEdicaoJaCarregou = false;
+    window.vtMultiLinhas['edicao'] = [];
 
     window.carregarVTParaEdicao = async function() {
         const unidadeSelecionada = document.getElementById('edit-adm-unidade').value;
@@ -27742,17 +27744,19 @@ window.editarAdmissaoAdmin = async function(idColab) {
             // Nas trocas de unidade seguintes, so revalida o que continua existindo.
             if (!window.vtEdicaoJaCarregou) {
                 window.vtEdicaoJaCarregou = true;
-                const linhasSalvas = window.vtLinhasDoColaborador(vt).map(function(l) {
+                // So entram linhas que REALMENTE existem na unidade deste colaborador
+                const linhasSalvas = window.vtLinhasAtuaisDoColaborador(vt).map(function(l) {
                     const naUnidade = opcoesVTEdicao.find(function(o) { return o && o.nome === l.nome; });
-                    return { nome: l.nome, valor: naUnidade ? naUnidade.valor : l.valor, quantidade: l.quantidade };
-                });
+                    return naUnidade ? { nome: naUnidade.nome, valor: naUnidade.valor, quantidade: l.quantidade } : null;
+                }).filter(Boolean);
                 window.vtMultiDefinir('edicao', linhasSalvas);
             } else {
                 window.vtMultiReconciliar('edicao');
             }
         } else {
             selectVT.innerHTML = '<option value="">Nenhum VT na unidade</option>';
-            window.vtMultiRenderizar('edicao');
+            window.vtEdicaoJaCarregou = true;
+            window.vtMultiLimpar('edicao'); // unidade sem linhas cadastradas nao pode herdar nada
         }
     };
 
@@ -40761,6 +40765,23 @@ window.vtLinhasDoColaborador = function(vt) {
     return [{ nome: nome, valor: parseFloat(vt.valor) || 0, quantidade: qtd || 2 }];
 };
 
+// Versao ESTRITA para os formularios: so as linhas ativas da ficha.
+// Nunca cai no historico (empresa_anterior / linhas_anteriores), que serve
+// apenas para a calculadora pagar o proporcional de quem cancelou o VT.
+window.vtLinhasAtuaisDoColaborador = function(vt) {
+    vt = vt || {};
+    if (vt.precisa !== 'Sim') return [];
+    if (Array.isArray(vt.linhas) && vt.linhas.length > 0) {
+        return vt.linhas.map(function(l) {
+            return { nome: String(l.nome || '').trim(), valor: parseFloat(l.valor) || 0, quantidade: parseInt(l.quantidade) || 0 };
+        }).filter(function(l) { return l.nome && l.quantidade > 0; });
+    }
+    const nome = String(vt.empresa || '').trim();
+    const qtd = parseInt(vt.quantidade || 0) || 0;
+    if (!nome) return [];
+    return [{ nome: nome, valor: parseFloat(vt.valor) || 0, quantidade: qtd || 2 }];
+};
+
 // Texto curto para telas e relatorios: "SPTrans (2/dia) + EMTU (1/dia)"
 window.vtResumoTexto = function(vt) {
     const linhas = window.vtLinhasDoColaborador(vt);
@@ -40819,6 +40840,7 @@ window.carregarOpcoesVTDaUnidade = async function() {
 
     if (error || !data || !data.empresa_vt) {
         selectEmpresa.innerHTML = '<option value="">Nenhum VT cadastrado para esta Unidade</option>';
+        window.vtMultiLimpar('admissao');
         return;
     }
 
@@ -46957,6 +46979,11 @@ document.body.addEventListener('reset', function(e) {
         // 👇 A MÁGICA 4: Mata os campos dinâmicos de descanso pra não dar bug de focus no required da próxima vez!
         const listasDescanso = e.target.querySelectorAll('[id^="lista-dias-descanso-"]');
         listasDescanso.forEach(lista => lista.innerHTML = '');
+
+        // 👇 Zera as linhas de VT: senão o próximo cadastro nasce com o VT do colaborador anterior
+        if (e.target.querySelector('#adm-vt-lista-linhas') && typeof window.vtMultiLimpar === 'function') {
+            window.vtMultiLimpar('admissao');
+        }
     }
 });
 
