@@ -11604,7 +11604,7 @@ window.removerAcentos = function(texto) {
         const nomeSafe = encodeURIComponent(nome).replace(/'/g, "%27");
         btnEdicaoAdmin = `
         <button class="btn-secondary" style="width: 100%; margin-top: 15px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255,193,7,0.1);" 
-            onclick="document.getElementById('modal-sistema-overlay').classList.add('hidden'); abrirEdicaoRapidaDia('${idColab}', decodeURIComponent('${nomeSafe}'), '${dataIso}')">
+            onclick="abrirEdicaoRapidaDia('${idColab}', decodeURIComponent('${nomeSafe}'), '${dataIso}')">
             <i class="fa-solid fa-pen"></i> Editar Este Dia Manualmente (Forçar Status)
         </button>`;
     }
@@ -29083,13 +29083,36 @@ window.abrirModalExcecoesPontuaisPainel = async function(idColab) {
         datas.forEach(dataIso => {
             const valor = excecoes[dataIso];
             const dataFormatada = formatarDataBR(dataIso);
-            const badgeCor = valor === 'Folga' ? '#28a745' : '#4fc3f7';
-            const icon = valor === 'Folga' ? 'fa-mug-hot' : 'fa-clock';
+
+            // Traduz o valor cru gravado no banco para algo legível
+            let badgeCor = '#4fc3f7', icon = 'fa-clock', rotulo = valor, origem = 'Edição manual da escala';
+            if (valor === 'Folga') { badgeCor = '#28a745'; icon = 'fa-mug-hot'; rotulo = 'Folga forçada'; }
+            else if (valor === 'Feriado') { badgeCor = '#8b5cf6'; icon = 'fa-champagne-glasses'; rotulo = 'Feriado forçado'; }
+            else if (typeof valor === 'string' && valor.startsWith('TP|')) {
+                badgeCor = '#4dabf7'; icon = 'fa-people-arrows';
+                const pTP = valor.split('|');
+                rotulo = `Troca de turno — ${pTP[1] || ''}`;
+                origem = `Cobrindo ${pTP[2] || ''}`;
+            }
+            else if (typeof valor === 'string' && valor.startsWith('FP|')) {
+                badgeCor = '#20c997'; icon = 'fa-mug-hot';
+                const pFP = valor.split('|');
+                rotulo = 'Folga programada (troca)';
+                origem = `Trocado com ${pFP[1] || ''}`;
+            }
+            else if (typeof valor === 'string' && valor.includes(' às ')) { rotulo = `Trabalho ${valor}`; }
+
+            const logDia = (jor.excecoes_log || {})[dataIso];
+            const infoLog = logDia
+                ? `<div style="font-size: 0.7rem; color: var(--cor-texto-secundario); margin-top: 3px;"><i class="fa-solid fa-user-pen"></i> ${logDia.por} em ${new Date(logDia.em).toLocaleDateString('pt-BR')}</div>`
+                : `<div style="font-size: 0.7rem; color: var(--cor-texto-secundario); margin-top: 3px;"><i class="fa-solid fa-circle-info"></i> ${origem}</div>`;
+
             listaHtml += `
                 <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.2); padding: 10px 15px; border-radius: 8px; border-left: 3px solid ${badgeCor}; margin-bottom: 8px;">
                     <div>
                         <strong style="color: var(--cor-texto-principal);">${dataFormatada}</strong>
-                        <span style="color: ${badgeCor}; margin-left: 10px; font-size: 0.85rem; font-weight: bold;"><i class="fa-solid ${icon}"></i> ${valor}</span>
+                        <span style="color: ${badgeCor}; margin-left: 10px; font-size: 0.85rem; font-weight: bold;"><i class="fa-solid ${icon}"></i> ${rotulo}</span>
+                        ${infoLog}
                     </div>
                     <button type="button" class="btn-danger-mini" onclick="removerExcecaoPontualPainel('${idColab}', '${dataIso}')" title="Remover Exceção">
                         <i class="fa-solid fa-trash"></i>
@@ -29128,6 +29151,9 @@ window.removerExcecaoPontualPainel = async function(idColab, dataIso) {
 
     if (jor.excecoes_pontuais && jor.excecoes_pontuais[dataIso]) {
         delete jor.excecoes_pontuais[dataIso];
+    }
+    if (jor.excecoes_log && jor.excecoes_log[dataIso]) {
+        delete jor.excecoes_log[dataIso];
     }
     adm.jornada = jor;
 
@@ -59372,9 +59398,43 @@ window.atualizarEscalaCongeladaSeNecessario = async function(dataVigencia, unida
 // MÁGICA DE EDIÇÃO RÁPIDA NA ESCALA (EXCLUSIVO PARA ADMIN)
 // =========================================================================
 
-window.abrirEdicaoRapidaDia = function(idColab, nome, dataIso) {
+window.abrirEdicaoRapidaDia = async function(idColab, nome, dataIso) {
     const dataBR = formatarDataBR(dataIso);
-    
+    const overlay = document.getElementById('modal-sistema-overlay');
+
+    // 🩹 O modal PRECISA continuar aberto. Antes ele era escondido e nunca voltava.
+    if (overlay) overlay.classList.remove('hidden');
+
+    const iconModal = document.getElementById('modal-sistema-icon');
+    if (iconModal) {
+        iconModal.className = 'fa-solid fa-pen-to-square main-icon';
+        iconModal.style.color = '#ffc107';
+    }
+
+    // Lê a exceção que já existe nesse dia (se houver) pra deixar o form preenchido
+    let excAtual = null;
+    try {
+        const { data: colabAtual } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+        excAtual = colabAtual?.dados_admissao?.jornada?.excecoes_pontuais?.[dataIso] || null;
+    } catch (e) { excAtual = null; }
+
+    let statusPre = 'Trabalho';
+    let entPre = '06:00';
+    let saiPre = '18:00';
+    if (excAtual === 'Folga') statusPre = 'Folga';
+    else if (excAtual === 'Feriado') statusPre = 'Feriado';
+    else if (typeof excAtual === 'string' && excAtual.includes(' às ')) {
+        const partes = excAtual.split(' às ');
+        entPre = (partes[0] || '06:00').trim();
+        saiPre = (partes[1] || '18:00').trim();
+    }
+
+    const avisoExistente = excAtual
+        ? `<div style="background: rgba(79,195,247,0.1); border: 1px dashed #4fc3f7; color: #4fc3f7; padding: 10px; border-radius: 6px; font-size: 0.8rem; margin-bottom: 15px;">
+             <i class="fa-solid fa-circle-info"></i> Já existe uma exceção pontual gravada nesse dia: <b>${excAtual}</b>. Alterar aqui substitui a anterior.
+           </div>`
+        : '';
+
     // Transforma a janela de informações no formulário de edição!
     document.getElementById('modal-sistema-titulo').innerHTML = `<i class="fa-solid fa-pen"></i> Forçar Edição: ${dataBR}`;
     
@@ -59388,14 +59448,15 @@ window.abrirEdicaoRapidaDia = function(idColab, nome, dataIso) {
 
     document.getElementById('modal-sistema-mensagem').innerHTML = `
         <div style="text-align: left;">
-            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Altere o comportamento de <b>${nome}</b> neste dia específico. Essa mudança tem prioridade máxima sobre a escala padrão.</p>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">Altere o comportamento de <b>${nome}</b> neste dia específico. Essa mudança tem prioridade máxima sobre a escala padrão e fica registrada em <b>Exceções Pontuais</b>.</p>
+            ${avisoExistente}
             
             <div class="form-group">
                 <label style="color: #ffc107;">Qual será o status deste dia? <span style="color: var(--cor-perigo);">*</span></label>
                 <select id="edit-rapido-status" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.3); color: #fff;" onchange="window.toggleHorasEdicaoRapida()">
-                    <option value="Trabalho">Trabalho (Plantão)</option>
-                    <option value="Folga">Folga (F)</option>
-                    <option value="Feriado">Feriado (FRD)</option>
+                    <option value="Trabalho" ${statusPre === 'Trabalho' ? 'selected' : ''}>Trabalho (Plantão)</option>
+                    <option value="Folga" ${statusPre === 'Folga' ? 'selected' : ''}>Folga (F)</option>
+                    <option value="Feriado" ${statusPre === 'Feriado' ? 'selected' : ''}>Feriado (FRD)</option>
                     <option value="Limpar" style="color: var(--cor-perigo); font-weight: bold;">Limpar Edição (Voltar ao Padrão da Escala)</option>
                 </select>
             </div>
@@ -59403,14 +59464,17 @@ window.abrirEdicaoRapidaDia = function(idColab, nome, dataIso) {
             <div class="form-group" id="box-edit-rapido-horas" style="background: rgba(255,193,7,0.05); padding: 15px; border-radius: 8px; border: 1px dashed #ffc107;">
                 <label style="color: #ffc107;">Horário Trabalhado <span style="color: var(--cor-perigo);">*</span></label>
                 <div style="display: flex; gap: 10px; align-items: center; margin-top: 5px;">
-                    <input type="text" id="edit-rapido-ent" value="06:00" readonly onclick="abrirTimePicker(this)" style="flex: 1; text-align: center; cursor: pointer; padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.5); color: #fff;">
+                    <input type="text" id="edit-rapido-ent" value="${entPre}" readonly onclick="abrirTimePicker(this)" style="flex: 1; text-align: center; cursor: pointer; padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.5); color: #fff;">
                     <span style="color: var(--cor-texto-secundario);">às</span>
-                    <input type="text" id="edit-rapido-sai" value="18:00" readonly onclick="abrirTimePicker(this)" style="flex: 1; text-align: center; cursor: pointer; padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.5); color: #fff;">
+                    <input type="text" id="edit-rapido-sai" value="${saiPre}" readonly onclick="abrirTimePicker(this)" style="flex: 1; text-align: center; cursor: pointer; padding: 10px; border-radius: 6px; border: 1px solid var(--cor-borda); background: rgba(0,0,0,0.5); color: #fff;">
                 </div>
                 <small style="color: var(--cor-texto-secundario); display: block; margin-top: 8px;">O sistema calculará automaticamente se o plantão é Diurno (D) ou Noturno (N) baseado nas horas informadas.</small>
             </div>
         </div>
     `;
+
+    // Mostra/esconde o box de horas conforme o status pré-selecionado
+    if (typeof window.toggleHorasEdicaoRapida === 'function') window.toggleHorasEdicaoRapida();
 };
 
 // Esconde as horas se ele marcar folga, feriado ou limpar
@@ -59451,9 +59515,23 @@ window.salvarEdicaoRapidaDia = async function(idColab, dataIso) {
         } else if (status === 'Feriado') {
             jor.excecoes_pontuais[dataIso] = 'Feriado';
         } else if (status === 'Trabalho') {
-            const ent = document.getElementById('edit-rapido-ent').value;
-            const sai = document.getElementById('edit-rapido-sai').value;
+            const ent = (document.getElementById('edit-rapido-ent').value || '').trim();
+            const sai = (document.getElementById('edit-rapido-sai').value || '').trim();
+            if (!ent || !sai) throw new Error("Informe o horário de entrada e de saída.");
+            if (ent === sai) throw new Error("Entrada e saída não podem ser iguais.");
             jor.excecoes_pontuais[dataIso] = `${ent} às ${sai}`; // Ex: "06:00 às 18:00"
+        }
+
+        // Trilha de auditoria (não interfere na leitura da escala, fica em chave separada)
+        if (!jor.excecoes_log) jor.excecoes_log = {};
+        if (status === 'Limpar') {
+            delete jor.excecoes_log[dataIso];
+        } else {
+            jor.excecoes_log[dataIso] = {
+                por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : 'Sistema',
+                em: new Date().toISOString(),
+                valor: jor.excecoes_pontuais[dataIso]
+            };
         }
 
         // 3. Atualiza o banco de dados
@@ -59461,12 +59539,28 @@ window.salvarEdicaoRapidaDia = async function(idColab, dataIso) {
         const { error: errUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
         if (errUpdate) throw errUpdate;
 
-       mostrarAlerta("Escala alterada com sucesso!", "sucesso");
+        mostrarAlerta(status === 'Limpar'
+            ? "Exceção removida! O dia voltou ao padrão da escala."
+            : "Escala alterada e registrada em Exceções Pontuais!", "sucesso");
         document.getElementById('modal-sistema-overlay').classList.add('hidden');
-        
+
         // 4. MÁGICA: Atualiza a fotografia trancada e reconstrói a tela!
         const { data: colabData } = await supabaseClient.from('perfis').select('unidade').eq('id', idColab).single();
         await window.atualizarEscalaCongeladaSeNecessario(dataIso, colabData.unidade);
+
+        // 5. Redesenha a Escala Mensal se ela estiver aberta no mesmo mês
+        const telaEscalaAberta = document.getElementById('tela-escala');
+        const filtroMesEscala = document.getElementById('filtro-mes-escala');
+        if (telaEscalaAberta && !telaEscalaAberta.classList.contains('hidden')
+            && filtroMesEscala && filtroMesEscala.value === dataIso.substring(0, 7)
+            && typeof processarEscala === 'function') {
+            processarEscala();
+        }
+
+        // 6. Se o painel de Exceções Pontuais estiver aberto, recarrega a lista
+        if (document.getElementById('modal-excecoes-pontuais-painel') && typeof abrirModalExcecoesPontuaisPainel === 'function') {
+            abrirModalExcecoesPontuaisPainel(idColab);
+        }
 
     } catch (e) {
         mostrarAlerta(e.message, "erro");
