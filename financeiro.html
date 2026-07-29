@@ -7425,7 +7425,18 @@ window.precarregarListasFinanceiro = async function () {
         var css = ''
         + '#ctm-tela { height: calc(100vh - 120px); display: flex; flex-direction: column; }'
         + '.ctm-topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; flex-wrap:wrap; }'
-        + '.ctm-topbar h3 { margin:0; color: var(--cor-texto-secundario, #94a3b8); font-size:1.05rem; }'
+        + '.ctm-topbar h3 { margin:0; color: var(--cor-texto-secundario, #94a3b8); font-size:1.05rem; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }'
+        /* --- indicador de tempo real --- */
+        + '.ctm-live { font-size:.66rem; font-weight:800; letter-spacing:.5px; text-transform:uppercase; '
+        +   'padding:3px 9px; border-radius:20px; display:inline-flex; align-items:center; gap:5px; }'
+        + '.ctm-live.on  { background: rgba(46,204,113,.15); color:#2ecc71; border:1px solid rgba(46,204,113,.4); }'
+        + '.ctm-live.off { background: rgba(149,165,166,.15); color:#95a5a6; border:1px solid rgba(149,165,166,.4); }'
+        + '.ctm-live-dot { width:7px; height:7px; border-radius:50%; background:currentColor; }'
+        + '.ctm-live.on .ctm-live-dot { animation: ctm-pulso 1.8s ease-in-out infinite; }'
+        + '@keyframes ctm-pulso { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.35; transform:scale(.75); } }'
+        + '.ctm-aviso { font-size:.72rem; font-weight:700; color:#a569bd; background: rgba(142,68,173,.14); '
+        +   'border:1px solid rgba(142,68,173,.4); padding:3px 10px; border-radius:20px; animation: ctm-entra .25s ease; }'
+        + '@keyframes ctm-entra { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }'
         + '.ctm-actions { display:flex; gap:10px; align-items:center; }'
         + '.ctm-btn { border:none; border-radius:8px; padding:9px 16px; font-weight:bold; cursor:pointer; font-size:0.9rem; display:inline-flex; align-items:center; gap:7px; transition:.15s; }'
         + '.ctm-btn:hover { filter:brightness(1.15); }'
@@ -7525,7 +7536,10 @@ window.precarregarListasFinanceiro = async function () {
     function htmlTela() {
         return ''
         + '<div class="ctm-topbar">'
-        +   '<h3><i class="fa-solid fa-people-arrows"></i> Central de Tarefas &mdash; Compromissos da Diretoria</h3>'
+        +   '<h3><i class="fa-solid fa-people-arrows"></i> Central de Tarefas &mdash; Compromissos da Diretoria'
+        +     '<span class="ctm-live off" id="ctm-live"><span class="ctm-live-dot"></span> conectando</span>'
+        +     '<span class="ctm-aviso ctm-hidden" id="ctm-aviso-mud"></span>'
+        +   '</h3>'
         +   '<div class="ctm-actions">'
         +     '<select id="ctm-filtro-origem" class="ctm-select" onchange="CTM.filtrar(this.value)">'
         +       '<option value="Todos">Todas as prioridades</option>'
@@ -7742,6 +7756,7 @@ window.precarregarListasFinanceiro = async function () {
         document.getElementById('ctm-origem').value = ORIGEM_PADRAO;
 
         carregarSortable();
+        assinarRealtime();
     }
 
     function esconderTela() {
@@ -7789,7 +7804,7 @@ window.precarregarListasFinanceiro = async function () {
         tela.classList.remove('ctm-hidden');
         tela.style.display = 'flex';
 
-        CTM.carregar();
+        sincronizar();
     }
     CTM.abrirAba = abrirAba;
 
@@ -7827,7 +7842,7 @@ window.precarregarListasFinanceiro = async function () {
                             ? 'O banco ainda nao aceita este status. Rode o arquivo central_tarefas_patch5.sql.'
                             : 'Sem permissao para mover esta tarefa.', 'erro');
                     }
-                    CTM.carregar();
+                    sincronizar();
                 }
             });
         });
@@ -7844,6 +7859,106 @@ window.precarregarListasFinanceiro = async function () {
         CTM.tarefas = r.data || [];
         renderizar();
     };
+
+    /* ---------------------------------------------------------------------- */
+    /* 5a. TEMPO REAL                                                          */
+    /*     Recarrega sozinho quando alguem cria, edita, move ou apaga.         */
+    /* ---------------------------------------------------------------------- */
+    var pendente = false;    // chegou mudanca enquanto o modal estava aberto
+    var ultimaSync = 0;
+
+    function modalAberto() {
+        var m = document.getElementById('ctm-modal-tarefa');
+        return m && !m.classList.contains('ctm-hidden');
+    }
+
+    function marcarSync(estado) {
+        var el = document.getElementById('ctm-live');
+        if (!el) return;
+        if (estado === 'ok') {
+            el.className = 'ctm-live on';
+            el.title = 'Conectado — atualiza sozinho';
+            el.innerHTML = '<span class="ctm-live-dot"></span> ao vivo';
+        } else if (estado === 'sync') {
+            el.className = 'ctm-live on';
+            el.innerHTML = '<i class="fa-solid fa-rotate fa-spin"></i> atualizando';
+        } else {
+            el.className = 'ctm-live off';
+            el.title = 'Sem conexao em tempo real — atualizando de tempos em tempos';
+            el.innerHTML = '<span class="ctm-live-dot"></span> offline';
+        }
+    }
+
+    /* recarrega, mas nunca por cima de um formulario aberto */
+    async function sincronizar(motivo) {
+        if (modalAberto()) { pendente = true; return; }
+        pendente = false;
+        ultimaSync = Date.now();
+        marcarSync('sync');
+        await CTM.carregar();
+        marcarSync(CTM.canalOk ? 'ok' : 'off');
+        if (motivo) {
+            var av = document.getElementById('ctm-aviso-mud');
+            if (av) {
+                av.textContent = motivo;
+                av.classList.remove('ctm-hidden');
+                clearTimeout(av.__t);
+                av.__t = setTimeout(function () { av.classList.add('ctm-hidden'); }, 4000);
+            }
+        }
+    }
+    CTM.sincronizar = sincronizar;
+
+    CTM.canalOk = false;
+
+    function assinarRealtime() {
+        if (CTM.canal) return;
+        if (!supabaseClient.channel) return;   // versao antiga do supabase-js
+
+        try {
+            CTM.canal = supabaseClient
+                .channel('central-tarefas-live')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'central_tarefas' },
+                    function (payload) {
+                        /* mudanca feita por mim mesmo ja foi refletida na tela */
+                        var quem = (payload.new && payload.new.criado_por) || '';
+                        var texto = payload.eventType === 'INSERT' ? 'Nova tarefa adicionada'
+                                  : payload.eventType === 'DELETE' ? 'Uma tarefa foi removida'
+                                  : 'Uma tarefa foi atualizada';
+                        if (quem && CTM.usuario && quem !== CTM.usuario.nome) texto += ' por ' + quem;
+                        sincronizar(texto);
+                    })
+                .subscribe(function (status) {
+                    CTM.canalOk = (status === 'SUBSCRIBED');
+                    marcarSync(CTM.canalOk ? 'ok' : 'off');
+                });
+        } catch (e) {
+            CTM.canalOk = false;
+            marcarSync('off');
+            console.warn('[Central de Tarefas] tempo real indisponivel:', e);
+        }
+
+        /* Rede de seguranca: se o tempo real cair (wifi, proxy, aba dormindo),
+           uma checagem periodica garante que a tela nao fique velha. */
+        setInterval(function () {
+            if (document.hidden) return;
+            var tela = document.getElementById('ctm-tela');
+            if (!tela || tela.classList.contains('hidden') || tela.classList.contains('ctm-hidden')) return;
+            var limite = CTM.canalOk ? 120000 : 20000;   // 2 min com canal, 20s sem
+            if (Date.now() - ultimaSync > limite) sincronizar();
+        }, 10000);
+
+        /* ao voltar para a aba do navegador, atualiza na hora */
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) {
+                var tela = document.getElementById('ctm-tela');
+                if (tela && !tela.classList.contains('hidden') && !tela.classList.contains('ctm-hidden')) {
+                    sincronizar();
+                }
+            }
+        });
+    }
 
     CTM.filtrar = function (v) { CTM.filtroOrigem = v; renderizar(); };
 
@@ -8126,7 +8241,12 @@ window.precarregarListasFinanceiro = async function () {
     /* ---------------------------------------------------------------------- */
     /* 6. MODAL DE TAREFA                                                      */
     /* ---------------------------------------------------------------------- */
-    CTM.fechar = function (id) { document.getElementById(id).classList.add('ctm-hidden'); };
+    CTM.fechar = function (id) {
+        document.getElementById(id).classList.add('ctm-hidden');
+        /* chegou mudanca de outra pessoa enquanto o formulario estava aberto?
+           agora que fechou, aplica. */
+        if (id === 'ctm-modal-tarefa' && pendente) sincronizar('Quadro atualizado');
+    };
 
     CTM.abrirTarefa = function (id) {
         var podeEditar = (CTM.nivel === 'editar' || CTM.nivel === 'admin');
@@ -8217,8 +8337,8 @@ window.precarregarListasFinanceiro = async function () {
         if (r.error) { mostrarAlerta('Erro ao salvar: ' + r.error.message, 'erro'); return; }
 
         mostrarAlerta(id ? 'Tarefa atualizada!' : 'Tarefa criada!', 'sucesso');
-        CTM.fechar('ctm-modal-tarefa');
-        CTM.carregar();
+        document.getElementById('ctm-modal-tarefa').classList.add('ctm-hidden');
+        sincronizar();
     };
 
     CTM.excluir = async function (id) {
@@ -8227,8 +8347,8 @@ window.precarregarListasFinanceiro = async function () {
         var r = await supabaseClient.from('central_tarefas').delete().eq('id', id);
         if (r.error) { mostrarAlerta('Erro ao excluir: ' + r.error.message, 'erro'); return; }
         mostrarAlerta('Tarefa apagada.', 'sucesso');
-        CTM.fechar('ctm-modal-tarefa');
-        CTM.carregar();
+        document.getElementById('ctm-modal-tarefa').classList.add('ctm-hidden');
+        sincronizar();
     };
 
     /* ---------------------------------------------------------------------- */
