@@ -18528,15 +18528,19 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
 
         const resc = perfilData.dados_rescisao || {};
         const isAutoGerado = (resc.tipo === 'Pedido da Empresa' || resc.tipo === 'Término de Contrato');
+        // 👇 PEDIDO DO FUNCIONÁRIO: a carta de próprio punho JÁ vem assinada. Não existe 2ª etapa.
+        const isPedidoFuncionario = (resc.tipo === 'Pedido do Funcionário');
 
         const fileInput = document.getElementById(`admin-doc-rh-${idColab}`);
-        
+
         // Se não for automático, barra se não anexar arquivo
         if (!isAutoGerado && (!fileInput || fileInput.files.length === 0)) {
             return mostrarAlerta("Anexe o documento oficial em PDF/Imagem!", "aviso");
         }
 
-        const confirmado = await mostrarConfirmacao(`Deseja aprovar a rescisão de ${nomeColab} e liberar para o Gestor colher a assinatura?`, "Aprovar e Liberar");
+        const confirmado = isPedidoFuncionario
+            ? await mostrarConfirmacao(`Como é <b>Pedido do Funcionário</b>, a carta anexada já está assinada de próprio punho.<br><br>Deseja aprovar e <b>CONCLUIR</b> o desligamento de ${nomeColab} agora, arquivando direto no histórico?`, "Aprovar e Concluir")
+            : await mostrarConfirmacao(`Deseja aprovar a rescisão de ${nomeColab} e liberar para o Gestor colher a assinatura?`, "Aprovar e Liberar");
         if (!confirmado) return;
 
         const btn = document.querySelector('#modal-ficha-rescisao .btn-primary');
@@ -18555,18 +18559,35 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
         resc.doc_gerado_por = usuarioAtual.nome; 
         resc.lida_por = usuarioAtual.nome; 
 
-        // 👇 A MÁGICA QUE FALTAVA AQUI: MUDA O STATUS DA APROVAÇÃO 👇
-        const { error: errUpdate } = await supabaseClient.from('perfis').update({ 
-            status_aprovacao: 'Aguardando Assinatura', // <-- ISSO FAZ ELA SUMIR DA CENTRAL!
-            dados_rescisao: resc 
-        }).eq('id', idColab);
-        
+        // 👇 BIFURCAÇÃO: Pedido do Funcionário conclui na hora. O resto vai pro Gestor assinar.
+        let payloadUpdate;
+        if (isPedidoFuncionario) {
+            // A carta anexada pelo RH JÁ é o documento assinado.
+            resc.doc_assinado = resc.doc_gerado_rh;
+            resc.concluido_por = usuarioAtual.nome;
+            resc.assinatura_dispensada = 'Carta de próprio punho (Pedido do Funcionário)';
+            payloadUpdate = {
+                status: 'Desligado',
+                status_aprovacao: 'Aprovado',
+                dados_rescisao: resc
+            };
+        } else {
+            payloadUpdate = {
+                status_aprovacao: 'Aguardando Assinatura', // <-- ISSO FAZ ELA SUMIR DA CENTRAL!
+                dados_rescisao: resc
+            };
+        }
+
+        const { error: errUpdate } = await supabaseClient.from('perfis').update(payloadUpdate).eq('id', idColab);
+
         if (errUpdate) throw errUpdate;
 
-        // 3. Notifica o Gestor que ele já pode colher a assinatura
-        await supabaseClient.from('notificacoes').insert([
-            { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Rescisão_Para_Assinar' }
-        ]);
+        // 3. Só notifica o Gestor pra assinar se ainda faltar assinatura
+        if (!isPedidoFuncionario) {
+            await supabaseClient.from('notificacoes').insert([
+                { colaborador_id: idColab, nome: nomeColab, unidade: unidadeColab, lida: false, tipo: 'Rescisão_Para_Assinar' }
+            ]);
+        }
         
         // 4. Marca as notificações pendentes do Admin como Lidas
         await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome })
@@ -18581,7 +18602,7 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
         if (typeof atualizarContador === 'function') atualizarContador(); 
         if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
         
-        mostrarAlerta("Rescisão aprovada e liberada com sucesso para o gestor!", "sucesso");
+        mostrarAlerta(isPedidoFuncionario ? "Desligamento concluído e arquivado no histórico!" : "Rescisão aprovada e liberada com sucesso para o gestor!", "sucesso");
 
     } catch (err) {
         mostrarAlerta("Erro interno: " + err.message, "erro");
@@ -18589,6 +18610,58 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
         if(btn) { btn.innerHTML = `<i class="fa-solid fa-magic"></i> Tentar Novamente`; btn.disabled = false; }
     }
 };
+
+// =========================================================================
+// CONCLUIR RESCISÃO DE PEDIDO DO FUNCIONÁRIO (carta de próprio punho)
+// Reaproveita o documento que o RH já anexou como documento assinado.
+// Serve pra desatolar os casos presos em "Aguardando Assinatura".
+// =========================================================================
+window.concluirRescisaoCartaPunho = async function(idColab) {
+    try {
+        const { data: perfil, error: errBusca } = await supabaseClient
+            .from('perfis')
+            .select('nome, unidade, dados_rescisao')
+            .eq('id', idColab)
+            .single();
+        if (errBusca) throw errBusca;
+
+        const resc = perfil.dados_rescisao || {};
+
+        if (!resc.doc_gerado_rh || resc.doc_gerado_rh === 'GERADO_SISTEMA') {
+            return mostrarAlerta("Não há carta anexada pelo RH para reaproveitar. Anexe o documento assinado manualmente.", "aviso");
+        }
+
+        const confirmado = await mostrarConfirmacao(`A carta de próprio punho de <b>${perfil.nome}</b> já está assinada.<br><br>Deseja concluir o desligamento e arquivar no histórico?`, "Concluir Desligamento");
+        if (!confirmado) return;
+
+        resc.doc_assinado = resc.doc_gerado_rh;
+        resc.concluido_por = usuarioAtual.nome;
+        resc.assinatura_dispensada = 'Carta de próprio punho (Pedido do Funcionário)';
+        resc.lida_por = null;
+
+        const { error } = await supabaseClient.from('perfis').update({
+            status: 'Desligado',
+            status_aprovacao: 'Aprovado',
+            dados_rescisao: resc
+        }).eq('id', idColab);
+        if (error) throw error;
+
+        await supabaseClient.from('notificacoes').delete().eq('referencia_id', idColab).in('tipo', ['Rescisão_Para_Assinar']);
+
+        await supabaseClient.from('notificacoes').insert([
+            { colaborador_id: idColab, nome: perfil.nome, unidade: perfil.unidade, lida: false, tipo: 'Rescisão' },
+            { colaborador_id: idColab, nome: perfil.nome, unidade: perfil.unidade, lida: false, tipo: 'Rescisão_Admin' }
+        ]);
+
+        mostrarAlerta("Desligamento concluído! Arquivado no histórico.", "sucesso");
+        if (typeof carregarAndamentoRescisoes === 'function' && document.getElementById('lista-andamento-rescisoes-container')) carregarAndamentoRescisoes();
+        if (typeof carregarAndamentoRescisoesAdmin === 'function' && document.getElementById('lista-andamento-rescisoes-container-admin')) carregarAndamentoRescisoesAdmin();
+        if (typeof atualizarContador === 'function') atualizarContador();
+    } catch (e) {
+        mostrarAlerta("Erro ao concluir: " + e.message, "erro");
+    }
+};
+
 
         window.verificarEDispararAlertaLotacao = async function(nomeUnidade) {
     try {
@@ -18778,6 +18851,20 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
                 btnImprimirDoc = `<a href="${resc.doc_gerado_rh}" target="_blank" class="btn-secondary" style="margin-bottom: 15px; display: inline-block; width: 100%; text-align: center;"><i class="fa-solid fa-download"></i> 1. Baixar Documento do RH para Imprimir</a>`;
             }
 
+            if (resc.tipo === 'Pedido do Funcionário') {
+                // 👇 Carta de próprio punho já vem assinada: não pede upload de novo.
+                areaAssinatura = `
+                <div style="margin-top: 15px; padding: 15px; background: rgba(40,167,69,0.08); border-radius: 8px; border: 1px dashed #28a745;">
+                    ${btnImprimirDoc}
+                    <div style="font-size: 0.82rem; color: #28a745; margin-bottom: 12px; line-height: 1.5;">
+                        <i class="fa-solid fa-circle-info"></i> <b>Pedido do Funcionário:</b> a carta anexada pelo RH já é a carta de próprio punho assinada pelo colaborador. Não precisa imprimir e colher assinatura de novo.
+                    </div>
+                    <button class="btn-success" style="width: 100%; justify-content: center;" onclick="concluirRescisaoCartaPunho('${colab.id}')">
+                        <i class="fa-solid fa-check-double"></i> Carta já assinada — Concluir
+                    </button>
+                </div>
+                `;
+            } else {
             areaAssinatura = `
                 <div style="margin-top: 15px; padding: 15px; background: rgba(79,195,247,0.1); border-radius: 8px; border: 1px dashed #4fc3f7;">
                     ${btnImprimirDoc}
@@ -18791,6 +18878,7 @@ window.enviarParaAssinatura = async function(idColab, nomeColab, unidadeColab, e
                     </div>
                 </div>
             `;
+            }
         }
 
                 html += `
@@ -48519,6 +48607,20 @@ window.carregarAndamentoRescisoesAdmin = async function() {
                 btnImprimirDoc = `<a href="${resc.doc_gerado_rh}" target="_blank" class="btn-secondary" style="margin-bottom: 15px; display: inline-block; width: 100%; text-align: center;"><i class="fa-solid fa-download"></i> 1. Baixar Documento do RH para Imprimir</a>`;
             }
 
+            if (resc.tipo === 'Pedido do Funcionário') {
+                // 👇 Carta de próprio punho já vem assinada: não pede upload de novo.
+                areaAssinatura = `
+                <div style="margin-top: 15px; padding: 15px; background: rgba(40,167,69,0.08); border-radius: 8px; border: 1px dashed #28a745;">
+                    ${btnImprimirDoc}
+                    <div style="font-size: 0.82rem; color: #28a745; margin-bottom: 12px; line-height: 1.5;">
+                        <i class="fa-solid fa-circle-info"></i> <b>Pedido do Funcionário:</b> a carta anexada pelo RH já é a carta de próprio punho assinada pelo colaborador. Não precisa imprimir e colher assinatura de novo.
+                    </div>
+                    <button class="btn-success" style="width: 100%; justify-content: center;" onclick="concluirRescisaoCartaPunho('${colab.id}')">
+                        <i class="fa-solid fa-check-double"></i> Carta já assinada — Concluir
+                    </button>
+                </div>
+                `;
+            } else {
             areaAssinatura = `
                 <div style="margin-top: 15px; padding: 15px; background: rgba(79,195,247,0.1); border-radius: 8px; border: 1px dashed #4fc3f7;">
                     ${btnImprimirDoc}
@@ -48532,6 +48634,7 @@ window.carregarAndamentoRescisoesAdmin = async function() {
                     </div>
                 </div>
             `;
+            }
         } else {
              areaAssinatura = `
                 <div style="margin-top: 15px; padding: 15px; background: rgba(255,152,0,0.1); border-radius: 8px; border: 1px dashed #ff9800; text-align: center;">
