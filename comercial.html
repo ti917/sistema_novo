@@ -2553,6 +2553,8 @@ Além do reajuste salarial, também tivemos reajuste em todos os benefícios, no
 
             // >>> CENTRAL DE TAREFAS <<<
             if (window.CTM) window.CTM.iniciar(perfil);
+            // >>> PROPOSTAS EM TEMPO REAL <<<
+            if (window.PropostasLive) window.PropostasLive.iniciar();
 
                 // Libera o botão de Configuração da Clara se for o Super Admin
 const btnClara = document.getElementById('btn-config-clara');
@@ -9845,6 +9847,193 @@ window.comAjustarBotoesPorPerfil = function () {
 
 </script>
 <!-- ============ FIM CENTRAL DE TAREFAS ============ -->
+
+<!-- ============================================================ -->
+<!-- PROPOSTAS EM TEMPO REAL                                       -->
+<!-- Modulo autocontido. Para remover: apague este bloco inteiro.  -->
+<!-- ============================================================ -->
+<script>
+/* ============================================================================
+   PROPOSTAS EM TEMPO REAL — modulo independente (somente comercial.html)
+   ----------------------------------------------------------------------------
+   * Nao altera nenhuma funcao existente. Apenas OUVE o banco e chama a
+     funcao que a pagina ja usa: carregarTabelaSolicitacoes().
+   * Recarga silenciosa: a tabela nao pisca o "Carregando dados..." a cada
+     aviso — o conteudo atual fica na tela ate os dados novos chegarem.
+   * Nao atualiza enquanto houver modal aberto (nao atrapalha quem digita).
+   * Se o tempo real cair, uma checagem periodica assume no lugar.
+   * Prefixo "pl-" em tudo -> zero colisao.
+   ========================================================================== */
+(function () {
+    'use strict';
+
+    var PL = { canalOk: false, canal: null, ultima: 0, pendente: false, ligado: false };
+    window.PropostasLive = PL;
+
+    /* ids de modal que, abertos, bloqueiam a atualizacao automatica */
+    var MODAIS = [
+        'modal-solicitacao-proposta', 'modal-obs-ajuste', 'modal-novo-cliente',
+        'modal-meta-com', 'modal-arquivar-com', 'modal-config-permissoes',
+        'modal-config-cargos', 'modal-config-clara', 'modal-alterar-senha',
+        'modal-lembrete', 'modal-detalhes-historico', 'modal-detalhes-kpi',
+        'modal-tarefa', 'ctm-modal-tarefa', 'ctm-modal-config'
+    ];
+
+    function algumModalAberto() {
+        for (var i = 0; i < MODAIS.length; i++) {
+            var m = document.getElementById(MODAIS[i]);
+            if (m && !m.classList.contains('hidden') && !m.classList.contains('ctm-hidden')) return true;
+        }
+        return false;
+    }
+
+    function abaPropostasVisivel() {
+        var a = document.getElementById('area-conteudo-propostas');
+        return !!a && !a.classList.contains('hidden') && a.style.display !== 'none';
+    }
+
+    function injetarCSS() {
+        if (document.getElementById('pl-styles')) return;
+        var s = document.createElement('style');
+        s.id = 'pl-styles';
+        s.textContent = ''
+          + '.pl-live { font-size:.66rem; font-weight:800; letter-spacing:.5px; text-transform:uppercase;'
+          +   ' padding:3px 9px; border-radius:20px; display:inline-flex; align-items:center; gap:5px; margin-left:10px; vertical-align:middle; }'
+          + '.pl-live.on  { background: rgba(46,204,113,.15); color:#2ecc71; border:1px solid rgba(46,204,113,.4); }'
+          + '.pl-live.off { background: rgba(149,165,166,.15); color:#95a5a6; border:1px solid rgba(149,165,166,.4); }'
+          + '.pl-dot { width:7px; height:7px; border-radius:50%; background:currentColor; }'
+          + '.pl-live.on .pl-dot { animation: pl-pulso 1.8s ease-in-out infinite; }'
+          + '@keyframes pl-pulso { 0%,100% { opacity:1; transform:scale(1);} 50% { opacity:.35; transform:scale(.75);} }'
+          + '.pl-aviso { font-size:.72rem; font-weight:700; color:#e67e22; background: rgba(230,126,34,.14);'
+          +   ' border:1px solid rgba(230,126,34,.4); padding:3px 10px; border-radius:20px; margin-left:8px; vertical-align:middle; }'
+          + '.pl-hidden { display:none !important; }';
+        document.head.appendChild(s);
+    }
+
+    function injetarSelo() {
+        if (document.getElementById('pl-live')) return;
+        var area = document.getElementById('area-conteudo-propostas');
+        if (!area) return;
+        var barra = area.firstElementChild;          // linha da busca + filtro
+        if (!barra) return;
+
+        var box = document.createElement('div');
+        box.style.cssText = 'display:flex; align-items:center; margin-bottom:10px;';
+        box.innerHTML = '<span class="pl-live off" id="pl-live"><span class="pl-dot"></span> conectando</span>'
+                      + '<span class="pl-aviso pl-hidden" id="pl-aviso"></span>';
+        area.insertBefore(box, barra);
+    }
+
+    function selo(estado) {
+        var el = document.getElementById('pl-live');
+        if (!el) return;
+        if (estado === 'ok') {
+            el.className = 'pl-live on';
+            el.title = 'Conectado — a lista atualiza sozinha';
+            el.innerHTML = '<span class="pl-dot"></span> ao vivo';
+        } else if (estado === 'sync') {
+            el.className = 'pl-live on';
+            el.innerHTML = '<i class="fa-solid fa-rotate fa-spin"></i> atualizando';
+        } else {
+            el.className = 'pl-live off';
+            el.title = 'Sem tempo real — conferindo de tempos em tempos';
+            el.innerHTML = '<span class="pl-dot"></span> offline';
+        }
+    }
+
+    function aviso(txt) {
+        var a = document.getElementById('pl-aviso');
+        if (!a || !txt) return;
+        a.textContent = txt;
+        a.classList.remove('pl-hidden');
+        clearTimeout(a.__t);
+        a.__t = setTimeout(function () { a.classList.add('pl-hidden'); }, 4000);
+    }
+
+    /* Recarga SILENCIOSA.
+       carregarTabelaSolicitacoes() escreve o spinner no tbody de forma sincrona,
+       antes do primeiro await. Guardamos o conteudo, deixamos ela escrever o
+       spinner e devolvemos o conteudo antigo no mesmo tick — assim a tabela
+       segue preenchida ate os dados novos substituirem tudo. */
+    async function recarregarSilencioso() {
+        if (typeof carregarTabelaSolicitacoes !== 'function') return;
+        var tbody = document.getElementById('tabela-solicitacoes-body');
+        var antes = tbody ? tbody.innerHTML : null;
+        var p = carregarTabelaSolicitacoes();
+        if (tbody && antes !== null) tbody.innerHTML = antes;
+        await p;
+    }
+
+    async function sincronizar(motivo) {
+        if (!abaPropostasVisivel()) return;
+        if (algumModalAberto()) { PL.pendente = true; return; }
+        PL.pendente = false;
+        PL.ultima = Date.now();
+        selo('sync');
+        try { await recarregarSilencioso(); } catch (e) { console.warn('[propostas live]', e); }
+        selo(PL.canalOk ? 'ok' : 'off');
+        aviso(motivo);
+    }
+    PL.sincronizar = sincronizar;
+
+    function assinar() {
+        if (PL.canal || typeof supabaseClient === 'undefined' || !supabaseClient.channel) return;
+        try {
+            PL.canal = supabaseClient
+                .channel('comercial-propostas-live')
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: 'comercial_propostas' },
+                    function (payload) {
+                        var txt = payload.eventType === 'INSERT' ? 'Nova proposta recebida'
+                                : payload.eventType === 'DELETE' ? 'Uma proposta foi removida'
+                                : 'Uma proposta foi atualizada';
+                        sincronizar(txt);
+                    })
+                .subscribe(function (status) {
+                    PL.canalOk = (status === 'SUBSCRIBED');
+                    selo(PL.canalOk ? 'ok' : 'off');
+                });
+        } catch (e) {
+            PL.canalOk = false;
+            selo('off');
+            console.warn('[propostas live] tempo real indisponivel:', e);
+        }
+    }
+
+    PL.iniciar = function () {
+        try {
+            if (PL.ligado) return;
+            if (!document.getElementById('area-conteudo-propostas')) return;  // so no comercial
+            PL.ligado = true;
+
+            injetarCSS();
+            injetarSelo();
+            assinar();
+
+            /* rede de seguranca: se o canal cair, confere de tempos em tempos */
+            setInterval(function () {
+                if (document.hidden || !abaPropostasVisivel()) return;
+                var limite = PL.canalOk ? 120000 : 25000;
+                if (Date.now() - PL.ultima > limite) sincronizar();
+            }, 10000);
+
+            /* voltou para a aba do navegador -> atualiza */
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden && abaPropostasVisivel()) sincronizar();
+            });
+
+            /* fechou um modal e tinha mudanca na fila -> aplica */
+            document.addEventListener('click', function () {
+                if (PL.pendente && !algumModalAberto()) setTimeout(function () { sincronizar(); }, 150);
+            }, true);
+        } catch (e) {
+            console.warn('[propostas live] nao iniciou:', e);
+        }
+    };
+})();
+
+</script>
+<!-- ============ FIM PROPOSTAS EM TEMPO REAL ============ -->
 
 </body>
 </html>
