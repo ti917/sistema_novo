@@ -3267,6 +3267,51 @@ function abrirModalSolicitacaoProposta(itemStr = null) {
 }
 
 // =================================================================
+// 🆕 RECARREGA O MODAL DE PROPOSTA SEM FECHAR
+// -----------------------------------------------------------------
+// Antes, salvar rascunho ou aprovar fechava a janela e obrigava a
+// reabrir para continuar. Agora a janela fica aberta.
+//
+// ⚠️ DOIS PROBLEMAS QUE ISSO CRIA, E COMO RESOLVEMOS AQUI:
+//
+// 1) Proposta NOVA sem id — se o campo solic-id continuasse vazio,
+//    o segundo clique em salvar criaria um registro DUPLICADO.
+//    Por isso buscamos o registro salvo e recarregamos o modal com
+//    ele, o que preenche o id.
+//
+// 2) Botões e travas do rodapé mudam conforme o status. Salvou como
+//    "Aprovada"? Os botões precisam virar os de aprovada. Em vez de
+//    remendar campo por campo, reabrimos o modal com o dado fresco —
+//    a própria abrirModalSolicitacaoProposta recalcula tudo.
+//
+// A posição da rolagem é preservada para a pessoa não se perder.
+// =================================================================
+async function recarregarModalProposta(idProposta) {
+    try {
+        const corpo = document.querySelector('#modal-solicitacao-proposta .modal-body');
+        const posicao = corpo ? corpo.scrollTop : 0;
+
+        const { data, error } = await supabaseClient
+            .from('comercial_propostas')
+            .select('*')
+            .eq('id', idProposta)
+            .single();
+
+        if (error || !data) {
+            console.warn('[proposta] não recarreguei o modal:', error?.message);
+            return;
+        }
+
+        abrirModalSolicitacaoProposta(encodeURIComponent(JSON.stringify(data)));
+
+        // devolve a rolagem para onde a pessoa estava
+        if (corpo) setTimeout(() => { corpo.scrollTop = posicao; }, 40);
+    } catch (e) {
+        console.warn('[proposta] erro ao recarregar o modal:', e);
+    }
+}
+
+// =================================================================
 // FUNÇÕES DOS OLHINHOS (FIX: RESOLVE UNCAUGHT REFERENCEERROR)
 // =================================================================
 window.toggleSubtotalDir = function(id) {
@@ -3789,13 +3834,17 @@ async function salvarSolicitacao(statusDefinido) {
         if (error) mostrarAlerta("Erro ao atualizar: " + error.message, "erro");
         else {
             mostrarAlerta("Solicitação atualizada com sucesso!", "sucesso");
-            document.getElementById('modal-solicitacao-proposta').classList.add('hidden');
-            
+
+            // 🆕 janela continua aberta; recarrega para os botões acompanharem o novo status
+            recarregarModalProposta(id);
+
             // 👇 GATILHO DA CLARA (EDIÇÃO) 👇
             notificarClaraProposta(statusDefinido, empresa, comercialNome);
         }
     } else {
-        const { error } = await supabaseClient
+        // .select() devolve a linha criada — precisamos do id dela, senão o
+        // próximo clique em salvar criaria OUTRA proposta.
+        const { data: criada, error } = await supabaseClient
             .from('comercial_propostas')
             .insert([{ 
                 empresa: empresa, 
@@ -3803,13 +3852,20 @@ async function salvarSolicitacao(statusDefinido) {
                 dados_proposta: dadosProposta, 
                 criado_por: usuarioAtual.nome,
                 user_id: usuarioAtual.id 
-            }]);
+            }])
+            .select()
+            .single();
 
         if (error) mostrarAlerta("Erro ao salvar: " + error.message, "erro");
         else {
             mostrarAlerta("Solicitação criada com sucesso!", "sucesso");
-            document.getElementById('modal-solicitacao-proposta').classList.add('hidden');
-            
+
+            // 🆕 janela continua aberta, agora já vinculada ao registro criado
+            if (criada?.id) {
+                document.getElementById('solic-id').value = criada.id;
+                recarregarModalProposta(criada.id);
+            }
+
             // 👇 GATILHO DA CLARA (NOVA) 👇
             notificarClaraProposta(statusDefinido, empresa, comercialNome);
         }
@@ -3843,7 +3899,16 @@ async function salvarSolicitacao(statusDefinido) {
                 else mostrarAlerta(`Status atualizado para ${novoStatus}!`, "sucesso");
             }
             
-            document.getElementById('modal-solicitacao-proposta').classList.add('hidden');
+            // 🆕 Excluir fecha (não há mais o que ver). Os outros status mantêm
+            //     a janela aberta e só recarregam o conteúdo.
+            if (novoStatus === 'Excluir') {
+                document.getElementById('modal-solicitacao-proposta').classList.add('hidden');
+            } else {
+                const modalAberto = !document.getElementById('modal-solicitacao-proposta')
+                                        .classList.contains('hidden');
+                if (modalAberto) recarregarModalProposta(id);
+            }
+
             carregarTabelaSolicitacoes();
         }
 
