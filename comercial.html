@@ -10354,7 +10354,7 @@ window.comAjustarBotoesPorPerfil = function () {
         +     '<i class="fa-solid fa-rotate"></i> Atualizar</button>'
         + '</div>'
 
-        + '<p class="ini-titulo-secao"><i class="fa-solid fa-inbox"></i> Precisam de você</p>'
+        + '<p class="ini-titulo-secao"><i class="fa-solid fa-inbox"></i> Propostas em aberto</p>'
         + '<div class="ini-cards">'
         +   cartao('ini-c-analise',  'Aguardando diretoria', 'fa-hourglass-half', '#f1c40f', 'propostas', 'Em Análise')
         +   cartao('ini-c-ajuste',   'Com ajuste pedido',    'fa-rotate-left',    '#e74c3c', 'propostas', 'Ajuste')
@@ -10490,6 +10490,48 @@ window.comAjustarBotoesPorPerfil = function () {
 
     var hhmm = function (h) { return h ? String(h).substring(0, 5) : ''; };
 
+    /**
+     * Descobre de quem eu posso ver dados.
+     *
+     * Não inventa regra nova: repete exatamente o que carregarSolicitacoes() e
+     * carregarDadosMetas() já fazem. Diretoria não filtra nada; consultor vê o
+     * dele mais o de quem marcou o nome dele em *_liberadas_para.
+     *
+     * Se a regra de permissão mudar lá, tem que mudar aqui também — é o preço
+     * de o Início ser um módulo separado.
+     *
+     * Devolve null em cada chave quando não há filtro a aplicar (Diretoria).
+     */
+    async function escopos() {
+        var ehDir = (typeof nivelAcessoComercial !== 'undefined'
+                     && nivelAcessoComercial === 'Diretoria');
+        if (ehDir) {
+            return { propostas: null, crm: null, tarefas: null };
+        }
+
+        var eu = usuarioAtual.id;
+        var r = { propostas: [eu], crm: [eu], tarefas: [eu] };
+
+        try {
+            var eq = await supabaseClient.rpc('obter_equipe_comercial');
+            (eq.data || []).forEach(function (p) {
+                var perm = p.permissoes || {};
+                if ((perm.propostas_liberadas_para || []).indexOf(eu) !== -1) r.propostas.push(p.id);
+                if ((perm.crm_liberado_para        || []).indexOf(eu) !== -1) r.crm.push(p.id);
+                if ((perm.tarefas_liberadas_para   || []).indexOf(eu) !== -1) r.tarefas.push(p.id);
+                // a agenda do CRM segue agenda_liberada_para nas outras telas;
+                // aqui o bloco "Hoje" mistura CRM e tarefas, então o CRM usa a
+                // permissão de CRM mesmo, que é a que trava a tela de clientes.
+            });
+        } catch (e) {
+            console.warn('[Início] não consegui ler a equipe, mostro só o meu:', e);
+        }
+        return r;
+    }
+
+    // aplica o filtro só quando existe lista (null = Diretoria, vê tudo)
+    function limitar(q, ids) { return ids ? q.in('user_id', ids) : q; }
+
     INI.carregar = async function (forcar) {
         if (INI.carregando) return;
         if (!forcar && Date.now() - INI.ultimaCarga < 15000) return;   // evita recarga à toa
@@ -10501,7 +10543,6 @@ window.comAjustarBotoesPorPerfil = function () {
 
         INI.carregando = true;
         var hoje = hojeISO();
-        var meuId = usuarioAtual.id;
 
         try {
             document.getElementById('ini-ola').textContent =
@@ -10510,26 +10551,28 @@ window.comAjustarBotoesPorPerfil = function () {
                 new Date().toLocaleDateString('pt-BR',
                     { weekday: 'long', day: 'numeric', month: 'long' });
 
+            var esc_ = await escopos();
+
             // Tudo em paralelo — são consultas independentes, não faz sentido
             // esperar uma pela outra e triplicar o tempo de tela em branco.
             var [props, crmHoje, tarHoje, tarAtraso, centralHoje] = await Promise.all([
-                supabaseClient.from('comercial_propostas')
-                    .select('status').eq('user_id', meuId),
+                limitar(supabaseClient.from('comercial_propostas')
+                    .select('status, criado_por'), esc_.propostas),
 
-                supabaseClient.from('comercial_clientes_crm')
-                    .select('id, empresa, hora_agendamento')
-                    .eq('user_id', meuId).eq('data_agendamento', hoje),
+                limitar(supabaseClient.from('comercial_clientes_crm')
+                    .select('id, empresa, hora_agendamento, criado_por')
+                    .eq('data_agendamento', hoje), esc_.crm),
 
-                supabaseClient.from('comercial_tarefas')
-                    .select('id, titulo, hora_tarefa, status')
-                    .eq('user_id', meuId).eq('data_tarefa', hoje)
-                    .neq('status', 'Concluido'),
+                limitar(supabaseClient.from('comercial_tarefas')
+                    .select('id, titulo, hora_tarefa, status, criado_por, user_id')
+                    .eq('data_tarefa', hoje)
+                    .neq('status', 'Concluido'), esc_.tarefas),
 
-                supabaseClient.from('comercial_tarefas')
-                    .select('id, titulo, data_tarefa, status')
-                    .eq('user_id', meuId).lt('data_tarefa', hoje)
+                limitar(supabaseClient.from('comercial_tarefas')
+                    .select('id, titulo, data_tarefa, status, criado_por, user_id')
+                    .lt('data_tarefa', hoje)
                     .neq('status', 'Concluido')
-                    .order('data_tarefa', { ascending: false }).limit(6),
+                    .order('data_tarefa', { ascending: false }).limit(10), esc_.tarefas),
 
                 // A Central de Tarefas é da diretoria. Quem não tem acesso
                 // recebe lista vazia por causa do RLS — não precisa checar aqui.
@@ -10550,6 +10593,17 @@ window.comAjustarBotoesPorPerfil = function () {
             INI.carregando = false;
         }
     };
+
+    /**
+     * Nome curto de quem é dono do item — só aparece quando NÃO sou eu, para
+     * não poluir a lista com "Italo" em toda linha do próprio Italo.
+     */
+    function dono(criadoPor) {
+        var meu = String((usuarioAtual && usuarioAtual.nome) || '').trim();
+        var dele = String(criadoPor || '').trim();
+        if (!dele || dele === meu) return '';
+        return ' · ' + dele.split(' ')[0];
+    }
 
     function saudacao() {
         var h = new Date().getHours();
@@ -10575,7 +10629,7 @@ window.comAjustarBotoesPorPerfil = function () {
             itens.push({
                 hora: hhmm(c.hora_agendamento),
                 titulo: c.empresa || 'Cliente',
-                sub: 'CRM · acompanhamento',
+                sub: 'CRM · acompanhamento' + dono(c.criado_por),
                 acao: 'agenda',
             });
         });
@@ -10584,7 +10638,7 @@ window.comAjustarBotoesPorPerfil = function () {
             itens.push({
                 hora: hhmm(t.hora_tarefa),
                 titulo: t.titulo,
-                sub: 'Minhas tarefas',
+                sub: 'Tarefas do comercial' + dono(t.criado_por),
                 acao: 'tarefas',
             });
         });
@@ -10647,7 +10701,8 @@ window.comAjustarBotoesPorPerfil = function () {
             return '<div class="ini-item" onclick="INI.abrirTarefas()">'
                  +   '<span class="ini-hora ini-passou"><i class="fa-solid fa-clock"></i></span>'
                  +   '<div><p class="ini-item-tit">' + esc(t.titulo) + '</p>'
-                 +     '<p class="ini-item-sub ini-alerta">Atrasada ' + quanto + '</p></div>'
+                 +     '<p class="ini-item-sub ini-alerta">Atrasada ' + quanto
+                 +       esc(dono(t.criado_por)) + '</p></div>'
                  + '</div>';
         }).join('');
     }
