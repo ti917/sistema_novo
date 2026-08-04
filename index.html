@@ -70928,10 +70928,11 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
         });
     });
 
-    // ---- Valor diário de VT (mesma tabela de preço da tela de VT) ----
+    // ---- VT: só entra na conta quem realmente usa (mesma trava da tela de VT) ----
     const adm = colab.dados_admissao || {};
+    const usaVT = !!(adm.vt && adm.vt.precisa === 'Sim');
     let valorDiarioVT = 0;
-    if (adm.vt && adm.vt.precisa === 'Sim') {
+    if (usaVT) {
         const configUnidade = (unidadesOficiais || []).find(function(u) { return u.nome === unidadeReal; });
         const tabelaPrecoVT = {};
         if (configUnidade && configUnidade.empresa_vt) {
@@ -70947,26 +70948,24 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
         valorDiarioVT = linhasVT.reduce(function(a, v) { return a + v; }, 0);
     }
 
-    // ---- Valor diário de VR (mesma regra por unidade da tela de VR) ----
-    let valorDiarioVR = 0;
+    // ---- VR: só entra na conta quem tem regra de VR ativa na unidade (mesma trava da tela de VR) ----
     const regraUnidadeVR = (regrasVR || []).find(function(r) { return (r.unidade || '').trim().toUpperCase() === unidadeReal.toUpperCase(); });
-    if (regraUnidadeVR && String(regraUnidadeVR.recebe_vr) !== 'false') {
-        valorDiarioVR = parseFloat(regraUnidadeVR.valor_diaria) || 0;
-    }
+    const usaVR = !!(regraUnidadeVR && String(regraUnidadeVR.recebe_vr) !== 'false');
+    const valorDiarioVR = usaVR ? (parseFloat(regraUnidadeVR.valor_diaria) || 0) : 0;
 
     // ---- Conta os dias restantes (do dia seguinte à saída até o fim do mês) ----
+    // Usa a MESMA escala gerada (diasGerais) pros dois — ela já sabe lidar com
+    // folguista, 12x36 etc. corretamente pra dias futuros; o "isDiaDeFolga" sozinho
+    // não enxerga escala de folguista sem exceção pontual já lançada, e zerava o VR à toa.
     let diasRestantesVT = 0;
     let diasRestantesVR = 0;
     for (let dia = dUltimoDia.getDate() + 1; dia <= ultimoDiaDoMes; dia++) {
         const ddStr = String(dia).padStart(2, '0');
-        const iso = `${mesAno}-${ddStr}`;
         const sigla = diasGerais[ddStr];
+        const diaValido = !!sigla && sigla !== 'TR' && sigla !== 'AL' && sigla !== '-' && sigla !== 'AD' && sigla !== 'DES';
 
-        // VT: mesmo critério da tela de VT — conta todo dia que tem sigla válida (não TR/AL/-)
-        if (sigla && sigla !== 'TR' && sigla !== 'AL' && sigla !== '-') diasRestantesVT++;
-
-        // VR: mesmo critério usado na base de cálculo do VR — dia de trabalho normal (não folga, não AD/DES)
-        if (!window.isDiaDeFolga(colab, iso) && sigla !== 'AD' && sigla !== 'DES') diasRestantesVR++;
+        if (usaVT && diaValido) diasRestantesVT++;
+        if (usaVR && diaValido) diasRestantesVR++;
     }
 
     return {
@@ -70975,9 +70974,11 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
         unidade: unidadeReal,
         mesReferencia: mesAno,
         ultimoDia: dr.ultimo_dia,
+        usaVT: usaVT,
         diasRestantesVT: diasRestantesVT,
         valorDiarioVT: valorDiarioVT,
         descontoVT: diasRestantesVT * valorDiarioVT,
+        usaVR: usaVR,
         diasRestantesVR: diasRestantesVR,
         valorDiarioVR: valorDiarioVR,
         descontoVR: diasRestantesVR * valorDiarioVR,
@@ -71027,12 +71028,19 @@ window.abrirDescontoVTVRRescisao = async function(idColab) {
         if (r.semDesconto) {
             corpoHtml = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">A saída foi no último dia do mês (ou depois) — não sobrou dia sem uso pra descontar.</p>';
         } else {
+            const linhaVT = r.usaVT
+                ? ('    <span>' + r.diasRestantesVT + ' dia(s) × ' + window.formatarMoedaBRDescontoResc(r.valorDiarioVT) + '</span>')
+                : '    <span style="color:var(--cor-texto-secundario); font-style:italic;">Não usa VT</span>';
+            const linhaVR = r.usaVR
+                ? ('    <span>' + r.diasRestantesVR + ' dia(s) × ' + window.formatarMoedaBRDescontoResc(r.valorDiarioVR) + '</span>')
+                : '    <span style="color:var(--cor-texto-secundario); font-style:italic;">Sem regra de VR na unidade</span>';
+
             corpoHtml = ''
                 + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-bottom:16px;">Referente a <b>' + mesReferenciaFmt + '</b> — dias de ' + (r.ultimoDia ? r.ultimoDia.split(' ')[0] : '-') + ' (saída) até o fim do mês, que já foram pagos mas não vão ser usados.</p>'
                 + '<div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden; margin-bottom:12px;">'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--cor-borda); background:rgba(255,255,255,0.02);">'
                 + '    <span><i class="fa-solid fa-bus"></i> Vale Transporte</span>'
-                + '    <span>' + r.diasRestantesVT + ' dia(s) × ' + window.formatarMoedaBRDescontoResc(r.valorDiarioVT) + '</span>'
+                + linhaVT
                 + '  </div>'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; font-weight:bold; color:#dc3545;">'
                 + '    <span>Desconto VT</span><span>' + window.formatarMoedaBRDescontoResc(r.descontoVT) + '</span>'
@@ -71041,7 +71049,7 @@ window.abrirDescontoVTVRRescisao = async function(idColab) {
                 + '<div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden;">'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--cor-borda); background:rgba(255,255,255,0.02);">'
                 + '    <span><i class="fa-solid fa-utensils"></i> Vale Refeição</span>'
-                + '    <span>' + r.diasRestantesVR + ' dia(s) × ' + window.formatarMoedaBRDescontoResc(r.valorDiarioVR) + '</span>'
+                + linhaVR
                 + '  </div>'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; font-weight:bold; color:#dc3545;">'
                 + '    <span>Desconto VR</span><span>' + window.formatarMoedaBRDescontoResc(r.descontoVR) + '</span>'
