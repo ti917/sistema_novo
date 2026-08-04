@@ -38400,6 +38400,7 @@ window.calcularVRAgora = async function() {
                 abatimentos: abatimentosCalculado,
                 diasAPagar: diasAPagarCalculado,
                 beneficioExtraTexto: labelsBeneficiosExcel ? labelsBeneficiosExcel.substring(3) : '-', 
+                valorExtra: valorExtraTotal,
                 valorTotal: valorLiquidoFinal
             });
 
@@ -38506,11 +38507,16 @@ window.exportarExcelVR = async function() {
             colaboradores.forEach(c => {
                 somaTotalUnidade += c.valorTotal;
                 
+                // 👇 CORREÇÃO: Total Líquido agora é fórmula viva (Dias a Pagar x Diária + Benefício Extra
+                // em R$, somado como número fixo pois o extra não tem coluna própria na planilha).
+                // Assim, ao editar Dias Padrão/Retroativo/Abatimentos ou a Diária direto no Excel,
+                // tanto "Dias a Pagar" quanto "Total Líquido" recalculam sozinhos.
+                const valorExtraColab = Number(c.valorExtra) || 0;
                 const row = sheet.addRow([
                     c.nome, c.cpf, c.jornada, c.diaria, c.diasPadrao, c.retroativo, c.abatimentos,
                     { formula: `E${currentRow}+F${currentRow}-G${currentRow}`, result: c.diasAPagar },
                     c.beneficioExtraTexto,
-                    c.valorTotal // Não dá pra fazer formula direta no total se o extra for texto, então vai o valor bruto calculado.
+                    { formula: `H${currentRow}*D${currentRow}+${valorExtraColab}`, result: c.valorTotal }
                 ]);
 
                 row.getCell(4).numFmt = '"R$ "#,##0.00'; 
@@ -41762,35 +41768,51 @@ window.calcularVTAgora = async function() {
 
             // O cálculo vira proporcional se houver rescisão (em processo ou já efetivada)
             // OU se houver cancelamento de VT lançado na Alteração de Dados.
+            //
+            // 👇 CORREÇÃO: a janela do filtro é a APURAÇÃO, mas o crédito é usado no MÊS SEGUINTE
+            // (ver mesCreditoIniVT/nomeMesCreditoVT acima). Quem JÁ SAIU dentro da própria janela do
+            // filtro (dataUltimoDiaVT <= dF) não vai mais trabalhar no mês de crédito, então não deve
+            // receber VT nenhum — igual já acontece hoje com o cancelamento de VT. Só continua com
+            // apuração normal quem ainda está em Aviso Prévio (sai DEPOIS do fim do filtro), pois
+            // nesse caso ela ainda vai estar na empresa quando o crédito do mês seguinte for usado.
+            let vtZeradoPorRescisaoImediata = false;
             if (dataUltimoDiaVT) {
-                // O limite é o menor entre o fim do filtro e o último dia de trabalho
-                let limiteUso = new Date(dF);
-                limiteUso.setHours(23, 59, 59, 0);
-                if (dataUltimoDiaVT < limiteUso) limiteUso = dataUltimoDiaVT;
-                limitePagamentoVT = new Date(limiteUso);
-
-                diasBase = 0;
-                let dCalc = new Date(dI);
-
-                while (dCalc <= limiteUso) {
-                    const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
-                    const siglaDoDiaNaEscala = consolidados[colab.id]?.diasGerais?.[isoStr];
-
-                    // Iguala a regra do VR: AD e DES não existem para a contagem
-                    if (siglaDoDiaNaEscala !== 'AD' && siglaDoDiaNaEscala !== 'DES') {
-                        if (!window.isDiaDeFolga(colab, isoStr)) {
-                            diasBase++;
-                        }
-                    }
-                    dCalc.setDate(dCalc.getDate() + 1);
-                }
-
-                // Meio dia de fechamento, exatamente como no Vale Refeição
-                if (diasBase > 0) diasBase += 0.5;
-
                 const emProcesso = dataUltimoDiaVT > dF;
-                labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> ${emProcesso ? 'Aviso Prévio' : 'Rescisão'} (Proporcional${ultimoDiaBr ? ' - sai em ' + ultimoDiaBr : ''})</span>`;
-                situacaoExcel = `Rescisão Proporcional${ultimoDiaBr ? ' (sai em ' + ultimoDiaBr + ')' : ''}`;
+
+                if (!emProcesso) {
+                    vtZeradoPorRescisaoImediata = true;
+                    limitePagamentoVT = new Date(dataUltimoDiaVT);
+                    diasBase = 0;
+                    labelExtra = `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-ban"></i> Rescisão em ${ultimoDiaBr} — sem crédito para ${nomeMesCreditoVT} (não estará mais na empresa no mês de uso)</span>`;
+                    situacaoExcel = `Rescisão em ${ultimoDiaBr} — sem crédito para ${nomeMesCreditoVT} (valor zerado)`;
+                } else {
+                    // O limite é o fim do filtro, pois ela ainda estará na empresa no mês de crédito
+                    let limiteUso = new Date(dF);
+                    limiteUso.setHours(23, 59, 59, 0);
+                    limitePagamentoVT = new Date(limiteUso);
+
+                    diasBase = 0;
+                    let dCalc = new Date(dI);
+
+                    while (dCalc <= limiteUso) {
+                        const isoStr = `${dCalc.getFullYear()}-${String(dCalc.getMonth()+1).padStart(2,'0')}-${String(dCalc.getDate()).padStart(2,'0')}`;
+                        const siglaDoDiaNaEscala = consolidados[colab.id]?.diasGerais?.[isoStr];
+
+                        // Iguala a regra do VR: AD e DES não existem para a contagem
+                        if (siglaDoDiaNaEscala !== 'AD' && siglaDoDiaNaEscala !== 'DES') {
+                            if (!window.isDiaDeFolga(colab, isoStr)) {
+                                diasBase++;
+                            }
+                        }
+                        dCalc.setDate(dCalc.getDate() + 1);
+                    }
+
+                    // Meio dia de fechamento, exatamente como no Vale Refeição
+                    if (diasBase > 0) diasBase += 0.5;
+
+                    labelExtra = `<br><span style="color: #ff9800; font-size: 0.75rem; background: rgba(255, 152, 0, 0.1); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-clock"></i> Aviso Prévio (Proporcional${ultimoDiaBr ? ' - sai em ' + ultimoDiaBr : ''})</span>`;
+                    situacaoExcel = `Aviso Prévio Proporcional${ultimoDiaBr ? ' (sai em ' + ultimoDiaBr + ')' : ''}`;
+                }
             }
 
             // 👇 CÁLCULO DE RETROATIVO DE ADMISSÃO (Não interfere na Base) 👇
@@ -41890,6 +41912,14 @@ window.calcularVTAgora = async function() {
                 labelExtra = `<br><span style="color: #ff5252; font-size: 0.75rem; background: rgba(255, 82, 82, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-ban"></i> ${motivoZeroVT}</span>`
                     + `<br><span style="color: var(--cor-texto-secundario); font-size: 0.72rem; display: inline-block; margin-top: 4px;">Este filtro (${dI.toLocaleDateString('pt-BR')} a ${dF.toLocaleDateString('pt-BR')}) gera o crédito de <b>${nomeMesCreditoVT}</b>. Como o VT foi cancelado em ${dataCancelVTBr}, o colaborador não utilizará vale nesse mês — por isso o valor está zerado.</span>`;
                 situacaoExcel = motivoZeroVT;
+            }
+
+            // 👇 RESCISÃO JÁ EFETIVADA DENTRO DA JANELA APURADA → mesma lógica do cancelamento:
+            // zera tudo (o rótulo e a situação já foram definidos lá em cima, na apuração de datas).
+            if (vtZeradoPorRescisaoImediata) {
+                diasBase = 0;
+                retroativoCalculado = 0;
+                abatimentosCalculado = 0;
             }
 
             // Matemática Final Pura e Intocável
