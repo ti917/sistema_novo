@@ -18624,7 +18624,17 @@ window.corrigirFichaDevolvida = async function(idColab) {
     
     tratarNacionalidade('adm');
     if (adm.pais_nascimento === 'Brasil') {
-        if(tomSelectAdm) tomSelectAdm.setValue(adm.cidade_nascimento);
+        // 👇 A lista de cidades do IBGE carrega uma vez, de forma assíncrona, na abertura
+        // do sistema. Se a correção for aberta antes dela terminar de carregar (ou o
+        // TomSelect ainda não tiver sido criado), o setValue falhava silenciosamente e a
+        // Cidade de Nascimento sumia da ficha. Agora garante que a lista está pronta antes.
+        window.carregarCidadesIBGE().then(function() {
+            const tentarSetarCidadeNasc = function(tentativas) {
+                if (tomSelectAdm) { tomSelectAdm.setValue(adm.cidade_nascimento); return; }
+                if (tentativas > 0) setTimeout(function() { tentarSetarCidadeNasc(tentativas - 1); }, 200);
+            };
+            tentarSetarCidadeNasc(10);
+        });
     } else {
         document.getElementById('adm-cidade-nasc-ext').value = adm.cidade_nascimento || '';
     }
@@ -18644,7 +18654,7 @@ window.corrigirFichaDevolvida = async function(idColab) {
     // 👇 MÁGICA 3: Preenche o Endereço CORRETAMENTE sem chamar a API dos correios para não apagar o número!
     if (adm.cep) document.getElementById('adm-cep').value = adm.cep;
     
-    let eRua = '', eNum = '', eComp = '', eBairro = '';
+    let eRua = '', eNum = '', eComp = '', eBairro = '', eCidade = '';
     if (adm.endereco) {
         let partesEnd = adm.endereco.split(' - ');
         if (partesEnd.length > 0) {
@@ -18656,15 +18666,18 @@ window.corrigirFichaDevolvida = async function(idColab) {
             eComp = partesEnd[1];
             let pBairroCid = partesEnd[2].split(', ');
             eBairro = pBairroCid[0] || '';
+            eCidade = pBairroCid[1] || ''; // 👈 estava sendo descartado — Cidade/UF sumia na correção
         } else if (partesEnd.length === 2) {
             let pBairroCid = partesEnd[1].split(', ');
             eBairro = pBairroCid[0] || '';
+            eCidade = pBairroCid[1] || ''; // 👈 estava sendo descartado — Cidade/UF sumia na correção
         }
     }
     document.getElementById('adm-rua').value = eRua;
     document.getElementById('adm-numero').value = eNum;
     if(document.getElementById('adm-complemento')) document.getElementById('adm-complemento').value = eComp;
     document.getElementById('adm-bairro').value = eBairro;
+    if(document.getElementById('adm-cidade')) document.getElementById('adm-cidade').value = eCidade;
 
     // Banco e VT
     document.getElementById('adm-tem-santander').value = adm.banco?.tem_santander || 'Não';
@@ -23492,9 +23505,13 @@ if (temPis === 'Sim' && !document.getElementById('adm-pis').value) {
             const idCorrecao = btn.getAttribute('data-id-correcao');
 
             // Traz o ID, nome, status e os dados de quem já está no banco
+            // 👇 O CPF pode estar salvo em dois lugares (coluna "cpf" solta OU dentro de
+            // dados_admissao.cpf, dependendo de quando o cadastro foi feito) — por isso
+            // buscamos as duas colunas, senão a checagem de duplicidade deixava passar CPF
+            // repetido quando só existia na coluna solta.
             const { data: colabsExistentes, error: errBusca } = await supabaseClient
                 .from('perfis')
-                .select('id, nome, status, dados_admissao') 
+                .select('id, nome, status, cpf, dados_admissao') 
                 .eq('perfil', 'Colaborador');
 
             if (!errBusca && colabsExistentes) {
@@ -23513,7 +23530,9 @@ if (temPis === 'Sim' && !document.getElementById('adm-pis').value) {
                     }
 
                     // 👇 2. VERIFICAÇÃO DE DUPLICIDADE (CPF ou PIS) BLINDADA 👇
-                    const matchCPF = cpfInput && admCheck.cpf === cpfInput;
+                    // Confere o CPF nos dois lugares possíveis onde ele pode estar salvo.
+                    const cpfSalvo = admCheck.cpf || c.cpf || '';
+                    const matchCPF = cpfInput && cpfSalvo === cpfInput;
                     
                     // Só compara o PIS se ele existir e for diferente de "não possui"
                     const pisBanco = (admCheck.pis || '').toLowerCase() === 'não possui' ? '' : admCheck.pis;
@@ -23850,6 +23869,10 @@ if (erroDependente) {
                 data_envio: new Date().toISOString() 
             };
 
+           // 👇 VERIFICA SE É UMA CORREÇÃO DE FICHA DEVOLVIDA 👇
+            const idCorrecao = btn.getAttribute('data-id-correcao');
+            let idNovoColab = idCorrecao || crypto.randomUUID();
+
             if (document.getElementById('novo-documentos').files.length > 0) {
                 const empresaLimpa = formatarNomePasta(empresaFinal);
                 const unidadeLimpa = formatarNomePasta(unidadeFinal);
@@ -23857,11 +23880,17 @@ if (erroDependente) {
                 const caminhoBase = `${empresaLimpa}/${unidadeLimpa}/${nomeLimpo}/Admissoes`;
                 
                 jsonAdmissao.documentos = await subirDocumentos(caminhoBase, document.getElementById('novo-documentos').files);
+            } else if (idCorrecao) {
+                // 👇 CORREÇÃO DE FICHA DEVOLVIDA SEM ANEXAR ARQUIVO NOVO: o campo de arquivo
+                // sempre começa vazio (o navegador não deixa pré-preencher <input type=file>),
+                // então se o gestor não escolher nada de novo, isso NÃO pode significar "sem
+                // documento" — tem que manter os que já estavam anexados antes, senão eles
+                // desaparecem da ficha só porque ela voltou pra correção.
+                const { data: colabAntigoDocs } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idCorrecao).single();
+                if (colabAntigoDocs?.dados_admissao?.documentos) {
+                    jsonAdmissao.documentos = colabAntigoDocs.dados_admissao.documentos;
+                }
             }
-
-           // 👇 VERIFICA SE É UMA CORREÇÃO DE FICHA DEVOLVIDA 👇
-            const idCorrecao = btn.getAttribute('data-id-correcao');
-            let idNovoColab = idCorrecao || crypto.randomUUID();
 
             if (idCorrecao) {
                 // É UMA CORREÇÃO! Faz um Update e volta o status pra Ativo/Pendente
