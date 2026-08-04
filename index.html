@@ -70919,11 +70919,6 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
 
     const unidadeReal = (colab.unidade || '').split(',')[0].trim();
 
-    // Se a saída já é o último dia do mês (ou depois), não sobra nada pra descontar.
-    if (dUltimoDia.getDate() >= ultimoDiaDoMes) {
-        return { semDesconto: true, nome: colab.nome, mesReferencia: mesAno };
-    }
-
     const primeiroDiaMesStr = `${mesAno}-01`;
     const ultimoDiaMesStr = `${mesAno}-${String(ultimoDiaDoMes).padStart(2, '0')}`;
 
@@ -70934,14 +70929,29 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
         supabaseClient.from('config_vr').select('*'),
     ]);
 
-    // A escala normal PARA de gerar dias depois do último dia de trabalho (porque a
-    // pessoa realmente não está mais lá). Mas aqui é justamente o contrário: queremos
-    // saber os dias que ELA IA TRABALHAR se não tivesse saído, pra saber quanto já foi
-    // pago e não vai ser usado. Por isso geramos a escala com uma cópia SEM a rescisão.
+    // Geramos a escala DUAS vezes:
+    //  1) REAL (com a rescisão dela) — mostra 'AD' nos dias de folga do aviso prévio
+    //     antecipado e 'DES' nos dias depois do último dia.
+    //  2) HIPOTÉTICA (sem a rescisão) — mostra o que ela normalmente faria naquele dia
+    //     (trabalho, folga de escala etc.) se não tivesse saído.
+    // O desconto é: todo dia marcado como AD ou DES na escala REAL, que na escala
+    // HIPOTÉTICA seria um dia de trabalho — ou seja, dia que já foi pago mas não vai
+    // (ou não vai mais) ser usado, seja porque ela já saiu ou porque foi liberada
+    // antes por causa do aviso prévio.
     const colabSemRescisaoParaEscala = Object.assign({}, colab, { dados_rescisao: null });
-    const escGerada = algoritmoGeradorDeEscala([colabSemRescisaoParaEscala], mesAno, ausenciasDB || [], unidadeReal, [], feriasDB || []);
+    const [escGeradaReal, escGeradaHipotetica] = [
+        algoritmoGeradorDeEscala([colab], mesAno, ausenciasDB || [], unidadeReal, [], feriasDB || []),
+        algoritmoGeradorDeEscala([colabSemRescisaoParaEscala], mesAno, ausenciasDB || [], unidadeReal, [], feriasDB || []),
+    ];
+    const diasReais = {};
+    escGeradaReal.forEach(function(cEsc) {
+        if (cEsc.id_colaborador !== colab.id) return;
+        Object.keys(cEsc.dias).forEach(function(d) {
+            diasReais[String(d).padStart(2, '0')] = cEsc.dias[d].sigla;
+        });
+    });
     const diasGerais = {};
-    escGerada.forEach(function(cEsc) {
+    escGeradaHipotetica.forEach(function(cEsc) {
         if (cEsc.id_colaborador !== colab.id) return;
         Object.keys(cEsc.dias).forEach(function(d) {
             diasGerais[String(d).padStart(2, '0')] = cEsc.dias[d].sigla;
@@ -70985,14 +70995,16 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
     }
     const ehJornada12x36 = (jornadaVigenteResc.tipo || '12x36').toLowerCase().includes('12x36');
 
-    // ---- Conta os dias restantes (do dia seguinte à saída até o fim do mês) ----
-    // Usa a MESMA escala gerada (diasGerais) pros dois — ela já sabe lidar com
-    // folguista, 12x36 etc. corretamente pra dias futuros; o "isDiaDeFolga" sozinho
-    // não enxerga escala de folguista sem exceção pontual já lançada, e zerava o VR à toa.
+    // ---- Conta os dias a descontar: todo dia do mês marcado como AD (folga do aviso
+    // prévio antecipado) ou DES (depois do último dia) na escala REAL, que seria dia
+    // de trabalho na escala HIPOTÉTICA (se ela não tivesse saído/sido liberada).
     let diasRestantesVT = 0;
     let diasRestantesVR = 0;
-    for (let dia = dUltimoDia.getDate() + 1; dia <= ultimoDiaDoMes; dia++) {
+    for (let dia = 1; dia <= ultimoDiaDoMes; dia++) {
         const ddStr = String(dia).padStart(2, '0');
+        const siglaReal = diasReais[ddStr];
+        if (siglaReal !== 'AD' && siglaReal !== 'DES') continue; // ela ainda tava lá nesse dia, não desconta
+
         const sigla = diasGerais[ddStr];
         // 'F' = Folga (fim de semana de quem é 44h, ou dia de folga do 12x36/escala alternada) — não conta.
         // 'FRD' = Feriado — só não conta pra quem NÃO é 12x36 (mesma regra do VT/VR de produção).
@@ -71071,7 +71083,7 @@ window.abrirDescontoVTVRRescisao = async function(idColab) {
                 : '    <span style="color:var(--cor-texto-secundario); font-style:italic;">Sem regra de VR na unidade</span>';
 
             corpoHtml = ''
-                + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-bottom:16px;">Referente a <b>' + mesReferenciaFmt + '</b> — dias de ' + (r.ultimoDia ? r.ultimoDia.split(' ')[0] : '-') + ' (saída) até o fim do mês, que já foram pagos mas não vão ser usados.</p>'
+                + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-bottom:16px;">Referente a <b>' + mesReferenciaFmt + '</b> — dias em que ela já não vai comparecer (folga do aviso prévio antecipado e/ou depois do último dia, ' + (r.ultimoDia ? r.ultimoDia.split(' ')[0] : '-') + '), que já foram pagos mas não vão ser usados.</p>'
                 + '<div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden; margin-bottom:12px;">'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--cor-borda); background:rgba(255,255,255,0.02);">'
                 + '    <span><i class="fa-solid fa-bus"></i> Vale Transporte</span>'
