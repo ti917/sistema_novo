@@ -71244,16 +71244,17 @@ window.carregarCalendarioPontoWhatsapp = async function() {
 // =============================================================================
 // DESCONTO DE VT/VR NÃO UTILIZADO NA RESCISÃO
 // -----------------------------------------------------------------------------
-// Quando alguém sai no meio do mês, o VT/VR daquele mês já foi pago inteiro
-// (o crédito é liberado no começo do mês pra ser usado o mês todo). Esta conta
-// estima quantos dias sobraram sem uso: os dias do dia seguinte à saída até o
-// fim do mês (não trabalhados por ter saído) SOMADOS às faltas injustificadas
-// (FA) que ele teve dentro desse mesmo mês, ANTES de sair — porque nos dois
-// casos o crédito já tinha sido pago mas o dia não foi (e não vai ser) usado.
-// Ou seja: o colaborador só "usa de fato" o VT/VR até o ÚLTIMO DIA TRABALHADO,
-// descontando também qualquer falta no meio do caminho. Usa a MESMA escala e
-// tabela de preço que o VT/VR normal já usa — e multiplica pelo valor diário
-// de cada um.
+// O colaborador só "usa de fato" o VT/VR até o ÚLTIMO DIA TRABALHADO. Esta conta
+// soma dois tipos de dia pago-mas-não-usado dentro do mês da rescisão:
+//  1) Dias 'AD' — a folga da antecipação/redução de 7 dias do aviso prévio (ele
+//     já não precisa comparecer, mas ainda dentro do prazo formal do contrato).
+//  2) Faltas e ausências (FA, ATM, AC, ATC, ATOB, AF, LDM) que ele teve dentro
+//     desse mesmo mês, ANTES de sair.
+// Os dias 'DES' (depois do ÚLTIMO DIA formal — contrato já encerrado) NÃO entram
+// nessa conta: a partir do último dia o colaborador já está oficialmente fora,
+// e o que acontece depois disso não faz parte do desconto de VT/VR da rescisão.
+// Usa a MESMA escala e tabela de preço que o VT/VR normal já usa — e multiplica
+// pelo valor diário de cada um.
 // =============================================================================
 window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
     const { data: colab, error } = await supabaseClient
@@ -71290,13 +71291,14 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
 
     // Geramos a escala DUAS vezes:
     //  1) REAL (com a rescisão dela) — mostra 'AD' nos dias de folga do aviso prévio
-    //     antecipado e 'DES' nos dias depois do último dia.
+    //     antecipado e 'DES' nos dias depois do último dia (formal, fora da empresa).
     //  2) HIPOTÉTICA (sem a rescisão) — mostra o que ela normalmente faria naquele dia
     //     (trabalho, folga de escala etc.) se não tivesse saído.
-    // O desconto é: todo dia marcado como AD ou DES na escala REAL, que na escala
-    // HIPOTÉTICA seria um dia de trabalho — ou seja, dia que já foi pago mas não vai
-    // (ou não vai mais) ser usado, seja porque ela já saiu ou porque foi liberada
-    // antes por causa do aviso prévio.
+    // O desconto é: todo dia marcado como AD na escala REAL, que na escala HIPOTÉTICA
+    // seria um dia de trabalho — ou seja, dia que já foi pago mas não vai ser usado
+    // porque ela foi liberada antes por causa do aviso prévio. Os dias 'DES' (depois
+    // do último dia formal) NÃO entram — a partir dali ela já está oficialmente fora
+    // da empresa e não faz parte do desconto de VT/VR da rescisão.
     const colabSemRescisaoParaEscala = Object.assign({}, colab, { dados_rescisao: null });
     const [escGeradaReal, escGeradaHipotetica] = [
         algoritmoGeradorDeEscala([colab], mesAno, ausenciasDB || [], unidadeReal, [], feriasDB || []),
@@ -71355,19 +71357,18 @@ window.calcularDescontoVTVRPorRescisao = async function(colaboradorId) {
     const ehJornada12x36 = (jornadaVigenteResc.tipo || '12x36').toLowerCase().includes('12x36');
 
     // ---- Conta os dias a descontar: todo dia do mês marcado como AD (folga do aviso
-    // prévio antecipado) ou DES (depois do último dia) na escala REAL, que seria dia
-    // de trabalho na escala HIPOTÉTICA (se ela não tivesse saído/sido liberada).
+    // prévio antecipado) na escala REAL, que seria dia de trabalho na escala HIPOTÉTICA
+    // (se ela não tivesse sido liberada), SOMADO às ausências (FA, ATM, AC, ATC, ATOB, AF,
+    // LDM — MESMA lista de códigos que a Calculadora de VR usa, CODIGOS_ABATIMENTO) que ela
+    // teve dentro do mês, antes de sair. Os dias 'DES' (depois do último dia formal, já fora
+    // da empresa) NÃO entram nessa conta — só o que ainda estava dentro do vínculo/contrato.
     let diasRestantesVT = 0;
     let diasRestantesVR = 0;
-    // Conta como "pago e não usado": dias depois da saída (AD/DES) OU qualquer ausência que já é
-    // abatimento no VT/VR normal (FA, ATM, AC, ATC, ATOB, AF, LDM) dentro do mês, antes de sair —
-    // MESMA lista de códigos que a Calculadora de VR usa (CODIGOS_ABATIMENTO), só que aqui aplicada
-    // também aos dias anteriores à saída, e não só aos posteriores.
     const CODIGOS_ABATIMENTO_PRE_SAIDA = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM'];
     for (let dia = 1; dia <= ultimoDiaDoMes; dia++) {
         const ddStr = String(dia).padStart(2, '0');
         const siglaReal = diasReais[ddStr];
-        if (siglaReal !== 'AD' && siglaReal !== 'DES' && !CODIGOS_ABATIMENTO_PRE_SAIDA.includes(siglaReal)) continue; // ela trabalhou/usou o benefício nesse dia, não desconta
+        if (siglaReal !== 'AD' && !CODIGOS_ABATIMENTO_PRE_SAIDA.includes(siglaReal)) continue; // ela trabalhou/usou o benefício nesse dia (ou já tá fora/DES), não desconta
 
         const sigla = diasGerais[ddStr];
         // 'F' = Folga (fim de semana de quem é 44h, ou dia de folga do 12x36/escala alternada) — não conta.
@@ -71447,7 +71448,7 @@ window.abrirDescontoVTVRRescisao = async function(idColab) {
                 : '    <span style="color:var(--cor-texto-secundario); font-style:italic;">Sem regra de VR na unidade</span>';
 
             corpoHtml = ''
-                + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-bottom:16px;">Referente a <b>' + mesReferenciaFmt + '</b> — considerando o último dia trabalhado (' + (r.ultimoDia ? r.ultimoDia.split(' ')[0] : '-') + '): dias após a saída (folga do aviso prévio antecipado e/ou depois do último dia) + faltas e ausências (FA, ATM, AC, ATC, ATOB, AF, LDM) dentro do mês, que já foram pagos mas não foram usados.</p>'
+                + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-bottom:16px;">Referente a <b>' + mesReferenciaFmt + '</b> — considerando o último dia trabalhado (' + (r.ultimoDia ? r.ultimoDia.split(' ')[0] : '-') + '): dias de folga da antecipação/redução de 7 dias do aviso prévio + faltas e ausências (FA, ATM, AC, ATC, ATOB, AF, LDM) dentro do mês, que já foram pagos mas não foram usados. Dias após o último dia formal (já fora da empresa) não entram nessa conta.</p>'
                 + '<div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden; margin-bottom:12px;">'
                 + '  <div style="display:flex; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--cor-borda); background:rgba(255,255,255,0.02);">'
                 + '    <span><i class="fa-solid fa-bus"></i> Vale Transporte</span>'
