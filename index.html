@@ -19076,13 +19076,49 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
         let limites = {};
         try { limites = JSON.parse(uniData.limites_cargos); } catch(e){ return; }
 
-        // 2. Busca quantos ativos e de aviso tem lá
+        // 2. Busca os colaboradores da unidade — MESMA REGRA do painel de BI (Lotação de Unidades):
+        //    quem tá cumprindo aviso/rescisão em andamento e quem tá afastado (INSS/atestado longo/licença)
+        //    NÃO ocupa vaga na lotação. Só conta quem tá realmente ativo no dia a dia (ou aguardando ASO).
         const { data: colabsDB } = await supabaseClient.from('perfis')
-            .select('nome, status, dados_admissao, dados_rescisao')
+            .select('id, nome, status, status_aprovacao, dados_admissao, dados_rescisao')
             .eq('perfil', 'Colaborador')
-            .eq('unidade', nomeUnidade);
-            
-        const colabsReais = window.filtrarAtivosE_AvisoPrevio(colabsDB || []);
+            .eq('unidade', nomeUnidade)
+            .in('status', ['Ativo', 'Aguardando ASO']);
+
+        const hojeIsoLot = new Date().toISOString().split('T')[0];
+        const idsColabsLot = (colabsDB || []).map(c => c.id).filter(Boolean);
+
+        // Busca só os afastamentos "de verdade" (INSS, atestado médico longo, licença maternidade/paternidade)
+        // vigentes hoje — mesma lista de siglas do painel de BI.
+        let mapaAfastamentosLot = {};
+        if (idsColabsLot.length > 0) {
+            const { data: ausenciasLot } = await supabaseClient.from('ausencias')
+                .select('colaborador_id, sigla')
+                .eq('status', 'Aprovado')
+                .in('colaborador_id', idsColabsLot)
+                .lte('data_inicio', hojeIsoLot)
+                .gte('data_fim', hojeIsoLot);
+
+            (ausenciasLot || []).forEach(a => {
+                if (a.sigla === 'AF' || a.sigla === 'ATM' || a.sigla === 'LDM' || a.sigla === 'LDP') {
+                    mapaAfastamentosLot[a.colaborador_id] = a.sigla;
+                }
+            });
+        }
+
+        const hojeLot = new Date(); hojeLot.setHours(0,0,0,0);
+
+        const colabsReais = (colabsDB || []).filter(c => {
+            // Cumprindo aviso / rescisão em andamento — não ocupa vaga
+            const emProcessoRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+            if (emProcessoRescisao) return false;
+
+            // Afastado de verdade (INSS/atestado longo/licença) — não ocupa vaga
+            if (c.status === 'Ativo' && mapaAfastamentosLot[c.id]) return false;
+
+            // Ativo normal ou Aguardando ASO conta normalmente
+            return true;
+        });
 
         // 3. Faz a contagem
         let lotacaoAtual = {};
