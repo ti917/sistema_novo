@@ -4640,9 +4640,14 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                 <p style="font-size: 0.82rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
                     Horário de entrada/saída de cada colaborador vem da Jornada já cadastrada na Admissão. Aqui você configura só o horário padrão do intervalo de refeição de cada um — usado pra saber quando ele deveria bater "Ida Refeição" e "Volta Refeição". Qualquer alteração fica registrada no Histórico de Jornadas do colaborador, junto com o resto do histórico de escala.
                 </p>
-                <div class="input-wrapper" style="max-width: 400px; margin-bottom: 15px;">
-                    <i class="fa-solid fa-search"></i>
-                    <input type="text" id="busca-ponto-horarios" placeholder="Buscar colaborador..." oninput="window.renderizarListaConfigHorarios()">
+                <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom: 15px;">
+                    <div class="input-wrapper" style="max-width: 400px; flex: 1; margin-bottom: 0;">
+                        <i class="fa-solid fa-search"></i>
+                        <input type="text" id="busca-ponto-horarios" placeholder="Buscar colaborador..." oninput="window.renderizarListaConfigHorarios()">
+                    </div>
+                    <button type="button" class="btn-secondary" style="border-color:#ffb300; color:#ffb300; padding:10px 14px; font-size:0.82rem; white-space:nowrap;" onclick="window.preencherRefeicaoPadraoTodos()">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Preencher automaticamente quem está vazio
+                    </button>
                 </div>
                 <div id="lista-config-horarios-ponto" style="max-height: 440px; overflow-y: auto; border: 1px solid var(--cor-borda); border-radius: 10px;">
                     <p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i></p>
@@ -11556,13 +11561,16 @@ window.removerAcentos = function(texto) {
     }
     
     try {
-        const [resPerfil, resPonto, resPlantao, resNotifs, resAusencias, resFTs] = await Promise.all([
+        const [resPerfil, resPonto, resPlantao, resNotifs, resAusencias, resFTs, resCartaoPonto] = await Promise.all([
             (sigla === 'DES' || sigla === 'AD') ? supabaseClient.from('perfis').select('unidade, dados_rescisao').eq('id', idColab).single() : Promise.resolve({data: null}),
             supabaseClient.from('ocorrencias_ponto').select('*').eq('colaborador_id', idColab).eq('data_falha', dataIso).maybeSingle(),
             supabaseClient.from('ocorrencias_plantao').select('*').eq('colaborador_id', idColab).eq('data_ocorrencia', dataIso).maybeSingle(),
             supabaseClient.from('notificacoes').select('*').eq('colaborador_id', idColab),
             supabaseClient.from('ausencias').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').lte('data_inicio', dataIso).gte('data_fim', dataIso).order('created_at', {ascending: false}).limit(1),
-            supabaseClient.from('horas_extras_ft').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').lte('data_inicio', dataIso).gte('data_fim', dataIso).order('created_at', {ascending: false}).limit(1)
+            supabaseClient.from('horas_extras_ft').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado').lte('data_inicio', dataIso).gte('data_fim', dataIso).order('created_at', {ascending: false}).limit(1),
+            // 👇 NOVO: pontos batidos pelo app (via WhatsApp) nesse dia, pra mostrar igual ao
+            // Cartão do turno iniciado, direto aqui no detalhe da escala.
+            supabaseClient.from('pontos_diarios_whatsapp').select('*').eq('colaborador_id', idColab).eq('data', dataIso).maybeSingle()
         ]);
 
         const notifsDia = resNotifs.data || [];
@@ -11772,6 +11780,25 @@ window.removerAcentos = function(texto) {
             <div style="font-size: 0.9rem; color: var(--cor-texto-principal); line-height: 1.4;">
                 ${obsHPlus}
             </div>
+        </div>`;
+    }
+
+    // 👇 NOVO: mostra os pontos batidos pelo app (se tiver) igual ao Cartão do turno iniciado
+    const cartaoPontoDia = resCartaoPonto && resCartaoPonto.data;
+    if (cartaoPontoDia) {
+        window.pontoCartoesPorId = window.pontoCartoesPorId || {};
+        window.pontoCartoesPorId[cartaoPontoDia.id] = cartaoPontoDia;
+        conteudoExtra += `
+        <div style="margin-top: 15px;">
+            <strong style="color: #ffb300; font-size: 0.85rem; letter-spacing: 0.5px; display: block; margin-bottom: 8px;">
+                <i class="fa-solid fa-clock"></i> Pontos Batidos pelo App
+            </strong>
+            <div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden;">${window.renderizarLinhasPontosBatidos(cartaoPontoDia)}</div>
+        </div>`;
+    } else if (sigla !== 'F' && sigla !== 'FE' && sigla !== 'FP' && sigla !== 'FER' && sigla !== 'FRD' && sigla !== 'PRÉ-ADMISSÃO' && sigla !== '-' && sigla !== 'DES') {
+        conteudoExtra += `
+        <div style="margin-top: 15px; background: rgba(220,53,69,0.08); padding: 12px 15px; border-radius: 8px; border-left: 4px solid #dc3545;">
+            <span style="color: #f5a3ac; font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> Nenhum ponto batido pelo app nesse dia.</span>
         </div>`;
     }
 
@@ -28346,6 +28373,8 @@ window.editarAdmissaoAdmin = async function(idColab) {
         if(m) { entPadrao = m[1]; saiPadrao = m[2]; }
         statusIni = jornadaVigente.status_inicio || 'Trabalho';
     }
+    // 👇 NOVO: Refeição vigente — pra não sumir quando essa tela salvar uma nova jornada
+    const refeicaoAtual = jornadaVigente.refeicao || { inicio: '', fim: '' };
 
     // --- ENGENHARIA REVERSA DO ENDEREÇO ---
     let eRua = '', eNum = '', eComp = '', eBairro = '', eCidade = '';
@@ -28636,6 +28665,18 @@ window.editarAdmissaoAdmin = async function(idColab) {
                     <div id="edit-adm-box-semanal" class="box-interior ${tipoJornadaAtual === '12x36' ? 'hidden' : ''}" style="border-color: var(--cor-acento); margin-top: 15px;">
                         <h5 style="color: var(--cor-acento); margin-bottom: 5px;"><i class="fa-solid fa-wand-magic-sparkles"></i> Horários da Semana</h5>
                         <div id="edit-adm-lista-semana-grid"></div>
+                    </div>
+
+                    <div class="form-row" style="margin-top: 15px;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label><i class="fa-solid fa-utensils"></i> Horário de Refeição (opcional)</label>
+                            <div class="input-wrapper" style="display: flex; align-items: center; gap: 5px;">
+                                <input type="text" id="edit-adm-refeicao-inicio" value="${refeicaoAtual.inicio || ''}" placeholder="--:--" readonly onclick="abrirTimePicker(this)" style="cursor: pointer; text-align: center; padding-left: 15px;" onchange="window.forcarExibicaoVigencia();">
+                                <span style="color:var(--cor-texto-secundario);">às</span>
+                                <input type="text" id="edit-adm-refeicao-fim" value="${refeicaoAtual.fim || ''}" placeholder="--:--" readonly onclick="abrirTimePicker(this)" style="cursor: pointer; text-align: center; padding-left: 15px;" onchange="window.forcarExibicaoVigencia();">
+                            </div>
+                            <small style="color: var(--cor-texto-secundario); display: block; margin-top: 5px;">Também pode ser configurado em Controle de Ponto → Configurar Horários. Fica salvo junto com a jornada, não some se deixar em branco aqui.</small>
+                        </div>
                     </div>
 
                     <div id="box-data-transferencia" class="hidden" style="background: rgba(255, 193, 7, 0.1); padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107; margin-top: 15px;">
@@ -28941,18 +28982,30 @@ window.editarAdmissaoAdmin = async function(idColab) {
             });
             novaJornadaEmpacotada.escala = escalaSemanalObj;
         }
+        // 👇 NOVO: Captura o horário de refeição da própria tela (se preenchido); senão,
+        // mantém o que já estava vigente — nunca deixa a jornada nova "esquecer" a refeição
+        // configurada, seja pela Admissão ou por Controle de Ponto → Configurar Horários.
+        const refInicioForm = document.getElementById('edit-adm-refeicao-inicio').value;
+        const refFimForm = document.getElementById('edit-adm-refeicao-fim').value;
+        if (refInicioForm && refFimForm) {
+            novaJornadaEmpacotada.refeicao = { inicio: refInicioForm, fim: refFimForm };
+        } else if (jornadaVigente.refeicao) {
+            novaJornadaEmpacotada.refeicao = jornadaVigente.refeicao;
+        }
 
         const jsonVelhoJor = JSON.stringify({ 
             tipo: jornadaVigente.tipo || '12x36', 
             horario: jornadaVigente.horario || '06:00 às 18:00', 
             status_inicio: jornadaVigente.status_inicio || 'Trabalho',
-            escala: jornadaVigente.escala || {}
+            escala: jornadaVigente.escala || {},
+            refeicao: jornadaVigente.refeicao || null
         });
         const jsonNovoJor = JSON.stringify({ 
             tipo: novaJornadaEmpacotada.tipo, 
             horario: novaJornadaEmpacotada.horario, 
             status_inicio: novaJornadaEmpacotada.status_inicio,
-            escala: novaJornadaEmpacotada.escala || {}
+            escala: novaJornadaEmpacotada.escala || {},
+            refeicao: novaJornadaEmpacotada.refeicao || null
         });
         
         let mudouJornada = (jsonVelhoJor !== jsonNovoJor);
@@ -29019,6 +29072,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
                     adm.jornada.horario = novaJornadaEmpacotada.horario;
                     adm.jornada.status_inicio = novaJornadaEmpacotada.status_inicio;
                     adm.jornada.escala = novaJornadaEmpacotada.escala;
+                    adm.jornada.refeicao = novaJornadaEmpacotada.refeicao || adm.jornada.refeicao;
                 }
             }
         }
@@ -71239,10 +71293,9 @@ window.listarBatimentosPontoWhatsapp = async function() {
 // -----------------------------------------------------------------------
 // MODAL DE DETALHES — data e hora exata de cada ponto do cartão do dia
 // -----------------------------------------------------------------------
-window.abrirDetalhesPontoDia = function(idCartao) {
-    const b = window.pontoCartoesPorId[idCartao];
-    if (!b) { mostrarAlerta('Não encontrei os detalhes desse ponto. Atualiza a lista e tenta de novo.', 'erro'); return; }
-
+// Monta as 4 linhas (entrada/ida/volta/saída) de um cartão de ponto batido pelo app —
+// reaproveitado tanto no modal "Cartão do turno" quanto no detalhe do dia da escala.
+window.renderizarLinhasPontosBatidos = function(b) {
     const dataCartaoFmt = b.data ? new Date(b.data + 'T12:00:00').toLocaleDateString('pt-BR') : '-';
 
     const campos = [
@@ -71252,7 +71305,7 @@ window.abrirDetalhesPontoDia = function(idCartao) {
         { campo: 'saida', rotulo: '🔴 Saída', hora: b.saida_hora, lat: b.saida_lat, lng: b.saida_lng, foto: b.saida_foto },
     ];
 
-    const linhasHtml = campos.map(function(c) {
+    return campos.map(function(c) {
         if (!c.hora) {
             return '<div style="display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid var(--cor-borda);">'
                 + '<span style="font-weight:bold;">' + c.rotulo + '</span>'
@@ -71289,6 +71342,14 @@ window.abrirDetalhesPontoDia = function(idCartao) {
             + ((linkMapa || botaoFoto) ? '<div style="margin-top:6px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">' + linkMapa + botaoFoto + '</div>' : '')
             + '</div>';
     }).join('');
+};
+
+window.abrirDetalhesPontoDia = function(idCartao) {
+    const b = window.pontoCartoesPorId[idCartao];
+    if (!b) { mostrarAlerta('Não encontrei os detalhes desse ponto. Atualiza a lista e tenta de novo.', 'erro'); return; }
+
+    const dataCartaoFmt = b.data ? new Date(b.data + 'T12:00:00').toLocaleDateString('pt-BR') : '-';
+    const linhasHtml = window.renderizarLinhasPontosBatidos(b);
 
     const modalHtml = '<div id="modal-detalhes-ponto-whatsapp" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">'
         + '<div class="glass-card" style="width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; border: 1px solid #ffb300; position: relative;">'
@@ -71439,6 +71500,94 @@ window.sugerirFimRefeicao = function() {
     const hFim = String(Math.floor(totalMin / 60)).padStart(2, '0');
     const mFim = String(totalMin % 60).padStart(2, '0');
     fimEl.value = hFim + ':' + mFim;
+};
+
+// Calcula um horário padrão de 1h de refeição no MEIO do turno (ex.: turno 18:00 às 06:00
+// -> refeição sugerida 00:00 às 01:00; turno 06:00 às 18:00 -> 12:00 às 13:00). Pra jornada
+// semanal (44h), usa o primeiro dia de trabalho encontrado na grade como referência — o
+// sistema hoje só guarda UM horário de refeição por colaborador, não um por dia da semana.
+window.calcularRefeicaoPadrao = function(jorVigente) {
+    let horarioBase = null;
+    if (jorVigente.tipo === '12x36') {
+        horarioBase = jorVigente.horario;
+    } else if (jorVigente.escala) {
+        const diaTrabalho = Object.values(jorVigente.escala).find(d => d && d.status !== 'Folga' && d.horario && d.horario !== 'Folga');
+        if (diaTrabalho) horarioBase = diaTrabalho.horario;
+    }
+    if (!horarioBase) return null;
+    const m = horarioBase.match(/(\d{2}):(\d{2})\s*às\s*(\d{2}):(\d{2})/);
+    if (!m) return null;
+
+    const entMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    let saiMin = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+    if (saiMin <= entMin) saiMin += 24 * 60; // turno vira o dia
+
+    const duracao = saiMin - entMin;
+    let meioMin = Math.round((entMin + duracao / 2) / 60) * 60; // arredonda pra hora cheia
+    meioMin = meioMin % (24 * 60);
+    const fimMin = (meioMin + 60) % (24 * 60);
+
+    const paraHHMM = (min) => String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
+    return { inicio: paraHHMM(meioMin), fim: paraHHMM(fimMin) };
+};
+
+// Preenche 1h de refeição padrão (no meio do turno) pra todo colaborador da lista atual que
+// ainda estiver sem nenhum horário de refeição configurado. Não mexe em quem já tem algo
+// configurado — só completa quem está em branco.
+window.preencherRefeicaoPadraoTodos = async function() {
+    const todos = window.pontoColabsHorariosGlobais || [];
+    const semRefeicao = todos.filter(function(c) {
+        const adm = c.dados_admissao || {};
+        const jorVigente = window.obterJornadaVigente(adm.jornada || {});
+        return !(jorVigente.refeicao && jorVigente.refeicao.inicio && jorVigente.refeicao.fim);
+    });
+
+    if (semRefeicao.length === 0) {
+        return mostrarAlerta('Todo mundo dessa lista já tem horário de refeição configurado.', 'sucesso');
+    }
+
+    const confirmou = await window.mostrarConfirmacao(
+        semRefeicao.length + ' colaborador(es) sem horário de refeição configurado. Vou sugerir 1h no meio do turno de cada um (ex.: turno 18h-06h vira refeição 00h-01h). Isso não muda quem já tem refeição configurada. Quer continuar?',
+        'Preencher automaticamente'
+    );
+    if (!confirmou) return;
+
+    let sucesso = 0, semJornada = 0, erro = 0;
+
+    for (const c of semRefeicao) {
+        try {
+            const adm = c.dados_admissao || {};
+            if (!adm.jornada) { semJornada++; continue; }
+
+            const jorVigente = window.obterJornadaVigente(adm.jornada);
+            const sugestao = window.calcularRefeicaoPadrao(jorVigente);
+            if (!sugestao) { semJornada++; continue; }
+
+            // Se a jornada vigente vier de uma entrada específica do histórico, atualiza ESSA
+            // entrada (senão o histórico continuaria "vencendo" e escondendo o valor da raiz).
+            // Senão, escreve direto na raiz da jornada.
+            if (jorVigente.data_inicio && adm.jornada.historico_alteracoes) {
+                const entrada = adm.jornada.historico_alteracoes.find(h => h.data_inicio === jorVigente.data_inicio);
+                if (entrada) entrada.refeicao = sugestao;
+                else adm.jornada.refeicao = sugestao;
+            } else {
+                adm.jornada.refeicao = sugestao;
+            }
+
+            const { error: erroUpdate } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', c.id);
+            if (erroUpdate) throw erroUpdate;
+            sucesso++;
+        } catch (e) {
+            erro++;
+        }
+    }
+
+    let resumo = sucesso + ' colaborador(es) atualizado(s) com sucesso.';
+    if (semJornada > 0) resumo += ' ' + semJornada + ' não têm jornada/horário cadastrado ainda, então não deu pra sugerir nada (precisa configurar a Admissão primeiro).';
+    if (erro > 0) resumo += ' ' + erro + ' deram erro ao salvar.';
+    mostrarAlerta(resumo, erro > 0 ? 'aviso' : 'sucesso');
+
+    window.carregarConfigHorariosPonto();
 };
 
 window.salvarConfigRefeicao = async function(idColab) {
