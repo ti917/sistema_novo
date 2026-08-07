@@ -71750,7 +71750,7 @@ window.reclassificarCampoPonto = async function(idCartao, campoOrigem, campoDest
 // de um cartão de ponto com base no horário da jornada vigente naquele dia. Reaproveitada
 // tanto pela correção individual (um dia) quanto pela correção em massa (o mês inteiro).
 window.calcularCorrecaoAutomaticaPonto = function(b, perfilColab) {
-    const resultadoVazio = { patch: null, motivo: null, resumoCampos: [], horarioTexto: null };
+    const resultadoVazio = { patch: null, motivo: null, resumoCampos: [], horarioTexto: null, foraDoDia: [] };
     const camposOrdem = ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'];
     const temAlgumaBatida = camposOrdem.some(function(c) { return !!b[c + '_hora']; });
     if (!temAlgumaBatida) return Object.assign({}, resultadoVazio, { motivo: 'sem_batida' });
@@ -71791,12 +71791,23 @@ window.calcularCorrecaoAutomaticaPonto = function(b, perfilColab) {
     const dadosReal = {};
     const camposForaDoDia = new Set();
     const camposJaSinteticos = new Set();
+    const foraDoDiaDetalhes = [];
     camposOrdem.forEach(function(c) {
         const hora = b[c + '_hora'];
         if (!hora) return;
         const dataDoPunch = window.dataSPPontoWhatsapp(hora);
         const mesmoTurno = dataDoPunch === b.data || (viraDiaNoturno && dataDoPunch === diaSeguinteStr);
-        if (!mesmoTurno) { camposForaDoDia.add(c); return; }
+        if (!mesmoTurno) {
+            camposForaDoDia.add(c);
+            foraDoDiaDetalhes.push({
+                campo: c, hora: hora,
+                lat: b[c + '_lat'] != null ? b[c + '_lat'] : null,
+                lng: b[c + '_lng'] != null ? b[c + '_lng'] : null,
+                foto: b[c + '_foto'] || null,
+                dataReal: dataDoPunch,
+            });
+            return;
+        }
         // Valor já gerado automaticamente numa correção anterior (sem GPS nem foto,
         // as três colunas de rastro zeradas ao mesmo tempo) não é uma batida real do
         // colaborador — não pode ser tratado como candidato pra reclassificação/troca
@@ -71887,13 +71898,13 @@ window.calcularCorrecaoAutomaticaPonto = function(b, perfilColab) {
         });
     });
 
-    if (!houveMudanca) return Object.assign({}, resultadoVazio, { motivo: 'ja_ok' });
+    if (!houveMudanca) return Object.assign({}, resultadoVazio, { motivo: 'ja_ok', foraDoDia: foraDoDiaDetalhes });
 
     patch.valores_originais = valoresOriginais;
     patch.historico_edicoes = historico;
 
     const resumoCampos = camposOrdem.filter(function(c) { return patch[c + '_hora'] !== undefined; }).map(function(c) { return window.NOMES_CAMPOS_PONTO[c]; });
-    return { patch: patch, motivo: null, resumoCampos: resumoCampos, horarioTexto: window.obterHorarioEsperadoParaData(jornadaVigente, b.data) };
+    return { patch: patch, motivo: null, resumoCampos: resumoCampos, horarioTexto: window.obterHorarioEsperadoParaData(jornadaVigente, b.data), foraDoDia: foraDoDiaDetalhes };
 };
 
 window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
@@ -71924,6 +71935,30 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
     }
 };
 
+// Dado uma batida real que caiu fora do dia do cartão de origem (dataReal !=
+// b.data) e não é rollover noturno legítimo, acha o melhor campo VAZIO no cartão
+// do dia de destino pra receber ela — usando o horário esperado da jornada NAQUELE
+// dia (esperadoDestino). Só considera campos ainda vazios no destino, pra nunca
+// sobrescrever uma batida real que já esteja lá. Retorna o nome do campo (string)
+// ou null se não achar destino seguro (ex: todos os campos do dia já preenchidos).
+window.calcularAlvoMigracaoParaOutroDia = function(item, cartaoDestino, esperadoDestino) {
+    const camposOrdem = ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'];
+    const partes = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(item.hora));
+    const hh = parseInt(partes.find(function(p) { return p.type === 'hour'; }).value);
+    const mm = parseInt(partes.find(function(p) { return p.type === 'minute'; }).value);
+    const minutoReal = hh * 60 + mm;
+
+    let melhorCampo = null, melhorDist = Infinity;
+    camposOrdem.forEach(function(c) {
+        if (esperadoDestino[c] == null) return;
+        if (cartaoDestino && cartaoDestino[c + '_hora']) return; // já ocupado no dia destino, não sobrescreve
+        const diff = Math.abs(minutoReal - esperadoDestino[c]);
+        const dist = Math.min(diff, 1440 - diff);
+        if (dist < melhorDist) { melhorDist = dist; melhorCampo = c; }
+    });
+    return melhorCampo;
+};
+
 // Corrige TODOS os dias do mês visível no calendário de uma vez só, pro colaborador
 // selecionado — reaproveita a mesma lógica dia a dia, só que em lote com 1 confirmação.
 window.corrigirPontosDoMesAutomatico = async function() {
@@ -71942,25 +71977,52 @@ window.corrigirPontosDoMesAutomatico = async function() {
 
     const perfilColab = await window.obterPerfilPontoCache(estado.colaboradorId);
     if (!perfilColab) { mostrarAlerta('Não consegui carregar o perfil do colaborador.', 'erro'); return; }
+    const jor = perfilColab.dados_admissao && perfilColab.dados_admissao.jornada;
 
     const pendentes = [];
+    const migracoes = [];
     let semHorario = 0;
     cartoes.forEach(function(b) {
         const resultado = window.calcularCorrecaoAutomaticaPonto(b, perfilColab);
         if (resultado.patch) pendentes.push({ b: b, patch: resultado.patch });
         else if (resultado.motivo === 'sem_horario') semHorario++;
+
+        // Batida presa fora do dia do cartão: se o colaborador NÃO é noturno (a
+        // jornada do dia de origem não vira o dia), essa batida não é um rollover
+        // legítimo — é uma batida real do dia seguinte que ficou colada no cartão
+        // errado. Move ela pro cartão do dia certo (criando o cartão se precisar),
+        // em vez de só deixar travada e sem sentido no cartão de origem.
+        (resultado.foraDoDia || []).forEach(function(item) {
+            if (item.dataReal <= b.data) return; // só migra pra frente (dia seguinte)
+            const jornadaVigenteOrigem = window.obterJornadaVigenteParaData(jor, b.data);
+            const esperadoOrigem = window.extrairMinutosEsperadosDia(jornadaVigenteOrigem, b.data);
+            const viraDiaNoturnoOrigem = esperadoOrigem.entrada != null && esperadoOrigem.saida != null && esperadoOrigem.saida < esperadoOrigem.entrada;
+            if (viraDiaNoturnoOrigem) return; // rollover noturno legítimo, não mexe
+
+            const jornadaVigenteDestino = window.obterJornadaVigenteParaData(jor, item.dataReal);
+            const esperadoDestino = window.extrairMinutosEsperadosDia(jornadaVigenteDestino, item.dataReal);
+            if (esperadoDestino.entrada == null && esperadoDestino.saida == null) return; // sem jornada no destino, não arrisca
+
+            const cartaoDestinoExistente = porDia[item.dataReal] || null;
+            const campoDestino = window.calcularAlvoMigracaoParaOutroDia(item, cartaoDestinoExistente, esperadoDestino);
+            if (!campoDestino) return;
+
+            migracoes.push({ origemCartao: b, campoOrigem: item.campo, item: item, cartaoDestino: cartaoDestinoExistente, campoDestino: campoDestino, dataDestino: item.dataReal });
+        });
     });
 
-    if (pendentes.length === 0) {
+    if (pendentes.length === 0 && migracoes.length === 0) {
         mostrarAlerta('Nenhum dia pôde ser corrigido automaticamente' + (semHorario > 0 ? ' (' + semHorario + ' sem horário de jornada identificado nesse dia da semana)' : ' — já está tudo certo') + '.', 'erro');
         return;
     }
 
     const c = (window.pontoColabsGlobais || []).find(function(x) { return x.id === estado.colaboradorId; });
     const nomesMeses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-    const msg = 'Isso vai corrigir automaticamente ' + pendentes.length + ' dia(s) de ' + nomesMeses[estado.mes] + '/' + estado.ano + ' de ' + (c ? c.nome : 'colaborador') + ', usando o horário da jornada configurada — reclassificando batidas no campo errado e preenchendo o que falta. O horário batido original continua guardado em cada dia.'
-        + (semHorario > 0 ? ' (' + semHorario + ' dia(s) não puderam ser identificados e continuam como estão.)' : '')
-        + ' Continuar?';
+    let msg = 'Isso vai corrigir automaticamente ' + pendentes.length + ' dia(s) de ' + nomesMeses[estado.mes] + '/' + estado.ano + ' de ' + (c ? c.nome : 'colaborador') + ', usando o horário da jornada configurada — reclassificando batidas no campo errado e preenchendo o que falta. O horário batido original continua guardado em cada dia.';
+    if (migracoes.length > 0) {
+        msg += ' Além disso, ' + migracoes.length + ' batida(s) que caiu(caíram) presa(s) no cartão do dia errado (colaborador não é noturno) vai(vão) ser movida(s) pro cartão do dia certo.';
+    }
+    msg += (semHorario > 0 ? ' (' + semHorario + ' dia(s) não puderam ser identificados e continuam como estão.)' : '') + ' Continuar?';
     const confirmou = await window.mostrarConfirmacao(msg);
     if (!confirmou) return;
 
@@ -71977,9 +72039,70 @@ window.corrigirPontosDoMesAutomatico = async function() {
         }
     }
 
+    let migradas = 0, migracoesFalhas = 0;
+    for (const mig of migracoes) {
+        try {
+            const nomeAutor = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Admin';
+            let destino = mig.cartaoDestino;
+            if (!destino) {
+                const { data: novo, error: errIns } = await supabaseClient.from('pontos_diarios_whatsapp').insert({
+                    colaborador_id: estado.colaboradorId,
+                    nome_colaborador: c ? c.nome : mig.origemCartao.nome_colaborador,
+                    unidade: c ? c.unidade : mig.origemCartao.unidade,
+                    data: mig.dataDestino,
+                }).select().single();
+                if (errIns) throw errIns;
+                destino = novo;
+                porDia[mig.dataDestino] = destino;
+                window.pontoCartoesPorId[destino.id] = destino;
+            }
+
+            const patchDestino = {};
+            patchDestino[mig.campoDestino + '_hora'] = mig.item.hora;
+            patchDestino[mig.campoDestino + '_lat'] = mig.item.lat;
+            patchDestino[mig.campoDestino + '_lng'] = mig.item.lng;
+            patchDestino[mig.campoDestino + '_foto'] = mig.item.foto;
+            const histDestino = (destino.historico_edicoes || []).slice();
+            histDestino.push({
+                campo: mig.campoDestino + '_hora', valor_anterior: null, valor_novo: mig.item.hora,
+                tipo: 'migracao_dia_seguinte', editado_por: nomeAutor, editado_em: new Date().toISOString(),
+            });
+            patchDestino.historico_edicoes = histDestino;
+            await window.aplicarPatchPontoDiario(destino.id, patchDestino);
+            Object.assign(destino, patchDestino);
+            window.pontoCartoesPorId[destino.id] = destino;
+            porDia[mig.dataDestino] = destino;
+
+            const origem = mig.origemCartao;
+            const patchOrigem = {};
+            patchOrigem[mig.campoOrigem + '_hora'] = null;
+            patchOrigem[mig.campoOrigem + '_lat'] = null;
+            patchOrigem[mig.campoOrigem + '_lng'] = null;
+            patchOrigem[mig.campoOrigem + '_foto'] = null;
+            const histOrigem = (origem.historico_edicoes || []).slice();
+            histOrigem.push({
+                campo: mig.campoOrigem + '_hora', valor_anterior: mig.item.hora, valor_novo: null,
+                tipo: 'migracao_dia_seguinte', editado_por: nomeAutor, editado_em: new Date().toISOString(),
+            });
+            patchOrigem.historico_edicoes = histOrigem;
+            await window.aplicarPatchPontoDiario(origem.id, patchOrigem);
+            Object.assign(origem, patchOrigem);
+            window.pontoCartoesPorId[origem.id] = origem;
+            migradas++;
+        } catch (e) {
+            migracoesFalhas++;
+            if (!primeiroErro) primeiroErro = e.message;
+        }
+    }
+
+    const partesResumo = [];
+    if (sucesso > 0 || falha === 0) partesResumo.push(sucesso + ' dia(s) corrigido(s)');
+    if (falha > 0) partesResumo.push(falha + ' falharam');
+    if (migradas > 0) partesResumo.push(migradas + ' batida(s) movida(s) de dia');
+    if (migracoesFalhas > 0) partesResumo.push(migracoesFalhas + ' movimentação(ões) falharam');
     mostrarAlerta(
-        sucesso + ' dia(s) corrigido(s)' + (falha > 0 ? ', ' + falha + ' falharam' : '') + '.' + (primeiroErro ? ' Erro: ' + primeiroErro : ''),
-        falha > 0 ? 'erro' : 'sucesso'
+        partesResumo.join(', ') + '.' + (primeiroErro ? ' Erro: ' + primeiroErro : ''),
+        (falha > 0 || migracoesFalhas > 0) ? 'erro' : 'sucesso'
     );
     window.carregarCalendarioPontoWhatsapp();
 };
