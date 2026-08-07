@@ -72177,6 +72177,75 @@ window.renderizarGradeCalendarioPontoVazia = function(primeiroDiaMes, ultimoDiaM
     return html;
 };
 
+// Reaproveita o mesmo algoritmo da Escala Mensal (algoritmoGeradorDeEscala) pra trazer
+// pra dentro do calendário de ponto batido as mesmas informações que já existem na escala:
+// folga, falta, atestado/afastamento, hora extra, troca de turno, férias, feriado etc.
+// Retorna { dias: { 'YYYY-MM-DD': <objeto do dia do algoritmo> }, horasExtras: { 'YYYY-MM-DD': '2,50' } }
+window.gerarMapaDiasColaboradorPonto = async function(colaboradorId, mesAno) {
+    const vazio = { dias: {}, horasExtras: {} };
+    try {
+        const { data: perfilColab, error: errPerfil } = await supabaseClient.from('perfis').select('*').eq('id', colaboradorId).single();
+        if (errPerfil || !perfilColab) return vazio;
+
+        const partes = mesAno.split('-');
+        const anoSel = parseInt(partes[0]);
+        const mesSel = parseInt(partes[1]);
+        const dataInicioMes = mesAno + '-01';
+        const dataFimMes = anoSel + '-' + String(mesSel).padStart(2, '0') + '-' + String(new Date(anoSel, mesSel, 0).getDate()).padStart(2, '0');
+
+        const dataBuscaRetroativa = new Date(anoSel, mesSel - 1, 1);
+        dataBuscaRetroativa.setDate(dataBuscaRetroativa.getDate() - 65);
+        const dataBuscaStr = dataBuscaRetroativa.toISOString().split('T')[0];
+
+        const [resAusencias, resFts, resFerias, resPonto, resPlantao, resTrocas] = await Promise.all([
+            supabaseClient.from('ausencias').select('*').eq('colaborador_id', colaboradorId).eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataBuscaStr),
+            supabaseClient.from('horas_extras_ft').select('*').eq('colaborador_id', colaboradorId).eq('status', 'Aprovado').lte('data_inicio', dataFimMes).gte('data_fim', dataInicioMes),
+            supabaseClient.from('solicitacoes_ferias').select('*').eq('colaborador_id', colaboradorId).eq('status', 'Aprovado').lte('data_inicio_ferias', dataFimMes).gte('data_fim_ferias', dataInicioMes),
+            supabaseClient.from('ocorrencias_ponto').select('colaborador_id, data_falha, status, doc_rh, doc_colaborador, justificativa').eq('colaborador_id', colaboradorId).lte('data_falha', dataFimMes).gte('data_falha', dataInicioMes),
+            supabaseClient.from('ocorrencias_plantao').select('colaborador_id, data_ocorrencia, tipo, status, observacao').eq('colaborador_id', colaboradorId).lte('data_ocorrencia', dataFimMes).gte('data_ocorrencia', dataInicioMes),
+            supabaseClient.from('trocas_turno').select('*').eq('status', 'Aprovado').or('dia_solicitante_ira.gte.' + dataBuscaStr + ',dia_substituto_ira.gte.' + dataBuscaStr),
+        ]);
+
+        const ocorrenciasMescladas = [...(resAusencias.data || []), ...(resFts.data || [])];
+        const resultado = algoritmoGeradorDeEscala([perfilColab], mesAno, ocorrenciasMescladas, perfilColab.unidade, resPonto.data || [], resFerias.data || [], resPlantao.data || [], resTrocas.data || []);
+
+        const mapaDias = {};
+        if (resultado && resultado[0] && resultado[0].dias) {
+            Object.keys(resultado[0].dias).forEach(function(d) {
+                mapaDias[mesAno + '-' + String(d).padStart(2, '0')] = resultado[0].dias[d];
+            });
+        }
+
+        const horasExtrasPorDia = {};
+        (resFts.data || []).forEach(function(ft) {
+            if ((ft.sigla === 'H+' || ft.sigla === 'HE') && ft.data_inicio) {
+                const obs = ft.observacao || '';
+                const m = obs.match(/\(([\d.,]+)\)/);
+                if (m) horasExtrasPorDia[ft.data_inicio] = m[1].replace('.', ',') + 'h';
+            }
+        });
+
+        return { dias: mapaDias, horasExtras: horasExtrasPorDia };
+    } catch (e) {
+        console.warn('Não deu pra cruzar com a escala mensal nesse calendário de ponto:', e.message);
+        return vazio;
+    }
+};
+
+// Cor de cada sigla — espelha as mesmas classes .celula-* usadas na Escala Mensal,
+// pra ficar visualmente consistente entre as duas telas.
+window.CORES_SIGLA_ESCALA_PONTO = {
+    'celula-frd': '#9c27b0', 'celula-atm': '#ff9800', 'celula-af': '#e91e63', 'celula-fp': '#20c997',
+    'celula-ferias': '#ffd54f', 'celula-fe': '#66bb6a', 'celula-d': '#4fc3f7', 'celula-n': '#c4b5fd',
+    'celula-folga': '#28a745', 'celula-desligado': '#94a3b8', 'celula-ausencia': '#ff9800',
+    'celula-falta': '#dc3545', 'celula-ft': '#a3e635', 'celula-he': '#42a5f5', 'celula-tp': '#e879f9',
+    'celula-atr': '#fd7e14', 'celula-abd': '#dc3545',
+};
+
+// Siglas que representam dia sem trabalho esperado (folga, atestado, afastamento, feriado,
+// desligado) — nesses dias o calendário de ponto NÃO deve cobrar "sem ponto batido".
+window.SIGLAS_SEM_COBRANCA_PONTO = new Set(['F', 'FE', 'FP', 'FRD', 'FER', 'DES', 'AD', 'ATM', 'LG', 'LDM', 'LDP', 'ATC', 'ATOB', 'AF']);
+
 window.carregarCalendarioPontoWhatsapp = async function() {
     const grade = document.getElementById('grade-calendario-ponto');
     const rotuloMes = document.getElementById('rotulo-mes-calendario-ponto');
@@ -72205,17 +72274,21 @@ window.carregarCalendarioPontoWhatsapp = async function() {
 
     const dataMinStr = primeiroDiaMes.toISOString().split('T')[0];
     const dataMaxStr = ultimoDiaMes.toISOString().split('T')[0];
+    const mesAnoStr = estado.ano + '-' + String(estado.mes + 1).padStart(2, '0');
 
     if (grade) grade.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></p>';
 
     try {
-        const [{ data, error }, { data: cfgColab, error: errCfg }] = await Promise.all([
+        const [{ data, error }, { data: cfgColab, error: errCfg }, mapaEscala] = await Promise.all([
             supabaseClient.from('pontos_diarios_whatsapp').select('*').eq('colaborador_id', estado.colaboradorId).gte('data', dataMinStr).lte('data', dataMaxStr),
             supabaseClient.from('config_ponto_whatsapp').select('data_inicio_ponto').eq('colaborador_id', estado.colaboradorId).maybeSingle(),
+            window.gerarMapaDiasColaboradorPonto(estado.colaboradorId, mesAnoStr),
         ]);
 
         if (error) throw error;
         const dataInicioPonto = (!errCfg && cfgColab) ? (cfgColab.data_inicio_ponto || null) : null;
+        const mapaDiasEscala = (mapaEscala && mapaEscala.dias) || {};
+        const mapaHorasExtras = (mapaEscala && mapaEscala.horasExtras) || {};
 
         const porDia = {};
         (data || []).forEach(function(b) {
@@ -72239,6 +72312,11 @@ window.carregarCalendarioPontoWhatsapp = async function() {
             return '<div style="display:flex; justify-content:space-between; font-size:0.62rem; line-height:1.35; color:' + (valor ? cor : 'var(--cor-texto-secundario)') + ';">'
                 + '<span>' + rotulo + '</span><span style="font-variant-numeric: tabular-nums;">' + hFmt + '</span></div>';
         };
+        const badgeSigla = function(sigla, cssClass) {
+            if (!sigla || sigla === '-') return '';
+            const cor = window.CORES_SIGLA_ESCALA_PONTO[cssClass] || '#4fc3f7';
+            return '<span style="position:absolute; top:5px; left:6px; font-size:0.6rem; font-weight:700; color:' + cor + '; background:' + cor + '22; border:1px solid ' + cor + '55; border-radius:6px; padding:1px 5px;">' + sigla + '</span>';
+        };
 
         for (let dia = 1; dia <= ultimoDiaMes.getDate(); dia++) {
             const dd = String(dia).padStart(2, '0');
@@ -72248,24 +72326,49 @@ window.carregarCalendarioPontoWhatsapp = async function() {
             const ehHoje = dataStr === hojeStr;
             const anelHoje = ehHoje ? 'box-shadow: 0 0 0 2px #4fc3f7 inset;' : '';
 
+            const diaEscala = mapaDiasEscala[dataStr] || null;
+            const sigla = diaEscala ? diaEscala.sigla : null;
+            const ehDiaSemCobranca = !!(sigla && window.SIGLAS_SEM_COBRANCA_PONTO.has(sigla));
+            const horaExtraDoDia = mapaHorasExtras[dataStr] || null;
+            const chipHoraExtra = horaExtraDoDia
+                ? '<div style="position:absolute; top:5px; right:6px; font-size:0.58rem; font-weight:700; color:#42a5f5; background:rgba(66,165,245,0.16); border:1px solid rgba(66,165,245,0.4); border-radius:6px; padding:1px 5px;"><i class="fa-solid fa-bolt"></i> ' + horaExtraDoDia + '</div>'
+                : '';
+            const iconJustificativa = (diaEscala && diaEscala.statusOcoPonto)
+                ? '<div style="position:absolute; bottom:5px; right:6px; font-size:0.68rem; color:#ffc107;" title="Tem ocorrência/justificativa de ponto nesse dia"><i class="fa-solid fa-file-lines"></i></div>'
+                : '';
+
             if (!cartao) {
                 const dentroDoPeriodo = dataInicioPonto && dataStr >= dataInicioPonto && dataStr <= hojeStr;
                 const diaJaPassouOuEhHoje = dataStr <= hojeStr;
+                const mostrarPendencia = dentroDoPeriodo && !ehDiaSemCobranca;
 
-                if (dentroDoPeriodo) {
+                if (mostrarPendencia) {
                     html += '<button type="button" onclick="window.abrirCriarPontoManualDia(\'' + dataStr + '\')" '
-                        + 'style="min-height:92px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; border-radius:10px; cursor:pointer; background:rgba(220,53,69,0.08); border:1px solid rgba(220,53,69,0.3); color:#f5a3ac; font-size:0.82rem; transition: background 0.15s; ' + anelHoje + '" '
+                        + 'style="position:relative; min-height:92px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; border-radius:10px; cursor:pointer; background:rgba(220,53,69,0.08); border:1px solid rgba(220,53,69,0.3); color:#f5a3ac; font-size:0.82rem; transition: background 0.15s; ' + anelHoje + '" '
                         + 'onmouseenter="this.style.background=\'rgba(220,53,69,0.16)\'" onmouseleave="this.style.background=\'rgba(220,53,69,0.08)\'">'
+                        + badgeSigla(sigla, diaEscala && diaEscala.cssClass)
                         + '<span style="font-weight:700;">' + dia + '</span>'
                         + '<i class="fa-solid fa-xmark" style="color:#dc3545; font-size:0.85rem;"></i>'
                         + '<span style="font-size:0.6rem;">sem ponto</span>'
                         + '</button>';
+                } else if (ehDiaSemCobranca) {
+                    const corSigla = window.CORES_SIGLA_ESCALA_PONTO[(diaEscala && diaEscala.cssClass) || ''] || 'var(--cor-texto-secundario)';
+                    html += '<button type="button" onclick="window.abrirCriarPontoManualDia(\'' + dataStr + '\')" '
+                        + 'style="position:relative; min-height:92px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; border-radius:10px; cursor:pointer; background:' + corSigla + '10; border:1px solid ' + corSigla + '35; color:' + corSigla + '; font-size:0.82rem; transition: background 0.15s; ' + anelHoje + '" '
+                        + 'onmouseenter="this.style.background=\'' + corSigla + '20\'" onmouseleave="this.style.background=\'' + corSigla + '10\'">'
+                        + '<span style="font-weight:700;">' + dia + '</span>'
+                        + '<span style="font-size:0.62rem; font-weight:700;">' + sigla + '</span>'
+                        + '</button>';
                 } else if (diaJaPassouOuEhHoje) {
                     html += '<button type="button" onclick="window.abrirCriarPontoManualDia(\'' + dataStr + '\')" '
-                        + 'style="min-height:92px; display:flex; align-items:center; justify-content:center; border-radius:10px; cursor:pointer; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); color:var(--cor-texto-secundario); font-size:0.82rem; transition: background 0.15s; ' + anelHoje + '" '
-                        + 'onmouseenter="this.style.background=\'rgba(255,255,255,0.06)\'" onmouseleave="this.style.background=\'rgba(255,255,255,0.02)\'">' + dia + '</button>';
+                        + 'style="position:relative; min-height:92px; display:flex; align-items:center; justify-content:center; border-radius:10px; cursor:pointer; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); color:var(--cor-texto-secundario); font-size:0.82rem; transition: background 0.15s; ' + anelHoje + '" '
+                        + 'onmouseenter="this.style.background=\'rgba(255,255,255,0.06)\'" onmouseleave="this.style.background=\'rgba(255,255,255,0.02)\'">'
+                        + badgeSigla(sigla, diaEscala && diaEscala.cssClass)
+                        + dia + '</button>';
                 } else {
-                    html += '<div style="min-height:92px; display:flex; align-items:center; justify-content:center; border-radius:10px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); color:var(--cor-texto-secundario); font-size:0.82rem; ' + anelHoje + '">' + dia + '</div>';
+                    html += '<div style="position:relative; min-height:92px; display:flex; align-items:center; justify-content:center; border-radius:10px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.05); color:var(--cor-texto-secundario); font-size:0.82rem; ' + anelHoje + '">'
+                        + badgeSigla(sigla, diaEscala && diaEscala.cssClass)
+                        + dia + '</div>';
                 }
                 continue;
             }
@@ -72275,8 +72378,11 @@ window.carregarCalendarioPontoWhatsapp = async function() {
             const cor = completo ? '#25D366' : '#ffc107';
 
             html += '<button type="button" onclick="window.abrirDetalhesPontoDia(\'' + cartao.id + '\')" '
-                + 'style="min-height:92px; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; gap:3px; padding:6px 7px; border-radius:10px; cursor:pointer; border:1px solid ' + cor + '55; background:' + cor + '14; color:#fff; transition: background 0.15s; text-align:left; ' + anelHoje + '" '
+                + 'style="position:relative; min-height:92px; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; gap:3px; padding:6px 7px; border-radius:10px; cursor:pointer; border:1px solid ' + cor + '55; background:' + cor + '14; color:#fff; transition: background 0.15s; text-align:left; ' + anelHoje + '" '
                 + 'onmouseenter="this.style.background=\'' + cor + '28\'" onmouseleave="this.style.background=\'' + cor + '14\'">'
+                + badgeSigla(sigla, diaEscala && diaEscala.cssClass)
+                + chipHoraExtra
+                + iconJustificativa
                 + '<span style="font-weight:700; font-size:0.8rem; align-self:flex-end;">' + dia + '</span>'
                 + '<div style="margin-top:2px;">'
                 + linhaHorario('E', cartao.entrada_hora, '#25D366')
