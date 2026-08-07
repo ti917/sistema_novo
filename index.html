@@ -71464,7 +71464,10 @@ window.listarBatimentosPontoWhatsapp = async function() {
 // -----------------------------------------------------------------------
 // Monta as 4 linhas (entrada/ida/volta/saída) de um cartão de ponto batido pelo app —
 // reaproveitado tanto no modal "Cartão do turno" quanto no detalhe do dia da escala.
-window.renderizarLinhasPontosBatidos = function(b) {
+window.NOMES_CAMPOS_PONTO = { entrada: 'Entrada', ida_refeicao: 'Ida para Refeição', volta_refeicao: 'Volta da Refeição', saida: 'Saída' };
+
+window.renderizarLinhasPontosBatidos = function(b, sugestoes) {
+    sugestoes = sugestoes || {};
     const dataCartaoFmt = b.data ? new Date(b.data + 'T12:00:00').toLocaleDateString('pt-BR') : '-';
     const valoresOriginais = b.valores_originais || {};
     const podeEditar = !!(b.id && b.colaborador_id);
@@ -71499,6 +71502,19 @@ window.renderizarLinhasPontosBatidos = function(b) {
             ? '<button type="button" onclick="window.restaurarValorOriginalPonto(\'' + b.id + '\', \'' + c.campo + '\')" '
                 + 'style="' + estiloBotao('#ff8a65') + '" onmouseenter="this.style.background=\'rgba(255,138,101,0.12)\'" onmouseleave="this.style.background=\'none\'">'
                 + '<i class="fa-solid fa-rotate-left"></i> Original</button>'
+            : '';
+
+        const botaoReclassificar = (podeEditar && c.hora)
+            ? '<button type="button" onclick="window.abrirReclassificarPontoModal(\'' + b.id + '\', \'' + c.campo + '\', \'' + c.rotulo.replace(/'/g, "\\'") + '\')" '
+                + 'style="' + estiloBotao('#a78bfa') + '" onmouseenter="this.style.background=\'rgba(167,139,250,0.12)\'" onmouseleave="this.style.background=\'none\'" title="Essa batida é de outro horário (ex: bateu Entrada mas era Ida Refeição)">'
+                + '<i class="fa-solid fa-arrows-turn-to-dots"></i> Não é isso</button>'
+            : '';
+
+        const campoSugerido = sugestoes[c.campo];
+        const avisoSugestao = (campoSugerido && window.NOMES_CAMPOS_PONTO[campoSugerido])
+            ? '<div style="margin-top:8px;"><button type="button" onclick="window.reclassificarCampoPonto(\'' + b.id + '\', \'' + c.campo + '\', \'' + campoSugerido + '\')" '
+                + 'style="background:rgba(167,139,250,0.1); border:1px solid rgba(167,139,250,0.4); color:#c4b5fd; border-radius:8px; padding:6px 12px; font-size:0.74rem; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">'
+                + '<i class="fa-solid fa-wand-magic-sparkles"></i> Pelo horário da jornada, isso parece ser <b>' + window.NOMES_CAMPOS_PONTO[campoSugerido] + '</b> — corrigir?</button></div>'
             : '';
 
         if (!c.hora) {
@@ -71538,9 +71554,156 @@ window.renderizarLinhasPontosBatidos = function(b) {
             + '<span style="font-variant-numeric: tabular-nums;">' + dataHoraCompleta + '</span>'
             + '</div>'
             + avisoNoturno
-            + '<div style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">' + linkMapa + botaoFoto + botaoEditar + botaoRestaurar + '</div>'
+            + avisoSugestao
+            + '<div style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">' + linkMapa + botaoFoto + botaoEditar + botaoRestaurar + botaoReclassificar + '</div>'
             + '</div></div>';
     }).join('');
+};
+
+// -----------------------------------------------------------------------
+// RECLASSIFICAR BATIDA — quando um horário foi registrado no campo errado
+// (ex: bateu "Ida Refeição" mas o app/Clara salvou como "Entrada"). Move o
+// horário+localização+foto pro campo certo, sem precisar redigitar nada.
+// -----------------------------------------------------------------------
+window.obterJornadaVigenteParaData = function(jor, dataRefStr) {
+    const jornadaRaiz = jor || { tipo: '12x36', status_inicio: 'Trabalho', horario: '06:00 às 18:00', escala: {} };
+    if (jornadaRaiz.historico_alteracoes && jornadaRaiz.historico_alteracoes.length > 0) {
+        const validos = jornadaRaiz.historico_alteracoes.filter(function(h) { return h.data_inicio && h.data_inicio <= dataRefStr; });
+        const base = validos.length > 0 ? validos : jornadaRaiz.historico_alteracoes;
+        const histOrdenado = base.slice().sort(function(a, b) { return new Date(b.data_inicio) - new Date(a.data_inicio); });
+        return histOrdenado[0];
+    }
+    return jornadaRaiz;
+};
+
+window.extrairMinutosEsperadosDia = function(jornadaVigente) {
+    const resultado = { entrada: null, saida: null, ida_refeicao: null, volta_refeicao: null };
+    if (!jornadaVigente) return resultado;
+    const horarioStr = jornadaVigente.horario || '';
+    const m = horarioStr.match(/(\d{1,2}):(\d{2})\s*às\s*(\d{1,2}):(\d{2})/);
+    if (m) {
+        resultado.entrada = parseInt(m[1]) * 60 + parseInt(m[2]);
+        resultado.saida = parseInt(m[3]) * 60 + parseInt(m[4]);
+    }
+    const ref = jornadaVigente.refeicao;
+    if (ref && ref.inicio) {
+        const p = ref.inicio.split(':');
+        resultado.ida_refeicao = parseInt(p[0]) * 60 + parseInt(p[1]);
+    }
+    if (ref && ref.fim) {
+        const p = ref.fim.split(':');
+        resultado.volta_refeicao = parseInt(p[0]) * 60 + parseInt(p[1]);
+    }
+    return resultado;
+};
+
+window.pontoPerfilCache = window.pontoPerfilCache || {};
+window.obterPerfilPontoCache = async function(colaboradorId) {
+    if (window.pontoPerfilCache[colaboradorId]) return window.pontoPerfilCache[colaboradorId];
+    const { data, error } = await supabaseClient.from('perfis').select('id, dados_admissao').eq('id', colaboradorId).single();
+    if (error || !data) return null;
+    window.pontoPerfilCache[colaboradorId] = data;
+    return data;
+};
+
+// Compara o horário de cada batida com o horário esperado da jornada do colaborador
+// (config em Editar Admissão / Configurar Horários) e sugere reclassificação só quando
+// a batida está bem longe do próprio campo (>1h) e claramente mais perto (>=30min) de outro.
+window.calcularSugestoesClassificacaoPonto = function(b, perfilColab) {
+    const sugestoes = {};
+    if (!perfilColab || !b.data) return sugestoes;
+    const jor = perfilColab.dados_admissao && perfilColab.dados_admissao.jornada;
+    const jornadaVigente = window.obterJornadaVigenteParaData(jor, b.data);
+    const esperado = window.extrairMinutosEsperadosDia(jornadaVigente);
+
+    const campos = ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'];
+    const minutoDoPunch = {};
+    campos.forEach(function(c) {
+        const valor = b[c + '_hora'];
+        if (!valor) return;
+        const partes = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(valor));
+        const hh = parseInt(partes.find(function(p) { return p.type === 'hour'; }).value);
+        const mm = parseInt(partes.find(function(p) { return p.type === 'minute'; }).value);
+        minutoDoPunch[c] = hh * 60 + mm;
+    });
+
+    Object.keys(minutoDoPunch).forEach(function(campoAtual) {
+        const minutoAtual = minutoDoPunch[campoAtual];
+        if (esperado[campoAtual] == null) return;
+        const distanciaPropria = Math.abs(minutoAtual - esperado[campoAtual]);
+        let melhorCampo = campoAtual;
+        let melhorDistancia = distanciaPropria;
+        campos.forEach(function(candidato) {
+            if (candidato === campoAtual || esperado[candidato] == null) return;
+            const dist = Math.abs(minutoAtual - esperado[candidato]);
+            if (dist < melhorDistancia - 30) { melhorDistancia = dist; melhorCampo = candidato; }
+        });
+        if (melhorCampo !== campoAtual && distanciaPropria > 60) sugestoes[campoAtual] = melhorCampo;
+    });
+
+    return sugestoes;
+};
+
+window.abrirReclassificarPontoModal = function(idCartao, campoAtual, rotuloAtual) {
+    const opcoes = Object.keys(window.NOMES_CAMPOS_PONTO).filter(function(c) { return c !== campoAtual; });
+    const modalHtml = '<div id="modal-reclassificar-ponto" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,10,20,0.8); backdrop-filter: blur(3px); z-index: 106030; display: flex; justify-content: center; align-items: center; padding: 20px;">'
+        + '<div class="glass-card" style="width: 100%; max-width: 380px; border: 1px solid rgba(167,139,250,0.4); border-radius: 16px; position: relative; padding: 24px;">'
+        + '<button onclick="document.getElementById(\'modal-reclassificar-ponto\').remove()" style="position: absolute; top: 16px; right: 16px; background: rgba(255,255,255,0.08); border: none; color: #fff; cursor: pointer; font-size: 1rem; width: 30px; height: 30px; border-radius: 50%;"><i class="fa-solid fa-xmark"></i></button>'
+        + '<h3 style="color: #fff; margin: 0 0 6px; font-size: 1.02rem; padding-right:26px;"><i class="fa-solid fa-arrows-turn-to-dots" style="color:#a78bfa;"></i> Essa batida (' + rotuloAtual + ') na verdade é:</h3>'
+        + '<p style="color:var(--cor-texto-secundario); font-size:0.8rem; margin-bottom:16px;">O horário, a localização e a foto continuam os mesmos — só muda pra qual campo eles valem.</p>'
+        + opcoes.map(function(c) {
+            return '<button type="button" class="btn-secondary" style="width:100%; text-align:left; margin-bottom:8px; padding:12px 14px; border-radius:10px;" onclick="window.reclassificarCampoPonto(\'' + idCartao + '\', \'' + campoAtual + '\', \'' + c + '\')">' + window.NOMES_CAMPOS_PONTO[c] + '</button>';
+        }).join('')
+        + '</div></div>';
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+window.reclassificarCampoPonto = async function(idCartao, campoOrigem, campoDestino) {
+    const b = window.pontoCartoesPorId[idCartao];
+    if (!b) return;
+
+    const sufixos = ['_hora', '_lat', '_lng', '_foto'];
+    const valorOrigem = {}, valorDestino = {};
+    sufixos.forEach(function(s) { valorOrigem[s] = b[campoOrigem + s] != null ? b[campoOrigem + s] : null; valorDestino[s] = b[campoDestino + s] != null ? b[campoDestino + s] : null; });
+
+    const temDestino = !!valorDestino['_hora'];
+    const msg = temDestino
+        ? 'A batida de ' + window.NOMES_CAMPOS_PONTO[campoDestino] + ' já tem um horário. Confirma trocar as duas (' + window.NOMES_CAMPOS_PONTO[campoOrigem] + ' vira ' + window.NOMES_CAMPOS_PONTO[campoDestino] + ' e vice-versa)?'
+        : 'Confirma mover essa batida de ' + window.NOMES_CAMPOS_PONTO[campoOrigem] + ' pra ' + window.NOMES_CAMPOS_PONTO[campoDestino] + '?';
+    const confirmou = await window.mostrarConfirmacao(msg);
+    if (!confirmou) return;
+
+    try {
+        const patch = {};
+        sufixos.forEach(function(s) {
+            patch[campoDestino + s] = valorOrigem[s];
+            patch[campoOrigem + s] = valorDestino[s];
+        });
+        const historico = (b.historico_edicoes || []).slice();
+        historico.push({
+            tipo: 'reclassificacao',
+            campo_origem: campoOrigem + '_hora',
+            campo_destino: campoDestino + '_hora',
+            editado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Admin',
+            editado_em: new Date().toISOString(),
+        });
+        patch.historico_edicoes = historico;
+
+        const { error } = await supabaseClient.from('pontos_diarios_whatsapp').update(patch).eq('id', b.id);
+        if (error) throw error;
+
+        Object.assign(b, patch);
+        window.pontoCartoesPorId[idCartao] = b;
+        const modalReclass = document.getElementById('modal-reclassificar-ponto');
+        if (modalReclass) modalReclass.remove();
+        mostrarAlerta('Batida reclassificada.', 'sucesso');
+        window.reabrirDetalhesPontoDiaAtualizado(idCartao);
+    } catch (e) {
+        const dicaColuna = (e.message && e.message.includes('historico_edicoes'))
+            ? ' — a coluna historico_edicoes ainda não existe na tabela pontos_diarios_whatsapp.'
+            : '';
+        mostrarAlerta('Erro ao reclassificar: ' + e.message + dicaColuna, 'erro');
+    }
 };
 
 // -----------------------------------------------------------------------
@@ -71733,11 +71896,22 @@ window.abrirDetalhesPontoDia = function(idCartao) {
         + '<div style="margin-top:14px;">' + statusChip + '</div>'
         + '</div>'
         + '<div style="padding: 18px 24px 24px;">'
-        + '<div style="border:1px solid var(--cor-borda); border-radius:12px; overflow:hidden;">' + linhasHtml + '</div>'
+        + '<div id="linhas-cartao-ponto" style="border:1px solid var(--cor-borda); border-radius:12px; overflow:hidden;">' + linhasHtml + '</div>'
         + '<button class="btn-secondary" style="width: 100%; height: 46px; margin-top: 18px; border-radius: 10px;" onclick="document.getElementById(\'modal-detalhes-ponto-whatsapp\').remove()">Fechar</button>'
         + '</div></div></div>';
 
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Compara com o horário da jornada configurada (assíncrono, não trava a abertura do modal)
+    // pra sugerir reclassificação quando uma batida parece estar no campo errado.
+    if (b.colaborador_id) {
+        window.obterPerfilPontoCache(b.colaborador_id).then(function(perfilColab) {
+            const sugestoes = window.calcularSugestoesClassificacaoPonto(b, perfilColab);
+            if (Object.keys(sugestoes).length === 0) return;
+            const cont = document.getElementById('linhas-cartao-ponto');
+            if (cont) cont.innerHTML = window.renderizarLinhasPontosBatidos(b, sugestoes);
+        }).catch(function() {});
+    }
 };
 
 // -----------------------------------------------------------------------
