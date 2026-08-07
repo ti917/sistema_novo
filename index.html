@@ -12350,12 +12350,23 @@ window.checarAvisosDeLogin = async function() {
             const dataLimite = new Date();
             dataLimite.setDate(dataLimite.getDate() - 3);
 
-            const { data } = await supabaseClient.from('notificacoes')
+            let { data } = await supabaseClient.from('notificacoes')
                 .select('*')
                 .eq('lida', false)
                 .gte('created_at', dataLimite.toISOString())
                 .in('tipo', tiposParaAviso)
                 .in('unidade', unidsPessoais);
+
+            // 👇 Não avisa o gestor sobre a própria rescisão (Encarregado com nome/vínculo dele) 👇
+            if (data && usuarioAtual.perfil === 'Gestor') {
+                const tiposRescisaoGestor = ['Rescisão', 'Rescisão_Para_Assinar', 'TRCT_Gestor'];
+                const vinculoIdAviso = usuarioAtual.permissoes?.colaborador_vinculado_id;
+                data = data.filter(n => {
+                    if (!tiposRescisaoGestor.includes(n.tipo)) return true;
+                    if (vinculoIdAviso) return n.colaborador_id !== vinculoIdAviso;
+                    return !ehMesmaPessoaPeloNome(n.nome, usuarioAtual.nome);
+                });
+            }
 
             if(data && data.length > 0) {
                 if(data.length > 3) {
@@ -14147,17 +14158,60 @@ window.carregarProcessosRescisoriosGestor = async function() {
     const container = document.getElementById('lista-processo-resc-container-gestor');
     container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo); padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x"></i><br><br>Buscando processos...</p>';
 
+    const souGestorGlobal = usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true;
     const unidsGestor = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
-    
-    let query = supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').eq('status', 'Desligado').in('unidade', unidsGestor);
-    
-    const { data, error } = await query;
+
+    let query = supabaseClient.from('perfis').select('id, nome, cargo, empresa, unidade, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').eq('status', 'Desligado').in('unidade', unidsGestor);
+
+    const { data: dataLocal, error } = await query;
     if (error) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro ao buscar processos.</p>';
         return;
     }
 
-    todosProcessosRescisoriosGlobais = data || [];
+    // 👇 MESMA REGRA DA ABA "ACOMPANHAMENTO E ASSINATURAS": se for Encarregado com o mesmo nome
+    // do Gestor da unidade, esconde do gestor local e, se quem estiver logado tiver Visão Global,
+    // ele recebe esse caso específico (só esse, não os processos de todas as unidades).
+    let dataGlobalEspecial = [];
+    if (souGestorGlobal) {
+        let qEncarregados = supabaseClient.from('perfis')
+            .select('id, nome, cargo, empresa, unidade, dados_admissao, dados_rescisao')
+            .eq('perfil', 'Colaborador')
+            .eq('status', 'Desligado')
+            .eq('cargo', 'Encarregado');
+        if (usuarioAtual.empresa) {
+            qEncarregados = qEncarregados.in('empresa', usuarioAtual.empresa.split(',').map(e => e.trim()));
+        }
+        const { data: encarregadosDesligados } = await qEncarregados;
+
+        if (encarregadosDesligados && encarregadosDesligados.length > 0) {
+            const { data: gestores } = await supabaseClient.from('perfis')
+                .select('id, nome, unidade, permissoes')
+                .eq('perfil', 'Gestor');
+
+            dataGlobalEspecial = encarregadosDesligados.filter(enc => {
+                const unidadesEnc = (enc.unidade || '').split(',').map(u => u.trim());
+                return (gestores || []).some(g => {
+                    if (g.id === enc.id) return false;
+                    const unidadesGestor = (g.unidade || '').split(',').map(u => u.trim());
+                    const mesmaUnidade = unidadesEnc.some(u => u && unidadesGestor.includes(u));
+                    return mesmaUnidade && ehColaboradorDoProprioGestor(enc, g);
+                });
+            }).map(enc => ({ ...enc, _casoRotaGlobal: true }));
+        }
+    }
+
+    const mapaFinalProc = new Map();
+    (dataLocal || []).forEach(c => mapaFinalProc.set(c.id, c));
+    dataGlobalEspecial.forEach(c => { if (!mapaFinalProc.has(c.id)) mapaFinalProc.set(c.id, c); });
+
+    // Esconde a própria rescisão de quem está logado (mesma regra: id igual OU nome batendo com Encarregado)
+    todosProcessosRescisoriosGlobais = Array.from(mapaFinalProc.values()).filter(c => {
+        if (c.id === usuarioAtual.id) return false;
+        if (ehColaboradorDoProprioGestor(c, usuarioAtual)) return false;
+        return true;
+    });
+
     filtrarProcessosRescGestor();
 };
 
@@ -14243,12 +14297,15 @@ window.filtrarProcessosRescGestor = function() {
             `;
         }
 
+        const avisoRotaGlobalProc = c._casoRotaGlobal ? `<span style="font-size: 0.75rem; color: #9b59b6; display: block; margin-top: 4px; font-weight: bold;"><i class="fa-solid fa-globe"></i> Roteado pra você por ter Visão Global (Encarregado com o nome do Gestor local)</span>` : '';
+
         container.innerHTML += `
             <div class="admissao-card" style="border-left: 4px solid ${corStatus}; flex-direction: column; align-items: stretch; padding: 15px;">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <strong style="font-size: 1.15rem; color: ${corStatus};"><i class="fa-solid fa-folder-open"></i> ${c.nome}</strong><br>
                         <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${c.unidade}</span>
+                        ${avisoRotaGlobalProc}
                     </div>
                     <span class="badge" style="background: ${corStatus}22; color: ${corStatus}; border: 1px solid ${corStatus}; padding: 6px 12px;">${trctStatus}</span>
                 </div>
@@ -15593,7 +15650,19 @@ if (isAdmin || podeAprovar) {
 
     const { data: notifsAprovadasDb } = await queryNotifs;
     let notifsAprovadas = notifsAprovadasDb || [];
-    
+
+    // 👇 Esconde do sino as notificações de Rescisão do PRÓPRIO gestor (mesmo caso do Encarregado
+    // com o nome/vínculo do gestor da unidade) 👇
+    if (usuarioAtual.perfil === 'Gestor') {
+        const tiposRescisaoGestor = ['Rescisão', 'Rescisão_Para_Assinar', 'TRCT_Gestor'];
+        const vinculoIdSino = usuarioAtual.permissoes?.colaborador_vinculado_id;
+        notifsAprovadas = notifsAprovadas.filter(n => {
+            if (!tiposRescisaoGestor.includes(n.tipo)) return true;
+            if (vinculoIdSino) return n.colaborador_id !== vinculoIdSino;
+            return !ehMesmaPessoaPeloNome(n.nome, usuarioAtual.nome);
+        });
+    }
+
     notifsAprovadas = notifsAprovadas.map(n => {
         if (n.lida && (n.lida_por === null || n.lida_por === undefined || n.lida_por.trim() === '')) n.lida_por = 'RH (Anterior)';
         return n;
@@ -19621,6 +19690,21 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             return true;
         }
 
+        // 👇 Decide se um registro de colaborador é a "própria pessoa" de um gestor logado
+        // (pra esconder rescisão/notificação/histórico dela da tela desse gestor).
+        // Prioriza o vínculo EXPLÍCITO (permissoes.colaborador_vinculado_id, configurado em
+        // Admin > Usuários Cadastrados > Configurar Acessos > "Colaborador Vinculado"). Só cai
+        // pra comparação por nome (completo ou só primeiro nome) quando não tiver esse vínculo.
+        function ehColaboradorDoProprioGestor(colabRecord, gestorRecord) {
+            if (!colabRecord || !gestorRecord) return false;
+            const vinculoId = gestorRecord.permissoes?.colaborador_vinculado_id;
+            if (vinculoId) {
+                return colabRecord.id === vinculoId;
+            }
+            if (colabRecord.cargo !== 'Encarregado') return false;
+            return ehMesmaPessoaPeloNome(colabRecord.nome, gestorRecord.nome);
+        }
+
         async function carregarAndamentoRescisoes() {
             const container = document.getElementById('lista-andamento-rescisoes-container');
             container.innerHTML = '<div style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</div>';
@@ -19656,7 +19740,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
 
                 if (encarregadosPendentes && encarregadosPendentes.length > 0) {
                     const { data: gestores } = await supabaseClient.from('perfis')
-                        .select('id, nome, unidade')
+                        .select('id, nome, unidade, permissoes')
                         .eq('perfil', 'Gestor');
 
                     dataGlobalEspecial = encarregadosPendentes.filter(enc => {
@@ -19665,7 +19749,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                             if (g.id === enc.id) return false;
                             const unidadesGestor = (g.unidade || '').split(',').map(u => u.trim());
                             const mesmaUnidade = unidadesEnc.some(u => u && unidadesGestor.includes(u));
-                            return mesmaUnidade && ehMesmaPessoaPeloNome(enc.nome, g.nome);
+                            return mesmaUnidade && ehColaboradorDoProprioGestor(enc, g);
                         });
                     }).map(enc => ({ ...enc, _casoRotaGlobal: true }));
                 }
@@ -19689,7 +19773,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             //     primeiro nome ("ALAN") no cadastro de colaborador.
             const dataFiltrada = data.filter(colab => {
                 if (colab.id === usuarioAtual.id) return false;
-                if (colab.cargo === 'Encarregado' && ehMesmaPessoaPeloNome(colab.nome, usuarioAtual.nome)) return false;
+                if (ehColaboradorDoProprioGestor(colab, usuarioAtual)) return false;
                 return true;
             });
 
@@ -25278,10 +25362,25 @@ if (['Comercial', 'Ambos', 'Comercial_Financeiro', 'Todos'].includes(modulo)) {
 // 2. O Modal de Checkbox de Permissões
 window.abrirModalPermissoes = async function(idUser) {
     // Busca no banco pra ter os dados mais frescos
-    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, perfil, permissoes').eq('id', idUser).single();
+    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, perfil, empresa, permissoes').eq('id', idUser).single();
     if (error || !u) return mostrarAlerta("Erro ao buscar permissões.", "erro");
 
     const permissoesAtuais = u?.permissoes || {};
+
+    // 👇 Busca os colaboradores da(s) mesma(s) empresa(s) do Gestor, pra ele escolher qual
+    // cadastro de colaborador (Encarregado) é a própria pessoa dele 👇
+    let colaboradoresParaVinculo = [];
+    if (u.perfil === 'Gestor') {
+        let qColabsVinculo = supabaseClient.from('perfis')
+            .select('id, nome, unidade, cargo')
+            .eq('perfil', 'Colaborador')
+            .order('nome');
+        if (u.empresa) {
+            qColabsVinculo = qColabsVinculo.in('empresa', u.empresa.split(',').map(e => e.trim()));
+        }
+        const { data: resColabsVinculo } = await qColabsVinculo;
+        colaboradoresParaVinculo = resColabsVinculo || [];
+    }
 
     // Dicionário de Menus por Perfil
 const menus = u.perfil === 'Admin' ? [
@@ -25364,6 +25463,35 @@ const menus = u.perfil === 'Admin' ? [
         `;
     }
 
+    // 👇 NOVO: VÍNCULO EXPLÍCITO COM O PRÓPRIO CADASTRO DE COLABORADOR (ENCARREGADO) 👇
+    // Substitui a comparação por nome (que às vezes vinha só com o primeiro nome) por uma
+    // escolha direta de QUAL colaborador é essa pessoa, sem depender de nome bater certinho.
+    let cardColaboradorVinculado = '';
+    if (u.perfil === 'Gestor') {
+        const vinculoAtualId = permissoesAtuais.colaborador_vinculado_id || '';
+        let opcoesColabs = '<option value="">Nenhum (não é Encarregado / usar comparação por nome)</option>';
+        colaboradoresParaVinculo.forEach(c => {
+            const rotulo = `${c.nome}${c.cargo ? ' — ' + c.cargo : ''}${c.unidade ? ' (' + c.unidade + ')' : ''}`;
+            opcoesColabs += `<option value="${c.id}" ${c.id === vinculoAtualId ? 'selected' : ''}>${rotulo}</option>`;
+        });
+
+        cardColaboradorVinculado = `
+            <div style="margin-top: 20px; background: rgba(155, 89, 182, 0.1); padding: 15px; border-radius: 8px; border: 1px dashed #9b59b6;">
+                <label style="display: block; color: #9b59b6; font-weight: bold; margin-bottom: 8px;">
+                    <i class="fa-solid fa-user-tag"></i> Colaborador Vinculado (ex: quando o Gestor também é o Encarregado)
+                </label>
+                <select id="perm-colaborador-vinculado" style="width: 100%;">
+                    ${opcoesColabs}
+                </select>
+                <small style="color: var(--cor-texto-secundario); display: block; margin-top: 8px; line-height: 1.4;">
+                    Selecione qual cadastro de colaborador é essa mesma pessoa (ex: o Encarregado da unidade que também é o Gestor).
+                    Assim o sistema esconde a rescisão, as notificações e o histórico próprio dele com certeza,
+                    sem depender do nome bater certinho (que às vezes vem só com o primeiro nome no cadastro).
+                </small>
+            </div>
+        `;
+    }
+
     const modalHtml = `
     <div id="modal-permissoes-usuario" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
         <div class="glass-card" style="width: 100%; max-width: 600px; max-height: 90vh; overflow-y: auto; border: 1px solid #ff9800; position: relative;">
@@ -25376,6 +25504,7 @@ const menus = u.perfil === 'Admin' ? [
                 ${linhasHtml}
                 
                 ${cardPoderGlobal}
+                ${cardColaboradorVinculado}
 
                 <button type="submit" id="btn-salvar-perms" class="btn-success" style="width: 100%; height: 50px; background-color: #ff9800; color: #000; border: none; font-weight: bold; margin-top: 15px;">
                     <i class="fa-solid fa-floppy-disk"></i> Salvar Permissões
@@ -25384,6 +25513,23 @@ const menus = u.perfil === 'Admin' ? [
         </div>
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Deixa o select de "Colaborador Vinculado" pesquisável (mesmo padrão usado no resto do sistema)
+    const selColabVinculado = document.getElementById('perm-colaborador-vinculado');
+    if (selColabVinculado && typeof TomSelect !== 'undefined') {
+        new TomSelect(selColabVinculado, {
+            create: false,
+            maxOptions: null,
+            sortField: { field: 'text', direction: 'asc' },
+            placeholder: '🔍 Digite pra buscar o colaborador...',
+            onChange: function() { this.blur(); },
+            render: {
+                no_results: function() {
+                    return '<div class="no-results" style="padding: 10px; color: var(--cor-acento); font-weight: bold;">Nenhum colaborador encontrado</div>';
+                }
+            }
+        });
+    }
 
     document.getElementById('form-salvar-permissoes').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -25406,6 +25552,12 @@ const menus = u.perfil === 'Admin' ? [
         const chkGlobal = document.getElementById('chk-escala-global');
         if (chkGlobal) {
             novoJsonPermissoes.escala_global = chkGlobal.checked;
+        }
+
+        // Adiciona o vínculo explícito com o colaborador (Encarregado), se essa tela existir pra esse usuário
+        const selColabVinculadoSubmit = document.getElementById('perm-colaborador-vinculado');
+        if (selColabVinculadoSubmit) {
+            novoJsonPermissoes.colaborador_vinculado_id = selColabVinculadoSubmit.value || null;
         }
 
         const { error } = await supabaseClient.from('perfis').update({ permissoes: novoJsonPermissoes }).eq('id', idUser);
@@ -44148,7 +44300,7 @@ window.carregarMeusHistoricos = async function() {
             return;
         }
 
-        const pAdmissoes = supabaseClient.from('perfis').select('id, nome, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').in('unidade', unids);
+        const pAdmissoes = supabaseClient.from('perfis').select('id, nome, cargo, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').in('unidade', unids);
         const pAusencias = supabaseClient.from('ausencias').select('*').in('unidade', unids).order('created_at', { ascending: false }).limit(100);
         const pFTs = supabaseClient.from('horas_extras_ft').select('*').in('unidade', unids).order('created_at', { ascending: false }).limit(100);
         const pTrocas = supabaseClient.from('trocas_turno').select('*').in('unidade_solicitante', unids).order('created_at', { ascending: false }).limit(100);
@@ -44162,6 +44314,12 @@ window.carregarMeusHistoricos = async function() {
         const pFoto = supabaseClient.from('fotos_cracha').select('*').in('unidade', unids).order('criado_em', { ascending: false }).limit(100);
 
         const [resAdm, resAus, resFt, resTroca, resAdv, resAlt, resDoc, resFer, resExp, resFoto] = await Promise.all([pAdmissoes, pAusencias, pFTs, pTrocas, pAdv, pAlt, pDoc, pFer, pExp, pFoto]);
+
+        // 👇 Esconde o próprio registro do gestor logado (caso dele mesmo ser o "Encarregado" vinculado)
+        // pra não aparecer nem admissão nem desligamento dele no próprio histórico de envios 👇
+        if (resAdm.data) {
+            resAdm.data = resAdm.data.filter(p => !ehColaboradorDoProprioGestor(p, usuarioAtual));
+        }
 
         let unificado = [];
 
