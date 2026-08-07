@@ -19625,12 +19625,57 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             const container = document.getElementById('lista-andamento-rescisoes-container');
             container.innerHTML = '<div style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</div>';
 
+            const souGestorGlobal = usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true;
             const unidadesArray = usuarioAtual.unidade ? usuarioAtual.unidade.split(',').map(u => u.trim()) : [];
-            const { data, error } = await supabaseClient.from('perfis')
+
+            // 1) Busca padrão: rescisões das unidades do próprio gestor
+            const { data: dataLocal, error } = await supabaseClient.from('perfis')
                 .select('*')
                 .in('unidade', unidadesArray)
                 .in('status_aprovacao', ['Rescisão Pendente', 'Aguardando Assinatura'])
                 .order('nome');
+
+            // 2) Busca ESPECIAL (só pra quem tem "Visão Global e Regional" ligada nas permissões):
+            //    Encarregados cujo nome bate com o do Gestor da própria unidade deles — esse caso fica
+            //    escondido do gestor local (ele não pode ver a própria rescisão), então precisa ir pra
+            //    quem tem visão global, mesmo que a unidade não seja dele. NÃO traz as demais rescisões
+            //    de outras unidades — só esse caso específico.
+            let dataGlobalEspecial = [];
+            if (souGestorGlobal) {
+                let qEncarregados = supabaseClient.from('perfis')
+                    .select('*')
+                    .eq('cargo', 'Encarregado')
+                    .in('status_aprovacao', ['Rescisão Pendente', 'Aguardando Assinatura']);
+
+                // Restringe à(s) empresa(s) do gestor global, pra não vazar de outras empresas
+                if (usuarioAtual.empresa) {
+                    qEncarregados = qEncarregados.in('empresa', usuarioAtual.empresa.split(',').map(e => e.trim()));
+                }
+
+                const { data: encarregadosPendentes } = await qEncarregados;
+
+                if (encarregadosPendentes && encarregadosPendentes.length > 0) {
+                    const { data: gestores } = await supabaseClient.from('perfis')
+                        .select('id, nome, unidade')
+                        .eq('perfil', 'Gestor');
+
+                    dataGlobalEspecial = encarregadosPendentes.filter(enc => {
+                        const unidadesEnc = (enc.unidade || '').split(',').map(u => u.trim());
+                        return (gestores || []).some(g => {
+                            if (g.id === enc.id) return false;
+                            const unidadesGestor = (g.unidade || '').split(',').map(u => u.trim());
+                            const mesmaUnidade = unidadesEnc.some(u => u && unidadesGestor.includes(u));
+                            return mesmaUnidade && ehMesmaPessoaPeloNome(enc.nome, g.nome);
+                        });
+                    }).map(enc => ({ ...enc, _casoRotaGlobal: true }));
+                }
+            }
+
+            // Junta as duas buscas sem duplicar (Map pelo id)
+            const mapaFinal = new Map();
+            (dataLocal || []).forEach(c => mapaFinal.set(c.id, c));
+            dataGlobalEspecial.forEach(c => { if (!mapaFinal.has(c.id)) mapaFinal.set(c.id, c); });
+            const data = Array.from(mapaFinal.values());
 
             if (error || !data || data.length === 0) {
                 container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma rescisão em andamento no momento.</p>';
@@ -19717,6 +19762,13 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             }
         }
 
+                // 👇 Se veio pela rota especial (Encarregado com nome do Gestor da própria unidade),
+                // mostra pro Gestor Global de onde é e por que apareceu pra ele
+                const avisoRotaGlobal = colab._casoRotaGlobal ? `
+                    <span style="font-size: 0.75rem; color: #9b59b6; display: block; margin-top: 4px; font-weight: bold;">
+                        <i class="fa-solid fa-globe"></i> Unidade: ${colab.unidade} — roteado pra você por ter Visão Global (Encarregado com o nome do Gestor local)
+                    </span>` : '';
+
                 html += `
                     <div class="admissao-card" style="border-left: 4px solid ${statusColor}; flex-direction: column; align-items: stretch;">
                         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
@@ -19724,6 +19776,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                                 <strong style="font-size: 1.15rem; color: ${statusColor};"><i class="fa-solid fa-user-slash"></i> ${colab.nome}</strong><br>
                         <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);">Tipo: ${resc.tipo} | Último dia: ${resc.ultimo_dia}</span>
                         ${geradoPorInfo}
+                        ${avisoRotaGlobal}
                         
                         <div style="margin-top: 8px; font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px; border-left: 3px solid ${statusColor};">
                             <b style="color: var(--cor-texto-secundario); font-size: 0.75rem;">MOTIVO / OBS:</b><br> ${resc.motivo || 'Não informado.'}
