@@ -4653,6 +4653,11 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     </div>
                 </div>
                 <div id="aviso-calendario-ponto"></div>
+                <div id="barra-corrigir-mes-ponto" class="hidden" style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+                    <button type="button" style="height:38px; padding:0 16px; border-radius:10px; background:rgba(167,139,250,0.12); border:1px solid rgba(167,139,250,0.5); color:#c4b5fd; font-weight:600; cursor:pointer; font-size:0.82rem;" onclick="window.corrigirPontosDoMesAutomatico()">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Corrigir Pontos do Mês (usar horário da jornada)
+                    </button>
+                </div>
                 <div id="grade-calendario-ponto">
                     <p style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Escolha um colaborador acima pra ver o calendário de ponto dele.</p>
                 </div>
@@ -71576,10 +71581,26 @@ window.obterJornadaVigenteParaData = function(jor, dataRefStr) {
     return jornadaRaiz;
 };
 
-window.extrairMinutosEsperadosDia = function(jornadaVigente) {
+window.obterHorarioEsperadoParaData = function(jornadaVigente, dataStr) {
+    if (!jornadaVigente) return null;
+    if (jornadaVigente.tipo === '12x36' && jornadaVigente.horario) return jornadaVigente.horario;
+    if (jornadaVigente.escala) {
+        const nomesDiasFull = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        const dataObj = new Date(dataStr + 'T12:00:00');
+        const diaNome = nomesDiasFull[dataObj.getDay()];
+        const diaEscala = jornadaVigente.escala[diaNome];
+        if (diaEscala && diaEscala.horario && diaEscala.horario !== 'Folga' && diaEscala.status !== 'Folga') {
+            return diaEscala.horario;
+        }
+        return null;
+    }
+    return jornadaVigente.horario || null;
+};
+
+window.extrairMinutosEsperadosDia = function(jornadaVigente, dataStr) {
     const resultado = { entrada: null, saida: null, ida_refeicao: null, volta_refeicao: null };
     if (!jornadaVigente) return resultado;
-    const horarioStr = jornadaVigente.horario || '';
+    const horarioStr = window.obterHorarioEsperadoParaData(jornadaVigente, dataStr) || '';
     const m = horarioStr.match(/(\d{1,2}):(\d{2})\s*às\s*(\d{1,2}):(\d{2})/);
     if (m) {
         resultado.entrada = parseInt(m[1]) * 60 + parseInt(m[2]);
@@ -71714,32 +71735,24 @@ window.reclassificarCampoPonto = async function(idCartao, campoOrigem, campoDest
 // Os horários preenchidos automaticamente (sem batida real por trás) ficam sem
 // foto/localização, pra deixar claro que são estimativa, não uma batida de verdade.
 // -----------------------------------------------------------------------
-window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
-    const b = window.pontoCartoesPorId[idCartao];
-    if (!b) { mostrarAlerta('Não encontrei os detalhes desse ponto.', 'erro'); return; }
-
+// Função PURA (não mexe em banco nem mostra alerta) — calcula o patch de correção
+// de um cartão de ponto com base no horário da jornada vigente naquele dia. Reaproveitada
+// tanto pela correção individual (um dia) quanto pela correção em massa (o mês inteiro).
+window.calcularCorrecaoAutomaticaPonto = function(b, perfilColab) {
+    const resultadoVazio = { patch: null, motivo: null, resumoCampos: [], horarioTexto: null };
     const camposOrdem = ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'];
     const temAlgumaBatida = camposOrdem.some(function(c) { return !!b[c + '_hora']; });
-    if (!temAlgumaBatida) {
-        mostrarAlerta('Esse dia não tem nenhuma batida registrada — não dá pra corrigir automaticamente. Use "Preencher" pra lançar manualmente se precisar.', 'erro');
-        return;
-    }
-    if (!b.colaborador_id) return;
-
-    const perfilColab = await window.obterPerfilPontoCache(b.colaborador_id);
-    if (!perfilColab) { mostrarAlerta('Não consegui carregar o perfil do colaborador pra comparar com a jornada.', 'erro'); return; }
+    if (!temAlgumaBatida) return Object.assign({}, resultadoVazio, { motivo: 'sem_batida' });
+    if (!perfilColab) return Object.assign({}, resultadoVazio, { motivo: 'sem_perfil' });
 
     const jor = perfilColab.dados_admissao && perfilColab.dados_admissao.jornada;
     const jornadaVigente = window.obterJornadaVigenteParaData(jor, b.data);
-    const esperado = window.extrairMinutosEsperadosDia(jornadaVigente);
+    const esperado = window.extrairMinutosEsperadosDia(jornadaVigente, b.data);
 
     if (esperado.entrada == null || esperado.saida == null) {
-        mostrarAlerta('Não consegui identificar o horário de entrada/saída da jornada desse colaborador — corrija manualmente.', 'erro');
-        return;
+        return Object.assign({}, resultadoVazio, { motivo: 'sem_horario' });
     }
 
-    // Sem refeição configurada? Usa a mesma estimativa de 1h no meio do turno já
-    // usada no botão "Preencher automaticamente" do Configurar Horários.
     if (esperado.ida_refeicao == null || esperado.volta_refeicao == null) {
         const refPadrao = window.calcularRefeicaoPadrao(jornadaVigente);
         if (refPadrao) {
@@ -71750,7 +71763,6 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
         }
     }
 
-    // Minuto-do-dia (fuso SP) de cada batida real que já existe hoje nesse cartão
     const minutoReal = {};
     const dadosReal = {};
     camposOrdem.forEach(function(c) {
@@ -71763,8 +71775,6 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
         dadosReal[c] = { hora: hora, lat: b[c + '_lat'] != null ? b[c + '_lat'] : null, lng: b[c + '_lng'] != null ? b[c + '_lng'] : null, foto: b[c + '_foto'] || null };
     });
 
-    // Reatribui cada batida real pro slot esperado mais próximo (sem repetir slot),
-    // priorizando as mais "óbvias" primeiro.
     const candidatos = Object.keys(minutoReal).map(function(campoOrigem) {
         let melhorCampo = campoOrigem, melhorDist = Infinity;
         camposOrdem.forEach(function(alvo) {
@@ -71789,8 +71799,6 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
         novoDadosPorCampo[alvo] = dadosReal[cand.origem];
     });
 
-    // Campos que continuam vazios depois da reatribuição: preenche com o horário
-    // esperado da jornada, sem foto/localização (é estimativa, não batida real).
     const viraDiaNoturno = esperado.saida < esperado.entrada;
     const construirIsoDoMinuto = function(minutos, viraDia) {
         const dia = new Date(b.data + 'T00:00:00-03:00');
@@ -71810,7 +71818,6 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
         camposPreenchidosAuto.push(c);
     });
 
-    // Monta o patch final comparando com o que já tinha, só grava o que realmente mudou
     const patch = {};
     const valoresOriginais = Object.assign({}, b.valores_originais || {});
     const historico = (b.historico_edicoes || []).slice();
@@ -71840,30 +71847,97 @@ window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
         });
     });
 
-    if (!houveMudanca) {
-        mostrarAlerta('Já está tudo de acordo com o horário da jornada — nada pra corrigir aqui.', 'sucesso');
-        return;
-    }
+    if (!houveMudanca) return Object.assign({}, resultadoVazio, { motivo: 'ja_ok' });
 
-    const resumo = camposOrdem.filter(function(c) { return patch[c + '_hora'] !== undefined; })
-        .map(function(c) { return window.NOMES_CAMPOS_PONTO[c]; }).join(', ');
-    const confirmou = await window.mostrarConfirmacao('Corrigir automaticamente esse dia com base no horário da jornada (' + (jornadaVigente.horario || '-') + ')? Vai ajustar: ' + resumo + '. O horário batido original continua guardado no sistema.');
+    patch.valores_originais = valoresOriginais;
+    patch.historico_edicoes = historico;
+
+    const resumoCampos = camposOrdem.filter(function(c) { return patch[c + '_hora'] !== undefined; }).map(function(c) { return window.NOMES_CAMPOS_PONTO[c]; });
+    return { patch: patch, motivo: null, resumoCampos: resumoCampos, horarioTexto: window.obterHorarioEsperadoParaData(jornadaVigente, b.data) };
+};
+
+window.corrigirPontosDoDiaAutomatico = async function(idCartao) {
+    const b = window.pontoCartoesPorId[idCartao];
+    if (!b) { mostrarAlerta('Não encontrei os detalhes desse ponto.', 'erro'); return; }
+    if (!b.colaborador_id) return;
+
+    const perfilColab = await window.obterPerfilPontoCache(b.colaborador_id);
+    const resultado = window.calcularCorrecaoAutomaticaPonto(b, perfilColab);
+
+    if (resultado.motivo === 'sem_batida') { mostrarAlerta('Esse dia não tem nenhuma batida registrada — não dá pra corrigir automaticamente. Use "Preencher" pra lançar manualmente se precisar.', 'erro'); return; }
+    if (resultado.motivo === 'sem_perfil') { mostrarAlerta('Não consegui carregar o perfil do colaborador pra comparar com a jornada.', 'erro'); return; }
+    if (resultado.motivo === 'sem_horario') { mostrarAlerta('Não consegui identificar o horário de entrada/saída da jornada desse colaborador pra esse dia da semana — corrija manualmente.', 'erro'); return; }
+    if (resultado.motivo === 'ja_ok') { mostrarAlerta('Já está tudo de acordo com o horário da jornada — nada pra corrigir aqui.', 'sucesso'); return; }
+
+    const confirmou = await window.mostrarConfirmacao('Corrigir automaticamente esse dia com base no horário da jornada (' + (resultado.horarioTexto || '-') + ')? Vai ajustar: ' + resultado.resumoCampos.join(', ') + '. O horário batido original continua guardado no sistema.');
     if (!confirmou) return;
 
     try {
-        patch.valores_originais = valoresOriginais;
-        patch.historico_edicoes = historico;
-
-        const { error } = await supabaseClient.from('pontos_diarios_whatsapp').update(patch).eq('id', b.id);
+        const { error } = await supabaseClient.from('pontos_diarios_whatsapp').update(resultado.patch).eq('id', b.id);
         if (error) throw error;
 
-        Object.assign(b, patch);
+        Object.assign(b, resultado.patch);
         window.pontoCartoesPorId[idCartao] = b;
         mostrarAlerta('Ponto corrigido de acordo com a jornada.', 'sucesso');
         window.reabrirDetalhesPontoDiaAtualizado(idCartao);
     } catch (e) {
         mostrarAlerta('Erro ao corrigir: ' + e.message, 'erro');
     }
+};
+
+// Corrige TODOS os dias do mês visível no calendário de uma vez só, pro colaborador
+// selecionado — reaproveita a mesma lógica dia a dia, só que em lote com 1 confirmação.
+window.corrigirPontosDoMesAutomatico = async function() {
+    const estado = window.pontoCalendarioEstado;
+    if (!estado || !estado.colaboradorId) { mostrarAlerta('Selecione um colaborador primeiro.', 'erro'); return; }
+
+    const porDia = window.pontoCalendarioPorDiaAtual || {};
+    const cartoes = Object.values(porDia).filter(function(b) {
+        const preenchidos = ['entrada_hora','ida_refeicao_hora','volta_refeicao_hora','saida_hora'].filter(function(c) { return !!b[c]; }).length;
+        return preenchidos > 0 && preenchidos < 4;
+    });
+
+    if (cartoes.length === 0) { mostrarAlerta('Nenhum dia incompleto pra corrigir nesse mês.', 'sucesso'); return; }
+
+    const perfilColab = await window.obterPerfilPontoCache(estado.colaboradorId);
+    if (!perfilColab) { mostrarAlerta('Não consegui carregar o perfil do colaborador.', 'erro'); return; }
+
+    const pendentes = [];
+    let semHorario = 0;
+    cartoes.forEach(function(b) {
+        const resultado = window.calcularCorrecaoAutomaticaPonto(b, perfilColab);
+        if (resultado.patch) pendentes.push({ b: b, patch: resultado.patch });
+        else if (resultado.motivo === 'sem_horario') semHorario++;
+    });
+
+    if (pendentes.length === 0) {
+        mostrarAlerta('Nenhum dia pôde ser corrigido automaticamente' + (semHorario > 0 ? ' (' + semHorario + ' sem horário de jornada identificado nesse dia da semana)' : ' — já está tudo certo') + '.', 'erro');
+        return;
+    }
+
+    const c = (window.pontoColabsGlobais || []).find(function(x) { return x.id === estado.colaboradorId; });
+    const nomesMeses = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+    const msg = 'Isso vai corrigir automaticamente ' + pendentes.length + ' dia(s) de ' + nomesMeses[estado.mes] + '/' + estado.ano + ' de ' + (c ? c.nome : 'colaborador') + ', usando o horário da jornada configurada — reclassificando batidas no campo errado e preenchendo o que falta. O horário batido original continua guardado em cada dia.'
+        + (semHorario > 0 ? ' (' + semHorario + ' dia(s) não puderam ser identificados e continuam como estão.)' : '')
+        + ' Continuar?';
+    const confirmou = await window.mostrarConfirmacao(msg);
+    if (!confirmou) return;
+
+    let sucesso = 0, falha = 0;
+    for (const item of pendentes) {
+        try {
+            const { error } = await supabaseClient.from('pontos_diarios_whatsapp').update(item.patch).eq('id', item.b.id);
+            if (error) throw error;
+            Object.assign(item.b, item.patch);
+            window.pontoCartoesPorId[item.b.id] = item.b;
+            sucesso++;
+        } catch (e) {
+            falha++;
+        }
+    }
+
+    mostrarAlerta(sucesso + ' dia(s) corrigido(s)' + (falha > 0 ? ', ' + falha + ' falharam' : '') + '.', falha > 0 ? 'erro' : 'sucesso');
+    window.carregarCalendarioPontoWhatsapp();
 };
 
 // -----------------------------------------------------------------------
@@ -72056,10 +72130,6 @@ window.abrirDetalhesPontoDia = function(idCartao) {
         + '<div style="margin-top:14px;">' + statusChip + '</div>'
         + '</div>'
         + '<div style="padding: 18px 24px 24px;">'
-        + (camposPreenchidos > 0 && camposPreenchidos < 4
-            ? '<button type="button" style="width:100%; height:44px; margin-bottom:14px; border-radius:10px; background:rgba(167,139,250,0.12); border:1px solid rgba(167,139,250,0.5); color:#c4b5fd; font-weight:600; cursor:pointer;" onclick="window.corrigirPontosDoDiaAutomatico(\'' + b.id + '\')">'
-                + '<i class="fa-solid fa-wand-magic-sparkles"></i> Corrigir Pontos do Dia (usar horário da jornada)</button>'
-            : '')
         + '<div id="linhas-cartao-ponto" style="border:1px solid var(--cor-borda); border-radius:12px; overflow:hidden;">' + linhasHtml + '</div>'
         + '<button class="btn-secondary" style="width: 100%; height: 46px; margin-top: 18px; border-radius: 10px;" onclick="document.getElementById(\'modal-detalhes-ponto-whatsapp\').remove()">Fechar</button>'
         + '</div></div></div>';
@@ -72627,13 +72697,17 @@ window.carregarCalendarioPontoWhatsapp = async function() {
     const primeiroDiaMes = new Date(estado.ano, estado.mes, 1);
     const ultimoDiaMes = new Date(estado.ano, estado.mes + 1, 0);
 
+    const barraCorrigirMes = document.getElementById('barra-corrigir-mes-ponto');
+
     if (!estado.colaboradorId) {
         if (avisoDiv) avisoDiv.innerHTML = '<div style="display:flex; align-items:center; gap:10px; background:rgba(255,179,0,0.1); border:1px solid rgba(255,179,0,0.35); color:#ffb300; padding:10px 16px; border-radius:10px; margin-bottom:12px; font-size:0.85rem;">'
             + '<i class="fa-solid fa-circle-info"></i> Selecione um colaborador acima para ver os pontos batidos.</div>';
         if (grade) grade.innerHTML = window.renderizarGradeCalendarioPontoVazia(primeiroDiaMes, ultimoDiaMes);
+        if (barraCorrigirMes) barraCorrigirMes.classList.add('hidden');
         return;
     }
     if (avisoDiv) avisoDiv.innerHTML = '';
+    if (barraCorrigirMes) barraCorrigirMes.classList.remove('hidden');
 
     const dataMinStr = primeiroDiaMes.toISOString().split('T')[0];
     const dataMaxStr = ultimoDiaMes.toISOString().split('T')[0];
@@ -72659,6 +72733,7 @@ window.carregarCalendarioPontoWhatsapp = async function() {
             window.pontoCartoesPorId[b.id] = b;
             porDia[b.data] = b;
         });
+        window.pontoCalendarioPorDiaAtual = porDia;
 
         const diasSemana = ['D','S','T','Q','Q','S','S'];
         let html = '<div style="display:grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 8px;">'
