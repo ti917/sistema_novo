@@ -4606,12 +4606,23 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <button id="btn-ponto-modo-horarios" class="btn-secondary" style="border-color: var(--cor-borda); color: var(--cor-texto-secundario); padding: 8px 14px; font-size: 0.8rem;" onclick="window.alternarModoPontoWhatsapp('horarios')">
                         <i class="fa-solid fa-utensils"></i> Configurar Horários
                     </button>
-                    <button class="btn-secondary" style="border-color: #25D366; color: #25D366; padding: 8px 16px; font-size: 0.85rem;" onclick="window.listarBatimentosPontoWhatsapp()">
+                    <button class="btn-secondary" style="border-color: #25D366; color: #25D366; padding: 8px 16px; font-size: 0.85rem;" onclick="window.buscarBatimentosPontoWhatsapp()">
                         <i class="fa-solid fa-rotate"></i> Atualizar
                     </button>
                 </div>
             </div>
             <p style="font-size: 0.82rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">Uma linha por colaborador/dia — últimos 30 dias, mais recentes primeiro. Clique num horário pra ver a data exata daquele ponto (importante à noite, quando o ponto pode cair no dia seguinte).</p>
+
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom: 15px;">
+                <div class="input-wrapper" style="max-width: 320px; flex: 1; margin-bottom: 0;">
+                    <i class="fa-solid fa-user"></i>
+                    <input type="text" id="busca-batimentos-colaborador" placeholder="Buscar por colaborador..." autocomplete="off" oninput="window.aoDigitarBuscaBatimentosPonto()">
+                </div>
+                <div class="input-wrapper" style="max-width: 320px; flex: 1; margin-bottom: 0;">
+                    <i class="fa-solid fa-building"></i>
+                    <input type="text" id="busca-batimentos-unidade" placeholder="Buscar por unidade..." autocomplete="off" oninput="window.aoDigitarBuscaBatimentosPonto()">
+                </div>
+            </div>
 
             <div id="ponto-modo-lista">
                 <div class="glass-card" style="padding: 4px; overflow-x: auto; border-radius: 14px;">
@@ -72032,7 +72043,10 @@ window.pontoConfigMapa = {};
 window.carregarPontoWhatsappTeste = async function() {
     window.alternarSubAbaControlePonto('batimentos');
     await window.listarColabsParaPontoWhatsapp();
-    await window.listarBatimentosPontoWhatsapp();
+    // 👇 Não carrega mais os batimentos de todo mundo automaticamente ao abrir
+    // a aba (evita puxar tudo do banco à toa). Só mostra depois que o RH
+    // digitar um colaborador ou uma unidade pra buscar.
+    window.mostrarEstadoInicialBatimentosPonto();
 };
 
 // Alterna entre as duas subabas de Controle de Ponto: os batimentos registrados (com
@@ -72266,8 +72280,35 @@ window.alternarModoPontoWhatsapp = function(modo) {
     if (modo === 'horarios') window.carregarConfigHorariosPonto();
 };
 
-window.listarBatimentosPontoWhatsapp = async function() {
+// Mostra a mensagem inicial pedindo pra buscar, em vez de carregar tudo.
+window.mostrarEstadoInicialBatimentosPonto = function() {
     const cont = document.getElementById('lista-batimentos-ponto-whatsapp');
+    if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:30px;"><i class="fa-solid fa-magnifying-glass" style="font-size:1.3rem; margin-bottom:8px; display:block;"></i>Digite o nome de um <b>colaborador</b> ou de uma <b>unidade</b> acima pra buscar os batimentos.<br><small>Não carregamos tudo de uma vez pra não gastar dados à toa.</small></td></tr>';
+};
+
+// Debounce: espera parar de digitar (350ms) antes de consultar o banco.
+window._debounceBuscaBatimentosPonto = null;
+window.aoDigitarBuscaBatimentosPonto = function() {
+    clearTimeout(window._debounceBuscaBatimentosPonto);
+    window._debounceBuscaBatimentosPonto = setTimeout(function() {
+        window.buscarBatimentosPontoWhatsapp();
+    }, 350);
+};
+
+window.buscarBatimentosPontoWhatsapp = async function() {
+    const cont = document.getElementById('lista-batimentos-ponto-whatsapp');
+    const inputColab = document.getElementById('busca-batimentos-colaborador');
+    const inputUnidade = document.getElementById('busca-batimentos-unidade');
+    const termoColab = inputColab ? inputColab.value.trim() : '';
+    const termoUnidade = inputUnidade ? inputUnidade.value.trim() : '';
+
+    // Exige pelo menos 2 letras em algum dos dois campos — sem isso, não
+    // consulta o banco (fica só com a mensagem pedindo pra buscar).
+    if (termoColab.length < 2 && termoUnidade.length < 2) {
+        window.mostrarEstadoInicialBatimentosPonto();
+        return;
+    }
+
     if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr>';
 
     // Célula de um horário: mostra a hora e, se tiver coordenada, o link do mapa embaixo.
@@ -72286,7 +72327,7 @@ window.listarBatimentosPontoWhatsapp = async function() {
         trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
         const dataMin = trintaDiasAtras.toISOString().split('T')[0];
 
-        const { data, error } = await supabaseClient
+        let query = supabaseClient
             .from('pontos_diarios_whatsapp')
             .select('*')
             .gte('data', dataMin)
@@ -72294,12 +72335,17 @@ window.listarBatimentosPontoWhatsapp = async function() {
             .order('nome_colaborador', { ascending: true })
             .limit(200);
 
+        if (termoColab.length >= 2) query = query.ilike('nome_colaborador', '%' + termoColab + '%');
+        if (termoUnidade.length >= 2) query = query.ilike('unidade', '%' + termoUnidade + '%');
+
+        const { data, error } = await query;
+
         if (error) throw error;
 
         (data || []).forEach(function(b) { window.pontoCartoesPorId[b.id] = b; });
 
         if (!data || data.length === 0) {
-            if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Nenhum ponto de teste registrado ainda.</td></tr>';
+            if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Nenhum batimento encontrado pra essa busca.</td></tr>';
             return;
         }
 
