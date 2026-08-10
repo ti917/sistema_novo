@@ -9624,13 +9624,6 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
     Escolha o período, o recorte (<b>Empresa</b>, <b>Unidade</b> ou <b>Colaborador</b>) e o indicador que deseja analisar. <b style="color: var(--cor-acento);">Os colaboradores afastados e cumprindo aviso não entram na contagem total da Lotação de unidade — e nesse indicador o recorte é sempre por Unidade ou Empresa.</b>
 </p>
 
-        <div class="glass-card" id="card-ferias-atual-bi" style="background: rgba(255, 213, 79, 0.06); border: 1px solid rgba(255, 213, 79, 0.35); margin-bottom: 20px;">
-            <h4 style="color: #ffd54f; margin-bottom: 10px;"><i class="fa-solid fa-umbrella-beach"></i> De Férias Agora</h4>
-            <div id="bi-lista-ferias-atual" style="display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto;">
-                <p style="text-align: center; color: var(--cor-texto-secundario); padding: 10px;"><i class="fa-solid fa-spinner fa-spin"></i></p>
-            </div>
-        </div>
-
         <div class="controls-escala" style="background: rgba(0, 188, 212, 0.05); border: 1px solid rgba(0, 188, 212, 0.3); display: flex; flex-wrap: wrap; gap: 15px;" id="controles-filtro-bi">
     <!-- 📅 PERÍODO ÚNICO (MESMO ESTILO DO EXTRATO DETALHADO) -->
     <div class="input-wrapper" style="flex: 2; min-width: 280px;">
@@ -13334,11 +13327,18 @@ window.gerarDadosBI = async function() {
             }
 
             const hojeIso = new Date().toISOString().split('T')[0];
-            const { data: ausenciasLotacao } = await supabaseClient.from('ausencias')
-                .select('colaborador_id, sigla, data_fim')
-                .eq('status', 'Aprovado')
-                .lte('data_inicio', hojeIso)
-                .gte('data_fim', hojeIso);
+            const [{ data: ausenciasLotacao }, { data: feriasLotacao }] = await Promise.all([
+                supabaseClient.from('ausencias')
+                    .select('colaborador_id, sigla, data_fim')
+                    .eq('status', 'Aprovado')
+                    .lte('data_inicio', hojeIso)
+                    .gte('data_fim', hojeIso),
+                supabaseClient.from('solicitacoes_ferias')
+                    .select('colaborador_id, data_fim_ferias')
+                    .eq('status', 'Aprovado')
+                    .lte('data_inicio_ferias', hojeIso)
+                    .gte('data_fim_ferias', hojeIso)
+            ]);
 
             let mapaAfastamentos = {};
             if (ausenciasLotacao) {
@@ -13347,6 +13347,13 @@ window.gerarDadosBI = async function() {
                         mapaAfastamentos[a.colaborador_id] = { sigla: a.sigla, retorno: a.data_fim };
                     }
                 });
+            }
+
+            // Quem está de férias entra normal na contagem de ativos (não sai da lotação) — só
+            // ganha um selo "De Férias" no card, igual ao "Cumprindo Aviso".
+            let mapaFeriasLotacao = {};
+            if (feriasLotacao) {
+                feriasLotacao.forEach(f => { mapaFeriasLotacao[f.colaborador_id] = f.data_fim_ferias; });
             }
 
             let queryPerfisLot = supabaseClient.from('perfis')
@@ -13397,12 +13404,17 @@ window.gerarDadosBI = async function() {
                 }
 
                 if (isAtivo || isAviso || isInss || isAso) {
-                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [] };
+                    if (!dadosLotacao[p.unidade].ativosPorCargo[cargo]) dadosLotacao[p.unidade].ativosPorCargo[cargo] = { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, qtdFerias: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [], nomesFerias: [] };
                     
                     if (isAtivo) {
                         dadosLotacao[p.unidade].ativosTotal++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdAtivos++;
                         dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesAtivos.push(p.nome);
+                        // Continua contando normal na lotação — só ganha o selo "De Férias" se for o caso.
+                        if (mapaFeriasLotacao[p.id]) {
+                            dadosLotacao[p.unidade].ativosPorCargo[cargo].qtdFerias++;
+                            dadosLotacao[p.unidade].ativosPorCargo[cargo].nomesFerias.push({ nome: p.nome, data: formatarDataBR(mapaFeriasLotacao[p.id]) });
+                        }
                     } else if (isAso) {
                         dadosLotacao[p.unidade].ativosTotal++; 
                         dadosLotacao[p.unidade].asoTotal++;
@@ -13454,7 +13466,7 @@ window.gerarDadosBI = async function() {
                 let cargosUnicos = new Set([...Object.keys(dados.limitesCargos), ...Object.keys(dados.ativosPorCargo)]);
 
                 cargosUnicos.forEach(cargo => {
-                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [] };
+                    const infoCargo = dados.ativosPorCargo[cargo] || { qtdAtivos: 0, qtdAviso: 0, qtdInss: 0, qtdAso: 0, qtdFerias: 0, nomesAtivos: [], nomesAviso: [], nomesInss: [], nomesAso: [], nomesFerias: [] };
                     const limiteCargo = dados.limitesCargos[cargo] || '∞';
                     const totalNoCargo = infoCargo.qtdAtivos + infoCargo.qtdAso; 
                     let pctCargoBarra = 0; let corCargo = '#4fc3f7'; 
@@ -13527,6 +13539,22 @@ window.gerarDadosBI = async function() {
                                </div>
                            </div>`
                         : '';
+
+                    let listFerias = infoCargo.nomesFerias && infoCargo.nomesFerias.length > 0
+                        ? `<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);">
+                               <small style="color: #ffd54f; font-weight: bold; text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.5px;">
+                                   <i class="fa-solid fa-umbrella-beach"></i> De Férias (${infoCargo.nomesFerias.length})
+                               </small>
+                               <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
+                                   ${infoCargo.nomesFerias.map(fr => `
+                                       <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 213, 79, 0.08); border-left: 2px solid #ffd54f; padding: 6px 8px; border-radius: 4px; gap: 10px;">
+                                           <span style="color: #ffd54f; font-size: 0.8rem; font-weight: bold; line-height: 1.2;">${fr.nome}</span>
+                                           <span style="background: rgba(255, 213, 79, 0.15); color: #ffd54f; font-size: 0.65rem; font-weight: bold; padding: 2px 4px; border-radius: 4px; white-space: nowrap;">Volta ${fr.data}</span>
+                                       </div>
+                                   `).join('')}
+                               </div>
+                           </div>`
+                        : '';
                         
                     if(infoCargo.nomesAtivos.length === 0 && infoCargo.nomesAviso.length === 0 && infoCargo.nomesInss.length === 0 && infoCargo.nomesAso.length === 0) {
                         listAtivos = `<div style="margin-top: 10px; font-size: 0.8rem; color: var(--cor-texto-secundario); font-style: italic;">Nenhum colaborador alocado.</div>`;
@@ -13545,6 +13573,7 @@ window.gerarDadosBI = async function() {
                             ${listAso}
                             ${listInss}
                             ${listAviso}
+                            ${listFerias}
                         </div>
                     `;
                 });
@@ -15508,7 +15537,6 @@ window.ajustarFiltroPorIndicadorBI = function() {
               window.popularEmpresasBI();
               window.ajustarFiltroPorIndicadorBI();
               window.mudarTipoFiltroBI();
-              window.carregarFeriasAtualBI();
                 // Garante o calendário de período montado
                 window.iniciarPeriodoBI();
 
@@ -74563,42 +74591,6 @@ window.abrirDescontoVTVRRescisao = async function(idColab) {
     }
 };
 
-// ===================== "DE FÉRIAS AGORA" (Indicadores e BI) =====================
-window.carregarFeriasAtualBI = async function() {
-    const cont = document.getElementById('bi-lista-ferias-atual');
-    if (!cont) return;
-    cont.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:10px;"><i class="fa-solid fa-spinner fa-spin"></i></p>';
-    try {
-        const hojeIso = new Date().toISOString().split('T')[0];
-        const { data, error } = await supabaseClient
-            .from('solicitacoes_ferias')
-            .select('*')
-            .eq('status', 'Aprovado')
-            .lte('data_inicio_ferias', hojeIso)
-            .gte('data_fim_ferias', hojeIso)
-            .order('data_fim_ferias', { ascending: true });
-        if (error) throw error;
-
-        if (!data || data.length === 0) {
-            cont.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:10px; font-size:0.85rem;">Ninguém de férias hoje.</p>';
-            return;
-        }
-
-        cont.innerHTML = data.map(function(f) {
-            const fimFmt = f.data_fim_ferias ? formatarDataBR(f.data_fim_ferias) : '-';
-            return '<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 12px; background:rgba(255,255,255,0.03); border-radius:8px; border:1px solid var(--cor-borda);">'
-                + '<div>'
-                + '<b style="font-size:0.88rem;">' + (f.nome || '-') + '</b>'
-                + '<div style="font-size:0.76rem; color:var(--cor-texto-secundario);">' + (f.unidade || '-') + '</div>'
-                + '</div>'
-                + '<span style="font-size:0.76rem; color:#ffd54f; white-space:nowrap;"><i class="fa-regular fa-calendar"></i> volta em ' + fimFmt + '</span>'
-                + '</div>';
-        }).join('');
-    } catch (e) {
-        console.error('Erro ao carregar quem está de férias:', e);
-        cont.innerHTML = '<p style="text-align:center; color:var(--cor-perigo); padding:10px; font-size:0.85rem;">Erro ao carregar: ' + e.message + '</p>';
-    }
-};
 
 // ===================== RELATÓRIOS ADMIN =====================
 window.relColaboradoresCache = null;
