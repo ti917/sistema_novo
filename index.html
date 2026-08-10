@@ -13030,15 +13030,24 @@ window.gerarDadosBI = async function() {
                 let somaMinutosCreditoTotal = 0;
                 let somaMinutosVencidos = 0;
                 const dataReferenciaFim = new Date(dFim + 'T00:00:00');
+                // 👇 Ciclo de fechamento de verdade (ex: 60 dias a partir de 26/05) —
+                // se a unidade não tiver Data de Início configurada ainda, cai no
+                // cálculo antigo (dias corridos) como fallback, pra não travar nada.
+                const inicioCicloAtualBI = window.obterInicioCicloAtual(configUnidade.data_inicio_ciclo, configUnidade.dias_validade, dataReferenciaFim);
 
                 arrayCreditos.forEach(cred => {
                     somaMinutosCreditoTotal += cred.minutos;
                     if (cred.minutos > 0) {
                         const dCred = new Date(cred.data + 'T00:00:00');
-                        const diffDias = Math.floor((dataReferenciaFim - dCred) / (1000 * 3600 * 24));
-                        if (diffDias > configUnidade.dias_validade) {
-                            somaMinutosVencidos += cred.minutos;
+                        let vencido;
+                        if (inicioCicloAtualBI) {
+                            // Já fechou o ciclo em que essa hora foi gerada? Então venceu.
+                            vencido = dCred < inicioCicloAtualBI;
+                        } else {
+                            const diffDias = Math.floor((dataReferenciaFim - dCred) / (1000 * 3600 * 24));
+                            vencido = diffDias > configUnidade.dias_validade;
                         }
+                        if (vencido) somaMinutosVencidos += cred.minutos;
                     }
                 });
 
@@ -59530,8 +59539,9 @@ window.abrirModalDetalhesCreditos = function(idColab) {
     try {
         // Pega a validade do banco de horas da unidade do cara
         const { data: colab } = await supabaseClient.from('perfis').select('unidade').eq('id', idColab).single();
-        const { data: confBH } = await supabaseClient.from('config_banco_horas').select('dias_validade').eq('unidade', colab.unidade).maybeSingle();
+        const { data: confBH } = await supabaseClient.from('config_banco_horas').select('dias_validade, data_inicio_ciclo').eq('unidade', colab.unidade).maybeSingle();
         const diasValidade = confBH ? confBH.dias_validade : 60;
+        const dataInicioCicloColab = confBH ? confBH.data_inicio_ciclo : null;
 
         // Buscas do banco de dados (Horas Extras e Ausências com Abate)
         let queryFt = supabaseClient.from('horas_extras_ft').select('*').eq('colaborador_id', idColab).eq('status', 'Aprovado');
@@ -59552,6 +59562,8 @@ window.abrirModalDetalhesCreditos = function(idColab) {
         let historicoFormatado = [];
 
         const hoje = new Date();
+        // 👇 Ciclo de fechamento de verdade configurado pra unidade desse colaborador
+        const inicioCicloAtualColab = window.obterInicioCicloAtual(dataInicioCicloColab, diasValidade, hoje);
 
         // 1. Processa todos os registros brutos
         todosRegistros.forEach(reg => {
@@ -59585,10 +59597,17 @@ window.abrirModalDetalhesCreditos = function(idColab) {
                     mins = Math.round(parseFloat(matchDec[1]) * 60);
                     totalMinsCredito += mins;
                     
-                    // Checa se Venceu
+                    // Checa se Venceu — usa o ciclo de fechamento de verdade (data de
+                    // início + dias de validade); se a unidade não tiver ciclo configurado
+                    // ainda, cai no cálculo antigo (dias corridos) como fallback.
                     const dCredito = new Date(reg.data_inicio + 'T00:00:00');
-                    const diffDiasVida = Math.floor((hoje - dCredito) / (1000 * 3600 * 24));
-                    const isVencido = diffDiasVida > diasValidade;
+                    let isVencido;
+                    if (inicioCicloAtualColab) {
+                        isVencido = dCredito < inicioCicloAtualColab;
+                    } else {
+                        const diffDiasVida = Math.floor((hoje - dCredito) / (1000 * 3600 * 24));
+                        isVencido = diffDiasVida > diasValidade;
+                    }
                     
                     if (isVencido) totalMinsVencido += mins;
 
@@ -60256,38 +60275,36 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 if (deb.minutos === 0) dIdx++;
             }
 
-            // 👇 INTELIGÊNCIA DE FECHAMENTO POR COMPETÊNCIA (CORTE NO DIA 25) 👇
+            // 👇 FECHAMENTO PELO CICLO REAL CONFIGURADO EM "Regras do Banco de Horas"
+            // (Data de Início do 1º Ciclo + Duração em dias) — antes isso aqui tinha
+            // uma regra fixa de "sempre dia 25 do mês seguinte" que ignorava
+            // completamente a duração configurada (ex: ciclo de 60 dias virava
+            // errado). Agora usa o mesmo motor de ciclo do restante do sistema:
+            // qualquer hora de um ciclo já fechado (que já passou do dia de
+            // vencimento) e ainda não quitada aparece como Vencida.
+            const inicioCicloAtualAdmin = window.obterInicioCicloAtual(configUnidade.data_inicio_ciclo, configUnidade.dias_validade, hoje);
+
             let vencidoPositivo = 0;
             let hVencidosPos = [];
             
             listCreditos.forEach(cred => {
                 if (cred.minutos > 0) {
                     const dCred = new Date(cred.data + 'T00:00:00');
-                    let estaVencido = false;
+                    let estaVencido;
 
-                    // 1. Descobre a competência da hora extra (Corte sempre no dia 25)
-                    let anoComp = dCred.getFullYear();
-                    let mesComp = dCred.getMonth(); // 0-11
-                    
-                    if (dCred.getDate() > 25) {
-                        mesComp++;
-                        if (mesComp > 11) { mesComp = 0; anoComp++; }
-                    }
-
-                    // 2. Define o vencimento para o dia 25 do mês seguinte (+1)
-                    let mesLimite = mesComp + 1; 
-                    let anoLimite = anoComp;
-                    if (mesLimite > 11) {
-                        mesLimite = mesLimite - 12;
-                        anoLimite++;
-                    }
-                    
-                    // Trava o cronômetro exatamente às 23:59:59 do dia 25 do mês de vencimento
-                    const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
-
-                    // Usa a variável 'hoje' para saber se já passou do prazo
-                    if (hoje > dataLimiteVencimento) {
-                        estaVencido = true;
+                    if (inicioCicloAtualAdmin) {
+                        // Já fechou o ciclo em que essa hora foi gerada? Então venceu.
+                        estaVencido = dCred < inicioCicloAtualAdmin;
+                    } else {
+                        // Unidade ainda sem Data de Início do Ciclo configurada — fallback
+                        // pro corte simples de "dia 25 do mês seguinte", igual antes.
+                        let anoComp = dCred.getFullYear();
+                        let mesComp = dCred.getMonth();
+                        if (dCred.getDate() > 25) { mesComp++; if (mesComp > 11) { mesComp = 0; anoComp++; } }
+                        let mesLimite = mesComp + 1; let anoLimite = anoComp;
+                        if (mesLimite > 11) { mesLimite -= 12; anoLimite++; }
+                        const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
+                        estaVencido = hoje > dataLimiteVencimento;
                     }
 
                     if (estaVencido) {
@@ -60302,27 +60319,18 @@ window.carregarExtratoBancoHorasAdmin = async function() {
             listDebitos.forEach(deb => {
                 if (deb.minutos > 0) {
                     const dDeb = new Date(deb.data + 'T00:00:00');
-                    let estaVencido = false;
+                    let estaVencido;
 
-                    let anoComp = dDeb.getFullYear();
-                    let mesComp = dDeb.getMonth();
-                    
-                    if (dDeb.getDate() > 25) {
-                        mesComp++;
-                        if (mesComp > 11) { mesComp = 0; anoComp++; }
-                    }
-
-                    let mesLimite = mesComp + 1;
-                    let anoLimite = anoComp;
-                    if (mesLimite > 11) {
-                        mesLimite = mesLimite - 12;
-                        anoLimite++;
-                    }
-                    
-                    const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
-
-                    if (hoje > dataLimiteVencimento) {
-                        estaVencido = true;
+                    if (inicioCicloAtualAdmin) {
+                        estaVencido = dDeb < inicioCicloAtualAdmin;
+                    } else {
+                        let anoComp = dDeb.getFullYear();
+                        let mesComp = dDeb.getMonth();
+                        if (dDeb.getDate() > 25) { mesComp++; if (mesComp > 11) { mesComp = 0; anoComp++; } }
+                        let mesLimite = mesComp + 1; let anoLimite = anoComp;
+                        if (mesLimite > 11) { mesLimite -= 12; anoLimite++; }
+                        const dataLimiteVencimento = new Date(anoLimite, mesLimite, 25, 23, 59, 59);
+                        estaVencido = hoje > dataLimiteVencimento;
                     }
 
                     if (estaVencido) {
@@ -60871,13 +60879,21 @@ window.carregarExtratoBancoHorasGestor = async function() {
             let somaMinutosVencidos = 0;
             let somaMinutosCreditoTotal = 0;
             let listaVencidosPos = [];
+            // 👇 Ciclo de fechamento de verdade configurado pra essa unidade
+            const inicioCicloAtualGestor = window.obterInicioCicloAtual(configUnidade.data_inicio_ciclo, configUnidade.dias_validade, hojeFim);
 
             arrayCreditos.forEach(cred => {
                 somaMinutosCreditoTotal += cred.minutos;
                 if (cred.minutos > 0) {
                     const dCred = new Date(cred.data + 'T00:00:00');
-                    const diffDias = Math.floor((hojeFim - dCred) / (1000 * 3600 * 24));
-                    if (diffDias > configUnidade.dias_validade) {
+                    let vencido;
+                    if (inicioCicloAtualGestor) {
+                        vencido = dCred < inicioCicloAtualGestor;
+                    } else {
+                        const diffDias = Math.floor((hojeFim - dCred) / (1000 * 3600 * 24));
+                        vencido = diffDias > configUnidade.dias_validade;
+                    }
+                    if (vencido) {
                         somaMinutosVencidos += cred.minutos;
                         listaVencidosPos.push({ sigla: cred.sigla, data: cred.data, minutes: cred.minutos, obs: cred.obs });
                     }
