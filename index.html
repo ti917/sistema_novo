@@ -74608,55 +74608,99 @@ window.imprimirRelatorioAdmin = function() {
 
 // Gera e baixa o PDF diretamente (sem passar pela caixa de diálogo de impressão), usando html2pdf.js
 window.baixarPdfRelatorioAdmin = async function() {
-    const montado = window.relMontarConteudoHtml();
-    if (!montado) return;
-    if (typeof html2pdf === 'undefined') {
-        mostrarAlerta('Biblioteca de PDF ainda carregando, tenta de novo em 1 segundinho.', 'aviso');
+    if (!window.relUltimoRelatorio) return;
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        mostrarAlerta("A biblioteca de PDF ainda está carregando. Tente novamente em 2 segundos.", "aviso");
         return;
     }
-    const { corpoHtml, tipoTxt } = montado;
+
+    const { jsPDF } = window.jspdf;
+    const { colunas, linhas, temGrupo } = window.relUltimoRelatorio;
+    const tipo = document.getElementById('rel-tipo').value;
+    const tipoTxt = document.getElementById('rel-tipo').selectedOptions[0]?.text || 'Relatório';
+    const comAssinatura = tipo === 'jornada_espelho';
 
     const btn = document.getElementById('btn-baixar-pdf-relatorio');
     const textoOriginal = btn ? btn.innerHTML : '';
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF...'; }
 
-    // Mesma receita usada nos outros PDFs do sistema (Avaliação/Desempenho): joga a tela pro topo,
-    // monta um clone visível fora da tela (zIndex negativo) e só depois manda o html2canvas fotografar.
-    const scrollAnterior = window.scrollY;
-    window.scrollTo(0, 0);
-
-    const containerInvisivel = document.createElement('div');
-    containerInvisivel.style.position = 'absolute';
-    containerInvisivel.style.top = '0';
-    containerInvisivel.style.left = '0';
-    containerInvisivel.style.zIndex = '-9999';
-    containerInvisivel.style.width = '780px';
-    containerInvisivel.style.backgroundColor = '#ffffff';
-    containerInvisivel.innerHTML = corpoHtml;
-    document.body.appendChild(containerInvisivel);
-
-    // Pausa pro navegador terminar de desenhar o clone antes de fotografar
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    const nomeArquivo = `Relatorio_${(tipoTxt || 'Relatorio').replace(/[^\w]+/g, '_')}_${new Date().toISOString().slice(0,10)}.pdf`;
-
-    const opt = {
-        margin: [10, 10, 10, 10],
-        filename: nomeArquivo,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, logging: false, useCORS: true, windowWidth: 800, scrollX: 0, scrollY: 0 },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
-    };
-
     try {
-        await html2pdf().set(opt).from(containerInvisivel).save();
+        // 👇 PDF DESENHADO DE VERDADE (vetorial, jsPDF + AutoTable) — igual à Escala.
+        // Nada de "tirar foto" da tela (html2canvas): aqui é texto e linha real,
+        // então nunca sai em branco e o arquivo fica leve e nítido.
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const MARGEM = 10;
+        const larguraPagina = doc.internal.pageSize.getWidth();
+        const alturaPagina = doc.internal.pageSize.getHeight();
+        const ALTURA_CABECALHO = 22;
+
+        const desenharCabecalho = function() {
+            doc.setFillColor(0, 35, 71);
+            doc.roundedRect(MARGEM, 6, 26, 11, 1.5, 1.5, 'F');
+            doc.setTextColor(255, 193, 7);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
+            doc.text('RH SOUL', MARGEM + 13, 11, { align: 'center' });
+            doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'normal'); doc.setFontSize(4.5);
+            doc.text('Gestão Inteligente', MARGEM + 13, 14.5, { align: 'center' });
+
+            doc.setTextColor(0, 35, 71); doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+            doc.text(String(tipoTxt).toUpperCase(), MARGEM + 30, 11);
+
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(71, 85, 105);
+            doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, MARGEM + 30, 15.5);
+
+            doc.setDrawColor(0, 35, 71); doc.setLineWidth(0.5);
+            doc.line(MARGEM, 19, larguraPagina - MARGEM, 19);
+        };
+
+        // Monta o corpo da tabela, com uma linha "faixa" para cada grupo (quando agrupado)
+        let body = [];
+        if (temGrupo) {
+            const grupos = {};
+            linhas.forEach(l => { const g = l._grupo || 'Outros'; (grupos[g] = grupos[g] || []).push(l); });
+            Object.keys(grupos).sort().forEach(g => {
+                body.push([{ content: `${g} (${grupos[g].length})`, colSpan: colunas.length, styles: { fillColor: [227, 242, 253], textColor: [2, 132, 199], fontStyle: 'bold', halign: 'left' } }]);
+                grupos[g].forEach(l => body.push(colunas.map(c => String(l[c.key] ?? '-'))));
+            });
+        } else {
+            linhas.forEach(l => body.push(colunas.map(c => String(l[c.key] ?? '-'))));
+        }
+
+        doc.autoTable({
+            head: [colunas.map(c => c.header)],
+            body: body,
+            startY: ALTURA_CABECALHO,
+            margin: { left: MARGEM, right: MARGEM, top: ALTURA_CABECALHO, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 8, cellPadding: 2.2, textColor: [45, 55, 72], lineColor: [222, 226, 230], lineWidth: 0.1, overflow: 'linebreak' },
+            headStyles: { fillColor: [0, 35, 71], textColor: [255, 193, 7], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: [248, 250, 252] },
+            didDrawPage: function() {
+                desenharCabecalho();
+                const pagina = doc.internal.getNumberOfPages();
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(148, 163, 184);
+                doc.text(`Página ${pagina}`, larguraPagina - MARGEM, alturaPagina - 6, { align: 'right' });
+            }
+        });
+
+        if (comAssinatura) {
+            let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 16;
+            if (y > alturaPagina - 24) { doc.addPage(); desenharCabecalho(); y = ALTURA_CABECALHO + 16; }
+            const largura = (larguraPagina - MARGEM * 2 - 20) / 2;
+            doc.setDrawColor(0, 35, 71); doc.setLineWidth(0.3);
+            doc.line(MARGEM, y, MARGEM + largura, y);
+            doc.line(larguraPagina - MARGEM - largura, y, larguraPagina - MARGEM, y);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(71, 85, 105);
+            doc.text('Assinatura do Colaborador', MARGEM + largura / 2, y + 4, { align: 'center' });
+            doc.text('Assinatura do Empregador', larguraPagina - MARGEM - largura / 2, y + 4, { align: 'center' });
+        }
+
+        const nomeArquivo = `Relatorio_${(tipoTxt || 'Relatorio').replace(/[^\w]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.pdf`;
+        doc.save(nomeArquivo);
     } catch (e) {
         console.error('Erro ao gerar PDF do relatório:', e);
         mostrarAlerta('Erro ao gerar PDF: ' + e.message, 'erro');
     } finally {
-        document.body.removeChild(containerInvisivel);
-        window.scrollTo(0, scrollAnterior);
         if (btn) { btn.disabled = false; btn.innerHTML = textoOriginal; }
     }
 };
