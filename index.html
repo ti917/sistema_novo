@@ -75008,15 +75008,28 @@ window.gerarRelatorioAdmin = async function() {
             const dFimObj = new Date(dataFim + 'T00:00:00');
             while (dCursor <= dFimObj) { diasPeriodo.push(new Date(dCursor)); dCursor.setDate(dCursor.getDate() + 1); }
 
-            const [rPontos, rAus] = await Promise.all([
+            const [rPontos, rAus, rConfigPonto, rConfigBH] = await Promise.all([
                 supabaseClient.from('pontos_diarios_whatsapp').select('*').gte('data', dataIni).lte('data', dataFim),
-                supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFim).gte('data_fim', dataIni)
+                supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFim).gte('data_fim', dataIni),
+                supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, habilitado, data_inicio_ponto'),
+                supabaseClient.from('config_banco_horas').select('unidade, dias_validade, data_inicio_ciclo')
             ]);
 
             const pontosPorChave = {};
             (rPontos.data || []).forEach(p => { pontosPorChave[p.colaborador_id + '_' + p.data] = p; });
             const ausenciasPorColab = {};
             (rAus.data || []).forEach(a => { (ausenciasPorColab[a.colaborador_id] = ausenciasPorColab[a.colaborador_id] || []).push(a); });
+
+            // Só entra no relatório quem realmente usa o Controle de Ponto (Método de Ponto habilitado),
+            // e só a partir do dia configurado como "Data que começou a bater ponto no sistema" — antes
+            // disso o colaborador nem estava usando o ponto digital, então não é falta.
+            const mapaConfigPonto = {};
+            (rConfigPonto.data || []).forEach(c => { mapaConfigPonto[c.colaborador_id] = c; });
+
+            // Saldo respeitando o ciclo de fechamento real (Regras do Banco de Horas), não um
+            // acúmulo solto do período escolhido — assim ele reinicia na virada de cada ciclo.
+            const mapaConfigBH = {};
+            (rConfigBH.data || []).forEach(c => { mapaConfigBH[c.unidade] = c; });
 
             const diasSemana = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
             const fmtH = h => h ? new Date(h).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
@@ -75045,6 +75058,12 @@ window.gerarRelatorioAdmin = async function() {
             const dataIniObj = new Date(dataIni + 'T00:00:00');
 
             colabsFiltrados.forEach(colab => {
+                // Só entra no relatório quem tem o Método de Ponto habilitado pra esse colaborador
+                // (Controle de Ponto > Configurações). Sem isso ele nunca teve ponto digital, então
+                // não faz sentido nem aparecer aqui.
+                const configPontoColab = mapaConfigPonto[colab.id];
+                if (!configPontoColab || !configPontoColab.habilitado) return;
+
                 // Se o colaborador já foi desligado ANTES do período filtrado nem sequer começar,
                 // ele não trabalhou nenhum dia dentro do período — não faz sentido aparecer no
                 // relatório nem em branco nem com falta.
@@ -75060,9 +75079,30 @@ window.gerarRelatorioAdmin = async function() {
                 const adm = colab.dados_admissao || {};
                 const jornadaRaiz = adm.jornada || {};
                 let saldoAcumulado = 0;
+                let inicioCicloAnterior = null;
+
+                // Não mostra nenhum dia anterior à data configurada como "começou a bater ponto
+                // no sistema" — antes disso ele nem estava usando ponto digital.
+                const dataInicioPontoColab = configPontoColab.data_inicio_ponto || null;
+
+                const configBHUnidade = mapaConfigBH[colab.unidade] || null;
 
                 diasPeriodo.forEach(diaObj => {
                     const dataIso = diaObj.toISOString().split('T')[0];
+                    if (dataInicioPontoColab && dataIso < dataInicioPontoColab) return; // ainda não tinha começado a bater ponto
+
+                    // Saldo respeitando o ciclo de fechamento real do Banco de Horas — reinicia toda
+                    // vez que o dia entra num ciclo novo (Data de Início do 1º Ciclo + Duração do
+                    // Ciclo de Fechamento), em vez de só somar solto desde o começo do período pedido.
+                    if (configBHUnidade && configBHUnidade.data_inicio_ciclo && configBHUnidade.dias_validade) {
+                        const inicioCicloDoDia = window.obterInicioCicloAtual(configBHUnidade.data_inicio_ciclo, configBHUnidade.dias_validade, diaObj);
+                        const chaveCiclo = inicioCicloDoDia ? inicioCicloDoDia.toISOString().split('T')[0] : null;
+                        if (inicioCicloAnterior !== null && chaveCiclo !== inicioCicloAnterior) {
+                            saldoAcumulado = 0; // virou de ciclo — reinicia o saldo mostrado
+                        }
+                        inicioCicloAnterior = chaveCiclo;
+                    }
+
                     const diaSemanaNome = diasSemana[diaObj.getDay()];
                     // 👇 Pega o horário que estava VALENDO nesse dia específico, não o atual —
                     // assim, se o colaborador trocou de jornada no meio do período, cada dia
