@@ -37,6 +37,9 @@
   <!-- Flatpickr (Calendário Duplo Moderno) -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
 <link rel="stylesheet" type="text/css" href="https://npmcdn.com/flatpickr/dist/themes/dark.css"> <!-- Tema Escuro -->
+<!-- Mapbox GL JS: usado só pro mapa visual do raio de Geofencing (Localização para Bater Ponto) -->
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 <script defer src="https://npmcdn.com/flatpickr/dist/l10n/pt.js"></script>
     
@@ -4606,23 +4609,12 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <button id="btn-ponto-modo-horarios" class="btn-secondary" style="border-color: var(--cor-borda); color: var(--cor-texto-secundario); padding: 8px 14px; font-size: 0.8rem;" onclick="window.alternarModoPontoWhatsapp('horarios')">
                         <i class="fa-solid fa-utensils"></i> Configurar Horários
                     </button>
-                    <button class="btn-secondary" style="border-color: #25D366; color: #25D366; padding: 8px 16px; font-size: 0.85rem;" onclick="window.buscarBatimentosPontoWhatsapp()">
+                    <button class="btn-secondary" style="border-color: #25D366; color: #25D366; padding: 8px 16px; font-size: 0.85rem;" onclick="window.listarBatimentosPontoWhatsapp()">
                         <i class="fa-solid fa-rotate"></i> Atualizar
                     </button>
                 </div>
             </div>
             <p style="font-size: 0.82rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">Uma linha por colaborador/dia — últimos 30 dias, mais recentes primeiro. Clique num horário pra ver a data exata daquele ponto (importante à noite, quando o ponto pode cair no dia seguinte).</p>
-
-            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom: 15px;">
-                <div class="input-wrapper" style="max-width: 320px; flex: 1; margin-bottom: 0;">
-                    <i class="fa-solid fa-user"></i>
-                    <input type="text" id="busca-batimentos-colaborador" placeholder="Buscar por colaborador..." autocomplete="off" oninput="window.aoDigitarBuscaBatimentosPonto()">
-                </div>
-                <div class="input-wrapper" style="max-width: 320px; flex: 1; margin-bottom: 0;">
-                    <i class="fa-solid fa-building"></i>
-                    <input type="text" id="busca-batimentos-unidade" placeholder="Buscar por unidade..." autocomplete="off" oninput="window.aoDigitarBuscaBatimentosPonto()">
-                </div>
-            </div>
 
             <div id="ponto-modo-lista">
                 <div class="glass-card" style="padding: 4px; overflow-x: auto; border-radius: 14px;">
@@ -10680,13 +10672,14 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                 </div>
                 <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 120px;">
                     <label>Raio permitido (m)</label>
-                    <input type="number" id="gestao-uni-raio" placeholder="150" value="150" min="20">
+                    <input type="number" id="gestao-uni-raio" placeholder="150" value="150" min="20" oninput="window.atualizarMapaGeofencing('gestao-uni')">
                 </div>
                 <button type="button" class="btn-secondary" style="height: 45px; padding: 0 16px; border-color: #20c997; color: #20c997; flex-shrink: 0;" onclick="buscarCoordenadasUnidade('gestao-uni')">
                     <i class="fa-solid fa-magnifying-glass-location"></i> Buscar Coordenadas
                 </button>
             </div>
             <div id="gestao-uni-coord-status" style="font-size: 0.8rem; margin-top: 8px;"></div>
+            <div id="gestao-uni-mapa-geofencing" style="width: 100%; height: 260px; border-radius: 10px; margin-top: 12px; overflow: hidden; border: 1px solid rgba(32,201,151,0.3); display: none;"></div>
         </div>
 
         <div style="margin-top: 15px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #ff9800;">
@@ -16914,6 +16907,109 @@ window.filtrarTabelaUnidadesGestao = function() {
 // =============================================================================
 window.MAPBOX_TOKEN = 'pk.eyJ1IjoidGlzb3VsIiwiYSI6ImNtc2dhajFrNTBoNjEyenBuaHRlYjE4cWIifQ.gatnSxthS0kLR-FRQR1PwA';
 
+// =============================================================================
+// GEOFENCING — MAPA VISUAL DO RAIO PERMITIDO (Mapbox GL JS)
+// -----------------------------------------------------------------------------
+// Mostra um mapinha com um pino no ponto cadastrado e um círculo desenhado no
+// tamanho real do "Raio permitido (m)", pra dar pra ver exatamente até onde o
+// colaborador consegue bater ponto pelo app. Atualiza sozinho toda vez que a
+// busca de coordenadas encontra um endereço ou quando o raio é alterado.
+// =============================================================================
+window.mapasGeofencingInstancias = window.mapasGeofencingInstancias || {};
+
+// Gera os pontos de um círculo geodésico (polígono) em volta de um centro,
+// no tamanho real em metros — assim o círculo fica correto independente do
+// zoom do mapa (diferente de um círculo em pixels, que "cresceria" ao dar zoom).
+window.gerarCirculoGeoJSON = function(lat, lng, raioMetros, pontos) {
+    pontos = pontos || 64;
+    const coords = [];
+    const raioTerraKm = 6371;
+    const raioKm = raioMetros / 1000;
+    const latRad = lat * Math.PI / 180;
+
+    for (let i = 0; i <= pontos; i++) {
+        const angulo = (i / pontos) * 2 * Math.PI;
+        const dx = raioKm * Math.cos(angulo);
+        const dy = raioKm * Math.sin(angulo);
+        const novaLat = lat + (dy / raioTerraKm) * (180 / Math.PI);
+        const novaLng = lng + (dx / (raioTerraKm * Math.cos(latRad))) * (180 / Math.PI);
+        coords.push([novaLng, novaLat]);
+    }
+
+    return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] }, properties: {} };
+};
+
+window.atualizarMapaGeofencing = function(prefixo) {
+    const inputLat = document.getElementById(`${prefixo}-lat`);
+    const inputLng = document.getElementById(`${prefixo}-lng`);
+    const inputRaio = document.getElementById(`${prefixo}-raio`);
+    const container = document.getElementById(`${prefixo}-mapa-geofencing`);
+    if (!inputLat || !inputLng || !inputRaio || !container) return;
+
+    const lat = parseFloat(inputLat.value);
+    const lng = parseFloat(inputLng.value);
+    const raio = parseInt(inputRaio.value) || 150;
+
+    if (!lat || !lng || isNaN(lat) || isNaN(lng)) {
+        container.style.display = 'none';
+        return;
+    }
+
+    if (!window.MAPBOX_TOKEN || window.MAPBOX_TOKEN.includes('COLOQUE_SEU_TOKEN')) return;
+    if (typeof mapboxgl === 'undefined') return;
+
+    container.style.display = 'block';
+    mapboxgl.accessToken = window.MAPBOX_TOKEN;
+
+    const circuloGeoJSON = window.gerarCirculoGeoJSON(lat, lng, raio);
+    let instancia = window.mapasGeofencingInstancias[prefixo];
+
+    // Mapa já existe pra esse formulário: só recentraliza e redesenha o círculo
+    // (bem mais rápido que recriar o mapa toda vez que o raio muda).
+    if (instancia && instancia.map && instancia.map.getSource(`${prefixo}-fonte-raio`)) {
+        instancia.map.setCenter([lng, lat]);
+        instancia.map.getSource(`${prefixo}-fonte-raio`).setData(circuloGeoJSON);
+        if (instancia.marker) instancia.marker.setLngLat([lng, lat]);
+        return;
+    }
+
+    // Container tinha ficado "display:none" antes (mapa nunca tinha um tamanho
+    // real) — precisa criar do zero agora que está visível.
+    const map = new mapboxgl.Map({
+        container: `${prefixo}-mapa-geofencing`,
+        style: 'mapbox://styles/mapbox/streets-v12',
+        center: [lng, lat],
+        zoom: 16,
+    });
+
+    map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
+
+    const marker = new mapboxgl.Marker({ color: '#20c997' }).setLngLat([lng, lat]).addTo(map);
+
+    map.on('load', function() {
+        map.addSource(`${prefixo}-fonte-raio`, { type: 'geojson', data: circuloGeoJSON });
+        map.addLayer({
+            id: `${prefixo}-camada-raio-preenchido`,
+            type: 'fill',
+            source: `${prefixo}-fonte-raio`,
+            paint: { 'fill-color': '#20c997', 'fill-opacity': 0.18 },
+        });
+        map.addLayer({
+            id: `${prefixo}-camada-raio-borda`,
+            type: 'line',
+            source: `${prefixo}-fonte-raio`,
+            paint: { 'line-color': '#20c997', 'line-width': 2 },
+        });
+        // Enquadra a câmera exatamente no tamanho do círculo, com uma margem.
+        const bounds = new mapboxgl.LngLatBounds();
+        circuloGeoJSON.geometry.coordinates[0].forEach(c => bounds.extend(c));
+        map.fitBounds(bounds, { padding: 40, duration: 0 });
+    });
+
+    window.mapasGeofencingInstancias[prefixo] = { map: map, marker: marker };
+};
+
+
 window.buscarCoordenadasUnidade = async function(prefixo) {
     const cep = document.getElementById(`${prefixo}-cep`)?.value || '';
     const rua = document.getElementById(`${prefixo}-rua`)?.value || '';
@@ -16950,6 +17046,9 @@ window.buscarCoordenadasUnidade = async function(prefixo) {
         if (statusEl) {
             statusEl.innerHTML = `<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-circle-check"></i> Encontrado: ${json.features[0].place_name}</span> — <a href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" style="color: #4fc3f7;">Conferir no mapa <i class="fa-solid fa-up-right-from-square"></i></a>`;
         }
+
+        // 👇 Mostra o mapinha com o círculo do raio permitido assim que acha o endereço
+        window.atualizarMapaGeofencing(prefixo);
     } catch (e) {
         if (statusEl) statusEl.innerHTML = '<span style="color: var(--cor-perigo);"><i class="fa-solid fa-circle-xmark"></i> Erro ao buscar no Mapbox: ' + e.message + '</span>';
     }
@@ -17183,13 +17282,14 @@ window.salvarUnidadeOficial = async function() {
                         </div>
                         <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 120px;">
                             <label>Raio permitido (m)</label>
-                            <input type="number" id="edit-uni-raio" value="${u.raio_permitido_metros || 150}" min="20">
+                            <input type="number" id="edit-uni-raio" value="${u.raio_permitido_metros || 150}" min="20" oninput="window.atualizarMapaGeofencing('edit-uni')">
                         </div>
                         <button type="button" class="btn-secondary" style="height: 45px; padding: 0 16px; border-color: #20c997; color: #20c997; flex-shrink: 0;" onclick="buscarCoordenadasUnidade('edit-uni')">
                             <i class="fa-solid fa-magnifying-glass-location"></i> Buscar Coordenadas
                         </button>
                     </div>
                     <div id="edit-uni-coord-status" style="font-size: 0.8rem; margin-top: 8px;">${(u.latitude && u.longitude) ? '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-circle-check"></i> Coordenadas já cadastradas.</span>' : '<span style="color: #ffc107;"><i class="fa-solid fa-triangle-exclamation"></i> Ainda sem coordenadas — o app não vai deixar bater ponto aqui até isso ser preenchido.</span>'}</div>
+                    <div id="edit-uni-mapa-geofencing" style="width: 100%; height: 260px; border-radius: 10px; margin-top: 12px; overflow: hidden; border: 1px solid rgba(32,201,151,0.3); display: none;"></div>
                 </div>
 
                 <div style="margin-top: 15px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px dashed #ff9800;">
@@ -17242,6 +17342,9 @@ window.salvarUnidadeOficial = async function() {
     </div>`;
     
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // 👇 Se já tinha coordenadas salvas, mostra o mapa com o raio assim que o modal abre
+    setTimeout(function() { window.atualizarMapaGeofencing('edit-uni'); }, 0);
 
     // ========================================================
     // O LISTENER DO SUBMIT DO MODAL (Salvando tudo pro banco!)
@@ -72043,10 +72146,7 @@ window.pontoConfigMapa = {};
 window.carregarPontoWhatsappTeste = async function() {
     window.alternarSubAbaControlePonto('batimentos');
     await window.listarColabsParaPontoWhatsapp();
-    // 👇 Não carrega mais os batimentos de todo mundo automaticamente ao abrir
-    // a aba (evita puxar tudo do banco à toa). Só mostra depois que o RH
-    // digitar um colaborador ou uma unidade pra buscar.
-    window.mostrarEstadoInicialBatimentosPonto();
+    await window.listarBatimentosPontoWhatsapp();
 };
 
 // Alterna entre as duas subabas de Controle de Ponto: os batimentos registrados (com
@@ -72280,35 +72380,8 @@ window.alternarModoPontoWhatsapp = function(modo) {
     if (modo === 'horarios') window.carregarConfigHorariosPonto();
 };
 
-// Mostra a mensagem inicial pedindo pra buscar, em vez de carregar tudo.
-window.mostrarEstadoInicialBatimentosPonto = function() {
+window.listarBatimentosPontoWhatsapp = async function() {
     const cont = document.getElementById('lista-batimentos-ponto-whatsapp');
-    if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:30px;"><i class="fa-solid fa-magnifying-glass" style="font-size:1.3rem; margin-bottom:8px; display:block;"></i>Digite o nome de um <b>colaborador</b> ou de uma <b>unidade</b> acima pra buscar os batimentos.<br><small>Não carregamos tudo de uma vez pra não gastar dados à toa.</small></td></tr>';
-};
-
-// Debounce: espera parar de digitar (350ms) antes de consultar o banco.
-window._debounceBuscaBatimentosPonto = null;
-window.aoDigitarBuscaBatimentosPonto = function() {
-    clearTimeout(window._debounceBuscaBatimentosPonto);
-    window._debounceBuscaBatimentosPonto = setTimeout(function() {
-        window.buscarBatimentosPontoWhatsapp();
-    }, 350);
-};
-
-window.buscarBatimentosPontoWhatsapp = async function() {
-    const cont = document.getElementById('lista-batimentos-ponto-whatsapp');
-    const inputColab = document.getElementById('busca-batimentos-colaborador');
-    const inputUnidade = document.getElementById('busca-batimentos-unidade');
-    const termoColab = inputColab ? inputColab.value.trim() : '';
-    const termoUnidade = inputUnidade ? inputUnidade.value.trim() : '';
-
-    // Exige pelo menos 2 letras em algum dos dois campos — sem isso, não
-    // consulta o banco (fica só com a mensagem pedindo pra buscar).
-    if (termoColab.length < 2 && termoUnidade.length < 2) {
-        window.mostrarEstadoInicialBatimentosPonto();
-        return;
-    }
-
     if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr>';
 
     // Célula de um horário: mostra a hora e, se tiver coordenada, o link do mapa embaixo.
@@ -72327,42 +72400,20 @@ window.buscarBatimentosPontoWhatsapp = async function() {
         trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
         const dataMin = trintaDiasAtras.toISOString().split('T')[0];
 
-        // 👇 Usa a function do banco (RPC) que ignora acento na busca — assim
-        // "jose" acha "José" e "sao paulo" acha "São Paulo". Se a function
-        // ainda não foi criada (rode busca_batimentos_sem_acento.sql), cai
-        // de volta pro ILIKE comum (sensível a acento) pra não travar tudo.
-        let data, error;
-        const rpcResult = await supabaseClient.rpc('buscar_pontos_diarios_whatsapp', {
-            termo_colab: termoColab.length >= 2 ? termoColab : '',
-            termo_unidade: termoUnidade.length >= 2 ? termoUnidade : '',
-            data_min: dataMin,
-        });
-
-        if (rpcResult.error) {
-            console.warn('RPC buscar_pontos_diarios_whatsapp indisponível, usando busca sem ignorar acento:', rpcResult.error.message);
-            let query = supabaseClient
-                .from('pontos_diarios_whatsapp')
-                .select('*')
-                .gte('data', dataMin)
-                .order('data', { ascending: false })
-                .order('nome_colaborador', { ascending: true })
-                .limit(200);
-
-            if (termoColab.length >= 2) query = query.ilike('nome_colaborador', '%' + termoColab + '%');
-            if (termoUnidade.length >= 2) query = query.ilike('unidade', '%' + termoUnidade + '%');
-
-            const fallback = await query;
-            data = fallback.data; error = fallback.error;
-        } else {
-            data = rpcResult.data; error = rpcResult.error;
-        }
+        const { data, error } = await supabaseClient
+            .from('pontos_diarios_whatsapp')
+            .select('*')
+            .gte('data', dataMin)
+            .order('data', { ascending: false })
+            .order('nome_colaborador', { ascending: true })
+            .limit(200);
 
         if (error) throw error;
 
         (data || []).forEach(function(b) { window.pontoCartoesPorId[b.id] = b; });
 
         if (!data || data.length === 0) {
-            if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Nenhum batimento encontrado pra essa busca.</td></tr>';
+            if (cont) cont.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Nenhum ponto de teste registrado ainda.</td></tr>';
             return;
         }
 
