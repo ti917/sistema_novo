@@ -11097,9 +11097,11 @@ const guiasDeAjuda = {
         icone: 'fa-box-open',
         cor: '#e91e63', // Rosa
         passos: [
-            '<b style="color: #e91e63;">1. Configuração Modular:</b> Na Engrenagem, você define se a unidade zera por faltas e cadastra os valores de redução por quantidade de atestados.',
-            '<b style="color: #e91e63;">2. Mês Retroativo:</b> Assim como o VA, a Cesta penaliza baseada nas faltas e atestados do <b>mês anterior</b>.',
-            '<b style="color: #e91e63;">3. Escalonamento:</b> O valor cai automaticamente se o colaborador teve 1 atestado (ex: R$ 240), 2 atestados (ex: R$ 140) ou perde tudo com 3 atestados ou 1 falta (FA).'
+            '<b style="color: #e91e63;">1. Configuração Modular:</b> Na Engrenagem, você cadastra o valor cheio e os valores por dias de atestado (ex: R$ 315 / R$ 240 / R$ 140).',
+            '<b style="color: #e91e63;">2. Mês Retroativo:</b> Assim como o VA, a Cesta analisa as faltas, atestados e férias do <b>mês anterior</b>.',
+            '<b style="color: #e91e63;">3. É por DIA, não por atestado:</b> O que conta é a quantidade de <b>dias corridos</b> de atestado/afastamento no mês — não a quantidade de atestados. Ex: 1 atestado de 3 dias corridos já perde o direito, mesmo em escala 12x36.',
+            '<b style="color: #e91e63;">4. Escalonamento:</b> 0 dia = valor cheio (R$ 315), 1 dia = R$ 240, 2 dias = R$ 140, 3+ dias = zera. Falta injustificada (sem atestado) sempre zera o benefício.',
+            '<b style="color: #e91e63;">5. Férias ou Afastamento (INSS/licença):</b> Pagamento proporcional — pega o valor do escalonamento acima, divide por 30 e multiplica pelos dias trabalhados no mês. Afastamento que cobre o mês inteiro (30+ dias corridos) não tem direito naquele mês.'
         ]
     },
     'estoque': {
@@ -41299,7 +41301,8 @@ window.calcularCestaAgora = async function() {
             // MÁGICA: Passamos a array de férias (resFerias.data) para a escala virtual montar os "FER" nos dias!
             const escAnt = algoritmoGeradorDeEscala(colabsAtivos, mesAnteriorStr, ocorrenciasAnt, u, [], resFerias.data || []);
             escAnt.forEach(linha => {
-                // Inclui a chave "ferias" na contagem
+                // Inclui a chave "ferias" na contagem (usada só pra exibir na tela — o valor
+                // pago usa a contagem por DIA CORRIDO calculada abaixo, direto das ausências)
                 if(!faltasEAtestados[linha.id_colaborador]) faltasEAtestados[linha.id_colaborador] = { faltas: 0, atestados: 0, ferias: 0 };
                 
                 Object.values(linha.dias).forEach(diaObj => {
@@ -41311,6 +41314,47 @@ window.calcularCestaAgora = async function() {
                     }
                 });
             });
+        });
+
+        // 👇 REGRA ATUALIZADA DA CESTA II: conta DIAS CORRIDOS de atestado/afastamento/férias,
+        // direto das tabelas de ausências e férias — NÃO pela escala. A escala "protege" o dia
+        // de folga do 12x36 (não marca ATM/AF em cima da folga), o que sub-contava um atestado
+        // de vários dias corridos pra quem é 12x36. Aqui contamos o período corrido real do
+        // atestado/afastamento, do jeito que está cadastrado, então "1 atestado de 3 dias"
+        // sempre vale 3 dias — mesmo pra 12x36.
+        const CODIGOS_ATESTADO_CURTO = ['ATM', 'AC', 'ATC']; // atestado médico comum — usa a tabela FIXA (315/240/140/0)
+        const CODIGOS_AFASTAMENTO_LONGO = ['AF', 'LDM', 'LDP']; // INSS, licença maternidade/paternidade — pagamento PROPORCIONAL
+        const inicioMesAntObj = new Date(anoAnt, mesAnt - 1, 1);
+        const fimMesAntObj = new Date(anoAnt, mesAnt, 0);
+
+        function diasCorridosNoMes(dataInicioStr, dataFimStr) {
+            const ini = new Date(dataInicioStr + 'T00:00:00');
+            const fim = new Date((dataFimStr || dataInicioStr) + 'T00:00:00');
+            const inicioClamp = ini > inicioMesAntObj ? ini : inicioMesAntObj;
+            const fimClamp = fim < fimMesAntObj ? fim : fimMesAntObj;
+            if (inicioClamp > fimClamp) return 0;
+            return Math.floor((fimClamp.getTime() - inicioClamp.getTime()) / 86400000) + 1;
+        }
+
+        const diasAtestadoCurtoPorColab = {};
+        const diasAfastamentoLongoPorColab = {};
+        (resAus.data || []).forEach(a => {
+            if (!a.data_inicio) return;
+            const dias = diasCorridosNoMes(a.data_inicio, a.data_fim);
+            if (dias <= 0) return;
+            if (CODIGOS_ATESTADO_CURTO.includes(a.sigla)) {
+                diasAtestadoCurtoPorColab[a.colaborador_id] = (diasAtestadoCurtoPorColab[a.colaborador_id] || 0) + dias;
+            } else if (CODIGOS_AFASTAMENTO_LONGO.includes(a.sigla)) {
+                diasAfastamentoLongoPorColab[a.colaborador_id] = (diasAfastamentoLongoPorColab[a.colaborador_id] || 0) + dias;
+            }
+        });
+
+        const diasFeriasPorColabRaw = {};
+        (resFerias.data || []).forEach(f => {
+            if (!f.data_inicio_ferias) return;
+            const dias = diasCorridosNoMes(f.data_inicio_ferias, f.data_fim_ferias);
+            if (dias <= 0) return;
+            diasFeriasPorColabRaw[f.colaborador_id] = (diasFeriasPorColabRaw[f.colaborador_id] || 0) + dias;
         });
 
         let html = '';
@@ -41345,55 +41389,66 @@ window.calcularCestaAgora = async function() {
             if (dataInicioObj.getFullYear() > anoAtual || (dataInicioObj.getFullYear() === anoAtual && (dataInicioObj.getMonth() + 1) > mesAtual)) return;
 
             const contagem = faltasEAtestados[colab.id] || { faltas: 0, atestados: 0, ferias: 0 };
+            const diasAtestadoCurtoMes = diasAtestadoCurtoPorColab[colab.id] || 0;
+            const diasAfastamentoLongoMes = diasAfastamentoLongoPorColab[colab.id] || 0;
+            const diasFeriasMes = diasFeriasPorColabRaw[colab.id] || 0;
+            const diasParaTier = diasAtestadoCurtoMes + diasAfastamentoLongoMes; // dias corridos usados pra achar o valor-base
+            const totalDiasNaoTrabalhados = diasParaTier + diasFeriasMes;
+            const isProporcional = diasFeriasMes > 0 || diasAfastamentoLongoMes > 0; // férias ou afastamento longo (AF/LDM/LDP)
+
             let valorFinal = 0;
             let statusTexto = '<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia</span>';
             let statusExcel = 'Apto (Base Cheia)';
 
             const dataCorte = new Date(anoAnt, mesAnt - 1, 15, 23, 59, 59);
-            
-            const regraDescontaFerias = regraUnidade.desconta_ferias !== undefined ? regraUnidade.desconta_ferias : true;
-            const regraDiasFerias = regraUnidade.dias_desconto_ferias || 15;
 
-            // 👇 A MÁGICA: Puxa a regra personalizada da Unidade
-            if (regraDescontaFerias && contagem.ferias >= regraDiasFerias) {
-                statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Em Férias (${contagem.ferias} dias)</span>`;
-                statusExcel = `Retido (Férias no período)`;
-                valorFinal = 0;
-            } else if (dataInicioObj.getFullYear() === anoAtual && dataInicioObj.getMonth() === (mesAtual - 1)) {
+            // 👇 REGRAS ATUALIZADAS DA CESTA II 👇
+            // 1. Não é a quantidade de atestados, é a quantidade de DIAS corridos de atestado/afastamento.
+            // 2. Falta injustificada (sem atestado): perde o benefício.
+            // 3. Atestado (dias corridos no mês): 0 dias = valor cheio, 1 dia = valor_1_atestado,
+            //    2 dias = valor_2_atestados, 3+ dias = valor_3_atestados (zera).
+            // 4. Férias ou afastamento longo (AF/LDM/LDP): pagamento PROPORCIONAL — valor do
+            //    tier acima dividido por 30 e multiplicado pelos dias trabalhados no mês.
+            // 5. Afastamento que cobre o mês inteiro (>= 30 dias corridos): sem direito naquele mês.
+            if (dataInicioObj.getFullYear() === anoAtual && dataInicioObj.getMonth() === (mesAtual - 1)) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Admissão no mês atual</span>`;
                 statusExcel = 'Retido (Admissão no mês atual)';
             } else if (dataInicioObj > dataCorte) {
                 statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Retido: Admitido após dia 15</span>`;
                 statusExcel = 'Retido (Admissão após dia 15)';
+            } else if (contagem.faltas > 0) {
+                statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: Falta Injustificada</span>`;
+                statusExcel = `Perdeu (${contagem.faltas} Falta(s) injustificada(s))`;
+                valorFinal = 0;
+            } else if (totalDiasNaoTrabalhados >= 30) {
+                statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Sem direito: Afastado/Férias o mês inteiro</span>`;
+                statusExcel = 'Sem direito (mês inteiro afastado/férias)';
+                valorFinal = 0;
             } else {
-                if (regraUnidade.zera_falta && contagem.faltas > 0) {
-                    statusTexto = `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: Possui Falta (FA)</span>`;
-                    statusExcel = `Perdeu (${contagem.faltas} Faltas)`;
-                    valorFinal = 0;
+                let valorTier;
+                if (diasParaTier === 0) {
+                    valorTier = regraUnidade.valor_base;
+                } else if (diasParaTier === 1) {
+                    valorTier = regraUnidade.valor_1_atestado;
+                } else if (diasParaTier === 2) {
+                    valorTier = regraUnidade.valor_2_atestados;
                 } else {
-                    if (regraUnidade.desconta_atestado === false) {
-                        valorFinal = regraUnidade.valor_base;
-                        if (contagem.atestados > 0) {
-                            statusTexto = `<span style="color: var(--cor-sucesso);"><i class="fa-solid fa-check"></i> Base Cheia (Atestado não afeta)</span>`;
-                            statusExcel = 'Apto (Atestados perdoados)';
-                        }
-                    } else {
-                        if (contagem.atestados === 0) {
-                            valorFinal = regraUnidade.valor_base;
-                        } else if (contagem.atestados === 1) {
-                            valorFinal = regraUnidade.valor_1_atestado;
-                            statusTexto = `<span style="color: #ff9800;">Desc. 1 Atestado</span>`;
-                            statusExcel = 'Desconto (1 Atestado)';
-                        } else if (contagem.atestados === 2) {
-                            valorFinal = regraUnidade.valor_2_atestados;
-                            statusTexto = `<span style="color: #ff9800;">Desc. 2 Atestados</span>`;
-                            statusExcel = 'Desconto (2 Atestados)';
-                        } else if (contagem.atestados >= 3) {
-                            valorFinal = regraUnidade.valor_3_atestados;
-                            statusTexto = valorFinal === 0 ? `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: 3+ Atestados</span>` : `<span style="color: #ff9800;">Desc. Máximo</span>`;
-                            statusExcel = `Desconto (3+ Atestados: ${contagem.atestados})`;
-                        }
-                    }
+                    valorTier = regraUnidade.valor_3_atestados; // 3+ dias corridos = zera
+                }
+
+                if (isProporcional) {
+                    const diasTrabalhados = Math.max(0, 30 - totalDiasNaoTrabalhados);
+                    valorFinal = (valorTier / 30) * diasTrabalhados;
+                    statusTexto = `<span style="color: #ff9800;">Proporcional: ${diasTrabalhados}/30 dias (Férias/Afastamento)</span>`;
+                    statusExcel = `Proporcional (${diasTrabalhados}/30 dias — Férias/Afastamento)`;
+                } else if (diasParaTier === 0) {
+                    valorFinal = valorTier;
+                } else {
+                    valorFinal = valorTier;
+                    statusTexto = valorFinal === 0
+                        ? `<span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Perdeu: ${diasParaTier} dia(s) de Atestado</span>`
+                        : `<span style="color: #ff9800;">Desc. ${diasParaTier} dia(s) de Atestado</span>`;
+                    statusExcel = valorFinal === 0 ? `Perdeu (${diasParaTier} dias de atestado)` : `Desconto (${diasParaTier} dia(s) de atestado)`;
                 }
             }
 
