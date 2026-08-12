@@ -9123,6 +9123,7 @@ window.comAjustarBotoesPorPerfil = function () {
         + '.ctm-colab-resultados-item:hover { background: rgba(142,68,173,.15); }'
         + '.ctm-colab-info { margin-top:8px; font-size:.8rem; padding:8px 12px; border-radius:8px; background: rgba(46,204,113,.08); border:1px solid rgba(46,204,113,.3); color: var(--cor-texto-principal,#e2e8f0); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }'
         + '.ctm-colab-info.ctm-colab-desligado { background: rgba(231,76,60,.08); border-color: rgba(231,76,60,.3); }'
+        + '.ctm-colab-info.ctm-colab-aviso { background: rgba(255,152,0,.08); border-color: rgba(255,152,0,.35); }'
         + '@media (max-width: 900px) { .ctm-grid2 { grid-template-columns:1fr; } .ctm-cal-grid { gap:3px; } .ctm-cal-day { min-height:70px; } }';
         var s = document.createElement('style');
         s.id = 'ctm-styles';
@@ -10037,7 +10038,7 @@ window.comAjustarBotoesPorPerfil = function () {
         if (!termo || termo.trim().length < 2) { box.classList.add('ctm-hidden'); box.innerHTML = ''; return; }
 
         CTM._buscaColabJuridicoTimer = setTimeout(async function () {
-            var r = await supabaseClient.from('perfis').select('id, nome, dados_admissao, dados_rescisao, status')
+            var r = await supabaseClient.from('perfis').select('id, nome, dados_admissao, dados_rescisao, status, status_aprovacao')
                         .ilike('nome', '%' + termo.trim() + '%').eq('perfil', 'Colaborador').limit(8);
 
             // 👇 DEBUG: antes, se a consulta desse erro (ex: RLS bloqueando), a busca caia
@@ -10076,6 +10077,41 @@ window.comAjustarBotoesPorPerfil = function () {
         CTM.mostrarInfoColabJuridico(p);
     };
 
+    /* tira HTML de dentro de um texto (o campo dados_rescisao.ultimo_dia as vezes vem com
+       tags coladas, tipo "10/09/2026 <br><span ...>(Sai na pratica dia 03/09)</span>" —
+       aqui so limpa as tags e mantem o texto puro, sem quebrar nada). */
+    function limparHtmlTexto(s) {
+        return String(s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    /* Mesma logica de "Cumprindo Aviso" ja usada no sistema de RH: se o status ja esta
+       'Desligado' (ou a rescisao esta 'Rescisão Pendente'/'Aguardando Assinatura') mas o
+       ultimo_dia ainda nao chegou, a pessoa ainda esta trabalhando (cumprindo aviso) —
+       nao pode aparecer como "Atual (ainda ativo)" nem como "Desligado" direto. */
+    function situacaoColaboradorInfo(p) {
+        var ultimoDiaTexto = p.dados_rescisao && p.dados_rescisao.ultimo_dia ? limparHtmlTexto(p.dados_rescisao.ultimo_dia) : '';
+        var emProcessoRescisorio = p.status_aprovacao === 'Rescisão Pendente' || p.status_aprovacao === 'Aguardando Assinatura';
+
+        var taNoAvisoAinda = false;
+        if (ultimoDiaTexto) {
+            var m = ultimoDiaTexto.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if (m) {
+                var hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+                var ud = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+                ud.setHours(0, 0, 0, 0);
+                if (hoje <= ud) taNoAvisoAinda = true;
+            }
+        }
+
+        if (p.status === 'Desligado' && !taNoAvisoAinda) {
+            return { classe: 'desligado', texto: '<i class="fa-solid fa-calendar-xmark"></i> Demiss&atilde;o: <strong>' + esc(ultimoDiaTexto || 'não informada') + '</strong>' };
+        }
+        if (emProcessoRescisorio || (p.status === 'Desligado' && taNoAvisoAinda)) {
+            return { classe: 'aviso', texto: '<i class="fa-solid fa-person-walking-arrow-right"></i> <strong>Cumprindo Aviso</strong>' + (ultimoDiaTexto ? ' (até ' + esc(ultimoDiaTexto) + ')' : '') };
+        }
+        return { classe: 'ativo', texto: '<i class="fa-solid fa-circle-check"></i> <strong>Atual</strong> (ainda ativo)' };
+    }
+
     CTM.mostrarInfoColabJuridico = function (p) {
         var infoBox = document.getElementById('ctm-proc-colab-info');
         /* admissao mora dentro do jsonb dados_admissao (jornada.data_inicio, com fallback pro
@@ -10084,19 +10120,21 @@ window.comAjustarBotoesPorPerfil = function () {
         var admBruto = p.dados_admissao || {};
         var dataAdmissaoIso = admBruto.jornada?.data_inicio || admBruto.data_inicio;
         var admissao = dataAdmissaoIso ? fmtBRLocal(String(dataAdmissaoIso).split('T')[0]) : 'não informada';
-        var desligado = p.status === 'Desligado' && p.dados_rescisao && p.dados_rescisao.ultimo_dia;
-        infoBox.classList.toggle('ctm-colab-desligado', !!desligado);
+
+        var situacao = situacaoColaboradorInfo(p);
+        infoBox.classList.remove('ctm-colab-desligado', 'ctm-colab-aviso');
+        if (situacao.classe === 'desligado') infoBox.classList.add('ctm-colab-desligado');
+        if (situacao.classe === 'aviso') infoBox.classList.add('ctm-colab-aviso');
+
         infoBox.innerHTML = '<span><i class="fa-solid fa-calendar-plus"></i> Admiss&atilde;o: <strong>' + admissao + '</strong></span>'
-            + (desligado
-                ? '<span><i class="fa-solid fa-calendar-xmark"></i> Demiss&atilde;o: <strong>' + esc(p.dados_rescisao.ultimo_dia) + '</strong></span>'
-                : '<span><i class="fa-solid fa-circle-check"></i> <strong>Atual</strong> (ainda ativo)</span>');
+            + '<span>' + situacao.texto + '</span>';
         infoBox.classList.remove('ctm-hidden');
     };
 
     /* usado ao reabrir uma tarefa juridica ja salva com colaborador vinculado */
     async function recarregarInfoColabJuridico(colaboradorId) {
         if (!colaboradorId) return;
-        var r = await supabaseClient.from('perfis').select('id, nome, dados_admissao, dados_rescisao, status').eq('id', colaboradorId).maybeSingle();
+        var r = await supabaseClient.from('perfis').select('id, nome, dados_admissao, dados_rescisao, status, status_aprovacao').eq('id', colaboradorId).maybeSingle();
         if (r && !r.error && r.data) CTM.mostrarInfoColabJuridico(r.data);
     }
 
