@@ -14510,11 +14510,13 @@ window.carregarProcessosRescisoriosGestor = async function() {
     (dataLocal || []).forEach(c => mapaFinalProc.set(c.id, c));
     dataGlobalEspecial.forEach(c => { if (!mapaFinalProc.has(c.id)) mapaFinalProc.set(c.id, c); });
 
-    // Esconde a própria rescisão de quem está logado (mesma regra: id igual OU nome batendo com Encarregado)
+    // Esconde a própria rescisão de quem está logado (mesma regra: id igual OU nome batendo com Encarregado),
+    // exceto se já foi aprovada pelo Gestor de Visão Global — nesse caso ele já pode acompanhar normalmente.
     todosProcessosRescisoriosGlobais = Array.from(mapaFinalProc.values()).filter(c => {
-        if (c.id === usuarioAtual.id) return false;
-        if (ehColaboradorDoProprioGestor(c, usuarioAtual)) return false;
-        return true;
+        const ehProprio = (c.id === usuarioAtual.id) || ehColaboradorDoProprioGestor(c, usuarioAtual);
+        if (!ehProprio) return true;
+        const resc = c.dados_rescisao || {};
+        return resc.aprovado_gestor_global === true;
     });
 
     filtrarProcessosRescGestor();
@@ -20286,6 +20288,34 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             return ehMesmaPessoaPeloNome(colabRecord.nome, gestorRecord.nome);
         }
 
+        window.aprovarRescisaoGestorGlobal = async function(idColab, nomeColab) {
+            const confirmado = await mostrarConfirmacao(`Confirma a aprovação da rescisão de <b>${nomeColab}</b>? Isso vai liberar o processo pro fluxo normal (RH segue com o documento) e o próprio gestor vinculado passará a enxergar e acompanhar a própria rescisão normalmente.`, "Aprovar Rescisão");
+            if (!confirmado) return;
+
+            try {
+                const { data: perfil, error: errBusca } = await supabaseClient.from('perfis').select('dados_rescisao').eq('id', idColab).single();
+                if (errBusca) throw errBusca;
+
+                let resc = perfil.dados_rescisao || {};
+                resc.aprovado_gestor_global = true;
+                resc.aprovado_gestor_global_por = usuarioAtual.nome;
+                resc.aprovado_gestor_global_em = new Date().toISOString();
+
+                const { error } = await supabaseClient.from('perfis').update({
+                    status_aprovacao: 'Rescisão Pendente',
+                    dados_rescisao: resc
+                }).eq('id', idColab);
+
+                if (error) throw error;
+
+                mostrarAlerta("Rescisão aprovada e liberada com sucesso!", "sucesso");
+                carregarAndamentoRescisoes();
+                if (typeof window.carregarDashboardInicio === 'function') window.carregarDashboardInicio();
+            } catch (err) {
+                mostrarAlerta("Erro ao aprovar rescisão: " + err.message, "erro");
+            }
+        };
+
         async function carregarAndamentoRescisoes() {
             const container = document.getElementById('lista-andamento-rescisoes-container');
             container.innerHTML = '<div style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</div>';
@@ -20343,6 +20373,25 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                         });
                     }).map(enc => ({ ...enc, _casoRotaGlobal: true }));
                 }
+
+                // 👇 Colaborador Vinculado (RH fez lançamento direto): fica represado em
+                // "Aguardando Aprovação Global" até o Gestor de Visão Global e Regional aprovar.
+                // Mostra pra ele aqui mesmo, com um botão de Aprovar.
+                let qAguardandoAprovGlobal = supabaseClient.from('perfis')
+                    .select('*')
+                    .eq('status_aprovacao', 'Aguardando Aprovação Global');
+                if (usuarioAtual.empresa) {
+                    qAguardandoAprovGlobal = qAguardandoAprovGlobal.in('empresa', usuarioAtual.empresa.split(',').map(e => e.trim()));
+                }
+                const { data: aguardandoAprovGlobal } = await qAguardandoAprovGlobal;
+                if (aguardandoAprovGlobal && aguardandoAprovGlobal.length > 0) {
+                    const idsJaListados = new Set(dataGlobalEspecial.map(c => c.id));
+                    aguardandoAprovGlobal.forEach(c => {
+                        if (!idsJaListados.has(c.id)) {
+                            dataGlobalEspecial.push({ ...c, _casoRotaGlobal: true, _aguardandoAprovacaoGlobal: true });
+                        }
+                    });
+                }
             }
 
             // Junta as duas buscas sem duplicar (Map pelo id)
@@ -20362,9 +20411,11 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             //     identificado pelo nome — que às vezes está completo ("ALAN FERREIRA CARVALHO") e às vezes só o
             //     primeiro nome ("ALAN") no cadastro de colaborador.
             const dataFiltrada = data.filter(colab => {
-                if (colab.id === usuarioAtual.id) return false;
-                if (ehColaboradorDoProprioGestor(colab, usuarioAtual)) return false;
-                return true;
+                const ehProprio = (colab.id === usuarioAtual.id) || ehColaboradorDoProprioGestor(colab, usuarioAtual);
+                if (!ehProprio) return true;
+                // 👇 Só libera pra ele mesmo ver depois que o Gestor de Visão Global aprovar
+                const resc = colab.dados_rescisao || {};
+                return resc.aprovado_gestor_global === true;
             });
 
             if (dataFiltrada.length === 0) {
@@ -20377,6 +20428,10 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                 const resc = colab.dados_rescisao || {};
                 let statusText = colab.status_aprovacao === 'Rescisão Pendente' ? 'Aguardando RH Gerar Documento' : 'Aguardando Assinatura do Colaborador';
                 let statusColor = colab.status_aprovacao === 'Rescisão Pendente' ? '#ff9800' : '#4fc3f7';
+                if (colab.status_aprovacao === 'Aguardando Aprovação Global') {
+                    statusText = 'Aguardando Aprovação do Gestor Global';
+                    statusColor = '#e91e63';
+                }
                 
                 // 👇 EXIBE QUEM DO RH LIBEROU 👇
                 let geradoPorInfo = resc.doc_gerado_por ? `<span style="font-size: 0.75rem; color: #4fc3f7; display: block; margin-top: 4px; font-weight: bold;"><i class="fa-solid fa-user-pen"></i> Liberado p/ Assinatura por: ${resc.doc_gerado_por}</span>` : '';
@@ -20434,6 +20489,17 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                 </div>
             `;
             }
+        } else if (colab.status_aprovacao === 'Aguardando Aprovação Global') {
+            areaAssinatura = `
+                <div style="margin-top: 15px; padding: 15px; background: rgba(233,30,99,0.1); border-radius: 8px; border: 1px dashed #e91e63;">
+                    <div style="font-size: 0.85rem; color: #e91e63; margin-bottom: 12px; line-height: 1.5;">
+                        <i class="fa-solid fa-shield-halved"></i> <b>Colaborador Vinculado:</b> este desligamento foi lançado pelo RH e está represado aguardando a sua aprovação como Gestor de Visão Global e Regional. Depois de aprovar, o processo segue o fluxo normal e o próprio gestor local passa a poder acompanhar e assinar.
+                    </div>
+                    <button class="btn-success" style="width: 100%; justify-content: center; background: #e91e63; border-color: #e91e63;" onclick="aprovarRescisaoGestorGlobal('${colab.id}', '${colab.nome.replace(/'/g, "\\'")}')">
+                        <i class="fa-solid fa-check"></i> Aprovar e Liberar Processo
+                    </button>
+                </div>
+            `;
         }
 
                 // 👇 Se veio pela rota especial (Encarregado com nome do Gestor da própria unidade),
@@ -26964,7 +27030,7 @@ window.abrirAdvertenciaDestacadaGestor = async function() {
     let query = supabaseClient.from('perfis')
         .select('*')
         .eq('perfil', 'Colaborador')
-        .or('status.eq.Desligado,status_aprovacao.eq.Aguardando Assinatura,status_aprovacao.eq.Rescisão Pendente');
+        .or('status.eq.Desligado,status_aprovacao.eq.Aguardando Assinatura,status_aprovacao.eq.Rescisão Pendente,status_aprovacao.eq.Aguardando Aprovação Global');
         
     if (empresaSelecionadaFiltro !== 'Todas') query = query.eq('empresa', empresaSelecionadaFiltro);
         
@@ -27074,6 +27140,8 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         let badgeStatusAtual = '';
         if (a.status === 'Desligado') {
             badgeStatusAtual = '<span class="badge desligado">Desligado</span>';
+        } else if (a.status_aprovacao === 'Aguardando Aprovação Global') {
+            badgeStatusAtual = '<span class="badge" style="background: rgba(233,30,99,0.2); color: #e91e63; border: 1px solid #e91e63;"><i class="fa-solid fa-shield-halved"></i> Aguardando Aprovação do Gestor Global</span>';
         } else if (a.status_aprovacao === 'Rescisão Pendente') {
             badgeStatusAtual = '<span class="badge pendente" style="background: rgba(255, 152, 0, 0.2); color: #ff9800; border: 1px solid #ff9800;"><i class="fa-solid fa-file-invoice"></i> Aguardando RH</span>';
         } else {
@@ -47676,7 +47744,11 @@ window.montarItensPendencia = function() {
 
             { n: g.contratoProrrogacao, cor: '#a78bfa', icone: 'fa-file-circle-plus',
               titulo: 'Prorrogações de contrato', sub: 'Aguardando ação do gestor',
-              alvo: 'tela-usuarios,tela-admissoes', aba: 'aba-contratos-trabalho,aba-contratos-acao-gestor' }
+              alvo: 'tela-usuarios,tela-admissoes', aba: 'aba-contratos-trabalho,aba-contratos-acao-gestor' },
+
+            { n: g.rescisoesAprovacaoGlobal, bloqueia: true, cor: '#e91e63', icone: 'fa-shield-halved',
+              titulo: 'Rescisões aguardando sua aprovação', sub: 'Colaborador Vinculado — RH lançou e está represado',
+              alvo: 'tela-rescisao', aba: 'aba-andamento-rescisoes' }
         ];
     }
 
@@ -47785,17 +47857,28 @@ window.carregarDashboardInicio = async function() {
         let unidsFiltro = null;
         let empresaFiltro = null;
 
+        let souGestorGlobalDash = false;
         if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
             // 👇 CORREÇÃO: mesma regra das outras telas — com Visão Global ligada, o dashboard
             // (incluindo o card "Rescisões do Mês") precisa abranger todas as unidades da
             // empresa, não só a unidade pessoal do gestor.
-            const souGestorGlobalDash = usuarioAtual.permissoes?.escala_global === true;
+            souGestorGlobalDash = usuarioAtual.permissoes?.escala_global === true;
             unidsFiltro = (souGestorGlobalDash && window.cacheUnidadesGestor && window.cacheUnidadesGestor.length > 0)
                 ? window.cacheUnidadesGestor
                 : usuarioAtual.unidade.split(',').map(u => u.trim());
         } else if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             empresaFiltro = empresaSelecionadaFiltro;
             unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
+        }
+
+        // 👇 Gestor de Visão Global e Regional: quantas rescisões de Colaborador Vinculado
+        // estão represadas aguardando a aprovação dele (card de alerta no Dashboard).
+        let countAguardandoAprovGlobalResc = 0;
+        if (souGestorGlobalDash) {
+            let qAprovGlobalDash = supabaseClient.from('perfis').select('id', { count: 'exact', head: true }).eq('status_aprovacao', 'Aguardando Aprovação Global');
+            if (usuarioAtual.empresa) qAprovGlobalDash = qAprovGlobalDash.in('empresa', usuarioAtual.empresa.split(',').map(e => e.trim()));
+            const { count: countAprovGlobalDash } = await qAprovGlobalDash;
+            countAguardandoAprovGlobalResc = countAprovGlobalDash || 0;
         }
 
         // Buscas Originais
@@ -47971,6 +48054,7 @@ window.carregarDashboardInicio = async function() {
         if (!window.pendenciasGestor) window.pendenciasGestor = {};
         window.pendenciasGestor.contratoAssinar = countContratoAssinatura;
         window.pendenciasGestor.contratoProrrogacao = countContratoProrrogacao;
+        window.pendenciasGestor.rescisoesAprovacaoGlobal = countAguardandoAprovGlobalResc;
 
         window.renderizarPendenciasDashboard();
 
@@ -51441,21 +51525,59 @@ if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo
             urlsAnexos = await subirDocumentos(caminhoBase, fileInput.files);
         }
 
+        // 👇 Colaborador Vinculado: se este colaborador for o "vínculo" de algum Gestor
+        // (ex.: Encarregado que é a própria pessoa do Gestor local, ou tem o vínculo explícito
+        // configurado em Configurar Acessos), a rescisão fica represada em
+        // "Aguardando Aprovação Global" até o Gestor de Visão Global e Regional liberar.
+        // Só depois dessa aprovação ela segue o fluxo normal (e passa a aparecer pra ele mesmo).
+        let statusInicial = 'Rescisão Pendente';
+        let vinculoInfo = {};
+        try {
+            const [{ data: colabParaVinculo }, { data: gestoresParaVinculo }] = await Promise.all([
+                supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('id', idColab).single(),
+                supabaseClient.from('perfis').select('id, nome, unidade, permissoes').eq('perfil', 'Gestor')
+            ]);
+
+            const gestorEncontrado = (gestoresParaVinculo || []).find(g => {
+                if (g.id === idColab) return false;
+                if (g.permissoes?.colaborador_vinculado_id === idColab) return true;
+                if (colabParaVinculo?.dados_admissao?.cargo === 'Encarregado') {
+                    const unidadesEnc = (colabParaVinculo.unidade || '').split(',').map(u => u.trim());
+                    const unidadesGestor = (g.unidade || '').split(',').map(u => u.trim());
+                    const mesmaUnidade = unidadesEnc.some(u => u && unidadesGestor.includes(u));
+                    return mesmaUnidade && ehMesmaPessoaPeloNome(colabParaVinculo.nome, g.nome);
+                }
+                return false;
+            });
+
+            if (gestorEncontrado) {
+                statusInicial = 'Aguardando Aprovação Global';
+                vinculoInfo = { gestor_vinculado_id: gestorEncontrado.id, gestor_vinculado_nome: gestorEncontrado.nome, aprovado_gestor_global: false };
+            }
+        } catch (errVinculo) {
+            console.warn('Falha ao checar Colaborador Vinculado para aprovação global:', errVinculo);
+        }
+
         const jsonRescisao = {
             tipo: tipo, data_comunicado: dataRescisao, aviso_cumprido: cumprir,
             opcao_aviso: opcaoAviso, ultimo_dia: ultimoDiaTexto, data_pagamento: dataPagamentoTexto, motivo: motivo,
-            documentos: urlsAnexos, data_registro: new Date().toISOString(), registrado_por: usuarioAtual.nome
+            documentos: urlsAnexos, data_registro: new Date().toISOString(), registrado_por: usuarioAtual.nome,
+            ...vinculoInfo
         };
 
-        const { error } = await supabaseClient.from('perfis').update({ 
-            status_aprovacao: 'Rescisão Pendente',
+        const { error } = await supabaseClient.from('perfis').update({
+            status_aprovacao: statusInicial,
             dados_rescisao: jsonRescisao
         }).eq('id', idColab);
 
         if (error) throw error;
 
         // Opcional: Como o Admin mesmo fez o lançamento, ele pode querer só gerar o documento do RH e aprovar direto na tela dele
-        mostrarAlerta("Desligamento registrado. Acesse a aba 'Histórico / Controle' para analisar e enviar o termo do RH.", "sucesso");
+        if (statusInicial === 'Aguardando Aprovação Global') {
+            mostrarAlerta("Desligamento registrado. Como este colaborador é vinculado a um Gestor, o processo fica represado até o Gestor de Visão Global e Regional aprovar a liberação.", "sucesso");
+        } else {
+            mostrarAlerta("Desligamento registrado. Acesse a aba 'Histórico / Controle' para analisar e enviar o termo do RH.", "sucesso");
+        }
         
         document.getElementById('form-rescisao-admin').reset();
         document.getElementById('resc-admin-ultimo-dia-display').innerHTML = '-';
