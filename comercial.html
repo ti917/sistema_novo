@@ -2553,6 +2553,7 @@ Além do reajuste salarial, também tivemos reajuste em todos os benefícios, no
 
             // >>> CENTRAL DE TAREFAS <<<
             if (window.CTM) window.CTM.iniciar(perfil);
+            if (window.CTR) window.CTR.iniciar(perfil);
             // >>> PROPOSTAS EM TEMPO REAL <<<
             if (window.PropostasLive) window.PropostasLive.iniciar();
             // >>> TELA INICIAL <<<
@@ -10741,6 +10742,724 @@ window.comAjustarBotoesPorPerfil = function () {
 
 </script>
 <!-- ============ FIM CENTRAL DE TAREFAS ============ -->
+
+<!-- ============================================================ -->
+<!-- MODULO CONTRATOS (pastas por Unidade, compartilhado Comercial/Financeiro) -->
+<!-- Injetado identico nos dois sites, mesma tabela/bucket, tempo real. -->
+<!-- Para remover: apague este bloco inteiro. -->
+<!-- ============================================================ -->
+<script>
+
+// ============================================================================
+// MÓDULO CONTRATOS — pastas por Unidade, compartilhado entre Comercial e
+// Financeiro. Mesmo arquivo injetado nos dois sites (igual a Central de
+// Tarefas), lendo/gravando na mesma tabela e no mesmo bucket, com tempo real.
+// ============================================================================
+(function () {
+    'use strict';
+    if (window.CTR) return; // já montado nesta página, não duplica
+
+    var CTR = {
+        nivel: null,
+        usuario: null,
+        iniciado: false,
+        arquivos: [],
+        pessoas: [],
+        pastaAtual: null, // { empresa, unidade }
+        canal: null,
+        canalOk: false,
+    };
+    window.CTR = CTR;
+
+    var ID_SUPER_ADMIN = 'fa338e33-18c9-467e-bf3e-34880fd9324e';
+    var BUCKET = 'contratos';
+    var TAMANHO_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function fmtBytes(n) {
+        n = Number(n) || 0;
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function fmtDataHora(iso) {
+        if (!iso) return '—';
+        var d = new Date(iso);
+        return d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function iconePorMime(mime) {
+        mime = mime || '';
+        if (mime.includes('pdf')) return 'fa-file-pdf';
+        if (mime.includes('word') || mime.includes('msword')) return 'fa-file-word';
+        if (mime.includes('sheet') || mime.includes('excel')) return 'fa-file-excel';
+        if (mime.includes('image')) return 'fa-file-image';
+        return 'fa-file';
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* CSS — próprio módulo, não depende do CSS de nenhum outro (CTM etc.)     */
+    /* ---------------------------------------------------------------------- */
+    function injetarCSS() {
+        if (document.getElementById('ctr-styles')) return;
+        var css = ''
+        + '#ctr-tela { height: calc(100vh - 120px); display: flex; flex-direction: column; }'
+        + '.ctr-topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; flex-wrap:wrap; }'
+        + '.ctr-topbar h3 { margin:0; color: var(--cor-texto-secundario, #94a3b8); font-size:1.05rem; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }'
+        + '.ctr-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }'
+        + '.ctr-btn { border:none; border-radius:8px; padding:9px 16px; font-size:0.85rem; font-weight:bold; cursor:pointer; display:inline-flex; align-items:center; gap:7px; transition:.15s; }'
+        + '.ctr-btn-primary { background:#20c997; color:#000; }'
+        + '.ctr-btn-primary:hover { filter:brightness(1.1); }'
+        + '.ctr-btn-ghost { background:transparent; border:1px solid rgba(148,163,184,.35); color: var(--cor-texto-secundario,#94a3b8); }'
+        + '.ctr-btn-ghost:hover { color: var(--cor-texto-principal,#e2e8f0); border-color: rgba(148,163,184,.6); }'
+        + '.ctr-btn-danger { background:#e74c3c; color:#fff; }'
+        + '.ctr-hidden { display:none !important; }'
+        + '.ctr-grid-pastas { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:14px; overflow-y:auto; padding-bottom:10px; }'
+        + '.ctr-pasta { background: rgba(255,255,255,.03); border:1px solid rgba(148,163,184,.18); border-radius:12px; padding:18px; cursor:pointer; transition:.15s; display:flex; flex-direction:column; gap:8px; }'
+        + '[data-theme="light"] .ctr-pasta { background:#fff; border-color:#e2e8f0; box-shadow:0 1px 3px rgba(0,0,0,.06); }'
+        + '.ctr-pasta:hover { transform: translateY(-2px); border-color: rgba(32,201,151,.6); }'
+        + '.ctr-pasta i.fa-folder { color:#f1c40f; font-size:1.8rem; }'
+        + '.ctr-pasta-nome { font-weight:bold; color: var(--cor-texto-principal,#e2e8f0); font-size:.95rem; line-height:1.3; }'
+        + '.ctr-pasta-empresa { font-size:.72rem; color: var(--cor-texto-secundario,#94a3b8); text-transform:uppercase; letter-spacing:.4px; }'
+        + '.ctr-pasta-qtd { font-size:.75rem; color:#20c997; font-weight:bold; margin-top:auto; }'
+        + '.ctr-vazio { text-align:center; padding:40px 20px; color: var(--cor-texto-secundario,#94a3b8); opacity:.75; }'
+        + '.ctr-breadcrumb { display:flex; align-items:center; gap:8px; font-size:.85rem; color: var(--cor-texto-secundario,#94a3b8); margin-bottom:14px; }'
+        + '.ctr-breadcrumb a { color:#20c997; cursor:pointer; text-decoration:none; font-weight:bold; }'
+        + '.ctr-lista-arquivos { display:flex; flex-direction:column; gap:10px; overflow-y:auto; }'
+        + '.ctr-arquivo-card { display:flex; align-items:center; gap:14px; background: rgba(255,255,255,.03); border:1px solid rgba(148,163,184,.18); border-radius:10px; padding:12px 16px; }'
+        + '[data-theme="light"] .ctr-arquivo-card { background:#fff; border-color:#e2e8f0; }'
+        + '.ctr-arquivo-card i.ctr-icone-arq { font-size:1.5rem; color:#20c997; flex-shrink:0; }'
+        + '.ctr-arquivo-nome { font-weight:bold; color: var(--cor-texto-principal,#e2e8f0); font-size:.92rem; }'
+        + '.ctr-arquivo-meta { font-size:.75rem; color: var(--cor-texto-secundario,#94a3b8); margin-top:2px; }'
+        + '.ctr-overlay { position:fixed; inset:0; background: rgba(0,0,0,.65); backdrop-filter: blur(4px); display:flex; align-items:center; justify-content:center; z-index:100200; padding:20px; }'
+        + '.ctr-overlay.ctr-hidden { display:none; }'
+        + '.ctr-modal { background: var(--cor-fundo-card, #1e293b); border-radius:14px; width:100%; max-width:520px; max-height:90vh; display:flex; flex-direction:column; overflow:hidden; border-top:4px solid #20c997; box-shadow:0 20px 60px rgba(0,0,0,.55); }'
+        + '[data-theme="light"] .ctr-modal { background:#fff; }'
+        + '.ctr-modal.ctr-modal-largo { max-width:760px; }'
+        + '.ctr-modal-head { padding:18px 22px; border-bottom:1px solid rgba(148,163,184,.2); display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }'
+        + '.ctr-modal-head h2 { margin:0; color:#20c997; font-size:1.2rem; }'
+        + '.ctr-modal-body { padding:22px; overflow-y:auto; flex:1; min-height:0; }'
+        + '.ctr-modal-foot { padding:16px 22px; border-top:1px solid rgba(148,163,184,.2); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-shrink:0; }'
+        + '.ctr-x { background:transparent; border:none; color: var(--cor-texto-secundario, #94a3b8); font-size:1.4rem; cursor:pointer; }'
+        + '.ctr-field { margin-bottom:15px; }'
+        + '.ctr-field label { display:block; margin-bottom:6px; font-size:.85rem; font-weight:bold; color: var(--cor-texto-secundario, #94a3b8); }'
+        + '.ctr-input { width:100%; box-sizing:border-box; background: rgba(0,0,0,.25); border:1px solid rgba(148,163,184,.3); border-radius:8px; padding:10px 12px; color: var(--cor-texto-principal, #e2e8f0); font-size:.95rem; font-family:inherit; }'
+        + '[data-theme="light"] .ctr-input { background:#fff; color:#0f172a; border-color:#cbd5e1; }'
+        + '.ctr-input:focus { outline:none; border-color:#20c997; }'
+        + '.ctr-table { width:100%; border-collapse:collapse; font-size:.88rem; }'
+        + '.ctr-table th { text-align:left; padding:10px; font-size:.75rem; text-transform:uppercase; color: var(--cor-texto-secundario, #94a3b8); border-bottom:1px solid rgba(148,163,184,.25); }'
+        + '.ctr-table td { padding:9px 10px; border-bottom:1px solid rgba(148,163,184,.12); color: var(--cor-texto-principal, #e2e8f0); }'
+        + '.ctr-progresso { font-size:.78rem; color:#20c997; margin-top:8px; }';
+        var s = document.createElement('style');
+        s.id = 'ctr-styles';
+        s.textContent = css;
+        document.head.appendChild(s);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* HTML                                                                    */
+    /* ---------------------------------------------------------------------- */
+    function htmlTela() {
+        return ''
+        + '<div class="ctr-topbar">'
+        +   '<h3><i class="fa-solid fa-file-contract"></i> Contratos'
+        +     '<span id="ctr-live" style="font-size:.66rem; font-weight:800; letter-spacing:.5px; text-transform:uppercase; padding:3px 9px; border-radius:20px; background: rgba(46,204,113,.15); color:#2ecc71; display:none; align-items:center; gap:5px;"><i class="fa-solid fa-circle" style="font-size:.5rem;"></i> ao vivo</span>'
+        +   '</h3>'
+        +   '<div class="ctr-actions">'
+        +     '<button id="ctr-btn-config" class="ctr-btn ctr-btn-ghost ctr-hidden" onclick="CTR.abrirConfig()" title="Configurar quem acessa Contratos"><i class="fa-solid fa-user-shield"></i> Acessos</button>'
+        +     '<button class="ctr-btn ctr-btn-primary" onclick="CTR.abrirUpload()"><i class="fa-solid fa-upload"></i> Novo Contrato</button>'
+        +   '</div>'
+        + '</div>'
+        + '<div id="ctr-breadcrumb" class="ctr-breadcrumb ctr-hidden">'
+        +   '<a onclick="CTR.voltarPastas()"><i class="fa-solid fa-folder-open"></i> Unidades</a>'
+        +   '<span>/</span><span id="ctr-breadcrumb-atual" style="font-weight:bold; color: var(--cor-texto-principal,#e2e8f0);"></span>'
+        + '</div>'
+        + '<div id="ctr-view-pastas" class="ctr-grid-pastas"></div>'
+        + '<div id="ctr-view-arquivos" class="ctr-lista-arquivos ctr-hidden"></div>';
+    }
+
+    function htmlModais() {
+        return ''
+        /* ---- MODAL UPLOAD ---- */
+        + '<div id="ctr-modal-upload" class="ctr-overlay ctr-hidden">'
+        +  '<div class="ctr-modal">'
+        +   '<div class="ctr-modal-head">'
+        +     '<h2><i class="fa-solid fa-upload"></i> Novo Contrato</h2>'
+        +     '<button type="button" class="ctr-x" onclick="CTR.fechar(\'ctr-modal-upload\')"><i class="fa-solid fa-xmark"></i></button>'
+        +   '</div>'
+        +   '<form id="ctr-form-upload" onsubmit="CTR.enviarContrato(event)">'
+        +   '<div class="ctr-modal-body">'
+        +     '<div class="ctr-field"><label><i class="fa-solid fa-building"></i> Empresa *</label>'
+        +       '<select id="ctr-up-empresa" class="ctr-input" required onchange="CTR.filtrarUnidadesDoUpload()"><option value="">Carregando...</option></select></div>'
+        +     '<div class="ctr-field"><label><i class="fa-solid fa-location-dot"></i> Unidade (pasta) *</label>'
+        +       '<select id="ctr-up-unidade" class="ctr-input" required disabled><option value="">Selecione a empresa primeiro...</option></select>'
+        +       '<small style="color:var(--cor-texto-secundario,#94a3b8); font-size:.75rem;">Lista vem direto das unidades cadastradas no RH.</small></div>'
+        +     '<div class="ctr-field"><label><i class="fa-solid fa-heading"></i> Nome do contrato *</label>'
+        +       '<input type="text" id="ctr-up-nome" class="ctr-input" required placeholder="Ex: Contrato de Prestação de Serviço 2026" maxlength="150"></div>'
+        +     '<div class="ctr-field"><label><i class="fa-solid fa-paperclip"></i> Arquivo * <span style="font-weight:400; opacity:.7;">(máx. 5 MB — PDF, Word, Excel ou imagem)</span></label>'
+        +       '<input type="file" id="ctr-up-arquivo" class="ctr-input" required accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" onchange="CTR.validarTamanhoArquivo(this)">'
+        +       '<div id="ctr-up-erro-tamanho" class="ctr-hidden" style="color:var(--cor-perigo,#e74c3c); font-size:.8rem; margin-top:6px;"><i class="fa-solid fa-triangle-exclamation"></i> Esse arquivo passa de 5 MB — escolha outro.</div>'
+        +     '</div>'
+        +     '<div id="ctr-up-progresso" class="ctr-progresso ctr-hidden"><i class="fa-solid fa-spinner fa-spin"></i> Enviando...</div>'
+        +   '</div>'
+        +   '<div class="ctr-modal-foot">'
+        +     '<button type="button" class="ctr-btn ctr-btn-ghost" onclick="CTR.fechar(\'ctr-modal-upload\')">Cancelar</button>'
+        +     '<button type="submit" id="ctr-up-btn-salvar" class="ctr-btn ctr-btn-primary"><i class="fa-solid fa-upload"></i> Enviar</button>'
+        +   '</div>'
+        +   '</form>'
+        +  '</div>'
+        + '</div>'
+        /* ---- MODAL CONFIG DE ACESSOS ---- */
+        + '<div id="ctr-modal-config" class="ctr-overlay ctr-hidden">'
+        +  '<div class="ctr-modal ctr-modal-largo">'
+        +   '<div class="ctr-modal-head">'
+        +     '<h2><i class="fa-solid fa-user-shield"></i> Quem acessa Contratos</h2>'
+        +     '<button type="button" class="ctr-x" onclick="CTR.fechar(\'ctr-modal-config\')"><i class="fa-solid fa-xmark"></i></button>'
+        +   '</div>'
+        +   '<div class="ctr-modal-body">'
+        +     '<p style="font-size:.85rem; color:var(--cor-texto-secundario,#94a3b8); margin-top:0; line-height:1.5;">'
+        +       'Vale tanto pro site do Comercial quanto pro do Financeiro — é o mesmo acesso nos dois. '
+        +       'Quem for liberado consegue ver, enviar e apagar contrato de qualquer unidade.</p>'
+        +     '<div style="display:flex; gap:10px; align-items:center; margin-bottom:14px;">'
+        +       '<input type="text" id="ctr-busca-pessoa" class="ctr-input" placeholder="Buscar pessoa..." oninput="CTR.filtrarPessoas(this.value)" style="flex:1; margin:0;">'
+        +     '</div>'
+        +     '<div style="max-height:46vh; overflow-y:auto;"><table class="ctr-table">'
+        +       '<thead><tr><th>Pessoa</th><th style="width:110px; text-align:center;">Acesso</th></tr></thead>'
+        +       '<tbody id="ctr-config-body"><tr><td colspan="2" class="ctr-vazio">Carregando...</td></tr></tbody>'
+        +     '</table></div>'
+        +   '</div>'
+        +   '<div class="ctr-modal-foot">'
+        +     '<span style="font-size:.78rem; color:var(--cor-texto-secundario,#94a3b8);"><i class="fa-solid fa-circle-info"></i> Cada alteração salva na hora.</span>'
+        +     '<button type="button" class="ctr-btn ctr-btn-primary" onclick="CTR.fechar(\'ctr-modal-config\')">Fechar</button>'
+        +   '</div>'
+        +  '</div>'
+        + '</div>';
+    }
+
+    CTR.fechar = function (id) {
+        document.getElementById(id).classList.add('ctr-hidden');
+    };
+
+    /* ---------------------------------------------------------------------- */
+    /* MONTAGEM / NAVEGAÇÃO ENTRE TELAS (mesmo padrão da Central de Tarefas —   */
+    /* injeta o próprio item de menu e a própria tela, funciona nos dois sites) */
+    /* ---------------------------------------------------------------------- */
+    function detectarModo() {
+        return document.querySelector('.view-section') ? 'financeiro' : 'comercial';
+    }
+
+    function montar() {
+        injetarCSS();
+        CTR.modo = detectarModo();
+
+        /* ---- item do menu lateral ---- */
+        var sidebar = document.querySelector('.sidebar');
+        if (sidebar && !document.getElementById('ctr-menu')) {
+            var item = document.createElement('div');
+            item.className = 'sidebar-item';
+            item.id = 'ctr-menu';
+            item.innerHTML = '<i class="fa-solid fa-file-contract"></i><span>Contratos</span>';
+            item.addEventListener('click', abrirAba);
+            sidebar.appendChild(item);
+        }
+
+        /* ---- tela ---- */
+        if (!document.getElementById('ctr-tela')) {
+            var tela = document.createElement('div');
+            tela.id = 'ctr-tela';
+            tela.innerHTML = htmlTela();
+
+            if (CTR.modo === 'financeiro') {
+                tela.className = 'view-section hidden';
+                var ref = document.querySelector('.view-section');
+                if (ref && ref.parentNode) ref.parentNode.appendChild(tela);
+                else document.querySelector('.main-wrapper').appendChild(tela);
+                document.querySelectorAll('.sidebar-item[data-target]').forEach(function (b) {
+                    b.addEventListener('click', function () { esconderTela(); });
+                });
+            } else {
+                tela.className = 'hidden';
+                tela.style.display = 'none';
+                var refc = document.getElementById('area-conteudo-propostas');
+                if (refc && refc.parentNode) refc.parentNode.appendChild(tela);
+                else document.querySelector('.main-wrapper').appendChild(tela);
+                if (typeof window.mudarAba === 'function' && !window.mudarAba.__ctr) {
+                    var original = window.mudarAba;
+                    var wrapper = function () {
+                        esconderTela();
+                        return original.apply(this, arguments);
+                    };
+                    wrapper.__ctr = true;
+                    window.mudarAba = wrapper;
+                }
+            }
+        } else {
+            document.getElementById('ctr-tela').innerHTML = htmlTela();
+        }
+
+        /* ---- modais no fim do body ---- */
+        if (!document.getElementById('ctr-modal-upload')) {
+            var box = document.createElement('div');
+            box.innerHTML = htmlModais();
+            while (box.firstChild) document.body.appendChild(box.firstChild);
+        }
+
+        var btnConfig = document.getElementById('ctr-btn-config');
+        if (btnConfig) {
+            if (CTR.usuario && CTR.usuario.id === ID_SUPER_ADMIN) {
+                btnConfig.classList.remove('ctr-hidden');
+            } else {
+                btnConfig.classList.add('ctr-hidden');
+            }
+        }
+
+        CTR.carregar();
+        assinarRealtime();
+    }
+
+    function esconderTela() {
+        var t = document.getElementById('ctr-tela');
+        if (!t) return;
+        t.classList.add('hidden');
+        t.classList.add('ctr-hidden');
+        var m = document.getElementById('ctr-menu');
+        if (m) m.classList.remove('active');
+    }
+
+    function abrirAba() {
+        var tela = document.getElementById('ctr-tela');
+        if (!tela) return;
+
+        document.querySelectorAll('.sidebar-item').forEach(function (b) { b.classList.remove('active'); });
+        document.getElementById('ctr-menu').classList.add('active');
+
+        if (CTR.modo === 'financeiro') {
+            document.querySelectorAll('.view-section').forEach(function (s) { s.classList.add('hidden'); });
+            var sub = document.getElementById('submenu-centros-custo');
+            if (sub) sub.classList.add('hidden');
+            var cc = document.getElementById('btn-menu-cc');
+            if (cc) cc.classList.remove('submenu-open');
+            var h = document.getElementById('titulo-header-atual');
+            if (h) h.innerText = 'Contratos';
+        } else {
+            ['area-conteudo-propostas', 'area-conteudo-crm', 'area-conteudo-metas', 'area-conteudo-tarefas']
+                .forEach(function (id) {
+                    var e = document.getElementById(id);
+                    if (e) { e.classList.add('hidden'); e.style.display = 'none'; }
+                });
+            ['btn-nova-solicitacao', 'btn-novo-cliente-crm', 'btn-nova-meta', 'btn-nova-tarefa']
+                .forEach(function (id) {
+                    var e = document.getElementById(id);
+                    if (e) e.style.display = 'none';
+                });
+            var ctmTela = document.getElementById('ctm-tela');
+            if (ctmTela) { ctmTela.classList.add('hidden'); ctmTela.classList.add('ctm-hidden'); }
+            var ctmMenu = document.getElementById('ctm-menu');
+            if (ctmMenu) ctmMenu.classList.remove('active');
+            var t1 = document.getElementById('header-title');
+            var t2 = document.getElementById('header-subtitle');
+            if (t1) t1.textContent = 'Contratos';
+            if (t2) t2.textContent = 'Compartilhado — Comercial e Financeiro';
+        }
+
+        tela.classList.remove('hidden');
+        tela.classList.remove('ctr-hidden');
+        tela.style.display = 'flex';
+
+        CTR.carregar();
+    }
+    CTR.abrirAba = abrirAba;
+
+    /* ---------------------------------------------------------------------- */
+    /* DADOS                                                                   */
+    /* ---------------------------------------------------------------------- */
+    CTR.carregar = async function () {
+        var viewPastas = document.getElementById('ctr-view-pastas');
+        if (viewPastas) viewPastas.innerHTML = '<div class="ctr-vazio"><i class="fa-solid fa-spinner fa-spin"></i> Carregando contratos...</div>';
+
+        var r = await supabaseClient
+            .from('contratos_arquivos')
+            .select('*')
+            .order('criado_em', { ascending: false });
+
+        if (r.error) {
+            console.error('[Contratos] Erro ao carregar:', r.error);
+            if (viewPastas) viewPastas.innerHTML = '<div class="ctr-vazio" style="color:var(--cor-perigo,#e74c3c);"><i class="fa-solid fa-triangle-exclamation"></i> Erro ao carregar contratos: ' + esc(r.error.message) + '</div>';
+            return;
+        }
+
+        CTR.arquivos = r.data || [];
+
+        if (CTR.pastaAtual) {
+            // se a pasta aberta não existe mais (ex: apagou o último arquivo dela), volta pra lista
+            var aindaExiste = CTR.arquivos.some(function (a) { return a.empresa === CTR.pastaAtual.empresa && a.unidade === CTR.pastaAtual.unidade; });
+            if (aindaExiste) {
+                renderizarArquivosDaPasta();
+            } else {
+                CTR.voltarPastas();
+            }
+        } else {
+            renderizarPastas();
+        }
+    };
+
+    function renderizarPastas() {
+        var mapa = {};
+        CTR.arquivos.forEach(function (a) {
+            var chave = a.empresa + '||' + a.unidade;
+            if (!mapa[chave]) mapa[chave] = { empresa: a.empresa, unidade: a.unidade, qtd: 0 };
+            mapa[chave].qtd++;
+        });
+        var pastas = Object.keys(mapa).map(function (k) { return mapa[k]; })
+            .sort(function (a, b) { return a.unidade.localeCompare(b.unidade, 'pt-BR'); });
+
+        var viewPastas = document.getElementById('ctr-view-pastas');
+        var viewArquivos = document.getElementById('ctr-view-arquivos');
+        var breadcrumb = document.getElementById('ctr-breadcrumb');
+        if (viewArquivos) viewArquivos.classList.add('ctr-hidden');
+        if (breadcrumb) breadcrumb.classList.add('ctr-hidden');
+        if (viewPastas) viewPastas.classList.remove('ctr-hidden');
+
+        if (!pastas.length) {
+            if (viewPastas) viewPastas.innerHTML = '<div class="ctr-vazio" style="grid-column:1/-1;"><i class="fa-solid fa-folder-open" style="font-size:2rem; opacity:.4; display:block; margin-bottom:10px;"></i>Nenhum contrato enviado ainda.<br>Clique em "Novo Contrato" para começar.</div>';
+            return;
+        }
+
+        var html = '';
+        pastas.forEach(function (p) {
+            html += '<div class="ctr-pasta" onclick="CTR.abrirPasta(' + "'" + esc(p.empresa) + '||' + esc(p.unidade) + "'" + ')">'
+                + '<i class="fa-solid fa-folder"></i>'
+                + '<div class="ctr-pasta-nome">' + esc(p.unidade) + '</div>'
+                + '<div class="ctr-pasta-empresa">' + esc(p.empresa) + '</div>'
+                + '<div class="ctr-pasta-qtd"><i class="fa-solid fa-file-lines"></i> ' + p.qtd + ' contrato' + (p.qtd > 1 ? 's' : '') + '</div>'
+                + '</div>';
+        });
+        if (viewPastas) viewPastas.innerHTML = html;
+    }
+
+    CTR.abrirPasta = function (chave) {
+        var partes = chave.split('||');
+        CTR.pastaAtual = { empresa: partes[0], unidade: partes[1] };
+        renderizarArquivosDaPasta();
+    };
+
+    CTR.voltarPastas = function () {
+        CTR.pastaAtual = null;
+        renderizarPastas();
+    };
+
+    function renderizarArquivosDaPasta() {
+        var viewPastas = document.getElementById('ctr-view-pastas');
+        var viewArquivos = document.getElementById('ctr-view-arquivos');
+        var breadcrumb = document.getElementById('ctr-breadcrumb');
+        var breadcrumbAtual = document.getElementById('ctr-breadcrumb-atual');
+        if (viewPastas) viewPastas.classList.add('ctr-hidden');
+        if (viewArquivos) viewArquivos.classList.remove('ctr-hidden');
+        if (breadcrumb) breadcrumb.classList.remove('ctr-hidden');
+        if (breadcrumbAtual) breadcrumbAtual.textContent = CTR.pastaAtual.unidade + ' (' + CTR.pastaAtual.empresa + ')';
+
+        var lista = CTR.arquivos.filter(function (a) {
+            return a.empresa === CTR.pastaAtual.empresa && a.unidade === CTR.pastaAtual.unidade;
+        });
+
+        if (!lista.length) {
+            if (viewArquivos) viewArquivos.innerHTML = '<div class="ctr-vazio">Nenhum contrato nessa unidade.</div>';
+            return;
+        }
+
+        var html = '';
+        lista.forEach(function (a) {
+            html += '<div class="ctr-arquivo-card">'
+                + '<i class="fa-solid ' + iconePorMime(a.tipo_mime) + ' ctr-icone-arq"></i>'
+                + '<div style="flex:1; min-width:0;">'
+                +   '<div class="ctr-arquivo-nome">' + esc(a.nome_contrato) + '</div>'
+                +   '<div class="ctr-arquivo-meta">' + esc(a.nome_arquivo_original) + ' · ' + fmtBytes(a.tamanho_bytes) + ' · enviado por ' + esc(a.enviado_por_nome || '—') + ' em ' + fmtDataHora(a.criado_em) + '</div>'
+                + '</div>'
+                + '<button class="ctr-btn ctr-btn-ghost" onclick="CTR.baixarContrato(' + "'" + a.id + "'" + ')" title="Baixar"><i class="fa-solid fa-download"></i></button>'
+                + '<button class="ctr-btn ctr-btn-danger" onclick="CTR.excluirContrato(' + "'" + a.id + "'" + ')" title="Excluir"><i class="fa-solid fa-trash"></i></button>'
+                + '</div>';
+        });
+        if (viewArquivos) viewArquivos.innerHTML = html;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* UPLOAD                                                                  */
+    /* ---------------------------------------------------------------------- */
+    CTR.abrirUpload = async function () {
+        var form = document.getElementById('ctr-form-upload');
+        if (form) form.reset();
+        var erroTam = document.getElementById('ctr-up-erro-tamanho');
+        if (erroTam) erroTam.classList.add('ctr-hidden');
+
+        document.getElementById('ctr-modal-upload').classList.remove('ctr-hidden');
+
+        var selEmpresa = document.getElementById('ctr-up-empresa');
+        var selUnidade = document.getElementById('ctr-up-unidade');
+        selEmpresa.innerHTML = '<option value="">Carregando...</option>';
+        selUnidade.innerHTML = '<option value="">Selecione a empresa primeiro...</option>';
+        selUnidade.disabled = true;
+
+        var r = await supabaseClient.from('unidades_oficiais').select('nome, empresa').order('empresa').order('nome');
+        if (r.error) {
+            console.error('[Contratos] Erro ao carregar unidades:', r.error);
+            selEmpresa.innerHTML = '<option value="">Erro ao carregar</option>';
+            return;
+        }
+
+        CTR._unidadesOficiais = r.data || [];
+        var empresas = [...new Set(CTR._unidadesOficiais.map(function (u) { return u.empresa; }).filter(Boolean))].sort();
+
+        if (!empresas.length) {
+            selEmpresa.innerHTML = '<option value="">Nenhuma unidade cadastrada no RH</option>';
+            return;
+        }
+
+        var optsEmpresa = '<option value="">Selecione...</option>';
+        empresas.forEach(function (e) { optsEmpresa += '<option value="' + esc(e) + '">' + esc(e) + '</option>'; });
+        selEmpresa.innerHTML = optsEmpresa;
+
+        if (CTR.pastaAtual) {
+            selEmpresa.value = CTR.pastaAtual.empresa;
+            CTR.filtrarUnidadesDoUpload();
+            selUnidade.value = CTR.pastaAtual.unidade;
+        }
+    };
+
+    CTR.filtrarUnidadesDoUpload = function () {
+        var empresa = document.getElementById('ctr-up-empresa').value;
+        var selUnidade = document.getElementById('ctr-up-unidade');
+        if (!empresa) {
+            selUnidade.innerHTML = '<option value="">Selecione a empresa primeiro...</option>';
+            selUnidade.disabled = true;
+            return;
+        }
+        var unidades = (CTR._unidadesOficiais || []).filter(function (u) { return u.empresa === empresa; })
+            .map(function (u) { return u.nome.trim(); }).filter(Boolean);
+        unidades = [...new Set(unidades)].sort(function (a, b) { return a.localeCompare(b, 'pt-BR'); });
+
+        if (!unidades.length) {
+            selUnidade.innerHTML = '<option value="">Nenhuma unidade cadastrada nessa empresa</option>';
+            selUnidade.disabled = true;
+            return;
+        }
+        var opts = '<option value="">Selecione...</option>';
+        unidades.forEach(function (u) { opts += '<option value="' + esc(u) + '">' + esc(u) + '</option>'; });
+        selUnidade.innerHTML = opts;
+        selUnidade.disabled = false;
+    };
+
+    CTR.validarTamanhoArquivo = function (input) {
+        var erroTam = document.getElementById('ctr-up-erro-tamanho');
+        var f = input.files && input.files[0];
+        if (f && f.size > TAMANHO_MAX_BYTES) {
+            erroTam.classList.remove('ctr-hidden');
+            input.value = '';
+        } else {
+            erroTam.classList.add('ctr-hidden');
+        }
+    };
+
+    CTR.enviarContrato = async function (ev) {
+        ev.preventDefault();
+
+        var empresa = document.getElementById('ctr-up-empresa').value;
+        var unidade = document.getElementById('ctr-up-unidade').value;
+        var nomeContrato = document.getElementById('ctr-up-nome').value.trim();
+        var inputArquivo = document.getElementById('ctr-up-arquivo');
+        var f = inputArquivo.files && inputArquivo.files[0];
+
+        if (!empresa || !unidade || !nomeContrato || !f) {
+            if (window.mostrarAlerta) mostrarAlerta('Preencha empresa, unidade, nome do contrato e escolha um arquivo.', 'aviso');
+            return;
+        }
+        if (f.size > TAMANHO_MAX_BYTES) {
+            if (window.mostrarAlerta) mostrarAlerta('Esse arquivo passa de 5 MB.', 'erro');
+            return;
+        }
+
+        var btnSalvar = document.getElementById('ctr-up-btn-salvar');
+        var progresso = document.getElementById('ctr-up-progresso');
+        if (btnSalvar) btnSalvar.disabled = true;
+        if (progresso) progresso.classList.remove('ctr-hidden');
+
+        try {
+            var extensao = (f.name.split('.').pop() || 'dat').toLowerCase();
+            var nomeSeguro = 'arquivo_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + '.' + extensao;
+            var caminho = empresa.replace(/[\/\\]/g, '-') + '/' + unidade.replace(/[\/\\]/g, '-') + '/' + nomeSeguro;
+
+            var up = await supabaseClient.storage.from(BUCKET).upload(caminho, f, { contentType: f.type || 'application/octet-stream', upsert: false });
+            if (up.error) throw up.error;
+
+            var ins = await supabaseClient.from('contratos_arquivos').insert({
+                empresa: empresa,
+                unidade: unidade,
+                nome_contrato: nomeContrato,
+                nome_arquivo_original: f.name,
+                caminho_storage: caminho,
+                tamanho_bytes: f.size,
+                tipo_mime: f.type || null,
+                enviado_por: (CTR.usuario && CTR.usuario.id) || null,
+                enviado_por_nome: (CTR.usuario && CTR.usuario.nome) || null
+            });
+            if (ins.error) {
+                // se der erro salvando os metadados, tenta desfazer o upload pra não sobrar lixo no storage
+                await supabaseClient.storage.from(BUCKET).remove([caminho]);
+                throw ins.error;
+            }
+
+            CTR.fechar('ctr-modal-upload');
+            if (window.mostrarAlerta) mostrarAlerta('Contrato enviado!', 'sucesso');
+            CTR.pastaAtual = { empresa: empresa, unidade: unidade };
+            CTR.carregar();
+        } catch (err) {
+            console.error('[Contratos] Erro ao enviar:', err);
+            if (window.mostrarAlerta) mostrarAlerta('Erro ao enviar contrato: ' + (err.message || err), 'erro');
+        } finally {
+            if (btnSalvar) btnSalvar.disabled = false;
+            if (progresso) progresso.classList.add('ctr-hidden');
+        }
+    };
+
+    CTR.baixarContrato = async function (id) {
+        var a = CTR.arquivos.find(function (x) { return x.id === id; });
+        if (!a) return;
+        var r = await supabaseClient.storage.from(BUCKET).createSignedUrl(a.caminho_storage, 60 * 5); // 5 min
+        if (r.error || !r.data) {
+            console.error('[Contratos] Erro ao gerar link:', r.error);
+            if (window.mostrarAlerta) mostrarAlerta('Erro ao gerar link de download.', 'erro');
+            return;
+        }
+        window.open(r.data.signedUrl, '_blank');
+    };
+
+    CTR.excluirContrato = async function (id) {
+        var a = CTR.arquivos.find(function (x) { return x.id === id; });
+        if (!a) return;
+        var ok = window.confirm ? window.confirm('Apagar o contrato "' + a.nome_contrato + '"? Essa ação não tem volta.') : true;
+        if (!ok) return;
+
+        var delStorage = await supabaseClient.storage.from(BUCKET).remove([a.caminho_storage]);
+        if (delStorage.error) console.error('[Contratos] Erro ao apagar arquivo do storage:', delStorage.error);
+
+        var delRow = await supabaseClient.from('contratos_arquivos').delete().eq('id', id);
+        if (delRow.error) {
+            console.error('[Contratos] Erro ao apagar registro:', delRow.error);
+            if (window.mostrarAlerta) mostrarAlerta('Erro ao apagar contrato.', 'erro');
+            return;
+        }
+        if (window.mostrarAlerta) mostrarAlerta('Contrato apagado.', 'sucesso');
+        CTR.carregar();
+    };
+
+    /* ---------------------------------------------------------------------- */
+    /* CONFIG DE ACESSOS (só Super Admin vê o botão)                           */
+    /* ---------------------------------------------------------------------- */
+    CTR.abrirConfig = async function () {
+        document.getElementById('ctr-modal-config').classList.remove('ctr-hidden');
+        var corpo = document.getElementById('ctr-config-body');
+        corpo.innerHTML = '<tr><td colspan="2" class="ctr-vazio">Carregando...</td></tr>';
+
+        var r = await supabaseClient.rpc('contratos_equipe');
+        if (r.error) {
+            console.error('[Contratos] Erro ao carregar equipe:', r.error);
+            corpo.innerHTML = '<tr><td colspan="2" class="ctr-vazio" style="color:var(--cor-perigo,#e74c3c);">Erro ao carregar.</td></tr>';
+            return;
+        }
+        CTR.pessoas = r.data || [];
+        renderizarPessoas(CTR.pessoas);
+    };
+
+    function renderizarPessoas(lista) {
+        var corpo = document.getElementById('ctr-config-body');
+        if (!corpo) return;
+        if (!lista.length) {
+            corpo.innerHTML = '<tr><td colspan="2" class="ctr-vazio">Ninguém com acesso ainda.</td></tr>';
+            return;
+        }
+        var html = '';
+        lista.forEach(function (p) {
+            html += '<tr><td>' + esc(p.nome) + '</td><td style="text-align:center;">'
+                + '<label class="ctr-switch" style="cursor:pointer;">'
+                + '<input type="checkbox" ' + (p.ativo ? 'checked' : '') + ' onchange="CTR.salvarAcesso(' + "'" + p.user_id + "'" + ', this.checked)">'
+                + (p.ativo ? ' <span style="color:#2ecc71; font-size:.78rem; font-weight:bold;">Ativo</span>' : ' <span style="color:var(--cor-texto-secundario,#94a3b8); font-size:.78rem;">Inativo</span>')
+                + '</label>'
+                + '</td></tr>';
+        });
+        corpo.innerHTML = html;
+    }
+
+    CTR.filtrarPessoas = function (termo) {
+        termo = (termo || '').toLowerCase().trim();
+        if (!termo) { renderizarPessoas(CTR.pessoas); return; }
+        renderizarPessoas(CTR.pessoas.filter(function (p) { return (p.nome || '').toLowerCase().includes(termo); }));
+    };
+
+    CTR.salvarAcesso = async function (userId, ativo) {
+        var r = await supabaseClient.rpc('contratos_definir_acesso', { p_user_id: userId, p_ativo: ativo });
+        if (r.error) {
+            console.error('[Contratos] Erro ao salvar acesso:', r.error);
+            if (window.mostrarAlerta) mostrarAlerta('Erro ao salvar: ' + r.error.message, 'erro');
+            CTR.abrirConfig();
+            return;
+        }
+        var p = CTR.pessoas.find(function (x) { return x.user_id === userId; });
+        if (p) p.ativo = ativo;
+    };
+
+    /* ---------------------------------------------------------------------- */
+    /* TEMPO REAL — Comercial e Financeiro compartilham a mesma tabela, então  */
+    /* uma aba manda e a outra vê aparecer/sumir sem precisar atualizar.       */
+    /* ---------------------------------------------------------------------- */
+    function assinarRealtime() {
+        if (CTR.canalOk) return;
+        try {
+            CTR.canal = supabaseClient
+                .channel('contratos_arquivos_realtime')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'contratos_arquivos' }, function () {
+                    CTR.carregar();
+                })
+                .subscribe();
+            CTR.canalOk = true;
+
+            var live = document.getElementById('ctr-live');
+            if (live) live.style.display = 'inline-flex';
+        } catch (e) {
+            console.error('[Contratos] Erro ao assinar tempo real:', e);
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* BOOT                                                                    */
+    /* ---------------------------------------------------------------------- */
+    CTR.iniciar = async function (perfil) {
+        /* Blindado: qualquer falha aqui NAO pode derrubar o resto do sistema.
+           Se algo der errado, a aba simplesmente nao aparece. */
+        try {
+            if (CTR.iniciado) return;
+            if (typeof supabaseClient === 'undefined' || !perfil) return;
+
+            var r = await supabaseClient.rpc('contratos_meu_nivel');
+            if (r.error || !r.data) return; // sem acesso -> nao renderiza nada
+
+            CTR.nivel = r.data;
+            CTR.usuario = { id: perfil.id, nome: perfil.nome };
+            CTR.iniciado = true;
+            montar();
+        } catch (e) {
+            console.warn('[Contratos] nao carregou:', e);
+        }
+    };
+})();
+
+</script>
+<!-- ============ FIM MODULO CONTRATOS ============ -->
+
 
 <!-- ============================================================ -->
 <!-- PROPOSTAS EM TEMPO REAL                                       -->
