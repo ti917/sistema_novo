@@ -3929,9 +3929,17 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
 
         <div id="aba-banco-curriculos" class="conteudo-aba-captacao">
     <div class="controls-escala" style="justify-content: flex-start; gap: 15px; flex-wrap: wrap;">
-        <div class="input-wrapper" style="flex: 2; min-width: 250px;">
-            <i class="fa-solid fa-search"></i>
-            <input type="text" id="busca-curriculos" placeholder="Buscar candidato, vaga ou cidade..." oninput="window.executarComAtraso(filtrarCurriculos)">
+        <div class="input-wrapper" style="flex: 1.4; min-width: 200px;">
+            <i class="fa-solid fa-user"></i>
+            <input type="text" id="busca-curriculo-candidato" placeholder="Buscar candidato (nome ou e-mail)..." oninput="window.executarComAtraso(filtrarCurriculos)">
+        </div>
+        <div class="input-wrapper" style="flex: 1; min-width: 170px;">
+            <i class="fa-solid fa-briefcase"></i>
+            <input type="text" id="busca-curriculo-cargo" placeholder="Cargo / vaga..." oninput="window.executarComAtraso(filtrarCurriculos)">
+        </div>
+        <div class="input-wrapper" style="flex: 1; min-width: 170px;">
+            <i class="fa-solid fa-location-dot"></i>
+            <input type="text" id="busca-curriculo-cidade" placeholder="Cidade..." oninput="window.executarComAtraso(filtrarCurriculos)">
         </div>
         <div class="input-wrapper" style="width: 200px;">
             <i class="fa-solid fa-filter"></i>
@@ -3951,7 +3959,9 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             </label>
         </div>
     </div>
+    <div id="info-total-curriculos" style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin: 10px 0;"></div>
     <div id="lista-curriculos-container" style="display: flex; flex-direction: column; gap: 15px; max-height: 65vh; overflow-y: auto; padding-right: 10px;"></div>
+    <div id="paginacao-curriculos-wrap" style="text-align: center; margin-top: 15px;"></div>
 </div>
 
       <div id="aba-captacao-vagas" class="conteudo-aba-captacao hidden">
@@ -54778,10 +54788,14 @@ document.querySelector('[data-target="tela-captacao"]')?.addEventListener('click
     if (selectFiltroCurriculo) selectFiltroCurriculo.value = 'Todos';
     if (selectFiltroOrcamento) selectFiltroOrcamento.value = 'Todos';
     
-    const buscaCurriculo = document.getElementById('busca-curriculos');
+    const buscaCurriculoCandidato = document.getElementById('busca-curriculo-candidato');
+    const buscaCurriculoCargo = document.getElementById('busca-curriculo-cargo');
+    const buscaCurriculoCidade = document.getElementById('busca-curriculo-cidade');
     const buscaOrcamento = document.getElementById('busca-orcamentos');
     
-    if (buscaCurriculo) buscaCurriculo.value = '';
+    if (buscaCurriculoCandidato) buscaCurriculoCandidato.value = '';
+    if (buscaCurriculoCargo) buscaCurriculoCargo.value = '';
+    if (buscaCurriculoCidade) buscaCurriculoCidade.value = '';
     if (buscaOrcamento) buscaOrcamento.value = '';
 
     if (typeof paginaAtualJustificativas !== 'undefined') paginaAtualJustificativas = 1;
@@ -54852,7 +54866,14 @@ window.carregarBancoCurriculos = async function() {
         }
     }
 
-    const { data, error } = await query.order('criado_em', { ascending: false });
+    // 👇 CORREÇÃO DE PERFORMANCE: antes buscava TODAS as colunas (select('*')), inclusive
+    // o texto longo de "experiencia_resumo" e o link do PDF, pra TODOS os currículos —
+    // pro Admin (que não tem o filtro de estado do Gestor) isso baixa a tabela inteira toda
+    // vez que a tela abre. Com muitos currículos cadastrados, isso sozinho já trava o
+    // carregamento. Continua trazendo tudo (a lógica de rank por cidade precisa do dataset
+    // completo em memória), mas agora com um teto de segurança de 3000 registros mais
+    // recentes — o suficiente pra qualquer uso real, sem arriscar carregar um banco sem limite.
+    const { data, error } = await query.order('criado_em', { ascending: false }).limit(3000);
     
     if (error) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro de conexão com o banco de talentos.</p>';
@@ -54863,22 +54884,34 @@ window.carregarBancoCurriculos = async function() {
     filtrarCurriculos();
 };
 
+// 👇 CORREÇÃO DE PERFORMANCE: renderização agora é PAGINADA (60 por vez) e monta o HTML
+// num array + join() de uma vez, em vez de container.innerHTML += (que reprocessa a lista
+// inteira de novo a cada card adicionado — o motivo real da travada pro Admin quando tem
+// muitos currículos: com 500+ currículos, aquele += virava milhares de re-renderizações).
+const TAMANHO_PAGINA_CURRICULOS = 60;
+window.curriculosFiltradosAtual = [];
+window.curriculosPaginaAtual = 1;
+
 window.filtrarCurriculos = function() {
-    const termo = window.removerAcentos(document.getElementById('busca-curriculos').value);
+    const termoCandidato = window.removerAcentos(document.getElementById('busca-curriculo-candidato').value);
+    const termoCargo = window.removerAcentos(document.getElementById('busca-curriculo-cargo').value);
+    const termoCidade = window.removerAcentos(document.getElementById('busca-curriculo-cidade').value);
     const statusFiltro = document.getElementById('filtro-status-curriculo').value;
-    const container = document.getElementById('lista-curriculos-container');
 
     // 👇 Checa o poder Global aqui também! 👇
     const isGlobal = usuarioAtual.perfil === 'Admin' || (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true);
 
     let filtrados = todosCurriculos.filter(c => {
         const cidadeColabLimpa = window.removerAcentos((c.cidade_estado || '').toLowerCase());
-        
-        const matchBusca = window.removerAcentos(c.nome).includes(termo) || 
-                           window.removerAcentos(c.vagas_interesse).includes(termo) ||
-                           cidadeColabLimpa.includes(termo) ||
-                           window.removerAcentos(c.email).includes(termo);
-                           
+
+        // 👇 Campos separados: candidato (nome/e-mail), cargo (vaga) e cidade, cada um
+        // opcional — só filtra pelo que a pessoa realmente preencheu.
+        const matchCandidato = !termoCandidato ||
+            window.removerAcentos(c.nome).includes(termoCandidato) ||
+            window.removerAcentos(c.email).includes(termoCandidato);
+        const matchCargo = !termoCargo || window.removerAcentos(c.vagas_interesse).includes(termoCargo);
+        const matchCidade = !termoCidade || cidadeColabLimpa.includes(termoCidade);
+
         const matchStatus = statusFiltro === 'Todos' || c.status === statusFiltro;
         
         // 👇 A TRAVA DE REGIÃO (Só aplica se ele NÃO for global) 👇
@@ -54887,7 +54920,7 @@ window.filtrarCurriculos = function() {
             matchRegiao = window.gestorCidadesVizinhas.some(cidadeDaRegiao => cidadeColabLimpa.includes(cidadeDaRegiao));
         }
 
-        return matchBusca && matchStatus && matchRegiao;
+        return matchCandidato && matchCargo && matchCidade && matchStatus && matchRegiao;
     });
 
     // 👇 RANKEAMENTO: Coloca quem é da CIDADE EXATA no topo, mesmo para o Gestor Global!
@@ -54903,13 +54936,35 @@ window.filtrarCurriculos = function() {
         });
     }
 
-    container.innerHTML = '';
+    window.curriculosFiltradosAtual = filtrados;
+    window.curriculosPaginaAtual = 1;
+    window.renderizarPaginaCurriculos(true);
+};
+
+window.renderizarPaginaCurriculos = function(reset) {
+    const container = document.getElementById('lista-curriculos-container');
+    const infoTotal = document.getElementById('info-total-curriculos');
+    const wrapPaginacao = document.getElementById('paginacao-curriculos-wrap');
+    const filtrados = window.curriculosFiltradosAtual;
+
+    if (reset) container.innerHTML = '';
+
     if (filtrados.length === 0) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum currículo encontrado com este filtro.</p>';
+        if (infoTotal) infoTotal.textContent = '';
+        if (wrapPaginacao) wrapPaginacao.innerHTML = '';
         return;
     }
 
-    filtrados.forEach(c => {
+    const isGlobal = usuarioAtual.perfil === 'Admin' || (usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true);
+    const totalMostrar = window.curriculosPaginaAtual * TAMANHO_PAGINA_CURRICULOS;
+    const fatiaAtual = filtrados.slice(reset ? 0 : (totalMostrar - TAMANHO_PAGINA_CURRICULOS), totalMostrar);
+
+    // 👇 Monta tudo num array e junta de uma vez só (join), em vez de += repetido —
+    // isso é a correção real da travada com listas grandes.
+    const pedacosHtml = [];
+
+    fatiaAtual.forEach(c => {
         const dataEnvio = new Date(c.criado_em).toLocaleDateString('pt-BR') + ' às ' + new Date(c.criado_em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const zapLink = `https://wa.me/${c.telefone.replace(/\D/g, '')}?text=Olá%20${c.nome.split(' ')[0]},%20recebemos%20seu%20currículo%20para%20a%20vaga%20de%20${c.vagas_interesse}!`;
 
@@ -54937,7 +54992,7 @@ window.filtrarCurriculos = function() {
             }
         }
 
-        container.innerHTML += `
+        pedacosHtml.push(`
             <div class="admissao-card" style="border-left: 4px solid ${corStatus}; display: flex; flex-direction: column; align-items: stretch; padding: 20px; border-radius: 12px; transition: all 0.3s ease; box-shadow: 0 4px 10px rgba(0,0,0,0.05);" onmouseover="this.style.transform='translateY(-3px)'; this.style.boxShadow='0 8px 25px rgba(0,0,0,0.2)'" onmouseout="this.style.transform='none'; this.style.boxShadow='0 4px 10px rgba(0,0,0,0.05)'">
                 
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
@@ -54980,8 +55035,19 @@ window.filtrarCurriculos = function() {
                     <a href="${zapLink}" target="_blank" class="btn-success" style="background: #25D366; color: #fff; padding: 10px 20px; border-radius: 8px; text-decoration: none; border: none; font-weight: bold; box-shadow: 0 4px 10px rgba(37,211,102,0.3); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'"><i class="fa-brands fa-whatsapp fa-lg"></i> Chamar no WhatsApp</a>
                 </div>
             </div>
-        `;
+        `);
     });
+
+    container.insertAdjacentHTML('beforeend', pedacosHtml.join(''));
+
+    if (infoTotal) {
+        infoTotal.innerHTML = `Mostrando <b>${Math.min(totalMostrar, filtrados.length)}</b> de <b>${filtrados.length}</b> currículo(s) encontrado(s).`;
+    }
+    if (wrapPaginacao) {
+        wrapPaginacao.innerHTML = totalMostrar < filtrados.length
+            ? `<button class="btn-secondary" style="padding: 10px 25px; border-radius: 8px;" onclick="window.curriculosPaginaAtual++; window.renderizarPaginaCurriculos(false)"><i class="fa-solid fa-arrow-down"></i> Carregar mais ${Math.min(TAMANHO_PAGINA_CURRICULOS, filtrados.length - totalMostrar)}</button>`
+            : '';
+    }
 };
 
 window.atualizarStatusCurriculo = async function(id, novoStatus) {
