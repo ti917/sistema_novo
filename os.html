@@ -208,14 +208,14 @@
 
       <div class="campo">
         <label>Unidade</label>
-        <select id="sol-unidade" required>
+        <select id="sol-unidade" required onchange="autoPreencherCidadeEstado()">
           <option value="">Carregando unidades...</option>
         </select>
       </div>
 
       <div class="form-row2">
         <div class="campo">
-          <label>Cidade</label>
+          <label>Cidade <span style="font-weight:400; color:var(--texto-sec);">(preenchido pela unidade, pode editar)</span></label>
           <input type="text" id="sol-cidade">
         </div>
         <div class="campo">
@@ -435,18 +435,93 @@ async function tentarRestaurarSessao() {
 // ---------------------------------------------------------------------------
 // UNIDADES (lidas do sistema de RH, só leitura, mesmo projeto Supabase)
 // ---------------------------------------------------------------------------
-let todasUnidadesCache = null; // cache simples pra não buscar de novo toda hora
+let todasUnidadesCache = null;       // lista só com os nomes (pra <select>/checkboxes)
+let unidadesComEnderecoCache = null; // nome + endereço (pra autopreencher cidade/UF)
 
-async function buscarTodasUnidades() {
-  if (todasUnidadesCache) return todasUnidadesCache;
+async function buscarTodasUnidadesComEndereco() {
+  if (unidadesComEnderecoCache) return unidadesComEnderecoCache;
   const { data, error } = await supabaseClient
     .from('unidades_oficiais')
-    .select('nome')
+    .select('nome, endereco')
     .eq('ativo', true)
     .order('nome');
   if (error) throw error;
-  todasUnidadesCache = (data || []).map(u => u.nome);
+  unidadesComEnderecoCache = data || [];
+  return unidadesComEnderecoCache;
+}
+
+async function buscarTodasUnidades() {
+  if (todasUnidadesCache) return todasUnidadesCache;
+  const comEndereco = await buscarTodasUnidadesComEndereco();
+  todasUnidadesCache = comEndereco.map(u => u.nome);
   return todasUnidadesCache;
+}
+
+// ---------------------------------------------------------------------
+// Extrai Cidade e UF do texto de endereço salvo em unidades_oficiais
+// (formato padrão do sistema de RH: "Rua X, Nº 123 - Bairro, Cidade -
+// CEP: 00000-000"). Se não bater no formato exato, tenta um jeito mais
+// solto antes de desistir — nesse caso o campo fica em branco pra
+// preencher na mão mesmo (mais seguro que preencher errado).
+// ---------------------------------------------------------------------
+const UFS_BRASIL = ['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO'];
+
+function detectarUFDoEndereco(endereco) {
+  if (!endereco) return '';
+  const txt = String(endereco).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+  const achadas = txt.match(/(?:^|[^A-Z])([A-Z]{2})(?![A-Z])/g) || [];
+  for (const bruto of achadas) {
+    const sigla = bruto.replace(/[^A-Z]/g, '');
+    if (UFS_BRASIL.includes(sigla)) return sigla;
+  }
+
+  const porExtenso = {
+    'SAO PAULO': 'SP', 'RIO DE JANEIRO': 'RJ', 'MINAS GERAIS': 'MG',
+    'ESPIRITO SANTO': 'ES', 'PARANA': 'PR', 'SANTA CATARINA': 'SC',
+    'RIO GRANDE DO SUL': 'RS', 'RONDONIA': 'RO', 'BAHIA': 'BA',
+    'GOIAS': 'GO', 'MATO GROSSO DO SUL': 'MS', 'MATO GROSSO': 'MT'
+  };
+  for (const nomeEstado in porExtenso) {
+    if (txt.indexOf(nomeEstado) !== -1) return porExtenso[nomeEstado];
+  }
+  return '';
+}
+
+function extrairCidadeDoEndereco(endereco) {
+  if (!endereco) return '';
+
+  // Formato padrão: "..., Bairro, Cidade - CEP: ....."  ou  "..., Cidade/UF"
+  const semCep = String(endereco).split(' - CEP:')[0];
+  const partes = semCep.split(',').map(p => p.trim()).filter(Boolean);
+  if (partes.length === 0) return '';
+
+  let cidade = partes[partes.length - 1];
+  // Se o último pedaço vier como "Cidade - SP" ou "Cidade/SP", tira a UF do final
+  cidade = cidade.replace(/\s*[-/]\s*[A-Za-z]{2}$/, '').trim();
+  return cidade;
+}
+
+// Preenche Cidade/Estado sozinho quando o usuário escolhe a Unidade
+async function autoPreencherCidadeEstado() {
+  const nomeUnidade = document.getElementById('sol-unidade').value;
+  const campoCidade = document.getElementById('sol-cidade');
+  const campoEstado = document.getElementById('sol-estado');
+  if (!nomeUnidade) return;
+
+  try {
+    const lista = await buscarTodasUnidadesComEndereco();
+    const unidade = lista.find(u => u.nome === nomeUnidade);
+    if (!unidade || !unidade.endereco) return;
+
+    const cidade = extrairCidadeDoEndereco(unidade.endereco);
+    const uf = detectarUFDoEndereco(unidade.endereco);
+
+    if (cidade) campoCidade.value = cidade;
+    if (uf) campoEstado.value = uf;
+  } catch (e) {
+    console.warn('Não foi possível auto-preencher cidade/estado:', e);
+  }
 }
 
 // Preenche o <select> de unidade do formulário de Nova Solicitação.
