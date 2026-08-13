@@ -913,8 +913,8 @@
                         <button class="btn-success" style="background: var(--cor-acento); color: #000;" onclick="abrirModalNovaContaFixaDireta()">
                             <i class="fa-solid fa-plus"></i> Nova Conta Fixa
                         </button>
-                        <button class="btn-success" style="background: #3498db; color: #fff;" onclick="gerarLancamentosMensais()" title="Gera os boletos deste mês para as contas ativas">
-                            <i class="fa-solid fa-bolt"></i> Gerar Contas do Mês
+                        <button class="btn-success" style="background: #3498db; color: #fff;" onclick="gerarLancamentosMensais()" title="Verifica e completa na hora o horizonte de 12 meses futuros de todas as contas fixas ativas (isso já roda sozinho, esse botão é só pra forçar agora)">
+                            <i class="fa-solid fa-bolt"></i> Verificar Horizonte (12 meses)
                         </button>
                     </div>
                 </div>
@@ -1769,6 +1769,9 @@
             carregarDashboardGeral();
             configurarNavegacaoLateral();
             if (typeof window.atualizarBadgeVencidasGlobal === 'function') window.atualizarBadgeVencidasGlobal();
+
+            // Garante o horizonte de 12 meses das Contas Fixas assim que alguém abre o Financeiro (silencioso)
+            if (typeof window.sincronizarTodasContasFixas === 'function') window.sincronizarTodasContasFixas(false);
 
             // Roteamento por # (cada aba/unidade tem seu próprio link, sem sair de financeiro.html)
             if (typeof window.restaurarTelaPelaHash === 'function') window.restaurarTelaPelaHash();
@@ -3869,12 +3872,17 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
                     criado_por: usuarioAtual.nome
                 };
 
-                const { error: errFixa } = await supabaseClient.from('financeiro_contas_fixas').insert([payloadFixa]);
+                const { data: fixaCriada, error: errFixa } = await supabaseClient.from('financeiro_contas_fixas').insert([payloadFixa]).select().single();
                 if (errFixa) {
                     console.error("Erro ao salvar conta fixa: ", errFixa);
                     mostrarAlerta("O lançamento foi gravado, mas a Conta Fixa recorrente NÃO foi salva. Erro: " + (errFixa.message || errFixa.details || JSON.stringify(errFixa)), "erro");
+                } else {
+                    // Já gera de cara os próximos 12 meses dessa conta fixa (o mês atual já foi lançado manualmente acima)
+                    if (fixaCriada && typeof window.sincronizarLancamentosContaFixa === 'function') {
+                        await window.sincronizarLancamentosContaFixa(fixaCriada);
+                    }
+                    if (typeof carregarContasFixas === 'function') carregarContasFixas();
                 }
-                else if (typeof carregarContasFixas === 'function') carregarContasFixas(); 
             }
 
             mostrarAlerta(`Lançamento gravado! (${totalParcelas} parcelas registradas)`, "sucesso");
@@ -4807,6 +4815,11 @@ window.carregarContasFixas = async function() {
 
     todasContasFixasGlobais = data || [];
     renderizarContasFixas();
+
+    // Garante o horizonte de 12 meses sempre que a tela é aberta (silencioso, sem popup)
+    window.sincronizarTodasContasFixas(false, todasContasFixasGlobais).then(qtd => {
+        if (qtd > 0) { carregarContasFixas(); }
+    });
 };
 
 window.formatarMesAnoFixa = function(dataStr) {
@@ -4864,7 +4877,7 @@ window.renderizarContasFixas = function() {
                 </td>
                 <td style="padding: 15px; text-align: center;">
                     <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; margin-right: 5px;" onclick="abrirModalEditarVigenciaFixa('${conta.id}')" title="Editar Vigência"><i class="fa-solid fa-calendar-days"></i></button>
-                    <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: var(--cor-perigo); color: var(--cor-perigo);" onclick="excluirContaFixa('${conta.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>
+                    <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: var(--cor-perigo); color: var(--cor-perigo);" onclick="abrirModalExclusaoContaFixa('${conta.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>
                 </td>
             </tr>
         `;
@@ -4977,81 +4990,245 @@ window.toggleAtivoContaFixa = async function(id, ativo) {
     mostrarAlerta(ativo ? "Conta ativada!" : "Conta pausada com sucesso!", "sucesso");
 };
 
-window.excluirContaFixa = async function(id) {
-    const confirmado = await mostrarConfirmacao("Deseja excluir permanentemente esta conta fixa? Ela não será mais gerada nos próximos meses.", "Excluir Conta Fixa");
-    if (!confirmado) return;
-    
-    const { error } = await supabaseClient.from('financeiro_contas_fixas').delete().eq('id', id);
-    if (error) return mostrarAlerta("Erro ao excluir conta fixa.", "erro");
-    
-    mostrarAlerta("Conta fixa removida!", "sucesso");
-    carregarContasFixas();
+/** Abre o modal de exclusão de Conta Fixa, com as opções de o que fazer com os lançamentos já gerados. */
+window.abrirModalExclusaoContaFixa = function(id) {
+    const conta = (todasContasFixasGlobais || []).find(c => c.id === id);
+    if (!conta) return mostrarAlerta("Conta fixa não encontrada.", "erro");
+
+    const modalAntigo = document.getElementById('modal-exclusao-conta-fixa');
+    if (modalAntigo) modalAntigo.remove();
+
+    const modalHtml = `
+    <div id="modal-exclusao-conta-fixa" class="modal-overlay" style="z-index: 100060;">
+        <div class="glass-card" style="width: 100%; max-width: 540px; border-top: 4px solid var(--cor-perigo); position: relative; padding: 25px; max-height: 90vh; overflow-y: auto;">
+            <button type="button" onclick="document.getElementById('modal-exclusao-conta-fixa').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.5rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h2 style="color: var(--cor-perigo); margin-top: 0;"><i class="fa-solid fa-trash"></i> Excluir Conta Fixa</h2>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem;">"<b>${conta.descricao}</b>" vai parar de gerar lançamentos novos automaticamente. Escolha também o que fazer com os lançamentos que <b>JÁ foram gerados</b> por ela:</p>
+
+            <div style="display: flex; flex-direction: column; gap: 12px; margin: 20px 0;">
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-fixa" value="nenhum" checked style="margin-top:4px;">
+                    <span><b>Não mexer nos lançamentos já gerados</b><br><span style="font-size:0.8rem; color:var(--cor-texto-secundario);">Só apaga a regra recorrente. O histórico (pago ou pendente) continua normal no Extrato.</span></span>
+                </label>
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-fixa" value="mes_atual" style="margin-top:4px;">
+                    <span><b>Apagar só o lançamento deste mês</b></span>
+                </label>
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-fixa" value="futuro" style="margin-top:4px;">
+                    <span><b>Apagar somente os futuros</b><br><span style="font-size:0.8rem; color:var(--cor-texto-secundario);">Mantém o histórico passado intacto.</span></span>
+                </label>
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-fixa" value="passado" style="margin-top:4px;">
+                    <span><b>Apagar somente os passados</b><br><span style="font-size:0.8rem; color: var(--cor-perigo);">⚠ Inclui lançamentos já pagos.</span></span>
+                </label>
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-fixa" value="todos" style="margin-top:4px;">
+                    <span><b>Apagar de todos os períodos</b><br><span style="font-size:0.8rem; color: var(--cor-perigo);">⚠ Inclui lançamentos já pagos. Apaga TODO o histórico gerado por essa conta fixa.</span></span>
+                </label>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:10px;">
+                <button type="button" class="btn-secondary" onclick="document.getElementById('modal-exclusao-conta-fixa').remove()">Cancelar</button>
+                <button type="button" id="btn-confirmar-exclusao-fixa" class="btn-success" style="background: var(--cor-perigo);" onclick="confirmarExclusaoContaFixa('${id}')"><i class="fa-solid fa-trash"></i> Confirmar Exclusão</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
-window.gerarLancamentosMensais = async function() {
-    const hoje = new Date();
-    const ano = hoje.getFullYear();
-    const mes = String(hoje.getMonth() + 1).padStart(2, '0');
-    const mesRef = `${mes}/${ano}`;
-    const primeiroDiaMesAtual = `${ano}-${mes}-01`; // 👈 usado para comparar com a vigência (formato AAAA-MM-DD)
+/** Executa a exclusão da conta fixa + os lançamentos já gerados, conforme o escopo escolhido no modal. */
+window.confirmarExclusaoContaFixa = async function(id) {
+    const escopoEl = document.querySelector('input[name="escopo-exclusao-fixa"]:checked');
+    const escopo = escopoEl ? escopoEl.value : 'nenhum';
 
-    // 👈 NOVO: além de "ativo", respeita a vigência (Permanente ou Por Período)
-    const contasAtivas = todasContasFixasGlobais.filter(c => {
-        if (!c.ativo) return false;
-        if (c.permanente === false) {
-            if (c.data_inicio_vigencia && c.data_inicio_vigencia > primeiroDiaMesAtual) return false; // ainda não começou
-            if (c.data_fim_vigencia && c.data_fim_vigencia < primeiroDiaMesAtual) return false; // já expirou
-        }
-        return true;
-    });
-
-    if (contasAtivas.length === 0) return mostrarAlerta("Nenhuma conta fixa ativa encontrada para gerar (verifique se alguma está fora do período de vigência).", "aviso");
-
-    const confirmado = await mostrarConfirmacao(`Atenção: Você está prestes a gerar <b>${contasAtivas.length} lançamentos pendentes</b> para as unidades no mês atual.<br><br>Deseja continuar?`, "Gerar Contas do Mês");
-    if (!confirmado) return;
-
-    const btn = document.querySelector('button[onclick="gerarLancamentosMensais()"]');
-    const htmlOriginal = btn.innerHTML;
-    btn.disabled = true; 
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando...';
-
-    let payloads = [];
-    const grupoId = 'FXM-' + Date.now(); // Prefixo para identificar que veio do robô de fixas
-
-    contasAtivas.forEach(conta => {
-        // Formata o dia para não quebrar (ex: dia 5 vira '05')
-        const diaVenc = String(conta.dia_vencimento).padStart(2, '0');
-        const dataIso = `${ano}-${mes}-${diaVenc}`;
-
-        payloads.push({
-            grupo_id: grupoId,
-            centro_custo_id: conta.centro_custo_id,
-            tipo: conta.tipo,
-            fornecedor_nome: conta.fornecedor_nome,
-            descricao: conta.descricao + " (Recorrente)",
-            data_vencimento: dataIso,
-            data_pagamento: null,
-            mes_referencia: mesRef,
-            valor_parcela: conta.valor_padrao,
-            parcela_atual: 1,
-            total_parcelas: 1,
-            valor_total: conta.valor_padrao,
-            status: 'Pendente',
-            empresa: conta.empresa,
-            criado_por: "Sistema Automático (Contas Fixas)"
-        });
-    });
+    const btn = document.getElementById('btn-confirmar-exclusao-fixa');
+    const htmlOriginal = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Excluindo...'; }
 
     try {
-        const { error } = await supabaseClient.from('financeiro_lancamentos').insert(payloads);
-        if (error) throw error;
-        mostrarAlerta("BOOM! ⚡ Contas geradas com sucesso para este mês!", "sucesso");
+        if (escopo !== 'nenhum') {
+            const hoje = new Date();
+            const anoAtual = hoje.getFullYear();
+            const mesAtualStr = String(hoje.getMonth() + 1).padStart(2, '0');
+            const primeiroDiaMes = `${anoAtual}-${mesAtualStr}-01`;
+            const ultimoDiaDoMes = new Date(anoAtual, hoje.getMonth() + 1, 0).getDate();
+            const ultimoDiaMesStr = `${anoAtual}-${mesAtualStr}-${String(ultimoDiaDoMes).padStart(2, '0')}`;
+
+            let queryDel = supabaseClient.from('financeiro_lancamentos').delete().eq('conta_fixa_id', id);
+
+            if (escopo === 'mes_atual') {
+                queryDel = queryDel.gte('data_vencimento', primeiroDiaMes).lte('data_vencimento', ultimoDiaMesStr);
+            } else if (escopo === 'futuro') {
+                queryDel = queryDel.gt('data_vencimento', ultimoDiaMesStr);
+            } else if (escopo === 'passado') {
+                queryDel = queryDel.lt('data_vencimento', primeiroDiaMes);
+            }
+            // escopo === 'todos' não aplica filtro de data nenhum: apaga tudo que tiver esse conta_fixa_id
+
+            const { error: errDelLanc } = await queryDel;
+            if (errDelLanc) throw errDelLanc;
+        }
+
+        const { error: errDelFixa } = await supabaseClient.from('financeiro_contas_fixas').delete().eq('id', id);
+        if (errDelFixa) throw errDelFixa;
+
+        mostrarAlerta("Conta fixa excluída com sucesso!", "sucesso");
+        const modal = document.getElementById('modal-exclusao-conta-fixa');
+        if (modal) modal.remove();
+
+        carregarContasFixas();
+        if (!document.getElementById('tela-dashboard-fin').classList.contains('hidden')) {
+            carregarDashboardGeral();
+        }
     } catch (err) {
-        mostrarAlerta("Erro ao gerar contas: " + err.message, "erro");
-    } finally {
-        btn.disabled = false; 
-        btn.innerHTML = htmlOriginal;
+        mostrarAlerta("Erro ao excluir: " + err.message, "erro");
+        if (btn) { btn.disabled = false; btn.innerHTML = htmlOriginal; }
     }
+};
+
+// =====================================================================
+// HORIZONTE ROLANTE DE 12 MESES: mantém sempre os próximos 12 meses de
+// lançamento já gerados pra cada Conta Fixa ativa, sem precisar de clique
+// manual. Roda sozinho ao abrir o app, ao abrir a tela de Contas Fixas, e
+// logo depois de cadastrar uma nova conta fixa. O botão "Gerar Contas do
+// Mês" virou um "forçar checagem agora".
+// =====================================================================
+window.HORIZONTE_MESES_CONTA_FIXA = 12;
+
+/** Lista os próximos N meses (ano/mês/data de vencimento) que essa conta fixa deveria ter lançamento gerado. */
+window.listarMesesAlvoContaFixa = function(conta, quantidadeMeses) {
+    const hoje = new Date();
+    let ano = hoje.getFullYear();
+    let mes = hoje.getMonth() + 1; // 1-12
+
+    // Se a vigência (Por Período) só começa no futuro, a lista começa a partir de lá
+    if (conta.permanente === false && conta.data_inicio_vigencia) {
+        const partes = conta.data_inicio_vigencia.split('-');
+        const anoVig = parseInt(partes[0], 10);
+        const mesVig = parseInt(partes[1], 10);
+        if (anoVig > ano || (anoVig === ano && mesVig > mes)) {
+            ano = anoVig; mes = mesVig;
+        }
+    }
+
+    const lista = [];
+    for (let i = 0; i < quantidadeMeses; i++) {
+        const mesStr = String(mes).padStart(2, '0');
+        const primeiroDiaDoMes = `${ano}-${mesStr}-01`;
+
+        // Respeita o fim da vigência (Por Período) — para de listar meses depois disso
+        if (conta.permanente === false && conta.data_fim_vigencia && primeiroDiaDoMes > conta.data_fim_vigencia) {
+            break;
+        }
+
+        const diaVenc = String(conta.dia_vencimento).padStart(2, '0');
+        lista.push({
+            mesRef: `${mesStr}/${ano}`,
+            dataVencIso: `${ano}-${mesStr}-${diaVenc}`
+        });
+
+        mes++;
+        if (mes > 12) { mes = 1; ano++; }
+    }
+    return lista;
+};
+
+/** Garante que UMA conta fixa tenha lançamento gerado pros próximos 12 meses (só cria o que falta, nunca duplica). */
+window.sincronizarLancamentosContaFixa = async function(conta) {
+    if (!conta || !conta.ativo) return { gerados: 0 };
+
+    const mesesAlvo = window.listarMesesAlvoContaFixa(conta, window.HORIZONTE_MESES_CONTA_FIXA);
+    if (mesesAlvo.length === 0) return { gerados: 0 };
+
+    const { data: existentes, error: errBusca } = await supabaseClient
+        .from('financeiro_lancamentos')
+        .select('mes_referencia')
+        .eq('conta_fixa_id', conta.id)
+        .in('mes_referencia', mesesAlvo.map(m => m.mesRef));
+
+    if (errBusca) {
+        console.error('Erro ao checar lançamentos existentes da conta fixa:', errBusca);
+        return { gerados: 0, erro: errBusca };
+    }
+
+    const jaExistem = new Set((existentes || []).map(e => e.mes_referencia));
+    const faltantes = mesesAlvo.filter(m => !jaExistem.has(m.mesRef));
+    if (faltantes.length === 0) return { gerados: 0 };
+
+    const payloads = faltantes.map(m => ({
+        grupo_id: 'FXM-' + conta.id,
+        conta_fixa_id: conta.id,
+        centro_custo_id: conta.centro_custo_id,
+        tipo: conta.tipo,
+        categoria: conta.categoria || null,
+        fornecedor_nome: conta.fornecedor_nome,
+        descricao: `${conta.descricao} (Recorrente)`,
+        data_vencimento: m.dataVencIso,
+        data_pagamento: null,
+        mes_referencia: m.mesRef,
+        valor_parcela: conta.valor_padrao,
+        parcela_atual: 1,
+        total_parcelas: 1,
+        valor_total: conta.valor_padrao,
+        status: 'Pendente',
+        empresa: conta.empresa,
+        criado_por: 'Sistema Automático (Contas Fixas)'
+    }));
+
+    const { error: errInsert } = await supabaseClient.from('financeiro_lancamentos').insert(payloads);
+    if (errInsert) {
+        console.error('Erro ao gerar lançamentos futuros da conta fixa:', errInsert);
+        return { gerados: 0, erro: errInsert };
+    }
+
+    return { gerados: payloads.length };
+};
+
+/** Roda a sincronização em TODAS as contas fixas ativas. Usado no login, ao abrir a tela e no botão manual. */
+window.sincronizarTodasContasFixas = async function(mostrarFeedback = false, listaJaCarregada = null) {
+    try {
+        let ativas = listaJaCarregada;
+        if (!ativas) {
+            const { data, error } = await supabaseClient.from('financeiro_contas_fixas').select('*').eq('ativo', true);
+            if (error) throw error;
+            ativas = data || [];
+        } else {
+            ativas = ativas.filter(c => c.ativo);
+        }
+
+        let totalGerado = 0;
+        for (const conta of ativas) {
+            const r = await window.sincronizarLancamentosContaFixa(conta);
+            totalGerado += (r.gerados || 0);
+        }
+
+        if (mostrarFeedback) {
+            if (totalGerado > 0) {
+                mostrarAlerta(`${totalGerado} lançamento(s) futuro(s) gerado(s) pra manter o horizonte de 12 meses das contas fixas.`, 'sucesso');
+            } else {
+                mostrarAlerta('Todas as contas fixas já estão com o horizonte de 12 meses completo. Nada novo pra gerar.', 'aviso');
+            }
+            if (typeof carregarContasFixas === 'function') carregarContasFixas();
+        }
+
+        return totalGerado;
+    } catch (err) {
+        console.error('Erro ao sincronizar contas fixas:', err);
+        if (mostrarFeedback) mostrarAlerta('Erro ao gerar lançamentos futuros: ' + err.message, 'erro');
+        return 0;
+    }
+};
+
+/** Botão "Gerar Contas do Mês" — agora força a checagem/complemento do horizonte de 12 meses na hora. */
+window.gerarLancamentosMensais = async function() {
+    const btn = document.querySelector('button[onclick="gerarLancamentosMensais()"]');
+    const htmlOriginal = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando...'; }
+
+    await window.sincronizarTodasContasFixas(true);
+
+    if (btn) { btn.disabled = false; btn.innerHTML = htmlOriginal; }
 };
 
 // Gatilho Menu Lateral
@@ -6619,50 +6796,17 @@ window.abrirModalNovaContaFixaDireta = async function() {
             };
 
             // 1. Salva a regra na tabela de Contas Fixas
-            const { error: errFixa } = await supabaseClient.from('financeiro_contas_fixas').insert([payloadFixa]);
+            const { data: fixaCriada, error: errFixa } = await supabaseClient.from('financeiro_contas_fixas').insert([payloadFixa]).select().single();
             if (errFixa) throw errFixa;
 
-            // 2. AUTOMAÇÃO: Checa se a vigência abrange o mês atual para já lançar no Centro de Custo
-            const hoje = new Date();
-            const anoAtual = hoje.getFullYear();
-            const mesAtualNum = hoje.getMonth() + 1;
-            const mesAtualStr = String(mesAtualNum).padStart(2, '0');
-            const primeiroDiaMesAtualStr = `${anoAtual}-${mesAtualStr}-01`;
-
-            let vigenciaValidaParaMesAtual = true;
-            if (!permanente) {
-                if (inicioIso && inicioIso > primeiroDiaMesAtualStr) vigenciaValidaParaMesAtual = false;
-                if (fimIso && fimIso < primeiroDiaMesAtualStr) vigenciaValidaParaMesAtual = false;
+            // 2. AUTOMAÇÃO: gera de cara os próximos 12 meses (respeitando a vigência, se for Por Período)
+            let qtdGerada = 0;
+            if (fixaCriada && typeof window.sincronizarLancamentosContaFixa === 'function') {
+                const r = await window.sincronizarLancamentosContaFixa(fixaCriada);
+                qtdGerada = r.gerados || 0;
             }
 
-            if (vigenciaValidaParaMesAtual) {
-                const diaVencStr = String(diaVenc).padStart(2, '0');
-                const dataPagamentoIso = `${anoAtual}-${mesAtualStr}-${diaVencStr}`;
-                const mesRefStr = `${mesAtualStr}/${anoAtual}`;
-
-                const payloadLancamento = {
-                    grupo_id: 'FXM-' + Date.now(),
-                    centro_custo_id: idCc,
-                    tipo: tipo,
-                    categoria: categoria,
-                    fornecedor_nome: tipo === 'Receita' ? null : fornecedor,
-                    descricao: `${descricao} (Recorrente)`.toUpperCase(),
-                    data_vencimento: dataPagamentoIso,
-                    data_pagamento: null,
-                    mes_referencia: mesRefStr,
-                    valor_parcela: valorPadrao,
-                    valor_total: valorPadrao,
-                    parcela_atual: 1,
-                    total_parcelas: 1,
-                    status: 'Pendente',
-                    empresa: empresaFinanceiraSelecionada === 'Todas' ? null : empresaFinanceiraSelecionada,
-                    criado_por: usuarioAtual ? usuarioAtual.nome : 'Usuário'
-                };
-
-                await supabaseClient.from('financeiro_lancamentos').insert([payloadLancamento]);
-            }
-
-            mostrarAlerta("Conta fixa cadastrada e lançada com sucesso no Centro de Custo!", "sucesso");
+            mostrarAlerta(`Conta fixa cadastrada! ${qtdGerada} lançamento(s) já gerado(s) cobrindo os próximos meses.`, "sucesso");
             document.getElementById('modal-nova-conta-fixa-direta').remove();
             carregarContasFixas();
 
