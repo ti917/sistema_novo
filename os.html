@@ -113,6 +113,22 @@
   .toggle-btn { padding: 6px 12px; font-size: 0.78rem; border-radius: 6px; cursor: pointer; border: 1px solid var(--borda); background: transparent; color: var(--texto); }
 
   hr.sep { border: 0; border-top: 1px dashed var(--borda); margin: 22px 0; }
+
+  .unidades-check-lista {
+    max-height: 160px; overflow-y: auto; border: 1px solid var(--borda); border-radius: 8px;
+    padding: 8px 10px; background: rgba(255,255,255,0.03);
+  }
+  .unidades-check-lista label {
+    display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 0.83rem; cursor: pointer;
+  }
+  .unidades-check-lista input { width: auto; }
+  .tag-unidade {
+    display: inline-block; background: rgba(79,195,247,0.15); color: var(--azul-claro);
+    padding: 2px 8px; border-radius: 10px; font-size: 0.7rem; margin: 2px 4px 0 0; font-weight: 700;
+  }
+  .conta-item { flex-direction: column; align-items: stretch; }
+  .conta-item .conta-topo { display: flex; justify-content: space-between; align-items: center; }
+  .conta-item .conta-acoes { display: flex; gap: 8px; }
 </style>
 </head>
 <body>
@@ -239,9 +255,11 @@
 <!-- ======================= MODAL: CONTAS (SÓ ADMIN) ======================= -->
 <div id="modal-contas" class="overlay hidden">
   <div class="modal" style="max-width: 480px;">
-    <h3>Contas de Acesso</h3>
+    <h3 id="titulo-form-conta">Nova Conta de Acesso</h3>
 
-    <form id="form-nova-conta" onsubmit="criarConta(event)">
+    <form id="form-nova-conta" onsubmit="salvarConta(event)">
+      <input type="hidden" id="conta-id-edicao" value="">
+
       <div class="campo">
         <label>Nome da pessoa</label>
         <input type="text" id="conta-nome" required>
@@ -252,11 +270,22 @@
           <input type="text" id="conta-usuario" required autocomplete="off">
         </div>
         <div class="campo">
-          <label>Senha</label>
-          <input type="text" id="conta-senha" required minlength="4" autocomplete="off">
+          <label id="label-conta-senha">Senha</label>
+          <input type="text" id="conta-senha" minlength="4" autocomplete="off" placeholder="Mínimo 4 caracteres">
         </div>
       </div>
-      <button type="submit" class="btn btn-primario">+ Criar Conta</button>
+
+      <div class="campo">
+        <label>Unidades que essa conta pode usar (marque uma ou mais)</label>
+        <div class="unidades-check-lista" id="conta-unidades-lista">
+          <p class="vazio" style="padding:8px 0;">Carregando unidades...</p>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:10px;">
+        <button type="button" class="btn btn-secundario hidden" id="btn-cancelar-edicao-conta" onclick="cancelarEdicaoConta()">Cancelar edição</button>
+        <button type="submit" class="btn btn-primario" id="btn-salvar-conta">+ Criar Conta</button>
+      </div>
     </form>
 
     <hr class="sep">
@@ -314,7 +343,7 @@ async function fazerLogin() {
 
     if (!contaErro && contaData && contaData.length > 0) {
       const c = contaData[0];
-      definirSessao({ tipo: 'conta', conta_id: c.id, nome: c.nome, usuario: c.usuario });
+      definirSessao({ tipo: 'conta', conta_id: c.id, nome: c.nome, usuario: c.usuario, unidades: c.unidades || [] });
       return;
     }
 
@@ -326,7 +355,7 @@ async function fazerLogin() {
     });
 
     if (!authErro && authData && authData.user && authData.user.id === ID_SUPER_ADMIN) {
-      definirSessao({ tipo: 'admin', conta_id: null, nome: 'Super Admin', usuario: authData.user.email });
+      definirSessao({ tipo: 'admin', conta_id: null, nome: 'Super Admin', usuario: authData.user.email, unidades: [] });
       return;
     }
 
@@ -406,23 +435,72 @@ async function tentarRestaurarSessao() {
 // ---------------------------------------------------------------------------
 // UNIDADES (lidas do sistema de RH, só leitura, mesmo projeto Supabase)
 // ---------------------------------------------------------------------------
+let todasUnidadesCache = null; // cache simples pra não buscar de novo toda hora
+
+async function buscarTodasUnidades() {
+  if (todasUnidadesCache) return todasUnidadesCache;
+  const { data, error } = await supabaseClient
+    .from('unidades_oficiais')
+    .select('nome')
+    .eq('ativo', true)
+    .order('nome');
+  if (error) throw error;
+  todasUnidadesCache = (data || []).map(u => u.nome);
+  return todasUnidadesCache;
+}
+
+// Preenche o <select> de unidade do formulário de Nova Solicitação.
+// Admin vê TODAS as unidades. Conta comum só vê as unidades liberadas
+// pra ela (definidas pelo Super Admin ao criar/editar a conta).
 async function carregarUnidades() {
   const select = document.getElementById('sol-unidade');
   try {
-    const { data, error } = await supabaseClient
-      .from('unidades_oficiais')
-      .select('nome')
-      .eq('ativo', true)
-      .order('nome');
+    const todas = await buscarTodasUnidades();
+    const permitidas = (sessaoAtual.tipo === 'admin')
+      ? todas
+      : todas.filter(nome => (sessaoAtual.unidades || []).includes(nome));
 
-    if (error) throw error;
+    if (permitidas.length === 0) {
+      select.innerHTML = '<option value="">Nenhuma unidade liberada pra essa conta — avise o Super Admin</option>';
+      return;
+    }
 
     select.innerHTML = '<option value="">Selecione a unidade...</option>' +
-      (data || []).map(u => `<option value="${escaparHtml(u.nome)}">${escaparHtml(u.nome)}</option>`).join('');
+      permitidas.map(nome => `<option value="${escaparHtml(nome)}">${escaparHtml(nome)}</option>`).join('');
   } catch (e) {
     console.error('Erro ao carregar unidades:', e);
     select.innerHTML = '<option value="">Não foi possível carregar as unidades</option>';
   }
+}
+
+// Preenche a lista de checkboxes de unidade no formulário de Criar/Editar
+// Conta. Aqui SEMPRE mostra todas as unidades (é o Super Admin escolhendo
+// quais liberar pra conta), marcando as que já estiverem selecionadas.
+async function carregarUnidadesCheckbox(unidadesJaMarcadas) {
+  const box = document.getElementById('conta-unidades-lista');
+  try {
+    const todas = await buscarTodasUnidades();
+    const marcadas = new Set(unidadesJaMarcadas || []);
+
+    if (todas.length === 0) {
+      box.innerHTML = '<p class="vazio" style="padding:8px 0;">Nenhuma unidade cadastrada no RH.</p>';
+      return;
+    }
+
+    box.innerHTML = todas.map(nome => `
+      <label>
+        <input type="checkbox" class="chk-unidade-conta" value="${escaparHtml(nome)}" ${marcadas.has(nome) ? 'checked' : ''}>
+        ${escaparHtml(nome)}
+      </label>
+    `).join('');
+  } catch (e) {
+    console.error('Erro ao carregar unidades:', e);
+    box.innerHTML = '<p class="vazio" style="padding:8px 0;">Não foi possível carregar as unidades.</p>';
+  }
+}
+
+function pegarUnidadesMarcadas() {
+  return Array.from(document.querySelectorAll('.chk-unidade-conta:checked')).map(chk => chk.value);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,8 +572,10 @@ async function salvarSolicitacao(e) {
 // ---------------------------------------------------------------------------
 // CONTAS (só Super Admin)
 // ---------------------------------------------------------------------------
+let contasCache = []; // guarda o último "listar_contas_servico" pra alimentar a edição sem buscar de novo
+
 function abrirModalContas() {
-  document.getElementById('form-nova-conta').reset();
+  cancelarEdicaoConta();
   document.getElementById('modal-contas').classList.remove('hidden');
   carregarContas();
 }
@@ -508,20 +588,32 @@ async function carregarContas() {
     const { data, error } = await supabaseClient.rpc('listar_contas_servico');
     if (error) throw error;
 
-    if (!data || data.length === 0) {
+    contasCache = data || [];
+
+    if (contasCache.length === 0) {
       lista.innerHTML = '<p class="vazio">Nenhuma conta criada ainda.</p>';
       return;
     }
 
-    lista.innerHTML = data.map(c => `
+    lista.innerHTML = contasCache.map(c => `
       <div class="conta-item ${c.ativo ? '' : 'inativa'}">
-        <div>
-          <div class="nome">${escaparHtml(c.nome)}</div>
-          <div class="usuario">usuário: ${escaparHtml(c.usuario)} ${c.ativo ? '' : '(desativada)'}</div>
+        <div class="conta-topo">
+          <div>
+            <div class="nome">${escaparHtml(c.nome)}</div>
+            <div class="usuario">usuário: ${escaparHtml(c.usuario)} ${c.ativo ? '' : '(desativada)'}</div>
+          </div>
+          <div class="conta-acoes">
+            <button class="toggle-btn" onclick="prepararEdicaoConta('${c.id}')">Editar</button>
+            <button class="toggle-btn" onclick="alternarConta('${c.id}', ${!c.ativo})">
+              ${c.ativo ? 'Desativar' : 'Ativar'}
+            </button>
+          </div>
         </div>
-        <button class="toggle-btn" onclick="alternarConta('${c.id}', ${!c.ativo})">
-          ${c.ativo ? 'Desativar' : 'Ativar'}
-        </button>
+        <div>
+          ${(c.unidades && c.unidades.length > 0)
+            ? c.unidades.map(u => `<span class="tag-unidade">${escaparHtml(u)}</span>`).join('')
+            : '<span class="tag-unidade" style="background:rgba(220,53,69,0.15); color:#dc3545;">Nenhuma unidade liberada</span>'}
+        </div>
       </div>
     `).join('');
   } catch (e) {
@@ -530,21 +622,76 @@ async function carregarContas() {
   }
 }
 
-async function criarConta(e) {
+// Preenche o formulário com os dados de uma conta existente pra editar
+function prepararEdicaoConta(id) {
+  const conta = contasCache.find(c => c.id === id);
+  if (!conta) return;
+
+  document.getElementById('conta-id-edicao').value = conta.id;
+  document.getElementById('conta-nome').value = conta.nome;
+  document.getElementById('conta-usuario').value = conta.usuario;
+  document.getElementById('conta-senha').value = '';
+  document.getElementById('label-conta-senha').textContent = 'Nova senha (deixe em branco pra manter a mesma)';
+  document.getElementById('titulo-form-conta').textContent = 'Editar Conta — ' + conta.nome;
+  document.getElementById('btn-salvar-conta').textContent = 'Salvar Alterações';
+  document.getElementById('btn-cancelar-edicao-conta').classList.remove('hidden');
+
+  carregarUnidadesCheckbox(conta.unidades || []);
+
+  document.getElementById('form-nova-conta').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function cancelarEdicaoConta() {
+  document.getElementById('form-nova-conta').reset();
+  document.getElementById('conta-id-edicao').value = '';
+  document.getElementById('label-conta-senha').textContent = 'Senha';
+  document.getElementById('conta-senha').setAttribute('required', 'required');
+  document.getElementById('titulo-form-conta').textContent = 'Nova Conta de Acesso';
+  document.getElementById('btn-salvar-conta').textContent = '+ Criar Conta';
+  document.getElementById('btn-cancelar-edicao-conta').classList.add('hidden');
+  carregarUnidadesCheckbox([]);
+}
+
+// Um único form serve pra criar E editar — decide qual RPC chamar
+// olhando se tem um id de edição guardado no campo escondido.
+async function salvarConta(e) {
   e.preventDefault();
+  const idEdicao = document.getElementById('conta-id-edicao').value;
+  const unidadesMarcadas = pegarUnidadesMarcadas();
+
+  if (unidadesMarcadas.length === 0) {
+    alert('Selecione pelo menos uma unidade pra essa conta.');
+    return;
+  }
+
   try {
-    const { error } = await supabaseClient.rpc('criar_conta_servico', {
-      p_usuario: document.getElementById('conta-usuario').value.trim(),
-      p_senha: document.getElementById('conta-senha').value,
-      p_nome: document.getElementById('conta-nome').value.trim()
-    });
+    if (idEdicao) {
+      const { error } = await supabaseClient.rpc('editar_conta_servico', {
+        p_conta_id: idEdicao,
+        p_nome: document.getElementById('conta-nome').value.trim(),
+        p_usuario: document.getElementById('conta-usuario').value.trim(),
+        p_senha: document.getElementById('conta-senha').value || null,
+        p_unidades: unidadesMarcadas
+      });
+      if (error) throw error;
+    } else {
+      if (!document.getElementById('conta-senha').value) {
+        alert('Informe uma senha pra conta nova.');
+        return;
+      }
+      const { error } = await supabaseClient.rpc('criar_conta_servico', {
+        p_usuario: document.getElementById('conta-usuario').value.trim(),
+        p_senha: document.getElementById('conta-senha').value,
+        p_nome: document.getElementById('conta-nome').value.trim(),
+        p_unidades: unidadesMarcadas
+      });
+      if (error) throw error;
+    }
 
-    if (error) throw error;
-
-    document.getElementById('form-nova-conta').reset();
+    cancelarEdicaoConta();
     carregarContas();
   } catch (e) {
-    alert('Erro ao criar conta: ' + (e.message || e));
+    alert('Erro ao salvar conta: ' + (e.message || e));
   }
 }
 
