@@ -36508,7 +36508,11 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
     const chavesPedido = Object.keys(alt.alteracoes);
     window.__pedeUnidadeAplicAlt = chavesPedido.some(k => k.includes('Unidade'));
     window.__pedeCargoAplicAlt = chavesPedido.some(k => k.includes('Cargo'));
-    window.__pedeJornadaAplicAlt = chavesPedido.some(k => k.includes('Horário') || k.includes('Turno') || k.includes('Exceção Pontual'));
+    // 👇 Exceção Pontual (só 1 dia) é diferente de mudança PERMANENTE de Horário/Turno:
+    // o pontual não mexe no Histórico de Jornadas nem manda e-mail pro OBSA — só grava
+    // em Exceções Pontuais daquele dia específico (ver submit handler mais abaixo).
+    window.__pedePontualAplicAlt = chavesPedido.some(k => k.includes('Exceção Pontual'));
+    window.__pedeJornadaAplicAlt = chavesPedido.some(k => k.includes('Horário') || k.includes('Turno')) || window.__pedePontualAplicAlt;
     // Salário/Insalubridade não têm checkbox próprio no pedido do gestor — eles
     // acompanham automaticamente Unidade/Cargo (a tabela salarial é buscada por
     // empresa+unidade+cargo), então só faz sentido mostrá-los quando um dos dois mudou.
@@ -36530,6 +36534,32 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
     if (!window.__pedeJornadaAplicAlt) {
         document.getElementById('aplic-alt-wrap-jornada').classList.add('hidden');
         document.getElementById('aplic-alt-wrap-jornada-hr').classList.add('hidden');
+    } else if (window.__pedePontualAplicAlt) {
+        // Pontual: esconde "Tipo de Jornada" e a grade semanal (não fazem sentido pra 1 dia
+        // só), sempre mostra o box de status+horário único, e ajusta os textos pro contexto certo.
+        const linhaTipoJornada = document.getElementById('aplic-alt-jornada-tipo').closest('.form-row');
+        if (linhaTipoJornada) linhaTipoJornada.classList.add('hidden');
+        document.getElementById('aplic-alt-box-12x36').classList.remove('hidden');
+        document.getElementById('aplic-alt-box-semanal').classList.add('hidden');
+
+        const headerJornada = document.querySelector('#aplic-alt-wrap-jornada h6');
+        if (headerJornada) headerJornada.innerHTML = '<i class="fa-regular fa-calendar-plus"></i> Exceção Pontual — Somente Este Dia';
+
+        const selectStatus = document.getElementById('aplic-alt-status-inicio');
+        if (selectStatus && !selectStatus.querySelector('option[value="Feriado"]')) {
+            selectStatus.insertAdjacentHTML('beforeend', '<option value="Feriado">Feriado</option>');
+        }
+        const labelsBox12x36 = document.querySelectorAll('#aplic-alt-box-12x36 label');
+        if (labelsBox12x36[0]) labelsBox12x36[0].textContent = 'Status do Dia';
+        if (labelsBox12x36[1]) labelsBox12x36[1].textContent = 'Horário do Dia';
+
+        const inputVig = document.getElementById('aplic-alt-data-vigencia');
+        if (inputVig) {
+            const labelVig = inputVig.previousElementSibling;
+            const smallVig = inputVig.nextElementSibling;
+            if (labelVig) labelVig.innerHTML = '<i class="fa-regular fa-calendar-plus"></i> Dia da Exceção <span style="color: var(--cor-perigo);">*</span>';
+            if (smallVig) smallVig.textContent = 'Qual o dia específico desta exceção pontual?';
+        }
     }
 
     // Tenta puxar a data que o gestor pediu no chamado para já preencher o input de vigência
@@ -36553,32 +36583,56 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
     // (foi exatamente o que aconteceu com a Alessandra). Agora o campo já
     // nasce com o valor pedido, então só precisa conferir e clicar Aplicar.
     // =========================================================================
-    const chaveHorario = Object.keys(alt.alteracoes).find(k => k.includes('Horário') || k.includes('Turno'));
-    if (chaveHorario) {
-        const textoPedido = String(alt.alteracoes[chaveHorario]).replace(/<[^>]*>?/gm, '');
+    if (window.__pedePontualAplicAlt) {
+        // Pedido de Exceção Pontual: pré-preenche com a Data/Status/Horário que o GESTOR
+        // pediu especificamente pra esse dia (campo próprio do form dele, "Data Específica"
+        // — pode ser diferente da "A PARTIR DO DIA" geral do topo, então sobrescreve aqui).
+        const chaveExcecao = Object.keys(alt.alteracoes).find(k => k.includes('Exceção Pontual'));
+        if (chaveExcecao) {
+            const textoExc = String(alt.alteracoes[chaveExcecao]).replace(/<[^>]*>?/gm, '');
+            const matchDataExc = textoExc.match(/Data:\s*(\d{2})\/(\d{2})\/(\d{4})/);
+            const matchStatusExc = textoExc.match(/Status:\s*(\w+)/);
+            const matchHorarioExc = textoExc.match(/Horário:\s*(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
 
-        const matchTipo = textoPedido.match(/Tipo:\s*([^-]+?)\s*->/);
-        if (matchTipo) {
-            const tipoPedido = matchTipo[1].trim();
-            const selectTipo = document.getElementById('aplic-alt-jornada-tipo');
-            const valorCompativel = tipoPedido === '12x36' ? '12x36' : '44h Semanais';
-            selectTipo.value = valorCompativel;
-            selectTipo.dispatchEvent(new Event('change'));
+            if (matchDataExc) {
+                document.getElementById('aplic-alt-data-vigencia').value = `${matchDataExc[3]}-${matchDataExc[2]}-${matchDataExc[1]}`;
+            }
+            if (matchStatusExc) {
+                document.getElementById('aplic-alt-status-inicio').value = matchStatusExc[1];
+            }
+            if (matchHorarioExc) {
+                document.getElementById('aplic-alt-ent').value = matchHorarioExc[1];
+                document.getElementById('aplic-alt-sai').value = matchHorarioExc[2];
+            }
+        }
+    } else {
+        const chaveHorario = Object.keys(alt.alteracoes).find(k => k.includes('Horário') || k.includes('Turno'));
+        if (chaveHorario) {
+            const textoPedido = String(alt.alteracoes[chaveHorario]).replace(/<[^>]*>?/gm, '');
 
-            if (valorCompativel === '12x36') {
-                const matchStatus = textoPedido.match(/Status no 1º dia:\s*(\w+)/);
-                const matchHorario = textoPedido.match(/Horário:\s*(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
-                if (matchStatus) document.getElementById('aplic-alt-status-inicio').value = matchStatus[1];
-                if (matchHorario) {
-                    document.getElementById('aplic-alt-ent').value = matchHorario[1];
-                    document.getElementById('aplic-alt-sai').value = matchHorario[2];
+            const matchTipo = textoPedido.match(/Tipo:\s*([^-]+?)\s*->/);
+            if (matchTipo) {
+                const tipoPedido = matchTipo[1].trim();
+                const selectTipo = document.getElementById('aplic-alt-jornada-tipo');
+                const valorCompativel = tipoPedido === '12x36' ? '12x36' : '44h Semanais';
+                selectTipo.value = valorCompativel;
+                selectTipo.dispatchEvent(new Event('change'));
+
+                if (valorCompativel === '12x36') {
+                    const matchStatus = textoPedido.match(/Status no 1º dia:\s*(\w+)/);
+                    const matchHorario = textoPedido.match(/Horário:\s*(\d{2}:\d{2})\s*às\s*(\d{2}:\d{2})/);
+                    if (matchStatus) document.getElementById('aplic-alt-status-inicio').value = matchStatus[1];
+                    if (matchHorario) {
+                        document.getElementById('aplic-alt-ent').value = matchHorario[1];
+                        document.getElementById('aplic-alt-sai').value = matchHorario[2];
+                    }
+                } else {
+                    // Jornada semanal (44h/Outra): o formato do texto varia dia a dia, então
+                    // aqui só garantimos que o TIPO certo já vem selecionado — o Admin ainda
+                    // precisa conferir/preencher a grade semanal manualmente, olhando o
+                    // resumo do pedido ao lado.
+                    console.log('[Alteração Cadastral] Jornada semanal detectada no pedido — confira a grade manualmente, o texto completo é:', textoPedido);
                 }
-            } else {
-                // Jornada semanal (44h/Outra): o formato do texto varia dia a dia, então
-                // aqui só garantimos que o TIPO certo já vem selecionado — o Admin ainda
-                // precisa conferir/preencher a grade semanal manualmente, olhando o
-                // resumo do pedido ao lado.
-                console.log('[Alteração Cadastral] Jornada semanal detectada no pedido — confira a grade manualmente, o texto completo é:', textoPedido);
             }
         }
     }
@@ -36681,11 +36735,16 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
             
             let mudouJornada = (jsonVelhoJor !== jsonNovoJor);
 
-            // Só força a gravação de histórico de jornada por causa da Data de Vigência quando o
-            // pedido do gestor realmente envolvia Horário/Turno — senão, um pedido de só Cargo/Unidade
-            // (que também exige Data de Vigência) criava uma entrada de histórico de jornada "fantasma",
-            // idêntica à anterior, sem nenhuma mudança real de horário.
-            if (window.__pedeJornadaAplicAlt && dataVigencia && dataVigencia !== '') {
+            // Exceção Pontual NUNCA mexe no Histórico de Jornadas (isso é escala permanente) —
+            // mesmo que os campos de status/horário aqui estejam com o valor do dia específico
+            // (usados só pra montar a exceção pontual lá embaixo, no bloco 2b).
+            if (window.__pedePontualAplicAlt) {
+                mudouJornada = false;
+            } else if (window.__pedeJornadaAplicAlt && dataVigencia && dataVigencia !== '') {
+                // Só força a gravação de histórico de jornada por causa da Data de Vigência quando o
+                // pedido do gestor realmente envolvia Horário/Turno — senão, um pedido de só Cargo/Unidade
+                // (que também exige Data de Vigência) criava uma entrada de histórico de jornada "fantasma",
+                // idêntica à anterior, sem nenhuma mudança real de horário.
                 mudouJornada = true;
             }
 
@@ -36735,6 +36794,35 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
                     adm.jornada.status_inicio = novaJornadaEmpacotada.status_inicio;
                     adm.jornada.escala = novaJornadaEmpacotada.escala;
                 }
+            }
+
+            // 2b. EXCEÇÃO PONTUAL: grava só o dia específico em excecoes_pontuais (mesmo lugar
+            // que o "Forçar Edição" de Usuários Cadastrados usa), sem mexer no Histórico de
+            // Jornadas nem na escala fixa do colaborador — e sem disparar e-mail pro OBSA.
+            if (window.__pedePontualAplicAlt) {
+                if (!dataVigencia) {
+                    btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check-double"></i> Aplicar Mudanças e Concluir Chamado';
+                    return mostrarAlerta("Informe o dia específico da exceção pontual.", "aviso", "Preencha o Dia da Exceção");
+                }
+                const statusDiaExc = document.getElementById('aplic-alt-status-inicio').value;
+                let valorExcecaoAplic;
+                if (statusDiaExc === 'Folga') valorExcecaoAplic = 'Folga';
+                else if (statusDiaExc === 'Feriado') valorExcecaoAplic = 'Feriado';
+                else {
+                    const entExc = document.getElementById('aplic-alt-ent').value;
+                    const saiExc = document.getElementById('aplic-alt-sai').value;
+                    valorExcecaoAplic = `${entExc} às ${saiExc}`;
+                }
+                if (!adm.jornada) adm.jornada = jornadaRaiz;
+                if (!adm.jornada.excecoes_pontuais) adm.jornada.excecoes_pontuais = {};
+                adm.jornada.excecoes_pontuais[dataVigencia] = valorExcecaoAplic;
+                if (!adm.jornada.excecoes_log) adm.jornada.excecoes_log = {};
+                adm.jornada.excecoes_log[dataVigencia] = {
+                    por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : 'Sistema',
+                    em: new Date().toISOString(),
+                    valor: valorExcecaoAplic,
+                    origem: `Solicitação do Gestor (chamado aprovado${alt.motivo ? ' — ' + alt.motivo : ''})`
+                };
             }
 
             // 3. CAPTURA E ATUALIZA TELEFONE, EMAIL, VT E SINDICATO SE HOUVER NO CHAMADO
@@ -36813,10 +36901,11 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
 
             if (mudancasRealizadas.length > 0) deveMandarEmail = true;
 
-            const mudouHorarioOuTipo = 
+            const mudouHorarioOuTipo = !window.__pedePontualAplicAlt && (
                 (jornadaVigente.tipo !== novaJornadaEmpacotada.tipo) || 
                 (jornadaVigente.horario !== novaJornadaEmpacotada.horario) ||
-                (JSON.stringify(jornadaVigente.escala) !== JSON.stringify(novaJornadaEmpacotada.escala));
+                (JSON.stringify(jornadaVigente.escala) !== JSON.stringify(novaJornadaEmpacotada.escala))
+            );
 
             if (mudouHorarioOuTipo) {
                 let textoJornadaNova = `Turno <b>${novaJornadaEmpacotada.tipo}</b>`;
