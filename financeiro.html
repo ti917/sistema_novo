@@ -1648,7 +1648,32 @@
         const SUPABASE_URL = 'https://kefvwdxebzgedugqeimz.supabase.co';
         const SUPABASE_ANON_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        
+
+        // 👇 O PostgREST/Supabase, por padrão, corta qualquer .select() em 1000 linhas
+        //    mesmo sem ".limit()" no código. Em telas como Dashboard, Extrato do Centro
+        //    de Custo e DRE isso corta dados SEM avisar (KPI errado, DRE errado) assim
+        //    que uma unidade/período passar de 1000 lançamentos. Esta função busca em
+        //    "páginas" de 1000 até não sobrar mais nada, então o resultado final é
+        //    sempre completo, não importa o tamanho — sem precisar mudar mais nada
+        //    no resto do código que já usa esses dados.
+        window.buscarTudoPaginado = async function(montarQuery, tamanhoPagina = 1000) {
+            let paginaAtual = 0;
+            let todosOsDados = [];
+            let ultimoErro = null;
+            while (true) {
+                const de = paginaAtual * tamanhoPagina;
+                const ate = de + tamanhoPagina - 1;
+                const { data, error } = await montarQuery().range(de, ate);
+                if (error) { ultimoErro = error; break; }
+                const pagina = data || [];
+                todosOsDados = todosOsDados.concat(pagina);
+                if (pagina.length < tamanhoPagina) break; // última página (veio incompleta)
+                paginaAtual++;
+                if (paginaAtual > 200) break; // trava de segurança (200 mil linhas) pra nunca travar o navegador
+            }
+            return { data: todosOsDados, error: ultimoErro };
+        };
+
         let usuarioAtual = null;
         let empresaFinanceiraSelecionada = 'Todas';
 
@@ -1862,24 +1887,26 @@
             document.getElementById('kpi-dash-saldo').innerHTML = '<i class="fa-solid fa-spinner fa-spin" style="font-size: 0.8em"></i>';
             document.getElementById('lista-lancamentos-dash-body').innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #3498db;"></i></td></tr>';
 
-            // Busca TODOS os dados do lançamento para aquela data
-            let query = supabaseClient.from('financeiro_lancamentos').select('*');
-            
-            if (empresaFinanceiraSelecionada !== 'Todas') query = query.eq('empresa', empresaFinanceiraSelecionada);
+            // Busca TODOS os dados do lançamento para aquela data (paginado, não trava mais em 1000 linhas)
             const _campoPeriodo = window.colunaPeriodoFinanceiro || 'data_vencimento';
-            if (dataInicio) query = query.gte(_campoPeriodo, dataInicio);
-            if (dataFim) query = query.lte(_campoPeriodo, dataFim);
-
-            let { data, error } = await query.order(_campoPeriodo, { ascending: false });
+            let { data, error } = await window.buscarTudoPaginado(() => {
+                let query = supabaseClient.from('financeiro_lancamentos').select('*');
+                if (empresaFinanceiraSelecionada !== 'Todas') query = query.eq('empresa', empresaFinanceiraSelecionada);
+                if (dataInicio) query = query.gte(_campoPeriodo, dataInicio);
+                if (dataFim) query = query.lte(_campoPeriodo, dataFim);
+                return query.order(_campoPeriodo, { ascending: false });
+            });
 
             // Se a coluna nova ainda não existe no banco, refaz a busca no modo antigo
             if (error && window.faltaMigracaoVencimento(error)) {
-                let q2 = supabaseClient.from('financeiro_lancamentos').select('*');
-                if (empresaFinanceiraSelecionada !== 'Todas') q2 = q2.eq('empresa', empresaFinanceiraSelecionada);
-                if (typeof idCc !== 'undefined' && idCc) q2 = q2.eq('centro_custo_id', idCc);
-                if (dataInicio) q2 = q2.gte('data_pagamento', dataInicio);
-                if (dataFim) q2 = q2.lte('data_pagamento', dataFim);
-                const r2 = await q2.order('data_pagamento', { ascending: false });
+                const r2 = await window.buscarTudoPaginado(() => {
+                    let q2 = supabaseClient.from('financeiro_lancamentos').select('*');
+                    if (empresaFinanceiraSelecionada !== 'Todas') q2 = q2.eq('empresa', empresaFinanceiraSelecionada);
+                    if (typeof idCc !== 'undefined' && idCc) q2 = q2.eq('centro_custo_id', idCc);
+                    if (dataInicio) q2 = q2.gte('data_pagamento', dataInicio);
+                    if (dataFim) q2 = q2.lte('data_pagamento', dataFim);
+                    return q2.order('data_pagamento', { ascending: false });
+                });
                 data = r2.data; error = r2.error;
             }
 
@@ -4142,21 +4169,24 @@ window.removerLinhaPagamento = function(idLinha) {
                 dataFim = `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,'0')}-${String(d2.getDate()).padStart(2,'0')}`;
             }
 
-            let query = supabaseClient.from('financeiro_lancamentos').select('*').eq('centro_custo_id', idCc);
             const _campoPeriodo = window.colunaPeriodoFinanceiro || 'data_vencimento';
-            if (dataInicio) query = query.gte(_campoPeriodo, dataInicio);
-            if (dataFim) query = query.lte(_campoPeriodo, dataFim);
-            
-            let { data, error } = await query.order(_campoPeriodo, { ascending: false });
+            let { data, error } = await window.buscarTudoPaginado(() => {
+                let query = supabaseClient.from('financeiro_lancamentos').select('*').eq('centro_custo_id', idCc);
+                if (dataInicio) query = query.gte(_campoPeriodo, dataInicio);
+                if (dataFim) query = query.lte(_campoPeriodo, dataFim);
+                return query.order(_campoPeriodo, { ascending: false });
+            });
 
             // Se a coluna nova ainda não existe no banco, refaz a busca no modo antigo
             if (error && window.faltaMigracaoVencimento(error)) {
-                let q2 = supabaseClient.from('financeiro_lancamentos').select('*');
-                if (empresaFinanceiraSelecionada !== 'Todas') q2 = q2.eq('empresa', empresaFinanceiraSelecionada);
-                if (typeof idCc !== 'undefined' && idCc) q2 = q2.eq('centro_custo_id', idCc);
-                if (dataInicio) q2 = q2.gte('data_pagamento', dataInicio);
-                if (dataFim) q2 = q2.lte('data_pagamento', dataFim);
-                const r2 = await q2.order('data_pagamento', { ascending: false });
+                const r2 = await window.buscarTudoPaginado(() => {
+                    let q2 = supabaseClient.from('financeiro_lancamentos').select('*');
+                    if (empresaFinanceiraSelecionada !== 'Todas') q2 = q2.eq('empresa', empresaFinanceiraSelecionada);
+                    if (typeof idCc !== 'undefined' && idCc) q2 = q2.eq('centro_custo_id', idCc);
+                    if (dataInicio) q2 = q2.gte('data_pagamento', dataInicio);
+                    if (dataFim) q2 = q2.lte('data_pagamento', dataFim);
+                    return q2.order('data_pagamento', { ascending: false });
+                });
                 data = r2.data; error = r2.error;
             }
 
@@ -7465,14 +7495,15 @@ window.carregarDRE = async function () {
     const idCC = selCC ? selCC.value : 'Todos';
 
     try {
-        let q = supabaseClient.from('financeiro_lancamentos').select('*');
-        if (empresaFinanceiraSelecionada !== 'Todas') q = q.eq('empresa', empresaFinanceiraSelecionada);
-        if (idCC !== 'Todos') q = q.eq('centro_custo_id', idCC);
-        if (regime === 'caixa') q = q.eq('status', 'Pago').not('data_pagamento', 'is', null);
-        if (inicio) q = q.gte(campoData, inicio);
-        if (fim) q = q.lte(campoData, fim);
-
-        const { data, error } = await q;
+        const { data, error } = await window.buscarTudoPaginado(() => {
+            let q = supabaseClient.from('financeiro_lancamentos').select('*');
+            if (empresaFinanceiraSelecionada !== 'Todas') q = q.eq('empresa', empresaFinanceiraSelecionada);
+            if (idCC !== 'Todos') q = q.eq('centro_custo_id', idCC);
+            if (regime === 'caixa') q = q.eq('status', 'Pago').not('data_pagamento', 'is', null);
+            if (inicio) q = q.gte(campoData, inicio);
+            if (fim) q = q.lte(campoData, fim);
+            return q;
+        });
         if (error) throw error;
 
         // Garante que a lista de categorias esteja em memória (o DRE depende do grupo_dre)
