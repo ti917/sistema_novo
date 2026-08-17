@@ -10419,13 +10419,24 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <div class="form-row">
                         <div class="form-group">
                             <label>Colaborador <span style="color: var(--cor-perigo);">*</span></label>
-                            <select id="aviso-aso-colaborador" class="select-busca-colab" required disabled>
+                            <select id="aviso-aso-colaborador" class="select-busca-colab" required disabled onchange="window.detectarClinicaAvisoAso()">
                                 <option value="">Selecione a Unidade primeiro...</option>
                             </select>
                         </div>
                         <div class="form-group">
                             <label>Data marcada do Exame ASO <span style="color: var(--cor-perigo);">*</span></label>
                             <input type="date" id="aviso-aso-data" required onclick="this.showPicker()">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Horário marcado <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="time" id="aviso-aso-hora" required onclick="this.showPicker()">
+                        </div>
+                        <div class="form-group">
+                            <label>Clínica (detectada da Configuração de ASO)</label>
+                            <input type="text" id="aviso-aso-clinica" readonly placeholder="Selecione o colaborador..." style="background: rgba(255,152,0,0.08); font-weight: bold; color: #ff9800; cursor: not-allowed;">
+                            <small id="aviso-aso-clinica-aviso" class="hidden" style="color: #dc3545; display: block; margin-top: 5px;"><i class="fa-solid fa-triangle-exclamation"></i> Nenhuma clínica configurada pra esse Cargo/Unidade em "Configurar Clínicas e Valores" (tipo Periódico). O aviso vai sem o nome da clínica.</small>
                         </div>
                     </div>
 
@@ -54541,6 +54552,56 @@ window.carregarColabsAvisoAso = async function() {
     ativosReais.forEach(c => opts += `<option value="${c.id}">${c.nome}</option>`);
     selectColab.innerHTML = opts;
     selectColab.disabled = false;
+
+    // Limpa a clínica detectada — precisa selecionar o colaborador de novo pra recalcular
+    const inputClinica = document.getElementById('aviso-aso-clinica');
+    if (inputClinica) { inputClinica.value = ''; inputClinica.placeholder = 'Selecione o colaborador...'; }
+    document.getElementById('aviso-aso-clinica-aviso')?.classList.add('hidden');
+};
+
+// 🏥 NOVO: assim que escolhe o colaborador, busca o cargo dele e cruza com a
+// Configuração de ASO (Clínicas e Valores) — tipo "Periódico" — pra já preencher
+// automaticamente qual clínica atende aquele cargo/unidade. Isso é o nome que vai
+// junto no aviso pro colaborador saber aonde ir fazer o exame.
+window.detectarClinicaAvisoAso = async function() {
+    const unidade = document.getElementById('aviso-aso-unidade').value;
+    const colaboradorId = document.getElementById('aviso-aso-colaborador').value;
+    const inputClinica = document.getElementById('aviso-aso-clinica');
+    const avisoSemClinica = document.getElementById('aviso-aso-clinica-aviso');
+
+    inputClinica.value = '';
+    avisoSemClinica.classList.add('hidden');
+
+    if (!colaboradorId || !unidade) {
+        inputClinica.placeholder = 'Selecione o colaborador...';
+        return;
+    }
+
+    inputClinica.placeholder = 'Buscando...';
+
+    const { data: perfilColab } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', colaboradorId).single();
+    const cargoColab = (perfilColab?.dados_admissao?.cargo || '').trim().toUpperCase();
+
+    let clinicaEncontrada = '';
+    if (cargoColab) {
+        const { data: regraAso } = await supabaseClient
+            .from('config_aso')
+            .select('clinica')
+            .eq('unidade', unidade)
+            .eq('cargo', cargoColab)
+            .eq('tipo', 'Periódico')
+            .maybeSingle();
+        if (regraAso && regraAso.clinica) clinicaEncontrada = regraAso.clinica;
+    }
+
+    if (clinicaEncontrada) {
+        inputClinica.value = clinicaEncontrada;
+        inputClinica.placeholder = '';
+    } else {
+        inputClinica.value = '';
+        inputClinica.placeholder = 'Nenhuma clínica configurada';
+        avisoSemClinica.classList.remove('hidden');
+    }
 };
 
 document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', async (e) => {
@@ -54556,9 +54617,11 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
         const colaboradorId = selColab.value;
         const nomeColab = selColab.options[selColab.selectedIndex]?.text || '';
         const dataAso = document.getElementById('aviso-aso-data').value;
+        const horaAso = document.getElementById('aviso-aso-hora').value;
+        const clinicaAso = document.getElementById('aviso-aso-clinica').value.trim();
 
-        if (!empresa || !unidade || !colaboradorId || !dataAso) {
-            throw new Error("Preencha Empresa, Unidade, Colaborador e a Data do Exame!");
+        if (!empresa || !unidade || !colaboradorId || !dataAso || !horaAso) {
+            throw new Error("Preencha Empresa, Unidade, Colaborador, Data e Horário do Exame!");
         }
 
         // Busca telefone e cargo atual do colaborador pra já ir no aviso
@@ -54571,6 +54634,8 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
         }
 
         // 1) Cria o registro do aviso (status Pendente) — o token de assinatura é gerado no banco (ver SQL)
+        // 🏥🕒 NOVO: guarda também a clínica (detectada da Configuração de ASO) e o
+        // horário marcado, que agora também vão no aviso pro colaborador.
         const { data: novoAviso, error: errInsert } = await supabaseClient
             .from('aso_avisos_periodicos')
             .insert([{
@@ -54581,6 +54646,8 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
                 unidade: unidade,
                 cargo: cargoColab,
                 data_aso: dataAso,
+                hora_aso: horaAso,
+                clinica: clinicaAso || null,
                 status: 'Pendente',
                 criado_por: usuarioAtual.nome
             }])
@@ -54593,14 +54660,18 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
         // "enviar-whatsapp" (a mesma que já manda holerite, EPI, etc.) — não precisa de
         // uma function nova. Como quem está clicando é o Admin logado, ela libera o
         // envio automaticamente (acessoLiberado = true pra qualquer usuário logado).
+        // 🏥🕒 NOVO: o template "aviso_aso_periodico" agora tem 4 variáveis:
+        // {{1}} nome, {{2}} data+horário, {{3}} clínica, {{4}} unidade
+        // (ver documento "Template Meta — Aviso de ASO Periódico" atualizado).
         const [diaAso, mesAso, anoAso] = [dataAso.split('-')[2], dataAso.split('-')[1], dataAso.split('-')[0]];
-        const dataAsoFormatada = `${diaAso}/${mesAso}/${anoAso}`;
+        const dataHoraAsoFormatada = `${diaAso}/${mesAso}/${anoAso} às ${horaAso}`;
+        const clinicaParaTemplate = clinicaAso || 'A definir com o RH';
 
         const { data: respZap, error: errFn } = await supabaseClient.functions.invoke('enviar-whatsapp', {
             body: {
                 telefone: telefoneColab,
                 templateName: 'aviso_aso_periodico',
-                variaveisBody: [nomeColab, dataAsoFormatada, unidade],
+                variaveisBody: [nomeColab, dataHoraAsoFormatada, clinicaParaTemplate, unidade],
                 urlButtonParam: `aso-ciencia.html?token=${novoAviso.token_assinatura}`,
                 colaboradorId: colaboradorId
             }
@@ -54625,6 +54696,8 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
         document.getElementById('aviso-aso-unidade').disabled = true;
         document.getElementById('aviso-aso-colaborador').innerHTML = '<option value="">Selecione a Unidade primeiro...</option>';
         document.getElementById('aviso-aso-colaborador').disabled = true;
+        document.getElementById('aviso-aso-clinica').placeholder = 'Selecione o colaborador...';
+        document.getElementById('aviso-aso-clinica-aviso')?.classList.add('hidden');
 
     } catch (err) {
         mostrarAlerta(err.message, "erro");
@@ -54714,13 +54787,15 @@ window.filtrarStatusAvisosAso = function() {
         const stEnvio = mapaStatusEnvio[a.status] || mapaStatusEnvio.Pendente;
         const stMsg = mapaStatusMsg[a.mensagem_status] || mapaStatusMsg.Pendente;
         const dataAsoFmt = a.data_aso ? formatarDataBR(a.data_aso) : '-';
+        const horaAsoFmt = a.hora_aso ? a.hora_aso.substring(0, 5) : '';
         const podeReenviar = a.status === 'Falhou' || a.status === 'Enviado';
 
         html += `
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 12px 15px; background: rgba(0,0,0,0.15); border: 1px solid var(--cor-borda); border-left: 4px solid ${stEnvio.cor}; border-radius: 8px; flex-wrap: wrap;">
             <div style="flex: 1; min-width: 220px;">
                 <strong style="color: var(--cor-texto-principal);">${a.nome}</strong>
-                <span style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block;"><i class="fa-solid fa-building"></i> ${a.unidade} &nbsp;|&nbsp; <i class="fa-regular fa-calendar-days"></i> Exame: <b>${dataAsoFmt}</b></span>
+                <span style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block;"><i class="fa-solid fa-building"></i> ${a.unidade} &nbsp;|&nbsp; <i class="fa-regular fa-calendar-days"></i> Exame: <b>${dataAsoFmt}${horaAsoFmt ? ' às ' + horaAsoFmt : ''}</b></span>
+                ${a.clinica ? `<span style="font-size: 0.78rem; color: #00bcd4; display: block; margin-top: 2px;"><i class="fa-solid fa-hospital"></i> ${a.clinica}</span>` : ''}
                 <span style="font-size: 0.78rem; color: ${stMsg.cor}; display: block; margin-top: 3px;"><i class="fa-brands fa-whatsapp"></i> Mensagem: ${stMsg.texto}</span>
             </div>
             <div style="text-align: right; min-width: 190px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
@@ -54745,13 +54820,15 @@ window.reenviarAvisoAsoPeriodico = async function(id) {
         await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Pendente', mensagem_status: 'Pendente', erro_detalhe: null }).eq('id', id);
 
         const [diaAso, mesAso, anoAso] = [aviso.data_aso.split('-')[2], aviso.data_aso.split('-')[1], aviso.data_aso.split('-')[0]];
-        const dataAsoFormatada = `${diaAso}/${mesAso}/${anoAso}`;
+        const horaFormatadaReenvio = aviso.hora_aso ? aviso.hora_aso.substring(0, 5) : '00:00';
+        const dataHoraAsoFormatada = `${diaAso}/${mesAso}/${anoAso} às ${horaFormatadaReenvio}`;
+        const clinicaParaTemplate = aviso.clinica || 'A definir com o RH';
 
         const { data: respZap, error: errFn } = await supabaseClient.functions.invoke('enviar-whatsapp', {
             body: {
                 telefone: aviso.telefone,
                 templateName: 'aviso_aso_periodico',
-                variaveisBody: [aviso.nome, dataAsoFormatada, aviso.unidade],
+                variaveisBody: [aviso.nome, dataHoraAsoFormatada, clinicaParaTemplate, aviso.unidade],
                 urlButtonParam: `aso-ciencia.html?token=${aviso.token_assinatura}`,
                 colaboradorId: aviso.colaborador_id
             }
