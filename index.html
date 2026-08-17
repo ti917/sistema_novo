@@ -54584,23 +54584,40 @@ document.getElementById('form-aviso-aso-periodico')?.addEventListener('submit', 
                 status: 'Pendente',
                 criado_por: usuarioAtual.nome
             }])
-            .select('id')
+            .select('id, token_assinatura')
             .single();
 
         if (errInsert) throw errInsert;
 
-        // 2) Aciona a Edge Function que efetivamente dispara o template aprovado na Meta
-        // (ver documento "Template Meta — Aviso de ASO Periódico" entregue à parte).
-        // A Edge Function é quem chama a API da Meta, grava o whatsapp_message_id e
-        // atualiza mensagem_status conforme os webhooks de entrega/leitura chegam.
-        const { error: errFn } = await supabaseClient.functions.invoke('enviar-aviso-aso-periodico', {
-            body: { aviso_id: novoAviso.id }
+        // 2) Dispara o template aprovado na Meta usando a Edge Function já existente
+        // "enviar-whatsapp" (a mesma que já manda holerite, EPI, etc.) — não precisa de
+        // uma function nova. Como quem está clicando é o Admin logado, ela libera o
+        // envio automaticamente (acessoLiberado = true pra qualquer usuário logado).
+        const [diaAso, mesAso, anoAso] = [dataAso.split('-')[2], dataAso.split('-')[1], dataAso.split('-')[0]];
+        const dataAsoFormatada = `${diaAso}/${mesAso}/${anoAso}`;
+
+        const { data: respZap, error: errFn } = await supabaseClient.functions.invoke('enviar-whatsapp', {
+            body: {
+                telefone: telefoneColab,
+                templateName: 'aviso_aso_periodico',
+                variaveisBody: [nomeColab, dataAsoFormatada, unidade],
+                urlButtonParam: `aso-ciencia.html?token=${novoAviso.token_assinatura}`,
+                colaboradorId: colaboradorId
+            }
         });
 
-        if (errFn) {
-            // Não desfaz o registro: fica "Pendente"/"Falhou" pra poder reenviar depois pela aba de Status
-            throw new Error("Aviso registrado, mas houve um erro ao acionar o disparo no WhatsApp: " + errFn.message);
+        if (errFn || !respZap?.success) {
+            const msgErro = respZap?.error || errFn?.message || 'Erro desconhecido';
+            await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Falhou', erro_detalhe: msgErro }).eq('id', novoAviso.id);
+            // Não desfaz o registro: fica "Falhou" pra poder reenviar depois pela aba de Status
+            throw new Error("Aviso registrado, mas houve um erro ao acionar o disparo no WhatsApp: " + msgErro);
         }
+
+        // 3) Marca como Enviado e guarda o wamid (id da mensagem na Meta) — é essa
+        // referência que a aba "Status dos Avisos" usa depois pra cruzar com
+        // mensagens_whatsapp_log e mostrar se foi entregue/lido/falhou.
+        const wamid = respZap?.data?.messages?.[0]?.id || null;
+        await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Enviado', mensagem_status: 'Enviado', whatsapp_message_id: wamid }).eq('id', novoAviso.id);
 
         await mostrarAlerta(`Aviso de ASO Periódico enviado para ${nomeColab} via WhatsApp!`, "sucesso");
         document.getElementById('form-aviso-aso-periodico').reset();
@@ -54629,6 +54646,22 @@ window.carregarStatusAvisosAso = async function() {
     }
 
     window.todosAvisosAsoGlobais = data || [];
+
+    // 🔄 Cruza com mensagens_whatsapp_log (pelo wamid) pra pegar o status REAL de
+    // entrega/leitura, que só quem atualiza é o webhook da Meta — o mensagem_status
+    // salvo direto na aso_avisos_periodicos só sabe dizer "Enviado" ou "Falhou" no
+    // instante do disparo, não depois.
+    const wamids = window.todosAvisosAsoGlobais.map(a => a.whatsapp_message_id).filter(Boolean);
+    if (wamids.length > 0) {
+        const { data: logs } = await supabaseClient.from('mensagens_whatsapp_log').select('wamid, status').in('wamid', wamids);
+        const mapaLogPorWamid = {};
+        (logs || []).forEach(l => { mapaLogPorWamid[l.wamid] = l.status; });
+        const traduzStatus = { enviado: 'Enviado', entregue: 'Entregue', lido: 'Lido', falhou: 'Falhou' };
+        window.todosAvisosAsoGlobais.forEach(a => {
+            const statusLog = a.whatsapp_message_id ? mapaLogPorWamid[a.whatsapp_message_id] : null;
+            if (statusLog && traduzStatus[statusLog]) a.mensagem_status = traduzStatus[statusLog];
+        });
+    }
 
     // Resumo rápido (cards) no topo da aba de Status
     const totalEnviados = window.todosAvisosAsoGlobais.filter(a => a.status !== 'Pendente').length;
@@ -54706,9 +54739,33 @@ window.reenviarAvisoAsoPeriodico = async function(id) {
     if (!confirmado) return;
 
     try {
-        await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Pendente', mensagem_status: 'Pendente' }).eq('id', id);
-        const { error: errFn } = await supabaseClient.functions.invoke('enviar-aviso-aso-periodico', { body: { aviso_id: id } });
-        if (errFn) throw errFn;
+        const aviso = (window.todosAvisosAsoGlobais || []).find(a => String(a.id) === String(id));
+        if (!aviso) throw new Error("Aviso não encontrado na lista carregada. Atualize a tela e tente de novo.");
+
+        await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Pendente', mensagem_status: 'Pendente', erro_detalhe: null }).eq('id', id);
+
+        const [diaAso, mesAso, anoAso] = [aviso.data_aso.split('-')[2], aviso.data_aso.split('-')[1], aviso.data_aso.split('-')[0]];
+        const dataAsoFormatada = `${diaAso}/${mesAso}/${anoAso}`;
+
+        const { data: respZap, error: errFn } = await supabaseClient.functions.invoke('enviar-whatsapp', {
+            body: {
+                telefone: aviso.telefone,
+                templateName: 'aviso_aso_periodico',
+                variaveisBody: [aviso.nome, dataAsoFormatada, aviso.unidade],
+                urlButtonParam: `aso-ciencia.html?token=${aviso.token_assinatura}`,
+                colaboradorId: aviso.colaborador_id
+            }
+        });
+
+        if (errFn || !respZap?.success) {
+            const msgErro = respZap?.error || errFn?.message || 'Erro desconhecido';
+            await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Falhou', erro_detalhe: msgErro }).eq('id', id);
+            throw new Error(msgErro);
+        }
+
+        const wamid = respZap?.data?.messages?.[0]?.id || null;
+        await supabaseClient.from('aso_avisos_periodicos').update({ status: 'Enviado', mensagem_status: 'Enviado', whatsapp_message_id: wamid }).eq('id', id);
+
         mostrarAlerta("Aviso reenviado!", "sucesso");
         window.carregarStatusAvisosAso();
     } catch (err) {
