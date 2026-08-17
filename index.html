@@ -54580,18 +54580,39 @@ window.detectarClinicaAvisoAso = async function() {
     inputClinica.placeholder = 'Buscando...';
 
     const { data: perfilColab } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', colaboradorId).single();
-    const cargoColab = (perfilColab?.dados_admissao?.cargo || '').trim().toUpperCase();
+    const cargoColabBruto = (perfilColab?.dados_admissao?.cargo || '').trim();
+
+    // 🔧 CORREÇÃO: comparar cargo/unidade "no bruto" com .eq() é frágil — qualquer
+    // diferença de acento, maiúscula/minúscula ou espaço a mais faz o match falhar
+    // silenciosamente (aviso dizia "não configurada" mesmo tendo regra cadastrada).
+    // Agora busca TODAS as regras Periódico da unidade e compara no JS, ignorando
+    // acento/caixa/espaço — bem mais tolerante a essas pequenas diferenças.
+    const normalizar = (txt) => (typeof window.removerAcentos === 'function' ? window.removerAcentos(txt || '') : (txt || '')).trim().toUpperCase();
+    const unidadeNormalizada = normalizar(unidade);
+    const cargoNormalizado = normalizar(cargoColabBruto);
 
     let clinicaEncontrada = '';
-    if (cargoColab) {
-        const { data: regraAso } = await supabaseClient
+    if (cargoNormalizado) {
+        const { data: regrasAso, error: errRegras } = await supabaseClient
             .from('config_aso')
-            .select('clinica')
-            .eq('unidade', unidade)
-            .eq('cargo', cargoColab)
-            .eq('tipo', 'Periódico')
-            .maybeSingle();
-        if (regraAso && regraAso.clinica) clinicaEncontrada = regraAso.clinica;
+            .select('unidade, cargo, clinica')
+            .eq('tipo', 'Periódico');
+
+        if (errRegras) {
+            console.error('Erro ao buscar config_aso:', errRegras);
+        } else {
+            const match = (regrasAso || []).find(r =>
+                normalizar(r.unidade) === unidadeNormalizada && normalizar(r.cargo) === cargoNormalizado
+            );
+            if (match) {
+                clinicaEncontrada = match.clinica;
+            } else {
+                // 🕵️ Ajuda a diagnosticar: mostra no console o que procurou e o que existe
+                // cadastrado pra essa unidade, pra facilitar achar a diferença de digitação.
+                console.log('[Aviso ASO] Não achei clínica pra:', { unidadeBuscada: unidade, cargoBuscado: cargoColabBruto });
+                console.log('[Aviso ASO] Regras Periódico cadastradas nessa unidade:', (regrasAso || []).filter(r => normalizar(r.unidade) === unidadeNormalizada));
+            }
+        }
     }
 
     if (clinicaEncontrada) {
