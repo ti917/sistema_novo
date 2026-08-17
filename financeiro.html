@@ -4448,6 +4448,103 @@ window.removerLinhaPagamento = function(idLinha) {
         // AÇÕES: EXCLUIR E EDITAR LANÇAMENTO ESPECÍFICO
         // ==========================================
 
+       /** Modal de exclusão de um lançamento gerado por Conta Fixa Recorrente:
+        * deixa escolher se é só o mês em questão, ou esse + todos os futuros
+        * (o que também desativa a recorrência, já que ela para de gerar novos). */
+       window.abrirModalExclusaoLancamentoRecorrente = function(lanc) {
+    const modalAntigo = document.getElementById('modal-exclusao-lanc-recorrente');
+    if (modalAntigo) modalAntigo.remove();
+
+    const modalHtml = `
+    <div id="modal-exclusao-lanc-recorrente" class="modal-overlay" style="z-index: 100060;">
+        <div class="glass-card" style="width: 100%; max-width: 520px; border-top: 4px solid var(--cor-perigo); position: relative; padding: 25px; max-height: 90vh; overflow-y: auto;">
+            <button type="button" onclick="document.getElementById('modal-exclusao-lanc-recorrente').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.5rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h2 style="color: var(--cor-perigo); margin-top: 0;"><i class="fa-solid fa-trash"></i> Excluir Lançamento Recorrente</h2>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem;">"<b>${lanc.descricao}</b>" (Ref. ${lanc.mes_referencia}) vem de uma Conta Fixa Recorrente. Escolha o que apagar:</p>
+
+            <div style="display: flex; flex-direction: column; gap: 12px; margin: 20px 0;">
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-lanc-rec" value="mes_atual" checked style="margin-top:4px;">
+                    <span><b>Apagar só este mês (${lanc.mes_referencia})</b><br><span style="font-size:0.8rem; color:var(--cor-texto-secundario);">A conta fixa continua ativa e volta a gerar normalmente nos próximos meses.</span></span>
+                </label>
+                <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                    <input type="radio" name="escopo-exclusao-lanc-rec" value="mes_e_futuros" style="margin-top:4px;">
+                    <span><b>Apagar este mês e todos os futuros</b><br><span style="font-size:0.8rem; color: var(--cor-perigo);">⚠ A conta fixa deixa de ser recorrente — vira inativa em "Contas Fixas". O histórico de meses já pagos/passados continua no Extrato.</span></span>
+                </label>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:10px;">
+                <button type="button" class="btn-secondary" onclick="document.getElementById('modal-exclusao-lanc-recorrente').remove()">Cancelar</button>
+                <button type="button" id="btn-confirmar-exclusao-lanc-rec" class="btn-success" style="background: var(--cor-perigo);" onclick="window.confirmarExclusaoLancamentoRecorrente('${lanc.id}')"><i class="fa-solid fa-trash"></i> Confirmar Exclusão</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+       /** Executa a exclusão escolhida no modal acima. */
+       window.confirmarExclusaoLancamentoRecorrente = async function(idLancamento) {
+    const lanc = window.lancamentosAtuaisEmMemoria.find(l => l.id === idLancamento);
+    if (!lanc) return mostrarAlerta("Lançamento não encontrado.", "erro");
+
+    const escopoEl = document.querySelector('input[name="escopo-exclusao-lanc-rec"]:checked');
+    const escopo = escopoEl ? escopoEl.value : 'mes_atual';
+
+    const btn = document.getElementById('btn-confirmar-exclusao-lanc-rec');
+    const htmlOriginal = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Excluindo...'; }
+
+    try {
+        if (escopo === 'mes_atual') {
+            // Apaga só esse lançamento e marca o mês como "pulado" na conta fixa,
+            // pra sincronização automática não recriar ele de novo.
+            const { error: errDel } = await supabaseClient.from('financeiro_lancamentos').delete().eq('id', idLancamento);
+            if (errDel) throw errDel;
+
+            const { data: contaAtual, error: errBuscaConta } = await supabaseClient
+                .from('financeiro_contas_fixas').select('meses_pulados').eq('id', lanc.conta_fixa_id).maybeSingle();
+            if (errBuscaConta) throw errBuscaConta;
+
+            let mesesPulados = [];
+            try { mesesPulados = Array.isArray(contaAtual?.meses_pulados) ? contaAtual.meses_pulados : JSON.parse(contaAtual?.meses_pulados || '[]'); } catch(e) { mesesPulados = []; }
+            if (!mesesPulados.includes(lanc.mes_referencia)) mesesPulados.push(lanc.mes_referencia);
+
+            const { error: errUpdConta } = await supabaseClient
+                .from('financeiro_contas_fixas').update({ meses_pulados: mesesPulados }).eq('id', lanc.conta_fixa_id);
+            if (errUpdConta) throw errUpdConta;
+
+            mostrarAlerta("Lançamento deste mês excluído! A conta fixa continua ativa pros próximos meses.", "sucesso");
+        } else {
+            // Apaga este + todos os futuros gerados por essa conta fixa, e desativa
+            // a recorrência (para de gerar novos lançamentos daqui pra frente).
+            const { error: errDel } = await supabaseClient
+                .from('financeiro_lancamentos').delete()
+                .eq('conta_fixa_id', lanc.conta_fixa_id)
+                .gte('data_vencimento', lanc.data_vencimento);
+            if (errDel) throw errDel;
+
+            const { error: errUpdConta } = await supabaseClient
+                .from('financeiro_contas_fixas').update({ ativo: false }).eq('id', lanc.conta_fixa_id);
+            if (errUpdConta) throw errUpdConta;
+
+            mostrarAlerta("Lançamento excluído deste mês em diante! A conta fixa foi desativada (não é mais recorrente). O histórico passado continua no Extrato.", "sucesso");
+        }
+
+        const modal = document.getElementById('modal-exclusao-lanc-recorrente');
+        if (modal) modal.remove();
+
+        if (!document.getElementById('tela-dashboard-fin').classList.contains('hidden')) {
+            carregarDashboardGeral();
+        } else {
+            const idCc = document.getElementById('detalhe-unidade-nome').dataset.id;
+            carregarLancamentosDoCentro(idCc);
+        }
+    } catch (err) {
+        mostrarAlerta("Erro ao excluir: " + err.message, "erro");
+        if (btn) { btn.disabled = false; btn.innerHTML = htmlOriginal; }
+    }
+};
+
        window.excluirLancamento = async function(idLancamento) {
     const lanc = window.lancamentosAtuaisEmMemoria.find(l => l.id === idLancamento);
     if (!lanc) return mostrarAlerta("Lançamento não encontrado.", "erro");
@@ -4486,6 +4583,14 @@ window.removerLinhaPagamento = function(idLinha) {
         } catch (err) {
             return mostrarAlerta("Erro ao reverter baixa: " + err.message, "erro");
         }
+    }
+
+    // 👇 NOVO: se o lançamento veio de uma Conta Fixa Recorrente (tem conta_fixa_id),
+    // pergunta se é só desse mês ou dele + todos os futuros (que aí para de ser
+    // recorrente de vez) — em vez de simplesmente apagar e o sistema recriar
+    // sozinho no próximo login/sincronização.
+    if (lanc.conta_fixa_id) {
+        return window.abrirModalExclusaoLancamentoRecorrente(lanc);
     }
 
     // Fluxo normal para outros lançamentos manuais
@@ -5211,7 +5316,13 @@ window.sincronizarLancamentosContaFixa = async function(conta) {
     }
 
     const jaExistem = new Set((existentes || []).map(e => e.mes_referencia));
-    const faltantes = mesesAlvo.filter(m => !jaExistem.has(m.mesRef));
+    // 👇 NOVO: não recria os meses que o usuário apagou manualmente pelo Extrato
+    // (guardados em conta.meses_pulados) — sem isso, o lançamento apagado
+    // "ressuscitava" sozinho na próxima sincronização automática.
+    let mesesPulados = [];
+    try { mesesPulados = Array.isArray(conta.meses_pulados) ? conta.meses_pulados : JSON.parse(conta.meses_pulados || '[]'); } catch(e) { mesesPulados = []; }
+    const pulados = new Set(mesesPulados);
+    const faltantes = mesesAlvo.filter(m => !jaExistem.has(m.mesRef) && !pulados.has(m.mesRef));
     if (faltantes.length === 0) return { gerados: 0 };
 
     const payloads = faltantes.map(m => ({
