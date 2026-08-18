@@ -26672,6 +26672,8 @@ window.filtrarUsuariosCadastrados = function() {
         const alvoEhSuperAdmin = (u.id === idSuperAdmin);
         const alvoEhAdmin = (u.perfil === 'Admin');
 
+        const alvoFoiExcluido = (u.status === 'Excluído');
+
         // Permissões de Ação
         if (alvoEhSuperAdmin) {
             btnGerenciar = `<button class="btn-secondary" style="padding: 6px 10px; font-size: 0.75rem; border-color: #555; color: #888; background: rgba(255,255,255,0.05); cursor: not-allowed; white-space: nowrap;" disabled title="Conta Master"><i class="fa-solid fa-shield-halved"></i> Super Admin</button>`;
@@ -26679,9 +26681,13 @@ window.filtrarUsuariosCadastrados = function() {
         } else if (alvoEhAdmin && !euSouSuperAdmin) {
             btnGerenciar = `<button class="btn-secondary" style="padding: 6px 10px; font-size: 0.75rem; border-color: #555; color: #888; background: rgba(255,255,255,0.05); cursor: not-allowed; white-space: nowrap;" disabled title="Bloqueado"><i class="fa-solid fa-lock"></i> Bloqueado</button>`;
             btnExcluir = ''; 
+        } else if (alvoFoiExcluido) {
+            // 👇 Conta arquivada/banida — mostra o status e o botão pra trazer de volta
+            btnGerenciar = `<button class="btn-secondary" style="padding: 6px 10px; font-size: 0.75rem; border-color: #dc3545; color: #dc3545; background: rgba(220,53,69,0.08); cursor: default; white-space: nowrap;" disabled title="Login bloqueado no Supabase Auth"><i class="fa-solid fa-user-slash"></i> Acesso Banido</button>`;
+            btnExcluir = `<button class="btn-success" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; flex-shrink: 0; background: #28a745; color: #06210f; font-weight: bold; border: none;" onclick="reativarUsuarioAdmin('${u.id}', '${u.perfil}', '${u.nome.replace(/'/g, "\'")}')" title="Reativar Acesso"><i class="fa-solid fa-user-check"></i> Reativar</button>`;
         } else {
             btnGerenciar = `<button class="btn-secondary" style="padding: 6px 10px; font-size: 0.75rem; border-color: #ff9800; color: #ff9800; border-radius: 6px; white-space: nowrap;" onclick="abrirModalHubUsuario('${u.id}')" title="Gerenciar Usuário"><i class="fa-solid fa-pen"></i> Editar e Acessos</button>`;
-            btnExcluir = `<button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; flex-shrink: 0;" onclick="excluirAdmissaoAdmin('${u.id}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>`;
+            btnExcluir = `<button class="btn-danger-mini" style="padding: 6px 10px; font-size: 0.75rem; border-radius: 6px; flex-shrink: 0;" onclick="excluirAdmissaoAdmin('${u.id}', '${u.perfil}')" title="Excluir Definitivamente"><i class="fa-solid fa-trash"></i></button>`;
         }
 
         // 👇 BOTÃO DA CLARA COM COMPACTAÇÃO E NO-WRAP 👇
@@ -30363,9 +30369,16 @@ window.reprovarERemoverAusencia = async function(id) {
         // SUPERPODERES DE EDIÇÃO E EXCLUSÃO DO ADMIN
         // ==========================================
 
-window.excluirAdmissaoAdmin = async function(id) {
-    // 1. Mudamos o texto para não assustar o Admin (já que agora é seguro)
-    const confirmado = await mostrarConfirmacao("Deseja remover este colaborador da lista de admissões? O histórico dele será arquivado por segurança.", "Arquivar Colaborador");
+window.excluirAdmissaoAdmin = async function(id, perfil = 'Colaborador') {
+    const ehContaComLogin = (perfil === 'Admin' || perfil === 'Gestor');
+
+    // 1. Texto do aviso muda se for uma conta com login (Admin/Gestor) — nesse caso
+    // avisa que o acesso vai ser banido de verdade, não só arquivado na lista.
+    const textoConfirmacao = ehContaComLogin
+        ? "Deseja excluir este usuário? O cadastro será arquivado E o login dele (e-mail/senha) será BLOQUEADO no sistema — ele não vai mais conseguir entrar. Dá pra reativar depois, se precisar."
+        : "Deseja remover este colaborador da lista de admissões? O histórico dele será arquivado por segurança.";
+
+    const confirmado = await mostrarConfirmacao(textoConfirmacao, ehContaComLogin ? "Excluir e Bloquear Acesso" : "Arquivar Colaborador");
     if (!confirmado) return;
     
     // 2. A MÁGICA: Em vez de .delete(), fazemos um .update() mudando o status!
@@ -30377,9 +30390,43 @@ window.excluirAdmissaoAdmin = async function(id) {
     
     // 3. Limpamos qualquer notificação pendente que tenha o ID dele para não bugar o sininho
     await supabaseClient.from('notificacoes').delete().eq('colaborador_id', id);
+
+    // 4. Se for Admin ou Gestor (conta com login de verdade), bane o acesso no Supabase
+    // Auth também — só marcar "Excluído" na tabela não impedia o login antes disso.
+    if (ehContaComLogin) {
+        try {
+            await supabaseClient.functions.invoke('gerenciar-acesso-usuario', { body: { userId: id, acao: 'banir' } });
+        } catch (eBan) {
+            console.warn('Não foi possível bloquear o login no Supabase Auth:', eBan);
+            mostrarAlerta("O cadastro foi arquivado, mas houve um problema ao bloquear o login (ver console). Tente novamente ou avise o suporte.", "aviso");
+        }
+    }
     
-    mostrarAlerta("Colaborador removido da tela e arquivado no banco de dados!", "sucesso");
-    carregarAdmissoesParaAdmin();
+    mostrarAlerta(ehContaComLogin ? "Usuário arquivado e acesso bloqueado com sucesso!" : "Colaborador removido da tela e arquivado no banco de dados!", "sucesso");
+    if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
+    if (typeof window.listarUsuarios === 'function') window.listarUsuarios(true);
+};
+
+window.reativarUsuarioAdmin = async function(id, perfil, nome) {
+    const ehContaComLogin = (perfil === 'Admin' || perfil === 'Gestor');
+    const confirmado = await mostrarConfirmacao(`Reativar o acesso de <b>${nome}</b>? ${ehContaComLogin ? 'O login dele volta a funcionar normalmente (mesma senha de antes).' : 'Ele volta a aparecer nas listas normalmente.'}`, "Reativar Acesso");
+    if (!confirmado) return;
+
+    const { error } = await supabaseClient.from('perfis').update({ status: 'Ativo' }).eq('id', id);
+    if (error) return mostrarAlerta("Erro ao reativar: " + error.message, "erro");
+
+    if (ehContaComLogin) {
+        try {
+            await supabaseClient.functions.invoke('gerenciar-acesso-usuario', { body: { userId: id, acao: 'reativar' } });
+        } catch (eUnban) {
+            console.warn('Não foi possível liberar o login no Supabase Auth:', eUnban);
+            mostrarAlerta("O cadastro foi reativado, mas houve um problema ao liberar o login (ver console). Tente novamente ou avise o suporte.", "aviso");
+        }
+    }
+
+    mostrarAlerta(`${nome} foi reativado(a) com sucesso!`, "sucesso");
+    if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
+    if (typeof window.listarUsuarios === 'function') window.listarUsuarios(true);
 };
 
 window.excluirRescisaoAdmin = async function(idColab) {
