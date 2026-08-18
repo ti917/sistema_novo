@@ -9062,11 +9062,21 @@ window.precarregarListasFinanceiro = async function () {
         // outra tela aberta), a lista e o badge se atualizam sozinhos, sem precisar clicar
         // em "Atualizar". Mesmo mecanismo (Supabase Realtime) já usado na Central de Tarefas.
         window.canalSolicitacoesComprovantes = null;
-        window.assinarRealtimeSolicitacoesComprovantes = function() {
+        window.assinarRealtimeSolicitacoesComprovantes = async function() {
             if (window.canalSolicitacoesComprovantes) return; // já assinado, não duplica
             if (!supabaseClient.channel) return; // versão antiga do supabase-js, sem suporte
 
             try {
+                // 🐛 CORRIGIDO: o WebSocket do tempo real não fica sabendo sozinho que a
+                // pessoa está logada — sem avisar ele explicitamente com o token de acesso,
+                // ele escuta como "visitante anônimo" e a regra de segurança (RLS) barra os
+                // avisos, mesmo o canal mostrando "SUBSCRIBED" e as buscas normais funcionando
+                // (essas sempre mandam o login junto a cada busca; o socket, não).
+                const { data: sessaoAtual } = await supabaseClient.auth.getSession();
+                if (sessaoAtual?.session?.access_token && supabaseClient.realtime?.setAuth) {
+                    supabaseClient.realtime.setAuth(sessaoAtual.session.access_token);
+                }
+
                 window.canalSolicitacoesComprovantes = supabaseClient
                     .channel('financeiro-solicitacoes-live')
                     .on('postgres_changes',
@@ -9090,6 +9100,15 @@ window.precarregarListasFinanceiro = async function () {
                         // ("SUBSCRIBED") ou não, e por quê.
                         console.log('[Solicitações] status do canal em tempo real:', status, err || '');
                     });
+
+                // 🆕 O token expira de tempos em tempos (1h) e o Supabase renova sozinho — só
+                // precisamos avisar de novo o socket do tempo real toda vez que isso acontecer,
+                // senão ele volta a "esquecer" que a pessoa está logada depois de 1h.
+                supabaseClient.auth.onAuthStateChange(function (_evento, sessao) {
+                    if (sessao?.access_token && supabaseClient.realtime?.setAuth) {
+                        supabaseClient.realtime.setAuth(sessao.access_token);
+                    }
+                });
             } catch (e) {
                 console.warn('[Solicitações] tempo real indisponível, segue no modo manual:', e);
             }
