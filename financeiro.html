@@ -8958,6 +8958,12 @@ window.precarregarListasFinanceiro = async function () {
             const tbody = document.getElementById('lista-solicitacoes-comprovantes-body');
             if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
 
+            // Precisa dos nomes das unidades (Centro de Custo) carregados pra poder mostrar
+            // qual unidade específica cada solicitação escolheu.
+            if (!window.todosCentrosCustoGlobais || window.todosCentrosCustoGlobais.length === 0) {
+                await carregarCentrosCusto(true);
+            }
+
             try {
                 const { data, error } = await supabaseClient
                     .from('financeiro_comprovantes_pendentes')
@@ -8977,6 +8983,14 @@ window.precarregarListasFinanceiro = async function () {
                     tbody.innerHTML = window.solicitacoesComprovantesEmMemoria.map(p => {
                         const dataFmt = p.data_escolhida ? String(p.data_escolhida).split('-').reverse().join('/') : '-';
                         const destinoLabel = window.LABELS_DESTINOS_FINANCEIRO_SOLICITACOES[p.modulo_lancamento] || p.modulo_lancamento;
+                        // 🆕 Quando o destino é Centro de Custo, mostra qual unidade específica foi
+                        // escolhida (não só o rótulo genérico "Centro de Custo").
+                        let unidadeCcHtml = '';
+                        if (p.modulo_lancamento === 'centro_custo' && p.centro_custo_id) {
+                            const ccAchado = (window.todosCentrosCustoGlobais || []).find((cc) => String(cc.id) === String(p.centro_custo_id));
+                            const nomeCc = ccAchado ? ccAchado.nome_unidade : null;
+                            unidadeCcHtml = `<br><span style="color: var(--cor-texto-secundario); font-size: 0.75rem;"><i class="fa-solid fa-building-columns" style="opacity: 0.7;"></i> ${nomeCc || 'Unidade não encontrada'}</span>`;
+                        }
                         let anexosHtml = '<span style="color: var(--cor-texto-secundario); font-size: 0.8rem;">—</span>';
                         if (Array.isArray(p.anexos) && p.anexos.length > 0) {
                             anexosHtml = p.anexos.map((url) => `<a href="javascript:void(0)" onclick="abrirAnexoSeguro('${String(url).replace(/'/g, "\\'")}', this)" style="color: #3498db; text-decoration: none; margin-right: 5px;" title="Ver comprovante (link temporário e protegido)"><i class="fa-solid fa-paperclip"></i></a>`).join('');
@@ -8987,7 +9001,7 @@ window.precarregarListasFinanceiro = async function () {
                                 <strong>${p.nome_colaborador || '-'}</strong><br>
                                 <span style="color: var(--cor-texto-secundario); font-size: 0.8rem;">${p.telefone || '-'}</span>
                             </td>
-                            <td style="padding: 12px 15px;"><span style="padding: 3px 8px; border-radius: 20px; font-size: 0.7rem; font-weight: bold; color: #3498db; background: rgba(52,152,219,0.15);">${destinoLabel}</span></td>
+                            <td style="padding: 12px 15px;"><span style="padding: 3px 8px; border-radius: 20px; font-size: 0.7rem; font-weight: bold; color: #3498db; background: rgba(52,152,219,0.15);">${destinoLabel}</span>${unidadeCcHtml}</td>
                             <td style="padding: 12px 15px;">${p.categoria || '-'}</td>
                             <td style="padding: 12px 15px; font-weight: bold;">${fmt(p.valor)}</td>
                             <td style="padding: 12px 15px;">${dataFmt}</td>
@@ -9006,6 +9020,37 @@ window.precarregarListasFinanceiro = async function () {
                 if (tbody) tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--cor-perigo); padding: 20px;">Erro ao carregar solicitações: ${err.message}<br><small style="color: var(--cor-texto-secundario);">Se a mensagem falar em tabela inexistente, rode o arquivo comprovantes_pendentes.sql no banco.</small></td></tr>`;
             }
         };
+
+        // 🆕 TEMPO REAL: assim que chega um comprovante novo (ou alguém aprova/recusa em
+        // outra tela aberta), a lista e o badge se atualizam sozinhos, sem precisar clicar
+        // em "Atualizar". Mesmo mecanismo (Supabase Realtime) já usado na Central de Tarefas.
+        window.canalSolicitacoesComprovantes = null;
+        window.assinarRealtimeSolicitacoesComprovantes = function() {
+            if (window.canalSolicitacoesComprovantes) return; // já assinado, não duplica
+            if (!supabaseClient.channel) return; // versão antiga do supabase-js, sem suporte
+
+            try {
+                window.canalSolicitacoesComprovantes = supabaseClient
+                    .channel('financeiro-solicitacoes-live')
+                    .on('postgres_changes',
+                        { event: '*', schema: 'public', table: 'financeiro_comprovantes_pendentes' },
+                        function () {
+                            // Só recarrega a tabela se a tela de Solicitações estiver aberta —
+                            // o badge do menu lateral atualiza sempre, esteja a tela aberta ou não.
+                            const telaAberta = document.getElementById('tela-solicitacoes-comprovantes');
+                            if (telaAberta && !telaAberta.classList.contains('hidden')) {
+                                renderizarSolicitacoesComprovantes();
+                            } else if (typeof window.atualizarBadgeSolicitacoesPendentes === 'function') {
+                                window.atualizarBadgeSolicitacoesPendentes();
+                            }
+                        })
+                    .subscribe();
+            } catch (e) {
+                console.warn('[Solicitações] tempo real indisponível, segue no modo manual:', e);
+            }
+        };
+        // Assina assim que o script carrega — não precisa esperar a pessoa clicar na aba.
+        window.assinarRealtimeSolicitacoesComprovantes();
 
         /** Acende/apaga o badge vermelho do menu lateral "Solicitações" com a contagem de pendentes. */
         window.atualizarBadgeSolicitacoesPendentes = async function() {
