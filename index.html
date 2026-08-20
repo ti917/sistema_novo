@@ -25681,6 +25681,125 @@ window.renderizarAnexosAdmissaoTipados = function() {
     });
 };
 
+// ==========================================================================
+// 🪄 SEPARAÇÃO AUTOMÁTICA DE ANEXOS POR TIPO (20/08/2026)
+// ==========================================================================
+// A Clara IA, além de preencher os campos de texto, agora também diz a que tipo de
+// documento cada página/imagem enviada pertence (data.classificacao_paginas, devolvido
+// pela edge function gemini-ocr-admissao). Esta função pega essa classificação e:
+//   1. Agrupa páginas consecutivas do MESMO arquivo original com o MESMO tipo (ex:
+//      página 1 e 2 do mesmo PDF = "rg" viram um único PDF final de RG frente+verso).
+//   2. Monta um PDF de verdade pra cada grupo — recorta as páginas certas se a origem já
+//      era PDF (via PDFLib.copyPages, igual à função de fatiar folha de ponto que já existe
+//      no sistema), ou embrulha a foto numa página de PDF se a origem era imagem (as
+//      caixinhas do card 6 só aceitam PDF, então uma foto solta não pode entrar crua).
+//   3. Empurra cada PDF final pro acumulador de arquivos daquele tipo (mesmo mecanismo que
+//      o Gestor usa ao anexar manualmente) e realça a caixinha em verde.
+// Documentos que a IA não conseguiu classificar (ou que vieram como página em branco/
+// ilegível) caem em "outros" — nunca são descartados silenciosamente.
+window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, classificacaoPaginas) {
+    const resultadoVazio = { resumo: [], ignorados: 0 };
+    if (!Array.isArray(paginasComMetadados) || paginasComMetadados.length === 0) return resultadoVazio;
+    if (!Array.isArray(classificacaoPaginas) || classificacaoPaginas.length === 0) return resultadoVazio;
+    if (typeof PDFLib === 'undefined') {
+        console.warn('PDFLib não carregou a tempo — pulando a separação automática por tipo.');
+        return resultadoVazio;
+    }
+
+    // IDs válidos = as mesmas caixinhas de window.CONFIG_ANEXOS_ADMISSAO. 'foto-cracha' fica
+    // de fora de propósito: é a foto de rosto pro crachá, não um documento pra classificar.
+    const TIPOS_VALIDOS = ['rg', 'carteira-trabalho', 'reservista', 'titulo-eleitor', 'cnh', 'certidao-filhos', 'conjuge', 'comprovante-endereco', 'outros'];
+
+    // Garante que as caixinhas (e a visibilidade de cada uma, já que os campos de texto acima
+    // já foram preenchidos pela Clara — ex: Sexo, Estado Civil, Possui PIS) estão atualizadas
+    // ANTES de decidir onde encaixar cada documento.
+    if (typeof window.renderizarAnexosAdmissaoTipados === 'function') window.renderizarAnexosAdmissaoTipados();
+
+    const tipoEstaVisivel = (tipoId) => {
+        const cfg = (window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === tipoId);
+        return !!(cfg && cfg.visivel());
+    };
+
+    // 1. Agrupa páginas consecutivas do mesmo arquivo + mesmo tipo
+    const grupos = []; // { arquivo, tipo, paginas: [numeros de página 1-based] }
+    paginasComMetadados.forEach((meta, i) => {
+        let tipo = (classificacaoPaginas[i] || 'outros').toString().trim().toLowerCase();
+        if (!TIPOS_VALIDOS.includes(tipo)) tipo = 'outros';
+        if (!tipoEstaVisivel(tipo)) tipo = 'outros'; // caixinha escondida agora (ex: sem cônjuge) -> some no lugar certo, não no vazio
+
+        const ultimoGrupo = grupos[grupos.length - 1];
+        if (ultimoGrupo && ultimoGrupo.arquivo === meta._arquivoOrigem && ultimoGrupo.tipo === tipo && meta._paginaOrigem != null) {
+            ultimoGrupo.paginas.push(meta._paginaOrigem);
+        } else {
+            grupos.push({ arquivo: meta._arquivoOrigem, tipo, paginas: meta._paginaOrigem != null ? [meta._paginaOrigem] : [] });
+        }
+    });
+
+    // 2. Monta um PDF de verdade pra cada grupo
+    const cacheBytesArquivo = new Map();
+    const resumo = [];
+    let ignorados = 0;
+
+    for (const grupo of grupos) {
+        try {
+            const pdfFinal = await PDFLib.PDFDocument.create();
+
+            if (grupo.arquivo.type === 'application/pdf') {
+                if (!cacheBytesArquivo.has(grupo.arquivo)) {
+                    cacheBytesArquivo.set(grupo.arquivo, await grupo.arquivo.arrayBuffer());
+                }
+                const pdfOrigem = await PDFLib.PDFDocument.load(cacheBytesArquivo.get(grupo.arquivo));
+                const indicesZeroBased = grupo.paginas.map(p => p - 1).filter(idx => idx >= 0 && idx < pdfOrigem.getPageCount());
+                if (indicesZeroBased.length === 0) { ignorados++; continue; }
+                const paginasCopiadas = await pdfFinal.copyPages(pdfOrigem, indicesZeroBased);
+                paginasCopiadas.forEach(p => pdfFinal.addPage(p));
+            } else if (grupo.arquivo.type && grupo.arquivo.type.startsWith('image/')) {
+                const bytesImg = new Uint8Array(await grupo.arquivo.arrayBuffer());
+                let imgEmbutida;
+                try {
+                    imgEmbutida = grupo.arquivo.type.includes('png') ? await pdfFinal.embedPng(bytesImg) : await pdfFinal.embedJpg(bytesImg);
+                } catch (e) {
+                    ignorados++; continue; // formato que o pdf-lib não abre (ex: heic) — Gestor anexa manualmente
+                }
+                const paginaImg = pdfFinal.addPage([imgEmbutida.width, imgEmbutida.height]);
+                paginaImg.drawImage(imgEmbutida, { x: 0, y: 0, width: imgEmbutida.width, height: imgEmbutida.height });
+            } else {
+                ignorados++; continue;
+            }
+
+            const bytesFinais = await pdfFinal.save();
+            const nomeTipoLabel = ((window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === grupo.tipo)?.label || grupo.tipo).replace(/[\/\\?*:|"<>]/g, '');
+            const arquivoFinal = new File([bytesFinais], `${nomeTipoLabel} - Separado por Clara IA.pdf`, { type: 'application/pdf' });
+
+            if (!window.arquivosAcumuladosAdmissao[grupo.tipo]) window.arquivosAcumuladosAdmissao[grupo.tipo] = [];
+            window.arquivosAcumuladosAdmissao[grupo.tipo].push(arquivoFinal);
+            resumo.push({ tipo: grupo.tipo, paginas: grupo.paginas.length || 1 });
+        } catch (e) {
+            console.warn('Não foi possível separar automaticamente um grupo de páginas:', e);
+            ignorados++;
+        }
+    }
+
+    // 3. Sincroniza os <input> escondidos com o que acabamos de acumular e realça em verde
+    // cada caixinha que a Clara preencheu sozinha — mesmo destaque usado nos campos de texto.
+    const tiposAfetados = [...new Set(resumo.map(r => r.tipo))];
+    tiposAfetados.forEach(tipoId => {
+        window.sincronizarInputComAcumuladorAdmissao(tipoId);
+        window.renderizarChipsArquivosAdmissao(tipoId);
+        const box = document.getElementById(`box-doc-${tipoId}`);
+        if (box) {
+            box.style.borderColor = '#28a745';
+            box.style.background = 'rgba(40, 167, 69, 0.08)';
+        }
+    });
+
+    if (ignorados > 0) {
+        console.warn(`⚠️ ${ignorados} grupo(s) de página(s) não puderam ser separados automaticamente — confira o item 6 e anexe manualmente se faltar algo.`);
+    }
+
+    return { resumo, ignorados };
+};
+
 // 👇 Mostra um aviso "Já anexado anteriormente" com link(s) pro(s) arquivo(s) que o
 // Gestor já tinha enviado antes (numa correção de Ficha Devolvida), pra ele ver que
 // o documento não sumiu — só precisa reanexar se quiser TROCAR por outro.
@@ -56585,9 +56704,14 @@ function atualizarBadgeChat(numero) {
         return mostrarAlerta("Anexe pelo menos um documento (PDF ou Imagem)!", "aviso");
     }
 
-    // 👇 Já joga os mesmos arquivos pro campo "6. Documentos Finais para Análise" (novo-documentos),
-    // que é o que realmente é enviado/salvo pro RH — o Gestor não precisa anexar de novo lá embaixo.
-    copiarArquivosParaAnexoFinal(fileInput.files, 'novo-documentos');
+    // 👇 LIMPEZA (20/08/2026): removida a chamada `copiarArquivosParaAnexoFinal(fileInput.files,
+    // 'novo-documentos')` que existia aqui. O campo 'novo-documentos' não existe mais no HTML —
+    // a tela "6. Documentos Finais para Análise" evoluiu pra caixinhas separadas por tipo
+    // (container-anexos-admissao-tipados / window.CONFIG_ANEXOS_ADMISSAO), então essa linha
+    // não fazia mais nada (a função tem um try/catch, então não quebrava nada, só era código
+    // morto). No lugar dela agora entra a separação automática de verdade, feita mais abaixo
+    // com window.separarDocumentosAdmissaoPorTipo() depois que a Clara devolve a classificação
+    // de cada página — que já joga cada documento na caixinha certa.
 
     // Inicialização dos cronômetros para controle preventivo no bloco finally
     let timer1, timer2, timer3;
@@ -56632,7 +56756,12 @@ function atualizarBadgeChat(numero) {
             const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
             paginas.push({
                 base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8),
-                mimeType: 'image/jpeg'
+                mimeType: 'image/jpeg',
+                // 👇 NOVO: guarda de qual arquivo original e qual página veio essa imagem —
+                // usado depois pra Clara conseguir separar automaticamente o PDF por tipo de
+                // documento (ver separarDocumentosAdmissaoPorTipo mais abaixo).
+                _arquivoOrigem: file,
+                _paginaOrigem: i
             });
         }
         return paginas;
@@ -56684,7 +56813,9 @@ function atualizarBadgeChat(numero) {
                     
                     resolve({
                         base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8),
-                        mimeType: 'image/jpeg'
+                        mimeType: 'image/jpeg',
+                        _arquivoOrigem: file,
+                        _paginaOrigem: null // foto não tem "página" — o arquivo inteiro é a própria imagem
                     });
                 };
                 img.onerror = error => reject(error);
@@ -56716,7 +56847,11 @@ const travarCampoPreenchido = (id) => {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
         // 👇 .flat(): PDF agora devolve uma LISTA de páginas-imagem (uma por página) em vez de
         // um objeto único — foto continua um objeto normal, e .flat() não mexe nesse caso.
-        const listaArquivosBase64 = (await Promise.all(promessas)).flat();
+        // Cada item carrega _arquivoOrigem/_paginaOrigem (de onde veio) — guardamos essa lista
+        // completa em paginasComMetadados pra usar DEPOIS, na separação automática por tipo de
+        // documento; e mandamos pro Gemini só base64Puro/mimeType (sem lixo extra no payload).
+        const paginasComMetadados = (await Promise.all(promessas)).flat();
+        const listaArquivosBase64 = paginasComMetadados.map(({ base64Puro, mimeType }) => ({ base64Puro, mimeType }));
 
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando documentos com IA...';
 
@@ -56839,10 +56974,42 @@ const travarCampoPreenchido = (id) => {
             document.getElementById('adm-raca').value = data.cor_raca; 
             travarCampoPreenchido('adm-raca'); 
         }
-        if (data.escolaridade) { 
-            document.getElementById('adm-escolaridade').value = data.escolaridade; 
-            travarCampoPreenchido('adm-escolaridade'); 
-        }
+        // 👇 CONSERTO (20/08/2026): Escolaridade nunca pode ficar em branco/inválida no select.
+        // Antes, se a IA devolvesse um texto que não batesse EXATAMENTE com uma das 7 opções
+        // do <select> (ex: "Médio" em vez de "Ensino Médio Completo", ou algo com espaço/acento
+        // diferente), o navegador simplesmente deixava o campo SEM NENHUMA opção selecionada
+        // (selectedIndex = -1) — parecia em branco pro Gestor, mesmo com o <option> padrão
+        // "Ensino Médio Completo" marcado no HTML. Agora normalizamos pro valor válido mais
+        // próximo, e se não der pra identificar nada mesmo, garante o padrão em vez de deixar inválido.
+        (function aplicarEscolaridadeSegura() {
+            const selectEscolaridade = document.getElementById('adm-escolaridade');
+            const PADRAO_ESCOLARIDADE = 'Ensino Médio Completo';
+            const OPCOES_VALIDAS = Array.from(selectEscolaridade.options).map(o => o.value);
+
+            const normalizar = (texto) => {
+                if (!texto) return null;
+                const limpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+                if (OPCOES_VALIDAS.some(op => op.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() === limpo)) {
+                    return OPCOES_VALIDAS.find(op => op.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() === limpo);
+                }
+                if (limpo.includes('pos') || limpo.includes('especializa') || limpo.includes('mba') || limpo.includes('mestrado') || limpo.includes('doutorado')) return 'Pós-graduação/Especialização';
+                if (limpo.includes('superior')) return limpo.includes('incompl') ? 'Ensino Superior Incompleto' : 'Ensino Superior Completo';
+                if (limpo.includes('medio') || limpo.includes('2 grau') || limpo.includes('2º grau')) return limpo.includes('incompl') ? 'Ensino Médio Incompleto' : 'Ensino Médio Completo';
+                if (limpo.includes('fundamental') || limpo.includes('1 grau') || limpo.includes('1º grau')) return limpo.includes('incompl') ? 'Ensino Fundamental Incompleto' : 'Ensino Fundamental Completo';
+                return null; // não deu pra reconhecer nada — melhor não travar como "confirmado pela IA"
+            };
+
+            const valorNormalizado = normalizar(data.escolaridade);
+            if (valorNormalizado) {
+                selectEscolaridade.value = valorNormalizado;
+                travarCampoPreenchido('adm-escolaridade');
+            }
+            // Rede de segurança final: se por qualquer motivo o select ficou sem opção
+            // selecionada (índice -1), força o padrão — nunca deixa em branco de verdade.
+            if (selectEscolaridade.selectedIndex === -1) {
+                selectEscolaridade.value = PADRAO_ESCOLARIDADE;
+            }
+        })();
 
         // 5. PROCESSAMENTO BLINDADO DA CIDADE DE NASCIMENTO
         if (data.cidade_uf) {
@@ -56981,6 +57148,25 @@ const travarCampoPreenchido = (id) => {
                     }
                 }
             });
+        }
+
+        // 👇 9. SEPARAÇÃO AUTOMÁTICA DOS ANEXOS POR TIPO (CARD "6. Documentos Finais para
+        // Análise") — a Clara agora também classifica cada página (RG, CTPS, Comprovante de
+        // Endereço, etc.) e já anexa sozinha na caixinha certa, recortando o PDF por página
+        // (ou embrulhando a foto num PDF, já que aquelas caixinhas só aceitam PDF). O Gestor
+        // só precisa CONFERIR e trocar manualmente se achar que ela classificou algo errado —
+        // nada aqui bloqueia o envio nem impede reanexar por cima.
+        if (data.classificacao_paginas && Array.isArray(data.classificacao_paginas) && typeof window.separarDocumentosAdmissaoPorTipo === 'function') {
+            try {
+                const resultadoSeparacao = await window.separarDocumentosAdmissaoPorTipo(paginasComMetadados, data.classificacao_paginas);
+                if (resultadoSeparacao.resumo.length > 0) {
+                    const nomeTipoLabel = (id) => ((window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === id)?.label || id);
+                    const listaTexto = resultadoSeparacao.resumo.map(r => nomeTipoLabel(r.tipo)).join(', ');
+                    mostrarAlerta(`Clara também separou automaticamente no item 6: ${listaTexto}. Role a tela e confira antes de enviar!`, "sucesso");
+                }
+            } catch (e) {
+                console.warn('Não foi possível separar os documentos automaticamente por tipo — anexe manualmente no item 6.', e);
+            }
         }
 
         mostrarAlerta("Formulário preenchido e travado via IA com sucesso!", "sucesso");
