@@ -56595,23 +56595,61 @@ function atualizarBadgeChat(numero) {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparando arquivos...';
 
+    // 👇 CONSERTO DO TIMEOUT (20/08/2026): antes, PDF era mandado "cru" pro Gemini (sem
+    // nenhuma compressão), enquanto foto já era comprimida. Um PDF escaneado em alta
+    // resolução com várias páginas virava um payload gigante, o Gemini demorava mais que
+    // os 140s que o próprio front tolera, e o navegador derrubava a conexão no meio
+    // (log confirmado: "Http: connection closed before message completed" — não era erro
+    // do Google, era o cliente desistindo enquanto o processamento ainda rodava).
+    // Agora o PDF passa pelo pdf.js (já carregado no sistema, usado noutras telas), cada
+    // página vira uma imagem JPEG comprimida do MESMO jeito que já fazíamos com foto —
+    // assim o payload fica leve e a IA lê rápido, com ou sem PDF.
+    const rasterizarPdfEmImagens = async (file) => {
+        const MAX_DIM = 1600; // um pouco maior que a foto (1200) pra não perder legibilidade de texto pequeno em documento
+        const LIMITE_PAGINAS = 20; // trava de segurança: evita PDF gigante virar payload gigante de novo
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const totalPaginas = Math.min(pdfDoc.numPages, LIMITE_PAGINAS);
+
+        if (pdfDoc.numPages > LIMITE_PAGINAS) {
+            console.warn(`⚠️ PDF "${file.name}" tem ${pdfDoc.numPages} páginas — lendo só as ${LIMITE_PAGINAS} primeiras pra não travar o envio.`);
+        }
+
+        const paginas = [];
+        for (let i = 1; i <= totalPaginas; i++) {
+            const page = await pdfDoc.getPage(i);
+            const viewportOriginal = page.getViewport({ scale: 1 });
+            const maiorLado = Math.max(viewportOriginal.width, viewportOriginal.height);
+            const escala = Math.min(2, MAX_DIM / maiorLado); // reduz PDF gigante, mas não estica demais PDF pequeno
+            const viewport = page.getViewport({ scale: escala });
+
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+            paginas.push({
+                base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8),
+                mimeType: 'image/jpeg'
+            });
+        }
+        return paginas;
+    };
+
     // COMPRESSOR NINJA: Reduz arquivos pesados antes de enviar pro servidor
     const converterParaBase64 = (file) => {
         return new Promise((resolve, reject) => {
+            // PDF agora vira uma LISTA de páginas-imagem já comprimidas (ver rasterizarPdfEmImagens acima)
+            if (file.type === 'application/pdf') {
+                rasterizarPdfEmImagens(file).then(resolve).catch(reject);
+                return;
+            }
+
             const reader = new FileReader();
             reader.readAsDataURL(file);
             reader.onload = (event) => {
-                
-                // Se for PDF, o navegador não sabe comprimir nativamente, manda do jeito que está
-                if (file.type === 'application/pdf') {
-                    const base64Completo = reader.result;
-                    const indexBase64 = base64Completo.indexOf(';base64,');
-                    resolve({
-                        base64Puro: base64Completo.substring(indexBase64 + 8),
-                        mimeType: file.type
-                    });
-                    return;
-                }
 
                 // Se for IMAGEM (foto do celular, escaneada), a mágica acontece aqui!
                 const img = new Image();
@@ -56676,7 +56714,9 @@ const travarCampoPreenchido = (id) => {
 
     try {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
-        const listaArquivosBase64 = await Promise.all(promessas);
+        // 👇 .flat(): PDF agora devolve uma LISTA de páginas-imagem (uma por página) em vez de
+        // um objeto único — foto continua um objeto normal, e .flat() não mexe nesse caso.
+        const listaArquivosBase64 = (await Promise.all(promessas)).flat();
 
         btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando documentos com IA...';
 
@@ -56979,17 +57019,46 @@ const travarCampoPreenchido = (id) => {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo documento...';
 
+    // 👇 CONSERTO DO TIMEOUT (20/08/2026): mesmo ajuste feito na tela de Admissão — PDF
+    // não é mais mandado "cru", passa pelo pdf.js e vira páginas-imagem já comprimidas
+    // (ver comentário completo na função lerDocumentoComIA / rasterizarPdfEmImagens).
+    const rasterizarPdfEmImagensAtestado = async (file) => {
+        const MAX_DIM = 1600;
+        const LIMITE_PAGINAS = 20;
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const totalPaginas = Math.min(pdfDoc.numPages, LIMITE_PAGINAS);
+        if (pdfDoc.numPages > LIMITE_PAGINAS) {
+            console.warn(`⚠️ PDF "${file.name}" tem ${pdfDoc.numPages} páginas — lendo só as ${LIMITE_PAGINAS} primeiras.`);
+        }
+        const paginas = [];
+        for (let i = 1; i <= totalPaginas; i++) {
+            const page = await pdfDoc.getPage(i);
+            const viewportOriginal = page.getViewport({ scale: 1 });
+            const maiorLado = Math.max(viewportOriginal.width, viewportOriginal.height);
+            const escala = Math.min(2, MAX_DIM / maiorLado);
+            const viewport = page.getViewport({ scale: escala });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+            paginas.push({ base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8), mimeType: 'image/jpeg' });
+        }
+        return paginas;
+    };
+
     // Função de compressão de imagem para acelerar o upload
     const converterParaBase64 = (file) => {
         return new Promise((resolve, reject) => {
+            if (file.type === 'application/pdf') {
+                rasterizarPdfEmImagensAtestado(file).then(resolve).catch(reject);
+                return;
+            }
             const reader = new FileReader();
             reader.readAsDataURL(file);
             reader.onload = (event) => {
-                if (file.type === 'application/pdf') {
-                    const base64Completo = reader.result;
-                    resolve({ base64Puro: base64Completo.substring(base64Completo.indexOf(';base64,') + 8), mimeType: file.type });
-                    return;
-                }
                 const img = new Image();
                 img.src = event.target.result;
                 img.onload = () => {
@@ -57027,7 +57096,9 @@ const travarCampoPreenchido = (id) => {
 
     try {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
-        const listaArquivosBase64 = await Promise.all(promessas);
+        // 👇 .flat(): PDF agora devolve uma LISTA de páginas-imagem (uma por página) em vez de
+        // um objeto único — foto continua um objeto normal, e .flat() não mexe nesse caso.
+        const listaArquivosBase64 = (await Promise.all(promessas)).flat();
 
         const response = await Promise.race([
     supabaseClient.functions.invoke('gemini-ocr-atestado', { body: { arquivos: listaArquivosBase64 } }),
@@ -70033,15 +70104,44 @@ window.lerDocumentoFaltanteOBSA = async function() {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Analisando com Clara IA...';
 
+    // 👇 CONSERTO DO TIMEOUT (20/08/2026): mesmo ajuste das outras telas de leitura de
+    // documento — PDF passa a virar páginas-imagem comprimidas via pdf.js em vez de ir cru.
+    const rasterizarPdfEmImagensDoc = async (file) => {
+        const MAX_DIM = 1600;
+        const LIMITE_PAGINAS = 20;
+        const arrayBuffer = await file.arrayBuffer();
+        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const totalPaginas = Math.min(pdfDoc.numPages, LIMITE_PAGINAS);
+        if (pdfDoc.numPages > LIMITE_PAGINAS) {
+            console.warn(`⚠️ PDF "${file.name}" tem ${pdfDoc.numPages} páginas — lendo só as ${LIMITE_PAGINAS} primeiras.`);
+        }
+        const paginas = [];
+        for (let i = 1; i <= totalPaginas; i++) {
+            const page = await pdfDoc.getPage(i);
+            const viewportOriginal = page.getViewport({ scale: 1 });
+            const maiorLado = Math.max(viewportOriginal.width, viewportOriginal.height);
+            const escala = Math.min(2, MAX_DIM / maiorLado);
+            const viewport = page.getViewport({ scale: escala });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+            paginas.push({ base64Puro: dataUrl.substring(dataUrl.indexOf(';base64,') + 8), mimeType: 'image/jpeg' });
+        }
+        return paginas;
+    };
+
     const converterParaBase64 = (file) => {
         return new Promise((resolve, reject) => {
+            if (file.type === 'application/pdf') {
+                rasterizarPdfEmImagensDoc(file).then(resolve).catch(reject);
+                return;
+            }
             const reader = new FileReader();
             reader.readAsDataURL(file);
             reader.onload = (event) => {
-                if (file.type === 'application/pdf') {
-                    resolve({ base64Puro: reader.result.substring(reader.result.indexOf(';base64,') + 8), mimeType: file.type });
-                    return;
-                }
                 const img = new Image();
                 img.src = event.target.result;
                 img.onload = () => {
@@ -70064,7 +70164,9 @@ window.lerDocumentoFaltanteOBSA = async function() {
 
     try {
         const promessas = Array.from(fileInput.files).map(file => converterParaBase64(file));
-        const listaArquivosBase64 = await Promise.all(promessas);
+        // 👇 .flat(): PDF agora devolve uma LISTA de páginas-imagem (uma por página) em vez de
+        // um objeto único — foto continua um objeto normal, e .flat() não mexe nesse caso.
+        const listaArquivosBase64 = (await Promise.all(promessas)).flat();
 
         const response = await Promise.race([
             supabaseClient.functions.invoke('gemini-ocr-admissao', { body: { arquivos: listaArquivosBase64 } }),
