@@ -28145,14 +28145,49 @@ if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo
         
         const urlsAnexos = await subirDocumentos(caminhoBase, fileInput.files);
 
+        // 👇 Colaborador Vinculado: mesma trava que já existe no Lançamento Direto do Admin —
+        // se este colaborador for o "vínculo" de algum Gestor (ex.: Encarregado que é a própria
+        // pessoa do Gestor local, ou tem o vínculo explícito configurado em Configurar Acessos),
+        // a rescisão fica represada em "Aguardando Aprovação Global" até o Gestor de Visão Global
+        // e Regional liberar — mesmo quando é OUTRO Gestor (não o vinculado) quem lança pela tela
+        // normal. Antes essa trava só existia no Lançamento Direto do Admin.
+        let statusInicial = 'Rescisão Pendente';
+        let vinculoInfo = {};
+        try {
+            const [{ data: colabParaVinculo }, { data: gestoresParaVinculo }] = await Promise.all([
+                supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('id', idColab).single(),
+                supabaseClient.from('perfis').select('id, nome, unidade, permissoes').eq('perfil', 'Gestor')
+            ]);
+
+            const gestorEncontrado = (gestoresParaVinculo || []).find(g => {
+                if (g.id === idColab) return false;
+                if (g.permissoes?.colaborador_vinculado_id === idColab) return true;
+                if (colabParaVinculo?.dados_admissao?.cargo === 'Encarregado') {
+                    const unidadesEnc = (colabParaVinculo.unidade || '').split(',').map(u => u.trim());
+                    const unidadesGestor = (g.unidade || '').split(',').map(u => u.trim());
+                    const mesmaUnidade = unidadesEnc.some(u => u && unidadesGestor.includes(u));
+                    return mesmaUnidade && ehMesmaPessoaPeloNome(colabParaVinculo.nome, g.nome);
+                }
+                return false;
+            });
+
+            if (gestorEncontrado) {
+                statusInicial = 'Aguardando Aprovação Global';
+                vinculoInfo = { gestor_vinculado_id: gestorEncontrado.id, gestor_vinculado_nome: gestorEncontrado.nome, aprovado_gestor_global: false };
+            }
+        } catch (errVinculo) {
+            console.warn('Falha ao checar Colaborador Vinculado para aprovação global:', errVinculo);
+        }
+
         const jsonRescisao = {
             tipo: tipo, data_comunicado: dataRescisao, aviso_cumprido: cumprir,
             opcao_aviso: opcaoAviso, ultimo_dia: ultimoDiaTexto, data_pagamento: dataPagamentoTexto, motivo: motivo,
-            documentos: urlsAnexos, data_registro: new Date().toISOString(), registrado_por: usuarioAtual.nome
+            documentos: urlsAnexos, data_registro: new Date().toISOString(), registrado_por: usuarioAtual.nome,
+            ...vinculoInfo
         };
 
-        const { error } = await supabaseClient.from('perfis').update({ 
-            status_aprovacao: 'Rescisão Pendente',
+        const { error } = await supabaseClient.from('perfis').update({
+            status_aprovacao: statusInicial,
             dados_rescisao: jsonRescisao
         }).eq('id', idColab);
 
@@ -28160,7 +28195,11 @@ if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo
 
         // REMOVIDA A INSERÇÃO DE NOTIFICAÇÃO AQUI PARA NÃO DUPLICAR NOS AVISOS RECENTES
 
+        if (statusInicial === 'Aguardando Aprovação Global') {
+            await mostrarAlerta("Solicitação registrada. Como este colaborador é vinculado a um Gestor, o processo fica represado até o Gestor de Visão Global e Regional aprovar a liberação.", "sucesso");
+        } else {
         await mostrarAlerta("Solicitação de desligamento enviada ao RH com sucesso!", "sucesso");
+        }
         
         document.getElementById('form-rescisao').reset();
         document.getElementById('resc-ultimo-dia-display').innerHTML = '-';
