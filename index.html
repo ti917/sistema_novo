@@ -6797,6 +6797,23 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <div id="chat-clara-cabecalho" style="padding: 15px; border-bottom: 1px solid var(--cor-borda); color: var(--cor-texto-secundario); font-size: 0.9rem;">
                         <i class="fa-solid fa-arrow-left"></i> Selecione um colaborador na lista ao lado
                     </div>
+                    <!-- 🆕 Pausar a Clara: enquanto o admin assume a conversa manualmente, a Clara
+                         não interfere respondendo "hmm não entendi" nem menu por cima. A pausa
+                         expira sozinha (não fica travado pra sempre se alguém esquecer de retomar). -->
+                    <div id="chat-clara-pausa-controles" style="display: none; padding: 8px 15px; border-bottom: 1px solid var(--cor-borda); align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap;">
+                        <span style="font-size: 0.75rem; color: var(--cor-texto-secundario);">Assumir esta conversa por:</span>
+                        <select id="chat-clara-pausa-minutos" style="padding: 4px 8px; border-radius: 6px; background: var(--cor-fundo-input); color: #fff; border: 1px solid var(--cor-borda); font-size: 0.78rem;">
+                            <option value="15">15 min</option>
+                            <option value="30" selected>30 min</option>
+                            <option value="60">1 hora</option>
+                            <option value="120">2 horas</option>
+                        </select>
+                        <button id="chat-clara-btn-pausar" class="btn-outline" style="padding: 5px 10px; font-size: 0.78rem; white-space: nowrap; border-color: #ffc107; color: #ffc107;" onclick="window.pausarClaraChat()"><i class="fa-solid fa-hand"></i> Pausar a Clara</button>
+                    </div>
+                    <div id="chat-clara-pausa-bar" class="hidden" style="padding: 8px 15px; border-bottom: 1px solid var(--cor-borda); background: rgba(255,193,7,0.1); align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+                        <span id="chat-clara-pausa-texto" style="font-size: 0.8rem; color: #ffc107;"></span>
+                        <button class="btn-outline" style="padding: 4px 10px; font-size: 0.75rem;" onclick="window.retomarClaraChat()"><i class="fa-solid fa-play"></i> Retomar a Clara</button>
+                    </div>
                     <div id="chat-clara-mensagens" style="flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px;"></div>
                     <div id="chat-clara-resposta-area" style="display: none; padding: 12px; border-top: 1px solid var(--cor-borda); gap: 8px;">
                         <div style="display: flex; gap: 8px;">
@@ -38735,6 +38752,12 @@ window.abrirChatClaraColaborador = function(grupo) {
     if (cabecalho) cabecalho.innerHTML = `<strong style="color: var(--cor-texto-principal);"><i class="fa-brands fa-whatsapp" style="color: #25D366;"></i> ${grupo.nome}</strong> <span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">— ${grupo.telefone}</span>`;
     if (areaResposta) areaResposta.style.display = 'block';
 
+    // 🆕 Checa/atualiza o status de pausa da Clara pra essa conversa e mantém
+    // atualizando sozinho (pra sumir a barrinha amarela na hora em que expirar).
+    window.atualizarStatusPausaClara(grupo);
+    if (window.claraPausaTimerId) clearInterval(window.claraPausaTimerId);
+    window.claraPausaTimerId = setInterval(() => window.atualizarStatusPausaClara(window.chatClaraSelecionado), 30000);
+
     const mensagens = (window.todasConversasClaraLog || [])
         .filter(m => (grupo.colaboradorId && m.colaborador_id === grupo.colaboradorId) || (!grupo.colaboradorId && m.telefone_normalizado === grupo.telefoneNormalizado))
         .sort((a, b) => new Date(a.criado_em) - new Date(b.criado_em));
@@ -38800,6 +38823,77 @@ window.enviarRespostaChatClara = async function() {
     // Agora quem desenha é só o Realtime (window.abrirChatClaraColaborador é chamado
     // automaticamente lá em cima, no listener 'escuta-clara-conversas-admin'), então
     // não duplica mais — a mensagem aparece assim que o INSERT confirma no banco.
+};
+
+// =========================================================================
+// 🆕 PAUSAR/RETOMAR A CLARA — assumir a conversa manualmente sem a Clara
+// "atrapalhar" respondendo por cima (o menu automático, "não entendi" etc.).
+// A pausa expira sozinha (padrão configurável no próprio botão: 15min/30min/
+// 1h/2h) — então mesmo que alguém esqueça de retomar, a Clara volta a atender
+// normal depois desse prazo, sem precisar de ninguém lembrar de desligar.
+// Guardado na tabela clara_pausas (1 linha por conversa, upsert por "chave").
+// =========================================================================
+window.claraPausaTimerId = null;
+
+window.pausarClaraChat = async function() {
+    const g = window.chatClaraSelecionado;
+    if (!g) return;
+    const btn = document.getElementById('chat-clara-btn-pausar');
+    const minutos = parseInt(document.getElementById('chat-clara-pausa-minutos')?.value || '30', 10);
+    const agora = new Date();
+    const pausadoAte = new Date(agora.getTime() + minutos * 60000).toISOString();
+
+    if (btn) btn.disabled = true;
+    const { error } = await supabaseClient.from('clara_pausas').upsert({
+        chave: g.chave,
+        colaborador_id: g.colaboradorId,
+        telefone_normalizado: g.telefoneNormalizado,
+        nome_colaborador: g.nome,
+        pausado_por: usuarioAtual?.nome || 'Admin',
+        pausado_em: agora.toISOString(),
+        pausado_ate: pausadoAte,
+    }, { onConflict: 'chave' });
+    if (btn) btn.disabled = false;
+
+    if (error) { mostrarAlerta('Não consegui pausar a Clara: ' + error.message, 'erro'); return; }
+    window.atualizarStatusPausaClara(g);
+};
+
+window.retomarClaraChat = async function() {
+    const g = window.chatClaraSelecionado;
+    if (!g) return;
+    const { error } = await supabaseClient.from('clara_pausas').delete().eq('chave', g.chave);
+    if (error) { mostrarAlerta('Não consegui retomar a Clara: ' + error.message, 'erro'); return; }
+    window.atualizarStatusPausaClara(g);
+};
+
+window.atualizarStatusPausaClara = async function(grupo) {
+    const controles = document.getElementById('chat-clara-pausa-controles');
+    const barra = document.getElementById('chat-clara-pausa-bar');
+    const texto = document.getElementById('chat-clara-pausa-texto');
+    if (!grupo) {
+        if (controles) controles.style.display = 'none';
+        if (barra) barra.classList.add('hidden');
+        return;
+    }
+
+    const { data } = await supabaseClient.from('clara_pausas')
+        .select('pausado_ate, pausado_por').eq('chave', grupo.chave).maybeSingle();
+
+    // Se o admin trocou de conversa enquanto essa consulta rodava, não pisa na tela errada.
+    if (!window.chatClaraSelecionado || window.chatClaraSelecionado.chave !== grupo.chave) return;
+
+    const ativa = data && new Date(data.pausado_ate) > new Date();
+
+    if (ativa) {
+        if (controles) controles.style.display = 'none';
+        if (barra) barra.classList.remove('hidden');
+        const horaFmt = new Date(data.pausado_ate).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        if (texto) texto.innerHTML = `<i class="fa-solid fa-pause"></i> Clara pausada por <b>${data.pausado_por || 'um admin'}</b> até <b>${horaFmt}</b> — pode responder direto por aqui que ela não interfere.`;
+    } else {
+        if (controles) controles.style.display = 'flex';
+        if (barra) barra.classList.add('hidden');
+    }
 };
 
 // =========================================================================
