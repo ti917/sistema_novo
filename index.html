@@ -41989,14 +41989,49 @@ window.excluirDocumentoExtra = async function(idColab, pasta, index) {
     try {
         const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
         let adm = perfil.dados_admissao || {};
-        
+
+        // 🔧 CORREÇÃO: guarda o nome do arquivo ANTES de remover, pra saber se era um Exame ASO
+        // anexado na pasta "Admissão". Esse botão genérico (usado no Arquivo Digital do
+        // colaborador) apagava o arquivo mas NUNCA recalculava data_ultimo_aso — diferente do
+        // botão dedicado "Excluir ASO" da tela de Controle de ASO (window.excluirAso), que já
+        // fazia esse recálculo. Resultado: o colaborador ficava com o exame excluído, mas o
+        // sistema continuava mostrando "Regular"/"Data do ASO informada manualmente" e um
+        // Próximo Vencimento calculado em cima de uma data que não existe mais no arquivo.
+        const docRemovido = (adm.documentos_extras && adm.documentos_extras[pasta]) ? adm.documentos_extras[pasta][index] : null;
+        const eraExameAso = pasta === 'Admissão' && !!(docRemovido && docRemovido.nome && docRemovido.nome.includes('Exame ASO'));
+
         // Remove do Array
         adm.documentos_extras[pasta].splice(index, 1);
-        
+
         // Se a pasta era customizada e ficou vazia, a gente exclui ela inteira pra manter limpo!
         const chavesPadrão = ['Admissão', 'Rescisão', 'Atestados', 'Advertências', 'Alterações', 'Justificativas de Ponto'];
         if (!chavesPadrão.includes(pasta) && adm.documentos_extras[pasta].length === 0) {
             delete adm.documentos_extras[pasta];
+        }
+
+        // Mesma lógica de recálculo do botão dedicado "Excluir ASO" (window.excluirAso):
+        // se sobrou algum "Exame ASO Periódico" no arquivo, usa a data mais recente dele como
+        // nova data-base. Se não sobrou NENHUM Exame ASO (nem periódico, nem admissional),
+        // limpa data_ultimo_aso em vez de inventar uma data — assim o colaborador volta a
+        // aparecer corretamente como pendente de ASO.
+        if (eraExameAso) {
+            const asosRestantes = (adm.documentos_extras['Admissão'] || []).filter(d => d && d.nome && d.nome.includes('Exame ASO'));
+            let datasPeriodicos = [];
+            asosRestantes.forEach(d => {
+                const match = d.nome.match(/Exame ASO Periódico \((.*)\)/);
+                if (match) {
+                    const [dia, mes, ano] = match[1].split('-');
+                    if (dia && mes && ano) {
+                        datasPeriodicos.push(new Date(`${ano}-${mes}-${dia}T00:00:00`));
+                    }
+                }
+            });
+            if (datasPeriodicos.length > 0) {
+                datasPeriodicos.sort((a, b) => b - a);
+                adm.data_ultimo_aso = datasPeriodicos[0].toISOString().split('T')[0];
+            } else {
+                delete adm.data_ultimo_aso;
+            }
         }
 
         await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
@@ -55126,8 +55161,7 @@ window.excluirAso = async function(idColab, indexDoc) {
             
             // 3. A MÁGICA: Recalcula qual é a nova "Data Base" do vencimento
             const asosRestantes = adm.documentos_extras['Admissão'].filter(d => d.nome.includes('Exame ASO'));
-            let novaDataBaseAso = adm.jornada?.data_inicio || adm.data_inicio; // Se não tiver nada, volta pra admissão
-            
+
             // Rastreia se sobrou algum "ASO Periódico" e acha a data que está escondida no nome do arquivo
             let datasPeriodicos = [];
             asosRestantes.forEach(d => {
@@ -55139,15 +55173,23 @@ window.excluirAso = async function(idColab, indexDoc) {
                     }
                 }
             });
-            
-            // Se encontrou periódicos, pega o mais recente e joga como base oficial de cálculo
-            if (datasPeriodicos.length > 0) {
-                datasPeriodicos.sort((a, b) => b - a); // Ordena do mais novo pro mais velho
-                novaDataBaseAso = datasPeriodicos[0].toISOString().split('T')[0];
-            }
-            
+
             // 4. Salva no banco de dados com os ajustes
-            adm.data_ultimo_aso = novaDataBaseAso;
+            if (datasPeriodicos.length > 0) {
+                // Ainda sobrou pelo menos um ASO Periódico: usa o mais recente como nova data-base.
+                datasPeriodicos.sort((a, b) => b - a); // Ordena do mais novo pro mais velho
+                adm.data_ultimo_aso = datasPeriodicos[0].toISOString().split('T')[0];
+            } else {
+                // 🔧 CORREÇÃO: não sobrou NENHUM ASO (nem periódico, nem admissional) anexado.
+                // Antes o código "inventava" uma data-base usando a data de admissão, o que
+                // deixava data_ultimo_aso preenchido mesmo sem exame nenhum no arquivo digital —
+                // e isso fazia o colaborador aparecer como "Regular"/"ASO informado manualmente"
+                // no Admissional (ver window.asoAdmissionalJaAnexado) mesmo sem exame de verdade.
+                // Agora limpamos o campo: o cálculo do Periódico já cai sozinho na data de
+                // admissão como fallback (ver window.filtrarAsoAdmin), e o Admissional volta a
+                // cobrar o exame corretamente.
+                delete adm.data_ultimo_aso;
+            }
             await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab);
             
             mostrarAlerta("Exame ASO excluído e vencimento recalculado com sucesso!", "sucesso");
