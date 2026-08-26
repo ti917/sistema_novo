@@ -25,6 +25,10 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+    <!-- 🆕 ExcelJS — só ele suporta estilizar de verdade (cor de cabeçalho, negrito, formato
+         de moeda, congelar linha, filtro automático). O SheetJS (xlsx.full.min.js acima)
+         continua sendo usado nos outros exportadores (DRE, Auditoria) que não pediram estilo. -->
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
     
     <style>
         /* ========================================================= */
@@ -8263,9 +8267,18 @@ window.exportarDados = function (nomeArquivo, colunas, linhas, formato, titulo) 
     }
 };
 
-/** Exporta o extrato do dashboard exatamente como está filtrado na tela. */
+/** Exporta o extrato do dashboard exatamente como está filtrado na tela (respeita
+ *  busca, unidade, forma de pagamento e os KPIs clicados/ativos no topo). */
 window.exportarExtratoDashboard = function (formato) {
     const dados = window._dadosFiltradosDash || [];
+
+    // 🆕 O Excel agora ganha um exportador dedicado, com estilo e 2 abas (Geral + Por
+    // Unidade) — CSV e PDF continuam pelo caminho simples de sempre.
+    if (formato === 'xlsx') {
+        window.exportarExcelDashboardBonito(dados);
+        return;
+    }
+
     const colunas = ['Vencimento', 'Pago em', 'Situação', 'Unidade', 'Tipo', 'Categoria',
                      'Fornecedor', 'Descrição', 'Referência', 'Parcela', 'Valor', 'Juros/Multa', 'Status'];
     const linhas = dados.map(l => {
@@ -8287,6 +8300,210 @@ window.exportarExtratoDashboard = function (formato) {
         ];
     });
     window.exportarDados('extrato_financeiro', colunas, linhas, formato, 'Extrato de Movimentações Financeiras');
+};
+
+/**
+ * 🆕 Excel "de verdade" do Dashboard Financeiro, via ExcelJS (o SheetJS gratuito não
+ * estiliza célula na escrita). Duas abas:
+ *   - "Geral": todos os lançamentos filtrados, com cabeçalho colorido, moeda formatada
+ *     e cor por situação (pago/vencido/a vencer).
+ *   - "Por Unidade": um resumo com os totais (receita, despesa paga, a pagar, juros,
+ *     saldo) agrupados por unidade — sempre a partir do MESMO recorte já filtrado na
+ *     tela, então se estiver em "Todas as Unidades" sai tudo, e se a busca de unidade
+ *     ou os KPIs do topo estiverem restringindo, a aba reflete só o que restou.
+ */
+window.exportarExcelDashboardBonito = async function (dados) {
+    if (!dados || dados.length === 0) {
+        return mostrarAlerta('Não há nada para exportar com os filtros atuais.', 'aviso');
+    }
+    if (typeof ExcelJS === 'undefined') {
+        return mostrarAlerta('Biblioteca de Excel não carregou. Verifique a conexão.', 'erro');
+    }
+
+    try {
+        const CORES = {
+            cabecalho: 'FF1E8A6E',   // verde-água escuro (harmoniza com --cor-acento)
+            cabecalhoTexto: 'FFFFFFFF',
+            tituloTexto: 'FF1E8A6E',
+            zebra: 'FFF4FAF8',
+            borda: 'FFD9E4E1',
+            receita: 'FF2ECC71',
+            despesaPaga: 'FFE74C3C',
+            despesaAPagar: 'FFE67E22',
+            vencido: 'FFFF4757',
+            aVencer: 'FF3498DB',
+            neutro: 'FF7F8C8D'
+        };
+        const corSituacao = (codigo) => ({
+            pago: CORES.receita, vencido: CORES.vencido, hoje: CORES.despesaAPagar,
+            aVencer: CORES.aVencer, pendente: CORES.neutro
+        }[codigo] || CORES.neutro);
+
+        const carimbo = new Date().toLocaleString('pt-BR');
+        const nomeEmpresa = (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas')
+            ? empresaFinanceiraSelecionada : 'Todas as Empresas/Unidades';
+
+        const wb = new ExcelJS.Workbook();
+        wb.creator = 'Sistema RH Soul';
+        wb.created = new Date();
+
+        // ================= ABA 1: GERAL =================
+        const wsGeral = wb.addWorksheet('Geral', { views: [{ state: 'frozen', ySplit: 4 }] });
+        const colunasGeral = [
+            { header: 'Vencimento', key: 'venc', width: 13 },
+            { header: 'Pago em', key: 'pago', width: 13 },
+            { header: 'Situação', key: 'sit', width: 14 },
+            { header: 'Unidade', key: 'unid', width: 24 },
+            { header: 'Tipo', key: 'tipo', width: 11 },
+            { header: 'Categoria', key: 'cat', width: 22 },
+            { header: 'Fornecedor', key: 'forn', width: 22 },
+            { header: 'Descrição', key: 'desc', width: 34 },
+            { header: 'Referência', key: 'ref', width: 12 },
+            { header: 'Parcela', key: 'parc', width: 10 },
+            { header: 'Valor', key: 'valor', width: 15 },
+            { header: 'Juros/Multa', key: 'juros', width: 13 },
+            { header: 'Status', key: 'status', width: 12 }
+        ];
+
+        // Título + subtítulo (linhas 1 e 2), cabeçalho de verdade na linha 4
+        wsGeral.mergeCells(1, 1, 1, colunasGeral.length);
+        const tituloCel = wsGeral.getCell(1, 1);
+        tituloCel.value = 'Extrato Financeiro — Grupo Soul';
+        tituloCel.font = { bold: true, size: 14, color: { argb: CORES.tituloTexto } };
+
+        wsGeral.mergeCells(2, 1, 2, colunasGeral.length);
+        const subCel = wsGeral.getCell(2, 1);
+        subCel.value = `${nomeEmpresa}  ·  Gerado em ${carimbo}  ·  ${dados.length} registro(s)`;
+        subCel.font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } };
+
+        wsGeral.getRow(4).values = colunasGeral.map(c => c.header);
+        wsGeral.columns = colunasGeral.map(c => ({ key: c.key, width: c.width }));
+        const linhaCabecalho = wsGeral.getRow(4);
+        linhaCabecalho.eachCell(cell => {
+            cell.font = { bold: true, color: { argb: CORES.cabecalhoTexto } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.cabecalho } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { bottom: { style: 'thin', color: { argb: CORES.borda } } };
+        });
+        linhaCabecalho.height = 20;
+        wsGeral.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: colunasGeral.length } };
+
+        dados.forEach((l, idx) => {
+            const sit = window.situacaoLancamento(l);
+            const linha = wsGeral.addRow({
+                venc: window.formatarDataBr(l.data_vencimento || l.data_pagamento),
+                pago: l.data_pagamento ? window.formatarDataBr(l.data_pagamento) : '',
+                sit: sit.rotulo,
+                unid: l._nomeUnidade || '',
+                tipo: l.tipo || '',
+                cat: l.categoria || '',
+                forn: l.fornecedor_nome || '',
+                desc: l.descricao || '',
+                ref: l.mes_referencia || '',
+                parc: `${l.parcela_atual || 1}/${l.total_parcelas || 1}`,
+                valor: Number(l.valor_parcela || 0),
+                juros: Number(l.juros || 0),
+                status: l.status || 'Pendente'
+            });
+            const linhaPar = (idx % 2 === 1);
+            linha.eachCell((cell, colNum) => {
+                if (linhaPar) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.zebra } };
+                cell.border = { bottom: { style: 'hair', color: { argb: CORES.borda } } };
+                if (colNum === 11 || colNum === 12) cell.numFmt = '"R$" #,##0.00'; // Valor / Juros
+            });
+            const celSit = linha.getCell(3);
+            celSit.font = { bold: true, color: { argb: corSituacao(sit.codigo) } };
+        });
+
+        // ================= ABA 2: POR UNIDADE =================
+        const wsUnid = wb.addWorksheet('Por Unidade', { views: [{ state: 'frozen', ySplit: 4 }] });
+        const colunasUnid = [
+            { header: 'Unidade', width: 28 },
+            { header: 'Qtd. Lançamentos', width: 16 },
+            { header: 'Receitas', width: 16 },
+            { header: 'Despesas Pagas', width: 16 },
+            { header: 'Despesas a Pagar', width: 16 },
+            { header: 'Juros Pagos', width: 14 },
+            { header: 'Saldo (Receita - Desp. Paga)', width: 20 }
+        ];
+
+        wsUnid.mergeCells(1, 1, 1, colunasUnid.length);
+        const tituloUnidCel = wsUnid.getCell(1, 1);
+        tituloUnidCel.value = 'Resumo Financeiro por Unidade — Grupo Soul';
+        tituloUnidCel.font = { bold: true, size: 14, color: { argb: CORES.tituloTexto } };
+
+        wsUnid.mergeCells(2, 1, 2, colunasUnid.length);
+        const subUnidCel = wsUnid.getCell(2, 1);
+        subUnidCel.value = `${nomeEmpresa}  ·  Gerado em ${carimbo}  ·  Respeitando os mesmos filtros da tela`;
+        subUnidCel.font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } };
+
+        wsUnid.getRow(4).values = colunasUnid.map(c => c.header);
+        wsUnid.columns = colunasUnid.map(c => ({ width: c.width }));
+        const cabecalhoUnid = wsUnid.getRow(4);
+        cabecalhoUnid.eachCell(cell => {
+            cell.font = { bold: true, color: { argb: CORES.cabecalhoTexto } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.cabecalho } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { bottom: { style: 'thin', color: { argb: CORES.borda } } };
+        });
+        cabecalhoUnid.height = 20;
+        wsUnid.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: colunasUnid.length } };
+
+        // Agrupa os MESMOS dados já filtrados na tela, por unidade
+        const porUnidade = {};
+        dados.forEach(l => {
+            const nome = l._nomeUnidade || 'Sem unidade';
+            if (!porUnidade[nome]) porUnidade[nome] = { qtd: 0, receita: 0, despesaPaga: 0, despesaAPagar: 0, juros: 0 };
+            const u = porUnidade[nome];
+            u.qtd++;
+            if (l.tipo === 'Receita') {
+                u.receita += Number(l.valor_parcela || 0);
+            } else if (l.tipo === 'Despesa') {
+                if ((l.status || 'Pendente') === 'Pago') {
+                    u.despesaPaga += Number(l.valor_parcela || 0);
+                    u.juros += Number(l.juros || 0);
+                } else {
+                    u.despesaAPagar += Number(l.valor_parcela || 0);
+                }
+            }
+        });
+
+        const totais = { qtd: 0, receita: 0, despesaPaga: 0, despesaAPagar: 0, juros: 0 };
+        Object.keys(porUnidade).sort((a, b) => a.localeCompare(b, 'pt-BR')).forEach((nome, idx) => {
+            const u = porUnidade[nome];
+            totais.qtd += u.qtd; totais.receita += u.receita; totais.despesaPaga += u.despesaPaga;
+            totais.despesaAPagar += u.despesaAPagar; totais.juros += u.juros;
+
+            const linha = wsUnid.addRow([nome, u.qtd, u.receita, u.despesaPaga, u.despesaAPagar, u.juros, u.receita - u.despesaPaga]);
+            const linhaPar = (idx % 2 === 1);
+            linha.eachCell((cell, colNum) => {
+                if (linhaPar) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.zebra } };
+                cell.border = { bottom: { style: 'hair', color: { argb: CORES.borda } } };
+                if (colNum >= 3) cell.numFmt = '"R$" #,##0.00';
+            });
+        });
+
+        // Linha de total geral, destacada
+        const linhaTotal = wsUnid.addRow(['TOTAL GERAL', totais.qtd, totais.receita, totais.despesaPaga, totais.despesaAPagar, totais.juros, totais.receita - totais.despesaPaga]);
+        linhaTotal.eachCell((cell, colNum) => {
+            cell.font = { bold: true, color: { argb: 'FF000000' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE9A8' } };
+            cell.border = { top: { style: 'thin', color: { argb: CORES.borda } } };
+            if (colNum >= 3) cell.numFmt = '"R$" #,##0.00';
+        });
+
+        const buffer = await wb.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `extrato_financeiro_${new Date().toISOString().substring(0, 10)}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+
+        mostrarAlerta(`Excel gerado com ${dados.length} registro(s) em 2 abas (Geral + Por Unidade).`, 'sucesso');
+    } catch (err) {
+        mostrarAlerta('Erro ao exportar Excel: ' + err.message, 'erro');
+    }
 };
 
 
