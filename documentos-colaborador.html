@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Documentos do Colaborador</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
     * { box-sizing: border-box; }
     body {
@@ -98,6 +97,27 @@
         font-size: 0.82rem; z-index: 200000; box-shadow: 0 8px 20px rgba(0,0,0,0.3);
         max-width: 90vw; text-align: center;
     }
+
+    .pin-box { text-align: center; padding: 10px 4px 4px; }
+    .pin-box i.fa-lock { font-size: 1.8rem; color: #0f5c46; margin-bottom: 10px; display: block; }
+    .pin-box p { font-size: 0.85rem; color: #475569; margin: 0 0 18px; line-height: 1.5; }
+    .pin-input {
+        width: 140px; margin: 0 auto 14px; display: block;
+        font-size: 1.6rem; letter-spacing: 10px; text-align: center;
+        padding: 10px 0 10px 10px; border-radius: 10px; border: 1px solid #cbd5e1;
+        font-family: inherit; font-weight: 700; color: #0f172a;
+    }
+    .pin-input:focus { outline: none; border-color: #0f5c46; }
+    .btn-pin-entrar {
+        width: 100%; padding: 13px; border-radius: 10px; border: none;
+        background: #0f5c46; color: #fff; font-weight: 700; font-size: 0.9rem;
+        cursor: pointer; font-family: inherit;
+    }
+    .btn-pin-entrar:disabled { opacity: 0.6; cursor: default; }
+    .pin-erro {
+        margin-top: 12px; font-size: 0.8rem; color: #b91c1c; background: rgba(220,38,38,0.08);
+        border: 1px solid rgba(220,38,38,0.3); border-radius: 8px; padding: 8px 10px; display: none;
+    }
 </style>
 </head>
 <body>
@@ -108,7 +128,13 @@
             <p>Documentos do Colaborador</p>
         </div>
         <div class="corpo" id="corpo-conteudo">
-            <div class="estado"><i class="fa-solid fa-spinner fa-spin"></i>Buscando os documentos…</div>
+            <div class="pin-box" id="tela-pin">
+                <i class="fa-solid fa-lock"></i>
+                <p>Por segurança, digite os <b>4 últimos dígitos do CPF</b> do colaborador pra ver os documentos.</p>
+                <input type="tel" inputmode="numeric" maxlength="4" class="pin-input" id="input-pin" placeholder="••••" autocomplete="off">
+                <button class="btn-pin-entrar" id="btn-pin-entrar" onclick="tentarAcesso()"><i class="fa-solid fa-unlock"></i> Acessar Documentos</button>
+                <div class="pin-erro" id="pin-erro"></div>
+            </div>
         </div>
     </div>
     <div class="rodape">Grupo Soul · Acesso via etiqueta/QR gerada pelo RH</div>
@@ -116,7 +142,7 @@
 <script>
     const SUPABASE_URL = 'https://kefvwdxebzgedugqeimz.supabase.co';
     const SUPABASE_ANON_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
-    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const URL_FUNCAO_DOCUMENTOS = SUPABASE_URL + '/functions/v1/documentos-colaborador-publico';
 
     // Mesmos rótulos usados no cadastro de admissão (index.html / CONFIG_ANEXOS_ADMISSAO),
     // copiados aqui só pra exibir nome bonito em vez do id cru (ex: "rg" -> "RG (Frente e Verso)").
@@ -178,9 +204,11 @@
         if (m) m.remove();
     }
 
-    // Caches em memória (equivalentes aos globais window.dadosAvulsosAtuais / window.dadosEpiAtuais do painel admin)
+    // Caches em memória, preenchidos depois que o PIN é validado pela Edge Function
+    // (equivalentes aos globais window.dadosAvulsosAtuais / window.dadosEpiAtuais do painel admin)
     window.dadosAvulsosAtuais = [];
     window.dadosEpiAtuais = [];
+    window.dadosDesempenhoAtuais = [];
     window.colabAtualCompleto = null;
 
     function logoParaEmpresa(empresa) {
@@ -386,7 +414,7 @@
     window.visualizarDesempenhoMontado = async function(idAval) {
         mostrarAviso("Montando documento seguro...");
 
-        const { data: des } = await supabaseClient.from('avaliacoes_desempenho').select('*').eq('id', idAval).single();
+        const des = (window.dadosDesempenhoAtuais || []).find(d => String(d.id) === String(idAval));
         if (!des) return mostrarAviso("Avaliação não encontrada.");
 
         let pontosMelhorarTexto = des.pontos_melhorar || '';
@@ -743,194 +771,233 @@
         </button>`;
     }
 
-    (async function carregar() {
-        const params = new URLSearchParams(window.location.search);
-        const id = params.get('id');
-        const corpo = document.getElementById('corpo-conteudo');
-        const titulo = document.getElementById('titulo-nome');
+    // =========================================================
+    // FLUXO: token na URL -> PIN (4 últimos dígitos do CPF) -> Edge Function
+    // -----------------------------------------------------------------------
+    // Nada de sensível é buscado/baixado antes do PIN ser conferido. Quem
+    // valida o PIN é a Edge Function (documentos-colaborador-publico), que
+    // roda no servidor com a chave de serviço — o CPF completo nunca chega
+    // no navegador, só o resultado depois de validado.
+    // =========================================================
+    let tokenAtual = '';
 
-        if (!id) {
+    (function init() {
+        const params = new URLSearchParams(window.location.search);
+        tokenAtual = params.get('token') || '';
+        const titulo = document.getElementById('titulo-nome');
+        const corpo = document.getElementById('corpo-conteudo');
+
+        if (!tokenAtual) {
             titulo.textContent = 'Link inválido';
             corpo.innerHTML = '<div class="estado"><i class="fa-solid fa-triangle-exclamation"></i>Nenhum colaborador informado no link.</div>';
             return;
         }
 
-        try {
-            const { data: colab, error } = await supabaseClient
-                .from('perfis')
-                .select('id, nome, unidade, empresa, dados_admissao, dados_rescisao')
-                .eq('id', id)
-                .maybeSingle();
+        const input = document.getElementById('input-pin');
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') tentarAcesso(); });
+        input.focus();
+    })();
 
-            if (error) throw error;
-            if (!colab) {
-                titulo.textContent = 'Não encontrado';
-                corpo.innerHTML = '<div class="estado"><i class="fa-solid fa-user-slash"></i>Não encontramos esse colaborador.</div>';
+    window.tentarAcesso = async function() {
+        const input = document.getElementById('input-pin');
+        const btn = document.getElementById('btn-pin-entrar');
+        const erroBox = document.getElementById('pin-erro');
+        const titulo = document.getElementById('titulo-nome');
+        const corpo = document.getElementById('corpo-conteudo');
+        const pin = (input.value || '').replace(/\D/g, '');
+
+        erroBox.style.display = 'none';
+
+        if (pin.length !== 4) {
+            erroBox.textContent = 'Digite os 4 dígitos do PIN.';
+            erroBox.style.display = 'block';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verificando...';
+
+        try {
+            const resp = await fetch(URL_FUNCAO_DOCUMENTOS, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': SUPABASE_ANON_KEY,
+                    'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                },
+                body: JSON.stringify({ token: tokenAtual, pin }),
+            });
+            const dados = await resp.json();
+
+            if (!resp.ok) {
+                erroBox.textContent = dados.erro || 'Não foi possível validar o PIN.';
+                erroBox.style.display = 'block';
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-unlock"></i> Acessar Documentos';
+                input.value = '';
+                input.focus();
                 return;
             }
 
-            window.colabAtualCompleto = colab;
-
-            if (colab.empresa && colab.empresa.trim().toUpperCase().includes('VILLAC')) {
-                document.getElementById('logo-empresa').src = logoParaEmpresa(colab.empresa);
-            }
-
-            const adm = colab.dados_admissao || {};
-            titulo.textContent = colab.nome || 'Colaborador';
-
-            let html = `
-                <div class="info-linha">CPF: <b>${mascaraCPF(adm.cpf)}</b></div>
-                <div class="info-linha">Unidade: <b>${colab.unidade || '-'}</b></div>
-                <div class="info-linha">Função: <b>${adm.cargo || '-'}</b></div>
-            `;
-
-            // Busca em paralelo os demais módulos do Arquivo Digital
-            const [resAus, resAdv, resAlt, resPonto, resEPI, resDesempenho, resAvulsos] = await Promise.all([
-                supabaseClient.from('ausencias').select('id, motivo, data_inicio, documento').eq('colaborador_id', id).not('documento', 'is', null),
-                supabaseClient.from('advertencias').select('motivo, evidencias, carta_rh, documento_assinado, created_at').eq('colaborador_id', id),
-                supabaseClient.from('solicitacoes_alteracao').select('*').eq('colaborador_id', id).not('anexo', 'is', null),
-                supabaseClient.from('ocorrencias_ponto').select('data_falha, doc_rh, doc_colaborador').eq('colaborador_id', id),
-                supabaseClient.from('recibos_epi').select('*').eq('colaborador_id', id).eq('status', 'Assinado'),
-                supabaseClient.from('avaliacoes_desempenho').select('*').eq('colaborador_id', id).in('status', ['Aprovado', 'Alerta_RH', 'Concluído']),
-                supabaseClient.from('documentos_avulsos').select('*').eq('colaborador_id', id).eq('status', 'Assinado')
-            ]);
-
-            window.dadosAvulsosAtuais = resAvulsos.data || [];
-            window.dadosEpiAtuais = resEPI.data || [];
-
-            let temAlgumDocumento = false;
-
-            // 1. ADMISSÃO
-            let htmlAdm = '';
-            let qtdAdm = 0;
-            if (adm.documento_consolidado_url) {
-                htmlAdm += `<a href="${adm.documento_consolidado_url}" target="_blank" class="doc-link destaque"><span><i class="fa-solid fa-file-zipper"></i> Baixar Tudo em 1 PDF</span><i class="fa-solid fa-download"></i></a>`;
-                qtdAdm++; temAlgumDocumento = true;
-            }
-            if (adm.documentosDetalhados && Object.keys(adm.documentosDetalhados).length > 0) {
-                Object.keys(adm.documentosDetalhados).forEach((tipoId) => {
-                    const urls = adm.documentosDetalhados[tipoId] || [];
-                    if (tipoId === 'foto-cracha') return;
-                    urls.forEach((url, i) => {
-                        const sufixo = urls.length > 1 ? ` (${i + 1}/${urls.length})` : '';
-                        htmlAdm += linkDoc(url, labelDoc(tipoId) + sufixo, '#28a745');
-                        qtdAdm++; temAlgumDocumento = true;
-                    });
-                });
-            } else if (adm.documentos && adm.documentos.length > 0) {
-                adm.documentos.forEach((url, i) => {
-                    htmlAdm += linkDoc(url, 'Documento ' + (i + 1), '#28a745');
-                    qtdAdm++; temAlgumDocumento = true;
-                });
-            }
-            html += criarCaixaPasta('Admissão e Contratos', 'fa-folder-open', '#28a745', htmlAdm, qtdAdm);
-
-            // 2. RESCISÃO
-            let htmlResc = '';
-            let qtdResc = 0;
-            const r = colab.dados_rescisao;
-            if (r) {
-                if (r.documentos) r.documentos.forEach((lnk, i) => { htmlResc += linkDoc(lnk, 'Doc Gestor ' + (i + 1), '#dc3545'); qtdResc++; temAlgumDocumento = true; });
-                if (r.doc_gerado_rh) {
-                    if (r.doc_gerado_rh === 'GERADO_SISTEMA') {
-                        htmlResc += botaoDoc("abrirModalAvisoPrevio()", 'Termo RH (Visualizar/Imprimir)', 'fa-print', '#4fc3f7');
-                    } else {
-                        htmlResc += linkDoc(r.doc_gerado_rh, 'Termo RH', '#4fc3f7');
-                    }
-                    qtdResc++; temAlgumDocumento = true;
-                }
-                if (r.doc_assinado) { htmlResc += linkDoc(r.doc_assinado, 'Termo Assinado', '#28a745'); qtdResc++; temAlgumDocumento = true; }
-            }
-            html += criarCaixaPasta('Rescisão / Desligamento', 'fa-user-slash', '#dc3545', htmlResc, qtdResc);
-
-            // 3. ATESTADOS
-            let htmlAus = '';
-            const aus = resAus.data || [];
-            aus.forEach(a => { htmlAus += linkDoc(a.documento, `${formatarDataBR(a.data_inicio)} - ${a.motivo}`, '#ff9800'); temAlgumDocumento = true; });
-            html += criarCaixaPasta('Atestados e Licenças', 'fa-user-clock', '#ff9800', htmlAus, aus.length);
-
-            // 4. MEDIDAS DISCIPLINARES
-            let htmlAdv = '';
-            let qtdAdv = 0;
-            const adv = resAdv.data || [];
-            adv.forEach(a => {
-                const dataFormat = a.created_at ? formatarDataBR(a.created_at.split('T')[0]) : 'Data não informada';
-                let links = '';
-                if (a.evidencias) a.evidencias.forEach((e, i) => links += `<a href="${e}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#f1f5f9; color:#334155; font-size:0.78rem;"><i class="fa-solid fa-paperclip"></i> Evidência ${i + 1}</a>`);
-                if (a.carta_rh) links += `<a href="${a.carta_rh}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#e0f2fe; color:#0369a1; font-size:0.78rem;"><i class="fa-solid fa-file-export"></i> Carta RH</a>`;
-                if (a.documento_assinado) links += `<a href="${a.documento_assinado}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#dcfce7; color:#15803d; font-size:0.78rem;"><i class="fa-solid fa-check-double"></i> Assinada</a>`;
-                if (links) { htmlAdv += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#b45309; font-size:0.78rem; display:block; margin-bottom:5px;">Data: ${dataFormat}</strong>${links}</div>`; qtdAdv++; temAlgumDocumento = true; }
-            });
-            html += criarCaixaPasta('Medidas Disciplinares', 'fa-gavel', '#b45309', htmlAdv, qtdAdv);
-
-            // 5. ALTERAÇÕES CADASTRAIS
-            let htmlAlt = '';
-            const alt = resAlt.data || [];
-            alt.forEach(a => {
-                const dataFormatAlt = a.created_at ? formatarDataBR(a.created_at.split('T')[0]) : 'Data não informada';
-                htmlAlt += linkDoc(a.anexo, 'Alteração de ' + dataFormatAlt, '#20c997');
-                temAlgumDocumento = true;
-            });
-            html += criarCaixaPasta('Alterações Cadastrais', 'fa-user-pen', '#20c997', htmlAlt, alt.length);
-
-            // 6. JUSTIFICATIVAS DE PONTO
-            let htmlPonto = '';
-            let qtdPonto = 0;
-            const ponto = resPonto.data || [];
-            ponto.forEach(o => {
-                let l = '';
-                if (o.doc_rh) l += `<a href="${o.doc_rh}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#f1f5f9; color:#334155; font-size:0.78rem;"><i class="fa-solid fa-file-pdf"></i> Espelho RH</a>`;
-                if (o.doc_colaborador) l += `<a href="${o.doc_colaborador}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#e0f2fe; color:#0369a1; font-size:0.78rem;"><i class="fa-solid fa-file-signature"></i> Justificativa Colaborador</a>`;
-                if (l) { htmlPonto += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#475569; font-size:0.78rem; display:block; margin-bottom:5px;">Data da Falha: ${formatarDataBR(o.data_falha)}</strong>${l}</div>`; qtdPonto++; temAlgumDocumento = true; }
-            });
-            html += criarCaixaPasta('Justificativas de Ponto', 'fa-clock', '#64748b', htmlPonto, qtdPonto);
-
-            // 7. RECIBOS DE EPI
-            let htmlEPI = '';
-            const epis = (resEPI.data || []).slice().sort((a, b) => new Date(b.assinado_em) - new Date(a.assinado_em));
-            epis.forEach(epi => {
-                const dataAssinado = new Date(epi.assinado_em).toLocaleDateString('pt-BR');
-                htmlEPI += botaoDoc(`visualizarReciboEPIMontado('${epi.id}')`, `Recibo EPI - ${epi.mes_ano} <small>(${dataAssinado})</small>`, 'fa-file-signature', '#00bcd4');
-                temAlgumDocumento = true;
-            });
-            html += criarCaixaPasta('Recibos de EPI (Assinados)', 'fa-helmet-safety', '#00bcd4', htmlEPI, epis.length);
-
-            // 8. AVALIAÇÕES DE DESEMPENHO
-            let htmlDesempenho = '';
-            let qtdDesempenho = 0;
-            const avals = (resDesempenho.data || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            avals.forEach(d => {
-                const dataFormat = new Date(d.created_at).toLocaleDateString('pt-BR');
-                let links = '';
-                if (d.documento) links += botaoDoc(`visualizarDesempenhoMontado('${d.id}')`, 'Ver Avaliação Completa', 'fa-file-invoice', '#00bcd4');
-                if (d.documento_assinado) links += linkDoc(d.documento_assinado, 'Termo Assinado', '#28a745');
-                if (links) { htmlDesempenho += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#00bcd4; font-size:0.78rem; display:block; margin-bottom:5px;">Ciclo: ${dataFormat}</strong>${links}</div>`; qtdDesempenho++; temAlgumDocumento = true; }
-            });
-            html += criarCaixaPasta('Avaliações de Desempenho', 'fa-chart-line', '#00bcd4', htmlDesempenho, qtdDesempenho);
-
-            // 9. TERMOS AVULSOS
-            let htmlAvulsos = '';
-            const avulsos = (resAvulsos.data || []).slice().sort((a, b) => new Date(b.created_at || b.criado_em) - new Date(a.created_at || a.criado_em));
-            avulsos.forEach(doc => {
-                const dataAssinado = new Date(doc.assinado_em || doc.created_at || doc.criado_em).toLocaleDateString('pt-BR');
-                htmlAvulsos += botaoDoc(`visualizarDocumentoAvulsoMontado('${doc.id}')`, `${doc.titulo_documento || doc.titulo} (${dataAssinado})`, 'fa-file-signature', '#25D366');
-                temAlgumDocumento = true;
-            });
-            html += criarCaixaPasta('Termos Avulsos (Assinados via WhatsApp)', 'fa-file-contract', '#25D366', htmlAvulsos, avulsos.length);
-
-            html += `<div class="aviso-topo"><i class="fa-solid fa-lock"></i> Acesso restrito via etiqueta/QR gerada pelo RH. Cada pasta pode ser aberta clicando em cima dela.</div>`;
-
-            if (!temAlgumDocumento) {
-                html += '<div class="estado" style="padding:20px 0 0;"><i class="fa-solid fa-folder-open"></i>Nenhum documento encontrado nas pastas acima ainda.</div>';
-            }
-
-            corpo.innerHTML = html;
+            titulo.textContent = dados.colaborador?.nome || 'Colaborador';
+            montarDocumentos(dados);
 
         } catch (e) {
-            titulo.textContent = 'Erro ao carregar';
-            corpo.innerHTML = `<div class="estado"><i class="fa-solid fa-circle-exclamation"></i>Não foi possível carregar os documentos.<br><small>${e.message || ''}</small></div>`;
+            erroBox.textContent = 'Erro de conexão. Tente novamente.';
+            erroBox.style.display = 'block';
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-unlock"></i> Acessar Documentos';
         }
-    })();
+    };
+
+    function montarDocumentos(dados) {
+        const corpo = document.getElementById('corpo-conteudo');
+        const colab = dados.colaborador || {};
+        window.colabAtualCompleto = colab;
+        window.dadosAvulsosAtuais = dados.documentosAvulsos || [];
+        window.dadosEpiAtuais = dados.recibosEpi || [];
+        window.dadosDesempenhoAtuais = dados.avaliacoesDesempenho || [];
+
+        if (colab.empresa && colab.empresa.trim().toUpperCase().includes('VILLAC')) {
+            document.getElementById('logo-empresa').src = logoParaEmpresa(colab.empresa);
+        }
+
+        const adm = colab.dados_admissao || {};
+
+        let html = `
+            <div class="info-linha">CPF: <b>${mascaraCPF(adm.cpf)}</b></div>
+            <div class="info-linha">Unidade: <b>${colab.unidade || '-'}</b></div>
+            <div class="info-linha">Função: <b>${adm.cargo || '-'}</b></div>
+        `;
+
+        let temAlgumDocumento = false;
+
+        // 1. ADMISSÃO
+        let htmlAdm = '';
+        let qtdAdm = 0;
+        if (adm.documento_consolidado_url) {
+            htmlAdm += `<a href="${adm.documento_consolidado_url}" target="_blank" class="doc-link destaque"><span><i class="fa-solid fa-file-zipper"></i> Baixar Tudo em 1 PDF</span><i class="fa-solid fa-download"></i></a>`;
+            qtdAdm++; temAlgumDocumento = true;
+        }
+        if (adm.documentosDetalhados && Object.keys(adm.documentosDetalhados).length > 0) {
+            Object.keys(adm.documentosDetalhados).forEach((tipoId) => {
+                const urls = adm.documentosDetalhados[tipoId] || [];
+                if (tipoId === 'foto-cracha') return;
+                urls.forEach((url, i) => {
+                    const sufixo = urls.length > 1 ? ` (${i + 1}/${urls.length})` : '';
+                    htmlAdm += linkDoc(url, labelDoc(tipoId) + sufixo, '#28a745');
+                    qtdAdm++; temAlgumDocumento = true;
+                });
+            });
+        } else if (adm.documentos && adm.documentos.length > 0) {
+            adm.documentos.forEach((url, i) => {
+                htmlAdm += linkDoc(url, 'Documento ' + (i + 1), '#28a745');
+                qtdAdm++; temAlgumDocumento = true;
+            });
+        }
+        html += criarCaixaPasta('Admissão e Contratos', 'fa-folder-open', '#28a745', htmlAdm, qtdAdm);
+
+        // 2. RESCISÃO
+        let htmlResc = '';
+        let qtdResc = 0;
+        const r = colab.dados_rescisao;
+        if (r) {
+            if (r.documentos) r.documentos.forEach((lnk, i) => { htmlResc += linkDoc(lnk, 'Doc Gestor ' + (i + 1), '#dc3545'); qtdResc++; temAlgumDocumento = true; });
+            if (r.doc_gerado_rh) {
+                if (r.doc_gerado_rh === 'GERADO_SISTEMA') {
+                    htmlResc += botaoDoc("abrirModalAvisoPrevio()", 'Termo RH (Visualizar/Imprimir)', 'fa-print', '#4fc3f7');
+                } else {
+                    htmlResc += linkDoc(r.doc_gerado_rh, 'Termo RH', '#4fc3f7');
+                }
+                qtdResc++; temAlgumDocumento = true;
+            }
+            if (r.doc_assinado) { htmlResc += linkDoc(r.doc_assinado, 'Termo Assinado', '#28a745'); qtdResc++; temAlgumDocumento = true; }
+        }
+        html += criarCaixaPasta('Rescisão / Desligamento', 'fa-user-slash', '#dc3545', htmlResc, qtdResc);
+
+        // 3. ATESTADOS
+        let htmlAus = '';
+        const aus = dados.ausencias || [];
+        aus.forEach(a => { htmlAus += linkDoc(a.documento, `${formatarDataBR(a.data_inicio)} - ${a.motivo}`, '#ff9800'); temAlgumDocumento = true; });
+        html += criarCaixaPasta('Atestados e Licenças', 'fa-user-clock', '#ff9800', htmlAus, aus.length);
+
+        // 4. MEDIDAS DISCIPLINARES
+        let htmlAdv = '';
+        let qtdAdv = 0;
+        const adv = dados.advertencias || [];
+        adv.forEach(a => {
+            const dataFormat = a.created_at ? formatarDataBR(a.created_at.split('T')[0]) : 'Data não informada';
+            let links = '';
+            if (a.evidencias) a.evidencias.forEach((e, i) => links += `<a href="${e}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#f1f5f9; color:#334155; font-size:0.78rem;"><i class="fa-solid fa-paperclip"></i> Evidência ${i + 1}</a>`);
+            if (a.carta_rh) links += `<a href="${a.carta_rh}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#e0f2fe; color:#0369a1; font-size:0.78rem;"><i class="fa-solid fa-file-export"></i> Carta RH</a>`;
+            if (a.documento_assinado) links += `<a href="${a.documento_assinado}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#dcfce7; color:#15803d; font-size:0.78rem;"><i class="fa-solid fa-check-double"></i> Assinada</a>`;
+            if (links) { htmlAdv += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#b45309; font-size:0.78rem; display:block; margin-bottom:5px;">Data: ${dataFormat}</strong>${links}</div>`; qtdAdv++; temAlgumDocumento = true; }
+        });
+        html += criarCaixaPasta('Medidas Disciplinares', 'fa-gavel', '#b45309', htmlAdv, qtdAdv);
+
+        // 5. ALTERAÇÕES CADASTRAIS
+        let htmlAlt = '';
+        const alt = dados.alteracoes || [];
+        alt.forEach(a => {
+            const dataFormatAlt = a.created_at ? formatarDataBR(a.created_at.split('T')[0]) : 'Data não informada';
+            htmlAlt += linkDoc(a.anexo, 'Alteração de ' + dataFormatAlt, '#20c997');
+            temAlgumDocumento = true;
+        });
+        html += criarCaixaPasta('Alterações Cadastrais', 'fa-user-pen', '#20c997', htmlAlt, alt.length);
+
+        // 6. JUSTIFICATIVAS DE PONTO
+        let htmlPonto = '';
+        let qtdPonto = 0;
+        const ponto = dados.ocorrenciasPonto || [];
+        ponto.forEach(o => {
+            let l = '';
+            if (o.doc_rh) l += `<a href="${o.doc_rh}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#f1f5f9; color:#334155; font-size:0.78rem;"><i class="fa-solid fa-file-pdf"></i> Espelho RH</a>`;
+            if (o.doc_colaborador) l += `<a href="${o.doc_colaborador}" target="_blank" style="display:inline-block; margin:0 6px 6px 0; text-decoration:none; padding:5px 9px; border-radius:6px; background:#e0f2fe; color:#0369a1; font-size:0.78rem;"><i class="fa-solid fa-file-signature"></i> Justificativa Colaborador</a>`;
+            if (l) { htmlPonto += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#475569; font-size:0.78rem; display:block; margin-bottom:5px;">Data da Falha: ${formatarDataBR(o.data_falha)}</strong>${l}</div>`; qtdPonto++; temAlgumDocumento = true; }
+        });
+        html += criarCaixaPasta('Justificativas de Ponto', 'fa-clock', '#64748b', htmlPonto, qtdPonto);
+
+        // 7. RECIBOS DE EPI
+        let htmlEPI = '';
+        const epis = (dados.recibosEpi || []).slice().sort((a, b) => new Date(b.assinado_em) - new Date(a.assinado_em));
+        epis.forEach(epi => {
+            const dataAssinado = new Date(epi.assinado_em).toLocaleDateString('pt-BR');
+            htmlEPI += botaoDoc(`visualizarReciboEPIMontado('${epi.id}')`, `Recibo EPI - ${epi.mes_ano} <small>(${dataAssinado})</small>`, 'fa-file-signature', '#00bcd4');
+            temAlgumDocumento = true;
+        });
+        html += criarCaixaPasta('Recibos de EPI (Assinados)', 'fa-helmet-safety', '#00bcd4', htmlEPI, epis.length);
+
+        // 8. AVALIAÇÕES DE DESEMPENHO
+        let htmlDesempenho = '';
+        let qtdDesempenho = 0;
+        const avals = (dados.avaliacoesDesempenho || []).slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        avals.forEach(d => {
+            const dataFormat = new Date(d.created_at).toLocaleDateString('pt-BR');
+            let links = '';
+            if (d.documento) links += botaoDoc(`visualizarDesempenhoMontado('${d.id}')`, 'Ver Avaliação Completa', 'fa-file-invoice', '#00bcd4');
+            if (d.documento_assinado) links += linkDoc(d.documento_assinado, 'Termo Assinado', '#28a745');
+            if (links) { htmlDesempenho += `<div style="margin-bottom:10px; padding:10px; background:#f8fafc; border-radius:8px;"><strong style="color:#00bcd4; font-size:0.78rem; display:block; margin-bottom:5px;">Ciclo: ${dataFormat}</strong>${links}</div>`; qtdDesempenho++; temAlgumDocumento = true; }
+        });
+        html += criarCaixaPasta('Avaliações de Desempenho', 'fa-chart-line', '#00bcd4', htmlDesempenho, qtdDesempenho);
+
+        // 9. TERMOS AVULSOS
+        let htmlAvulsos = '';
+        const avulsos = (dados.documentosAvulsos || []).slice().sort((a, b) => new Date(b.created_at || b.criado_em) - new Date(a.created_at || a.criado_em));
+        avulsos.forEach(doc => {
+            const dataAssinado = new Date(doc.assinado_em || doc.created_at || doc.criado_em).toLocaleDateString('pt-BR');
+            htmlAvulsos += botaoDoc(`visualizarDocumentoAvulsoMontado('${doc.id}')`, `${doc.titulo_documento || doc.titulo} (${dataAssinado})`, 'fa-file-signature', '#25D366');
+            temAlgumDocumento = true;
+        });
+        html += criarCaixaPasta('Termos Avulsos (Assinados via WhatsApp)', 'fa-file-contract', '#25D366', htmlAvulsos, avulsos.length);
+
+        html += `<div class="aviso-topo"><i class="fa-solid fa-lock"></i> Acesso restrito via etiqueta/QR gerada pelo RH. Cada pasta pode ser aberta clicando em cima dela.</div>`;
+
+        if (!temAlgumDocumento) {
+            html += '<div class="estado" style="padding:20px 0 0;"><i class="fa-solid fa-folder-open"></i>Nenhum documento encontrado nas pastas acima ainda.</div>';
+        }
+
+        corpo.innerHTML = html;
+    }
 </script>
 </body>
 </html>
