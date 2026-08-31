@@ -56030,14 +56030,35 @@ window.carregarAsoAdmin = async function() {
         
         const { data: colabs, error: errColabs } = await query;
         if (errColabs) throw errColabs;
-        
+
         todosColabsAsoGeral = colabs || [];
 
         // 2. Busca regras das Clínicas
         const { data: configs, error: errConfigs } = await supabaseClient.from('config_aso').select('*');
         if (errConfigs) throw errConfigs;
-        
+
         configsAsoGlobais = configs || [];
+
+        // 👇 NOVO: Busca quem está de férias/afastado, pra avisar direto no card
+        // (o aviso do RH já tira essas pessoas da contagem de pendências — mas
+        // quando o RH abre o card pra olhar de perto, antes não tinha como saber
+        // POR QUE aquele "vencido" não estava contando: agora mostra ali mesmo).
+        const hojeObjAso = new Date(); hojeObjAso.setHours(0, 0, 0, 0);
+        const dCarenciaAso = new Date(hojeObjAso); dCarenciaAso.setDate(dCarenciaAso.getDate() - 5);
+        const dataCarenciaAsoIso = dCarenciaAso.toISOString().split('T')[0];
+
+        const [resAusenciasAso, resFeriasAso] = await Promise.all([
+            supabaseClient.from('ausencias').select('colaborador_id, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').gte('data_fim', dataCarenciaAsoIso),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', dataCarenciaAsoIso)
+        ]);
+
+        window.mapaAfastadosAsoAdmin = {};
+        (resAusenciasAso.data || []).forEach(a => {
+            window.mapaAfastadosAsoAdmin[a.colaborador_id] = { tipo: 'Ausência/Atestado', ate: a.data_fim };
+        });
+        (resFeriasAso.data || []).forEach(f => {
+            window.mapaAfastadosAsoAdmin[f.colaborador_id] = { tipo: 'Férias', ate: f.data_fim_ferias };
+        });
 
         // Renderiza
         window.filtrarAsoAdmin();
@@ -56235,9 +56256,16 @@ window.filtrarAsoAdmin = function() {
             regra = mapaClinicas.get(`${c.unidade}_${cargo}_admissional`) || mapaClinicas.get(`${c.unidade}_${cargo}_geral`);
         }
         
-        const infoClinica = regra  
+        const infoClinica = regra
             ? `<span style="color: #00bcd4; font-size: 0.85rem;"><i class="fa-solid fa-hospital"></i> <b>${regra.clinica}</b> (${regra.tipo || 'ASO'}: R$ ${parseFloat(regra.valor).toFixed(2).replace('.',',')})</span>`
             : `<span style="color: var(--cor-perigo); font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> Clínica não configurada para ${aba.toUpperCase()}</span>`;
+
+        // 👇 NOVO: se esse colaborador está de férias/afastado, avisa aqui embaixo do
+        // card — é por isso que ele não entra na contagem de pendências do RH.
+        const infoAfastAso = (window.mapaAfastadosAsoAdmin && window.mapaAfastadosAsoAdmin[c.id]);
+        const htmlAvisoAfastAso = infoAfastAso
+            ? `<div style="margin-top: 6px;"><span class="badge" style="background: rgba(255,193,7,0.12); color: #ffc107; border: 1px solid #ffc107;" title="Enquanto estiver assim, não entra na contagem de pendências mostrada pro RH"><i class="fa-solid fa-plane-departure"></i> ${infoAfastAso.tipo}${infoAfastAso.ate ? ' até ' + formatarDataBR(infoAfastAso.ate) : ''}</span></div>`
+            : '';
 
         // --- ABA ADMISSIONAL ---
         if (aba === 'admissional') {
@@ -56336,6 +56364,7 @@ window.filtrarAsoAdmin = function() {
                         ${htmlDataInicio}
                         ${infoClinica}
                         ${htmlAvisoContrato}
+                        ${htmlAvisoAfastAso}
                     </div>
                     ${badgeSituacao}
                 </div>
@@ -56453,6 +56482,7 @@ window.filtrarAsoAdmin = function() {
                         <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${c.unidade} | <i class="fa-solid fa-user-tie"></i> ${cargo}</span><br>
                         ${infoClinica}<br>
                         ${statusPeridicoHtml}
+                        ${htmlAvisoAfastAso}
                     </div>
                     <span class="badge" style="background: ${corStatus}22; color: ${corStatus}; border: 1px solid ${corStatus};">${labelBadge}</span>
                 </div>
@@ -57551,24 +57581,56 @@ window.exportarRelatorioAso = async function() {
         const periodoTxt = mesAnoSelecionado ? mesAnoSelecionado.split('-').reverse().join('/') : 'Todos os meses';
         const dataHoje = new Date().toLocaleDateString('pt-BR');
 
-        sheet.mergeCells('A1:I1');
+        sheet.mergeCells('A1:J1');
         const titulo = sheet.getCell('A1');
         titulo.value = 'RELATÓRIO DE EXAMES ADMISSIONAIS E PERIÓDICOS (ASO)';
         titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
-        titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } }; 
+        titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
         titulo.alignment = { vertical: 'middle', horizontal: 'center' };
 
-        sheet.mergeCells('A2:I2');
+        sheet.mergeCells('A2:J2');
         const subtitulo = sheet.getCell('A2');
         subtitulo.value = `PERÍODO (VENCIMENTO / ADMISSÃO): ${periodoTxt}   |   GERADO EM: ${dataHoje}`;
         subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
-        subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }; 
+        subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
         subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+        // 👇 NOVO: o mesmo aviso que o RH vê ao logar ("X ASO Admissional sem anexar
+        // e Y ASO Periódico vencido(s)") agora também fica registrado no relatório
+        // exportado, já descontando quem está de férias/afastado (ver coluna nova).
+        const totalPendAdmissionalRel = (window.colabsAsoFiltrados || []).filter(c => {
+            const emProcX = c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+            if (emProcX) return false;
+            if (window.mapaAfastadosAsoAdmin && window.mapaAfastadosAsoAdmin[c.id]) return false;
+            return typeof window.asoAdmissionalPendente === 'function' && window.asoAdmissionalPendente(c);
+        }).length;
+        const totalPendPeriodicoRel = (window.colabsAsoFiltrados || []).filter(c => {
+            const admX = c.dados_admissao || {};
+            const emProcX = c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+            if (emProcX || c.status !== 'Ativo') return false;
+            if (window.mapaAfastadosAsoAdmin && window.mapaAfastadosAsoAdmin[c.id]) return false;
+            if (typeof window.asoAdmissionalPendente === 'function' && window.asoAdmissionalPendente(c)) return false;
+            const dataBaseAsoX = admX.data_ultimo_aso || admX.jornada?.data_inicio || admX.data_inicio;
+            if (!dataBaseAsoX) return false;
+            const dBaseX = new Date(dataBaseAsoX + 'T00:00:00');
+            const dVencX = new Date(dBaseX); dVencX.setFullYear(dVencX.getFullYear() + 1);
+            return new Date() > dVencX;
+        }).length;
+
+        sheet.mergeCells('A3:J3');
+        const linhaAvisoAso = sheet.getCell('A3');
+        linhaAvisoAso.value = (totalPendAdmissionalRel + totalPendPeriodicoRel) > 0
+            ? `⚠ ATENÇÃO RH: ${totalPendAdmissionalRel} ASO Admissional(is) sem anexar e ${totalPendPeriodicoRel} ASO Periódico(s) vencido(s) pendente(s) (não conta quem está de férias/afastado — ver coluna "AUSÊNCIA / FÉRIAS")`
+            : '✅ Sem pendências de ASO nos dados exportados (fora quem está de férias/afastado).';
+        linhaAvisoAso.font = { size: 10, bold: true, color: { argb: (totalPendAdmissionalRel + totalPendPeriodicoRel) > 0 ? 'FFDC3545' : 'FF28A745' } };
+        linhaAvisoAso.alignment = { vertical: 'middle', horizontal: 'center' };
 
         sheet.addRow([]);
 
         // 👇 A MÁGICA: Coluna de Data de Admissão + Vencimento Adicionadas! 👇
-        const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "CARGO", "DATA DE ADMISSÃO", "STATUS GERAL", "DATA DE VENCIMENTO", "CLÍNICA / EMPRESA", "CUSTO (R$)"]);
+        // 👇 NOVO: Coluna de Ausência/Férias — mostra por que aquele "vencido"/"pendente"
+        // não entra na contagem de bloqueio do gestor nem no aviso do RH.
+        const headerRow = sheet.addRow(["NOME DO COLABORADOR", "CPF", "UNIDADE", "CARGO", "DATA DE ADMISSÃO", "STATUS GERAL", "DATA DE VENCIMENTO", "CLÍNICA / EMPRESA", "CUSTO (R$)", "AUSÊNCIA / FÉRIAS"]);
         headerRow.font = { bold: true, color: { argb: 'FF000000' } };
         headerRow.height = 25;
         headerRow.eachCell((cell) => {
@@ -57580,10 +57642,10 @@ window.exportarRelatorioAso = async function() {
         // Ajuste de larguras para caber a nova coluna
         sheet.columns = [
             { width: 40 }, { width: 16 }, { width: 25 }, { width: 25 },
-            { width: 18 }, { width: 24 }, { width: 22 }, { width: 35 }, { width: 18 }
+            { width: 18 }, { width: 24 }, { width: 22 }, { width: 35 }, { width: 18 }, { width: 26 }
         ];
 
-        let currentRow = 5;
+        let currentRow = 6; // linha 3 = aviso do RH, linha 4 = vazia, linha 5 = cabeçalho, linha 6 = 1ª linha de dados
         let somaTotal = 0;
 
         // 👇 A MÁGICA: Verifica o que está escrito na Lupa de Busca! 👇
@@ -57671,12 +57733,22 @@ window.exportarRelatorioAso = async function() {
                 }
             }
 
+            // 👇 NOVO: mostra se está de férias/afastado — explica por que essa
+            // pendência não entra na contagem do aviso/bloqueio do gestor.
+            const infoAfastRelatorio = (window.mapaAfastadosAsoAdmin && window.mapaAfastadosAsoAdmin[c.id]);
+            const textoAfastRelatorio = infoAfastRelatorio
+                ? `${infoAfastRelatorio.tipo}${infoAfastRelatorio.ate ? ' até ' + formatarDataBR(infoAfastRelatorio.ate) : ''}`
+                : '-';
+
             // Manda a linha para o Excel
-            const row = sheet.addRow([c.nome, cpf, c.unidade, cargo, dataAdmissaoFormatada, statusPlanilha, dataVencimentoFormatada, clinica, valor]);
+            const row = sheet.addRow([c.nome, cpf, c.unidade, cargo, dataAdmissaoFormatada, statusPlanilha, dataVencimentoFormatada, clinica, valor, textoAfastRelatorio]);
 
             row.getCell(9).numFmt = '"R$ "#,##0.00';
-            row.getCell(9).font = { bold: true, color: { argb: 'FFDC3545' } }; 
-            
+            row.getCell(9).font = { bold: true, color: { argb: 'FFDC3545' } };
+            if (infoAfastRelatorio) {
+                row.getCell(10).font = { color: { argb: 'FFFFC107' }, bold: true };
+            }
+
             // 👇 COLORE O STATUS E A DATA DE ACORDO COM A URGÊNCIA 👇
             if (c.status === 'Aguardando ASO') {
                 row.getCell(6).font = { color: { argb: 'FF00BCD4' }, bold: true }; // Azul
@@ -57704,7 +57776,7 @@ window.exportarRelatorioAso = async function() {
         });
 
         sheet.addRow([]);
-        const totalRow = sheet.addRow(["", "", "", "", "", "", "", "CUSTO TOTAL DE EXAMES:", { formula: `SUM(I5:I${currentRow-1})`, result: somaTotal }]);
+        const totalRow = sheet.addRow(["", "", "", "", "", "", "", "CUSTO TOTAL DE EXAMES:", { formula: `SUM(I6:I${currentRow-1})`, result: somaTotal }]);
         
         totalRow.getCell(8).font = { bold: true, size: 12, color: { argb: 'FF00BCD4' } };
         totalRow.getCell(8).alignment = { horizontal: 'right' };
