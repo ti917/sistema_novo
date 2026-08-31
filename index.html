@@ -16340,6 +16340,7 @@ async function carregarPerfil(id) {
         window.carregarDashboardInicio();
         window.checarTravaContrato();
         window.checarAvisosAsoAoLogar();
+        window.checarAvisoAsoPendenteAdmin();
         window.checarTravaAsoAdmissional();
     }
 
@@ -56506,7 +56507,7 @@ window.anexarAsoDemissional = async function(idColab, nomeColab, unidadeColab, e
 
         mostrarAlerta("ASO Demissional anexado e arquivado com sucesso!", "sucesso");
         window.carregarAsoAdmin();
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
 
     } catch (err) {
         mostrarAlerta("Erro ao salvar ASO demissional: " + err.message, "erro");
@@ -56568,7 +56569,7 @@ window.anexarAsoDemissional = async function(idColab, nomeColab, unidadeColab, e
 
         mostrarAlerta("Exames anexados ao prontuário com sucesso!", "sucesso");
         window.carregarAsoAdmin();
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
 
     } catch (err) {
         mostrarAlerta("Erro ao salvar exames: " + err.message, "erro");
@@ -56634,7 +56635,7 @@ window.excluirAso = async function(idColab, indexDoc) {
             
             // Recarrega a tela para a lixeira sumir na hora
             window.carregarAsoAdmin(); 
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
         }
     } catch (err) {
         mostrarAlerta("Erro ao excluir ASO: " + err.message, "erro");
@@ -56766,7 +56767,7 @@ window.anexarEAtivarAso = async function(idColab, nomeColab, unidadeColab, empre
         mostrarAlerta(temAso ? "Sucesso! Colaborador ativado com ASO e Exames Laboratoriais registrados." : "Exame(s) laboratorial(is) anexado(s) com sucesso!", "sucesso");
         
         window.carregarAsoAdmin();
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
         if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
         atualizarContador();
 
@@ -56905,7 +56906,7 @@ document.getElementById('form-config-aso')?.addEventListener('submit', async (e)
         // Recarrega as regras no modal e atualiza a tela do fundo
         await window.renderizarListaConfigAso();
         window.carregarAsoAdmin();
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
 
     } catch (err) {
         mostrarAlerta(err.message, "erro");
@@ -72572,6 +72573,69 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
 };
 
 // =========================================================================
+// MÓDULO: AVISO (NÃO BLOQUEIA) PRA ADMIN/RH — ASO PENDENTE DE ANEXAR
+// =========================================================================
+// 👇 Quem trava por causa de ASO é o Gestor (ver checarTravaAsoAdmissional
+// logo abaixo). Esse aviso aqui NUNCA bloqueia ninguém — é só um alerta pro
+// Admin/RH enxergar, de cara ao logar, que existe(m) ASO(s) parado(s) esperando
+// pra serem anexados, ANTES que o prazo estoure e o gestor daquela unidade
+// fique travado. Assim o RH "fica esperto" e resolve antes de virar bloqueio.
+window.checarAvisoAsoPendenteAdmin = async function() {
+    if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
+
+    let queryColabs = supabaseClient.from('perfis')
+        .select('id, nome, unidade, empresa, dados_admissao, status, status_aprovacao')
+        .eq('perfil', 'Colaborador')
+        .eq('status', 'Ativo');
+
+    if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro && empresaSelecionadaFiltro !== 'Todas' && usuarioAtual.empresa === 'Todas') {
+        queryColabs = queryColabs.eq('empresa', empresaSelecionadaFiltro);
+    } else if (usuarioAtual.empresa && usuarioAtual.empresa !== 'Todas') {
+        queryColabs = queryColabs.eq('empresa', usuarioAtual.empresa);
+    }
+
+    const { data: colabs } = await queryColabs;
+    const hojeObj = new Date(); hojeObj.setHours(0, 0, 0, 0);
+
+    let qtdAdmissional = 0, qtdPeriodico = 0;
+
+    (colabs || []).forEach(c => {
+        if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
+
+        const adm = c.dados_admissao || {};
+        if (adm.isenta_aso === true) return;
+
+        // ASO Admissional ainda não anexado — conta desde já (o Gestor só bloqueia
+        // depois de 2 dias, mas o RH pode/deve resolver antes disso).
+        if (typeof window.asoAdmissionalPendente === 'function' && window.asoAdmissionalPendente(c)) {
+            qtdAdmissional++;
+            return;
+        }
+
+        // ASO Periódico já vencido (não espera a tolerância de 30 dias do Gestor —
+        // aqui é só um alerta, quanto antes o RH ver, melhor).
+        const dataBaseAso = adm.data_ultimo_aso || (adm.jornada?.data_inicio || adm.data_inicio);
+        if (!dataBaseAso) return;
+        const dBase = new Date(dataBaseAso + 'T00:00:00');
+        const dVencimento = new Date(dBase); dVencimento.setFullYear(dVencimento.getFullYear() + 1);
+        if (hojeObj > dVencimento) qtdPeriodico++;
+    });
+
+    const avisoAntigo = document.getElementById('aviso-alerta-aso-admin');
+    if (avisoAntigo) avisoAntigo.remove();
+
+    if (qtdAdmissional + qtdPeriodico === 0) return;
+
+    const partes = [];
+    if (qtdAdmissional > 0) partes.push(`${qtdAdmissional} ASO Admissional(is) sem anexar`);
+    if (qtdPeriodico > 0) partes.push(`${qtdPeriodico} ASO Periódico(s) vencido(s)`);
+
+    document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-aso-admin" style="position: fixed; top: 0; left: 0; width: 100%; background: #00838f; color: #fff; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2); cursor: pointer;" onclick="document.querySelector('[data-target=&quot;tela-admissoes&quot;]')?.click(); setTimeout(() => document.querySelector('[data-aba=&quot;aba-aso-admin&quot;]')?.click(), 100);">
+        <i class="fa-solid fa-notes-medical"></i> Atenção RH: ${partes.join(' e ')} pendente(s). Anexe na aba Controle de ASO antes que o(s) gestor(es) responsável(is) fiquem bloqueados. (Clique para ir até lá)
+    </div>`);
+};
+
+// =========================================================================
 // MÓDULO: TRAVA DE SISTEMA PARA ASO (ADMISSIONAL + PERIÓDICO) — GESTOR
 // =========================================================================
 // 👇 CORREÇÃO DE ROTA: quem trava é o GESTOR, nunca o Admin/RH — o Admin só
@@ -75752,7 +75816,7 @@ window.excluirVaga = async function(id) {
 
         mostrarAlerta("Exames periódicos arquivados com sucesso!", "sucesso");
         window.carregarAsoAdmin();
-        if (typeof window.checarTravaAsoAdmissional === 'function') window.checarTravaAsoAdmissional();
+        if (typeof window.checarAvisoAsoPendenteAdmin === 'function') window.checarAvisoAsoPendenteAdmin();
 
     } catch (err) {
         mostrarAlerta("Erro ao salvar exames: " + err.message, "erro");
