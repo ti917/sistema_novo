@@ -72524,7 +72524,20 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         if (btnMenuAdm) {
             btnMenuAdm.classList.remove('hidden'); btnMenuAdm.style.display = ''; btnMenuAdm.style.pointerEvents = 'auto';
             if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des')) {
-                btnMenuAdm.click(); setTimeout(() => document.querySelector('[data-aba="aba-contratos-trabalho"]')?.click(), 100);
+                btnMenuAdm.click();
+                setTimeout(() => document.querySelector('[data-aba="aba-contratos-trabalho"]')?.click(), 100);
+                // 👇 "Sistema inteligente": não joga a lista inteira de contratos na cara do
+                // gestor — filtra pra mostrar só quem está pendente com ele (Admissional
+                // aguardando assinatura + Prorrogação já vencida), que é exatamente o que
+                // está causando o bloqueio. Espera o carregarContratosAdmissao() (disparado
+                // pelo clique acima) terminar de buscar antes de aplicar o filtro.
+                setTimeout(() => {
+                    const selectStatusCtr = document.getElementById('filtro-status-contratos-gestor');
+                    if (selectStatusCtr) {
+                        selectStatusCtr.value = 'Pendentes Gestor';
+                        if (typeof window.filtrarContratos === 'function') window.filtrarContratos();
+                    }
+                }, 600);
             }
         }
     }
@@ -72559,132 +72572,182 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
 };
 
 // =========================================================================
-// MÓDULO: TRAVA DE SISTEMA PARA ASO ADMISSIONAL PENDENTE (ADMIN/RH)
+// MÓDULO: TRAVA DE SISTEMA PARA ASO (ADMISSIONAL + PERIÓDICO) — GESTOR
 // =========================================================================
-// 👇 O ASO Admissional é 100% responsabilidade do Admin/RH (o Gestor não tem
-// aba nenhuma pra isso), então essa trava NUNCA mexe no menu do Gestor — ela
-// bloqueia o próprio Admin/RH até anexar o exame, igual ao espírito do
-// bloqueio de Desempenho, só que pro outro lado da mesa.
+// 👇 CORREÇÃO DE ROTA: quem trava é o GESTOR, nunca o Admin/RH — o Admin só
+// anexa o exame quando ele chega, quem precisa correr atrás de levar o
+// colaborador pra fazer o ASO é o gestor da unidade. Como o Gestor não tem
+// nenhuma aba de ASO na tela dele (só o Admin tem o Controle de ASO), esse
+// bloqueio não tenta abrir uma aba — ele cobre a tela toda com um aviso
+// dedicado, mostrando exatamente quem está pendente e por quê (Admissional
+// ou Periódico), pra ele saber quem cobrar do RH.
 window.checarTravaAsoAdmissional = async function(foiCliqueManual = false) {
-    const ATIVAR_BLOQUEIO_ASO_ADMISSIONAL = true;
-    if (!ATIVAR_BLOQUEIO_ASO_ADMISSIONAL) return;
+    const ATIVAR_BLOQUEIO_ASO = true;
+    if (!ATIVAR_BLOQUEIO_ASO) return;
 
-    if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
+    if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
 
-    // 👇 Mesma carência dada ao Contrato Admissional: só cobra 2 dias corridos
-    // completos após a data de início do colaborador.
+    // 👇 Carência do Admissional: só cobra 2 dias corridos após o início.
     const DIAS_CARENCIA_RECEM_ADMITIDO = 2;
+    // 👇 Tolerância do Periódico: já vencido o exame anual + esses dias de graça.
+    const DIAS_TOLERANCIA_PERIODICO = 30;
 
+    const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hojeObj = new Date(); hojeObj.setHours(0, 0, 0, 0);
     const dCarencia = new Date(hojeObj); dCarencia.setDate(dCarencia.getDate() - 5);
     const dataCarenciaIso = dCarencia.toISOString().split('T')[0];
 
-    let queryColabs = supabaseClient.from('perfis')
-        .select('id, nome, unidade, empresa, dados_admissao, status, status_aprovacao')
-        .eq('perfil', 'Colaborador')
-        .eq('status', 'Ativo');
-
-    if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro && empresaSelecionadaFiltro !== 'Todas' && usuarioAtual.empresa === 'Todas') {
-        queryColabs = queryColabs.eq('empresa', empresaSelecionadaFiltro);
-    } else if (usuarioAtual.empresa && usuarioAtual.empresa !== 'Todas') {
-        queryColabs = queryColabs.eq('empresa', usuarioAtual.empresa);
-    }
-
     const [resColabs, resAusencias, resFerias] = await Promise.all([
-        queryColabs,
+        supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
         supabaseClient.from('ausencias').select('colaborador_id, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').gte('data_fim', dataCarenciaIso),
         supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', dataCarenciaIso)
     ]);
 
-    let deveBloquearSistema = false; let temAlerta = false; let menorPrazo = 999; let qtdPendentesAso = 0;
+    let deveBloquearSistema = false; let temAlerta = false; let menorPrazo = 999;
+    const pendentesBloqueio = []; // { nome, unidade, tipo: 'Admissional'|'Periódico', dias }
 
     (resColabs.data || []).forEach(c => {
-        // Regra pedida: só Ativo (a query já filtra, isso é reforço) e nunca quem
-        // está em processo de desligamento.
         if (c.status !== 'Ativo') return;
         if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
 
-        // 👇 Reaproveita a MESMA regra que já roda no Controle de ASO / Painel de
-        // Controle, pra nunca cobrar de quem já está resolvido ou é isento.
-        if (typeof window.asoAdmissionalPendente !== 'function' || !window.asoAdmissionalPendente(c)) return;
-
         const adm = c.dados_admissao || {};
-        const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
-        if (!dataInicioStr) return;
-
-        const dIni = new Date(dataInicioStr + 'T00:00:00');
-        const diffDias = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
+        if (adm.isenta_aso === true) return;
 
         let protegidoPorAfastamento = false;
         if ((resAusencias.data || []).some(a => a.colaborador_id === c.id) || (resFerias.data || []).some(f => f.colaborador_id === c.id)) {
             protegidoPorAfastamento = true;
         }
 
-        if (diffDias >= DIAS_CARENCIA_RECEM_ADMITIDO) {
+        // ------------------------------------------------------------------
+        // 1) ASO ADMISSIONAL — exame de entrada ainda não anexado pelo RH.
+        // ------------------------------------------------------------------
+        if (typeof window.asoAdmissionalPendente === 'function' && window.asoAdmissionalPendente(c)) {
+            const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
+            if (!dataInicioStr) return;
+
+            const dIni = new Date(dataInicioStr + 'T00:00:00');
+            const diffDias = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
+
+            if (diffDias >= DIAS_CARENCIA_RECEM_ADMITIDO) {
+                if (protegidoPorAfastamento) {
+                    temAlerta = true; if (0 < menorPrazo) menorPrazo = 0;
+                } else {
+                    deveBloquearSistema = true;
+                    pendentesBloqueio.push({ nome: c.nome, unidade: c.unidade, tipo: 'Admissional', dias: diffDias });
+                }
+            } else {
+                temAlerta = true;
+                let diasFaltando = DIAS_CARENCIA_RECEM_ADMITIDO - diffDias;
+                if (diasFaltando < menorPrazo) menorPrazo = diasFaltando;
+            }
+            return; // quem ainda não tem o admissional feito não entra no periódico
+        }
+
+        // ------------------------------------------------------------------
+        // 2) ASO PERIÓDICO — já tem admissional, mas o exame anual venceu
+        //    (mesma regra que já existia como alerta no Painel de Controle).
+        // ------------------------------------------------------------------
+        const dataBaseAso = adm.data_ultimo_aso || (adm.jornada?.data_inicio || adm.data_inicio);
+        if (!dataBaseAso) return;
+
+        const dBase = new Date(dataBaseAso + 'T00:00:00');
+        const dVencimento = new Date(dBase); dVencimento.setFullYear(dVencimento.getFullYear() + 1);
+        const dBloqueio = new Date(dVencimento); dBloqueio.setDate(dBloqueio.getDate() + DIAS_TOLERANCIA_PERIODICO);
+
+        const diasParaBloqueio = Math.floor((dBloqueio - hojeObj) / (1000 * 60 * 60 * 24));
+
+        if (hojeObj > dBloqueio) {
             if (protegidoPorAfastamento) {
                 temAlerta = true; if (0 < menorPrazo) menorPrazo = 0;
             } else {
-                deveBloquearSistema = true; qtdPendentesAso++;
+                deveBloquearSistema = true;
+                const diasVencido = Math.floor((hojeObj - dVencimento) / (1000 * 60 * 60 * 24));
+                pendentesBloqueio.push({ nome: c.nome, unidade: c.unidade, tipo: 'Periódico', dias: diasVencido });
             }
-        } else {
+        } else if (diasParaBloqueio <= 5) {
             temAlerta = true;
-            let diasFaltando = DIAS_CARENCIA_RECEM_ADMITIDO - diffDias;
-            if (diasFaltando < menorPrazo) menorPrazo = diasFaltando;
+            if (diasParaBloqueio < menorPrazo) menorPrazo = diasParaBloqueio;
         }
     });
 
     const menuSidebar = document.querySelector('.sidebar');
-    const avisoTravaAsoAntigo = document.getElementById('aviso-bloqueio-aso');
+    const overlayAsoAntigo = document.getElementById('tela-bloqueio-aso-gestor');
     const avisoAlertaAsoAntigo = document.getElementById('aviso-alerta-aso');
-    const btnMenuAdmissoes = document.querySelector('button[data-target="tela-admissoes"]');
 
-    if (avisoTravaAsoAntigo) avisoTravaAsoAntigo.remove();
+    if (overlayAsoAntigo) overlayAsoAntigo.remove();
     if (avisoAlertaAsoAntigo) avisoAlertaAsoAntigo.remove();
 
     const destravamento = await window.verificarDesbloqueioContratoAso();
 
-    // Outras travas (Contrato/Experiência/Desempenho) nunca aparecem pro Admin —
-    // são exclusivas do Gestor — então aqui não precisa "respeitar" nenhuma delas.
     if (deveBloquearSistema && !destravamento.liberado) {
-        document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-bloqueio-aso" style="position: fixed; top: 0; left: 0; width: 100%; background: var(--cor-perigo); color: white; text-align: center; padding: 10px; font-weight: bold; z-index: 10003; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.3);"><i class="fa-solid fa-lock"></i> ATENÇÃO: Existe(m) ${qtdPendentesAso} ASO Admissional(is) pendente(s) de anexar! O sistema está bloqueado até a regularização.</div>`);
+        const linhasHtml = pendentesBloqueio.map(p => `
+            <tr>
+                <td style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.1);">${p.nome}</td>
+                <td style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.1);">${p.unidade || '-'}</td>
+                <td style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.1); text-align:center;">
+                    <span class="badge" style="background:${p.tipo === 'Admissional' ? 'rgba(0,188,212,0.15)' : 'rgba(255,152,0,0.15)'}; color:${p.tipo === 'Admissional' ? '#00bcd4' : '#ff9800'}; border:1px solid ${p.tipo === 'Admissional' ? '#00bcd4' : '#ff9800'};">${p.tipo}</span>
+                </td>
+                <td style="padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.1); text-align:center;">${p.dias}</td>
+            </tr>`).join('');
 
-        document.querySelectorAll('.nav-btn').forEach(b => { if (b.dataset.target !== 'tela-admissoes') b.style.display = 'none'; });
-        document.querySelectorAll('.btn-aba-tela-adm').forEach(aba => { if (aba.getAttribute('data-aba') !== 'aba-aso-admin') aba.style.display = 'none'; });
+        // 👇 "Janela escondida": não é uma tela navegável (o Gestor não tem ação
+        // real aqui, quem resolve é o RH) — é um overlay fixo que cobre o
+        // sistema todo até normalizar, avisando quem está pendente e o motivo.
+        document.body.insertAdjacentHTML('beforeend', `
+        <div id="tela-bloqueio-aso-gestor" style="position: fixed; inset: 0; background: rgba(10,10,15,0.97); z-index: 100010; display: flex; align-items: center; justify-content: center; padding: 20px;">
+            <div class="glass-card" style="max-width: 680px; width: 100%; max-height: 85vh; overflow-y: auto; border: 1px solid var(--cor-perigo);">
+                <h3 style="color: var(--cor-perigo); margin-bottom: 10px;"><i class="fa-solid fa-lock"></i> Sistema bloqueado: ASO pendente</h3>
+                <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 15px;">
+                    Existe(m) <b>${pendentesBloqueio.length}</b> colaborador(es) da sua unidade com o exame ASO pendente há tempo demais.
+                    Avise o RH para anexar o(s) exame(s) abaixo na aba Controle de ASO — o sistema libera automaticamente assim que forem regularizados.
+                </p>
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+                        <thead>
+                            <tr style="text-align: left; color: var(--cor-texto-secundario); border-bottom: 1px solid var(--cor-borda);">
+                                <th style="padding: 8px 10px;">Colaborador</th>
+                                <th style="padding: 8px 10px;">Unidade</th>
+                                <th style="padding: 8px 10px; text-align:center;">Tipo de ASO</th>
+                                <th style="padding: 8px 10px; text-align:center;">Dias vencido</th>
+                            </tr>
+                        </thead>
+                        <tbody>${linhasHtml}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`);
+
+        document.querySelectorAll('.nav-btn').forEach(b => b.style.display = 'none');
         if (menuSidebar) menuSidebar.classList.add('sidebar-bloqueada');
-
-        if (btnMenuAdmissoes) {
-            btnMenuAdmissoes.classList.remove('hidden'); btnMenuAdmissoes.style.display = ''; btnMenuAdmissoes.style.pointerEvents = 'auto';
-            if (!foiCliqueManual) {
-                btnMenuAdmissoes.click();
-                setTimeout(() => document.querySelector('[data-aba="aba-aso-admin"]')?.click(), 100);
-            }
-        }
     }
     else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
         let diasTextoDisplay = menorPrazo <= 0 ? 'hoje (ou está sob carência de retorno)' : `em ${menorPrazo} dia(s)`;
         let textoAlerta = deveBloquearSistema
-            ? `<i class="fa-solid fa-unlock"></i> Liberação temporária ativa! Existem ASO Admissionais pendentes. Bloqueio retorna em: <span class="contador-desbloqueio-ctr-aso" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
-            : `<i class="fa-solid fa-triangle-exclamation"></i> Existe ASO Admissional vencendo o prazo de carência <b>${diasTextoDisplay}</b>. Anexe o exame na aba Controle de ASO.`;
+            ? `<i class="fa-solid fa-unlock"></i> O RH liberou o sistema! Existe(m) ASO(s) pendente(s) na sua unidade. Bloqueio retorna em: <span class="contador-desbloqueio-ctr-aso" style="background: rgba(0,0,0,0.2); padding: 3px 8px; border-radius: 6px; font-family: monospace; font-size: 1.05rem; margin-left: 5px;">...</span>`
+            : `<i class="fa-solid fa-triangle-exclamation"></i> Existe ASO vencendo o prazo de carência <b>${diasTextoDisplay}</b>. Avise o RH / leve o colaborador para o exame.`;
 
         document.body.insertAdjacentHTML('afterbegin', `<div id="aviso-alerta-aso" style="position: fixed; top: 0; left: 0; width: 100%; background: #00838f; color: #fff; text-align: center; padding: 10px; font-weight: bold; z-index: 10000; font-size: 0.9rem; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">${textoAlerta}</div>`);
 
-        if (menuSidebar) {
+        if (!document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des') && !document.getElementById('aviso-bloqueio-ctr') && menuSidebar) {
             menuSidebar.classList.remove('sidebar-bloqueada');
             document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
-            document.querySelectorAll('.btn-aba-tela-adm').forEach(aba => aba.style.display = '');
         }
 
         if (deveBloquearSistema && destravamento.liberado) window.iniciarContagemDesbloqueioContratoAso(destravamento.expiracao);
     } else {
-        if (menuSidebar) {
+        if (!document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des') && !document.getElementById('aviso-bloqueio-ctr') && menuSidebar) {
             menuSidebar.classList.remove('sidebar-bloqueada');
             document.querySelectorAll('.nav-btn').forEach(b => b.style.display = '');
-            document.querySelectorAll('.btn-aba-tela-adm').forEach(aba => aba.style.display = '');
         }
     }
 
-    const avisoAsoNovo = document.getElementById('aviso-bloqueio-aso') || document.getElementById('aviso-alerta-aso');
-    if (avisoAsoNovo) avisoAsoNovo.style.top = '0px';
+    // 👇 O aviso de alerta (não-bloqueio) da ASO empilha embaixo dos outros já existentes.
+    let offsetTop = 0;
+    if (document.getElementById('aviso-bloqueio-exp') || document.getElementById('aviso-alerta-exp')) offsetTop += 38;
+    if (document.getElementById('aviso-bloqueio-des') || document.getElementById('aviso-alerta-des')) offsetTop += 38;
+    if (document.getElementById('aviso-bloqueio-ctr') || document.getElementById('aviso-alerta-ctr')) offsetTop += 38;
+    const avisoAsoNovo = document.getElementById('aviso-alerta-aso');
+    if (avisoAsoNovo) avisoAsoNovo.style.top = `${offsetTop}px`;
 };
 
       // =========================================================================
