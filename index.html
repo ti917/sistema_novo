@@ -21799,11 +21799,69 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             if(!confirmado) return;
 
             const { error } = await supabaseClient.from('perfis').update({ status_aprovacao: 'Aprovado', dados_rescisao: null }).eq('id', idColab);
-            if(error) { await mostrarAlerta("Erro ao cancelar: " + error.message, "erro"); } 
+            if(error) { await mostrarAlerta("Erro ao cancelar: " + error.message, "erro"); }
             else {
                 document.getElementById('modal-ficha-rescisao').remove();
-                listarSolicitacoes(); atualizarContador();  
+                listarSolicitacoes(); atualizarContador();
                 await mostrarAlerta("Pedido de rescisão cancelado. O funcionário permanece Ativo.", "sucesso");
+            }
+        };
+
+        // =========================================================================
+        // 🔙 VOLTAR PARA SOLICITAÇÕES (RH desfaz a aprovação, sem perder nada)
+        // -------------------------------------------------------------------------
+        // Usado quando o RH aprovou uma rescisão sem querer (colocando ela em
+        // "Aguardando Assinatura", o que faz ela sumir da Central de Solicitações e
+        // aparecer na tela do Gestor pra assinar). Esse botão desfaz SÓ isso: volta
+        // o status_aprovacao pra 'Rescisão Pendente' — exatamente como se o Gestor
+        // tivesse acabado de enviar a solicitação de novo. NÃO toca em dados_rescisao
+        // (documentos, motivo, observações, histórico, vínculo etc. continuam 100%
+        // intactos) — por isso não reaproveitamos reprovarRescisaoAdmin/excluirRescisaoAdmin,
+        // que apagam dados_rescisao inteiro.
+        // =========================================================================
+        window.voltarRescisaoParaSolicitacoes = async function(idColab, nomeColab) {
+            const confirmado = await mostrarConfirmacao(
+                `Deseja retornar a rescisão de <b>${nomeColab || 'este colaborador'}</b> para "Solicitações"?<br><br>` +
+                `Isso desfaz a aprovação do RH: o processo volta para o estado de recém-enviado pelo Gestor, some do "Aguardando Assinatura" e da tela do Gestor, e volta a aparecer em Solicitações Pendentes pra ser reavaliado.<br><br>` +
+                `<b>Nenhum documento, motivo ou observação já preenchida é apagado</b> — só o status volta atrás, como se nada tivesse acontecido além do envio original.`,
+                "Voltar para Solicitações"
+            );
+            if (!confirmado) return;
+
+            try {
+                // 1. Confere o estado atual — evita "voltar" algo que já mudou de fase
+                //    (tela desatualizada, duplo clique, etc.)
+                const { data: colabAtual, error: errBusca } = await supabaseClient
+                    .from('perfis')
+                    .select('nome, status_aprovacao')
+                    .eq('id', idColab)
+                    .single();
+                if (errBusca) throw errBusca;
+
+                if (colabAtual.status_aprovacao !== 'Aguardando Assinatura') {
+                    await mostrarAlerta("Esta rescisão não está mais em 'Aguardando Assinatura' (a tela deve estar desatualizada). Recarregando a lista...", "aviso");
+                    if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin();
+                    return;
+                }
+
+                // 2. SÓ mexe no status_aprovacao. dados_rescisao fica intocado de propósito.
+                const { error: errUpdate } = await supabaseClient.from('perfis').update({
+                    status_aprovacao: 'Rescisão Pendente'
+                }).eq('id', idColab);
+                if (errUpdate) throw errUpdate;
+
+                // 3. Remove a notificação "Rescisão_Para_Assinar" que tinha ido pro Gestor —
+                //    ela deixou de fazer sentido, já que o processo saiu de lá.
+                await supabaseClient.from('notificacoes').delete().eq('colaborador_id', idColab).eq('tipo', 'Rescisão_Para_Assinar');
+
+                await mostrarAlerta("Rescisão devolvida para Solicitações Pendentes! Documentos e observações continuam intactos.", "sucesso");
+
+                // 4. Atualiza as telas relevantes
+                if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin();
+                if (typeof listarSolicitacoes === 'function') listarSolicitacoes();
+                if (typeof atualizarContador === 'function') atualizarContador();
+            } catch (e) {
+                await mostrarAlerta("Erro ao devolver para Solicitações: " + e.message, "erro");
             }
         };
 
@@ -29551,7 +29609,16 @@ const isLidaFallback = !!resc.lida_por;
 
        let btnAdminAcoes = '';
 if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
+    // 👇 NOVO: "Voltar para Solicitações" — desfaz a aprovação do RH (que colocou em
+    // "Aguardando Assinatura") e devolve pro estado de "Rescisão Pendente", como se o
+    // Gestor tivesse acabado de mandar de novo. Só aparece nesse status específico, e só
+    // pro Admin (é uma ação de RH, não do Gestor). Não mexe em documentos/observações.
+    const btnVoltarSolicitacoes = (usuarioAtual.perfil === 'Admin' && a.status_aprovacao === 'Aguardando Assinatura')
+        ? `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800; font-weight: bold;" onclick="window.voltarRescisaoParaSolicitacoes('${a.id}', '${a.nome.replace(/'/g, "\\'")}')" title="Desfazer a aprovação do RH e devolver para Solicitações Pendentes — como se o Gestor tivesse acabado de enviar de novo. Documentos e observações não são apagados."><i class="fa-solid fa-rotate-left"></i> Voltar p/ Solicitações</button>`
+        : '';
+
     btnAdminAcoes = `
+        ${btnVoltarSolicitacoes}
         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255, 193, 7, 0.1);" onclick="abrirModalObsaRescisao('${a.id}')" title="Gerar Requisição de Rescisão (OBSA)"><i class="fa-solid fa-file-invoice"></i> OBSA</button>
         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarRescisaoAdmin('${a.id}')" title="Editar Rescisão"><i class="fa-solid fa-pen"></i></button>
         <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirRescisaoAdmin('${a.id}')" title="Excluir Rescisão"><i class="fa-solid fa-trash"></i></button>
