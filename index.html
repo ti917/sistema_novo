@@ -20045,6 +20045,9 @@ window.renderizarPaginacaoAdmissoes = function() {
 
             <!-- Rodapé Fixo com Botão Fechar -->
             <div style="padding: 15px 30px; border-top: 1px solid var(--cor-borda); position: sticky; bottom: 0; background: var(--cor-principal); z-index: 10; display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; border-radius: 0 0 16px 16px;">
+                ${(usuarioAtual.perfil === 'Admin' && colab.status_aprovacao === 'Aprovado' && (colab.status === 'Ativo' || colab.status === 'Aguardando ASO'))
+                    ? `<button class="btn-secondary" style="padding: 12px 25px; font-weight: bold; font-size: 1rem; border-radius: 8px; border-color: #ff9800; color: #ff9800;" onclick="window.voltarAdmissaoParaSolicitacoes('${colab.id}', '${(colab.nome || '').replace(/'/g, "\\'")}')" title="Desfaz a aprovação e devolve a ficha pra fila de Solicitações Pendentes do RH — como se o Gestor tivesse acabado de enviar de novo. Nenhum documento (contrato, ASO, abertura de conta etc.) é apagado ou duplicado."><i class="fa-solid fa-rotate-left"></i> Voltar p/ Solicitações</button>`
+                    : ''}
                 <button class="btn-secondary" style="padding: 12px 25px; font-weight: bold; font-size: 1rem; border-radius: 8px; border-color: #ffc107; color: #ffc107;" onclick="gerarEtiquetaColaborador('${colab.id}')"><i class="fa-solid fa-tag"></i> Gerar Etiqueta</button>
                 <button class="btn-primary" style="padding: 12px 40px; font-weight: bold; font-size: 1rem; border-radius: 8px;" onclick="document.getElementById('modal-ficha-aprovada').remove()">Fechar Ficha</button>
             </div>
@@ -20052,6 +20055,68 @@ window.renderizarPaginacaoAdmissoes = function() {
         </div>
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// =========================================================================
+// 🔙 VOLTAR ADMISSÃO PARA SOLICITAÇÕES (RH desfaz a aprovação, sem duplicar nada)
+// -------------------------------------------------------------------------
+// Botão da Ficha (Controle de Admissões Aprovadas > Colaboradores Aprovados >
+// Ver Ficha). Usado quando o RH aprovou uma admissão sem querer. Desfaz SÓ o
+// fluxo de aprovação — volta status_aprovacao pra 'Pendente' e status pra
+// 'Ativo' (exatamente o estado de quando o Gestor acabou de enviar a ficha) —
+// e devolve pra Central de Solicitações Pendentes pra reavaliação.
+//
+// NÃO mexe em dados_admissao em nenhum momento: Contrato de Trabalho, ASO e
+// Abertura de Conta não são tabelas separadas, são só sub-campos dentro desse
+// mesmo JSON (dados_admissao.contrato / .aso / .conta_salario) — como a gente
+// não toca nesse objeto, nada é apagado, e como o RH aprovando de novo
+// (aprovarAdmissaoDefinitiva) sempre RELÊ o dados_admissao atual antes de
+// gravar, nada é recriado/duplicado por cima do que já existe.
+// =========================================================================
+window.voltarAdmissaoParaSolicitacoes = async function(idColab, nomeColab) {
+    const confirmado = await mostrarConfirmacao(
+        `Deseja retornar a admissão de <b>${nomeColab || 'este colaborador'}</b> para "Solicitações"?<br><br>` +
+        `Isso desfaz a aprovação do RH: a ficha volta para o estado de recém-enviada pelo Gestor e passa a aparecer de novo em Solicitações Pendentes pra ser reavaliada.<br><br>` +
+        `<b>Nada é apagado ou duplicado</b> — documentos, Contrato de Trabalho, ASO, Abertura de Conta e todo o resto da ficha continuam exatamente como estão.`,
+        "Voltar para Solicitações"
+    );
+    if (!confirmado) return;
+
+    try {
+        // 1. Confere o estado atual — evita "voltar" algo que já mudou de fase
+        //    (tela desatualizada, duplo clique, colaborador já desligado, etc.)
+        const { data: colabAtual, error: errBusca } = await supabaseClient
+            .from('perfis')
+            .select('nome, status, status_aprovacao')
+            .eq('id', idColab)
+            .single();
+        if (errBusca) throw errBusca;
+
+        if (colabAtual.status_aprovacao !== 'Aprovado' || !['Ativo', 'Aguardando ASO'].includes(colabAtual.status)) {
+            await mostrarAlerta("Esta ficha não está mais no estado esperado (a tela deve estar desatualizada). Recarregando a lista...", "aviso");
+            if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
+            return;
+        }
+
+        // 2. SÓ mexe em status/status_aprovacao. dados_admissao fica intocado de propósito
+        //    (contrato, ASO, abertura de conta e documentos continuam intactos).
+        const { error: errUpdate } = await supabaseClient.from('perfis').update({
+            status: 'Ativo',
+            status_aprovacao: 'Pendente'
+        }).eq('id', idColab);
+        if (errUpdate) throw errUpdate;
+
+        document.getElementById('modal-ficha-aprovada')?.remove();
+
+        await mostrarAlerta("Admissão devolvida para Solicitações Pendentes! Nada foi apagado nem duplicado.", "sucesso");
+
+        // 3. Atualiza as telas relevantes
+        if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
+        if (typeof listarSolicitacoes === 'function') listarSolicitacoes();
+        if (typeof atualizarContador === 'function') atualizarContador();
+    } catch (e) {
+        await mostrarAlerta("Erro ao devolver para Solicitações: " + e.message, "erro");
+    }
 };
         
  window.listarSolicitacoes = async function(silencioso = false) {
