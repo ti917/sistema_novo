@@ -7048,6 +7048,13 @@ window.exportarNotasReceber = function (formato) {
     const situacoesAtivas = window._situacoesAtivasNotas || [];
     const rotuloFiltro = situacoesAtivas.length > 0 ? situacoesAtivas.join(' + ') : 'Todas as situações';
 
+    // 👇 Excel ganha o exportador dedicado (estilo + fórmulas de verdade); CSV e PDF
+    // continuam pelo caminho simples e genérico de sempre.
+    if (formato === 'xlsx') {
+        window.exportarExcelNotasReceberBonito(dados, situacoesAtivas);
+        return;
+    }
+
     const colunas = ['Empresa', 'Descrição', 'Nº NF', 'Referência', 'Bruto', 'Imposto', 'Líquido', 'Data Pagto', 'Situação'];
     const linhas = dados.map(nota => {
         const imposto = nota.valor_bruto - nota.valor_liquido;
@@ -8590,6 +8597,153 @@ window.exportarExcelDashboardBonito = async function (dados) {
         URL.revokeObjectURL(a.href);
 
         mostrarAlerta(`Excel gerado com ${dados.length} registro(s) em 2 abas (Geral + Por Unidade).`, 'sucesso');
+    } catch (err) {
+        mostrarAlerta('Erro ao exportar Excel: ' + err.message, 'erro');
+    }
+};
+
+/**
+ * 🆕 (03/09/2026): Excel "de verdade" de Notas a Receber — mesmo estilo do Dashboard
+ * (ExcelJS: cabeçalho colorido, zebra, moeda formatada, situação colorida), só que agora
+ * com FÓRMULA de verdade dentro da planilha (não só número já calculado):
+ *   - Coluna "Líquido" = fórmula "=Bruto-Imposto" célula por célula, então se o Financeiro
+ *     mudar o Bruto ou o Imposto na própria planilha, o Líquido recalcula sozinho.
+ *   - Linha de TOTAL no rodapé = fórmula SOMA(...) de verdade em cima do intervalo de
+ *     dados, não um número fixo — abre a planilha, clica na célula do total e aparece a
+ *     fórmula =SOMA(E5:E20), por exemplo.
+ * Respeita o mesmo recorte que está filtrado na tela (busca + período + KPI clicado).
+ */
+window.exportarExcelNotasReceberBonito = async function (dados, situacoesAtivas) {
+    if (!dados || dados.length === 0) {
+        return mostrarAlerta('Não há nada para exportar com os filtros atuais.', 'aviso');
+    }
+    if (typeof ExcelJS === 'undefined') {
+        return mostrarAlerta('Biblioteca de Excel não carregou. Verifique a conexão.', 'erro');
+    }
+
+    try {
+        const CORES = {
+            cabecalho: 'FF1E8A6E',
+            cabecalhoTexto: 'FFFFFFFF',
+            tituloTexto: 'FF1E8A6E',
+            zebra: 'FFF4FAF8',
+            borda: 'FFD9E4E1',
+            pago: 'FF2ECC71',
+            atrasado: 'FFF39C12',
+            critico: 'FFC0392B',
+            aReceber: 'FF3498DB',
+            totalFundo: 'FFFFE9A8'
+        };
+        const corSituacaoNota = (sit) => ({
+            'PAGO': CORES.pago, 'ATRASADO': CORES.atrasado,
+            'MUITO ATRASADO': CORES.critico, 'A RECEBER': CORES.aReceber
+        }[sit] || 'FF7F8C8D');
+
+        const carimbo = new Date().toLocaleString('pt-BR');
+        const nomeEmpresa = (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas')
+            ? empresaFinanceiraSelecionada : 'Todas as Empresas/Unidades';
+        const rotuloFiltro = (situacoesAtivas && situacoesAtivas.length > 0) ? situacoesAtivas.join(' + ') : 'Todas as situações';
+
+        const wb = new ExcelJS.Workbook();
+        wb.creator = 'Sistema RH Soul';
+        wb.created = new Date();
+
+        const ws = wb.addWorksheet('Notas a Receber', { views: [{ state: 'frozen', ySplit: 4 }] });
+        const colunas = [
+            { header: 'Empresa', key: 'empresa', width: 26 },
+            { header: 'Descrição', key: 'desc', width: 32 },
+            { header: 'Nº NF', key: 'nf', width: 12 },
+            { header: 'Referência', key: 'ref', width: 13 },
+            { header: 'Bruto', key: 'bruto', width: 15 },
+            { header: 'Imposto', key: 'imposto', width: 15 },
+            { header: 'Líquido', key: 'liquido', width: 15 },
+            { header: 'Data Pagto', key: 'pago', width: 13 },
+            { header: 'Situação', key: 'sit', width: 16 }
+        ];
+
+        // Título + subtítulo (linhas 1 e 2) — o subtítulo mostra o filtro de situação/KPI
+        // que estava ativo na tela quando o relatório foi gerado.
+        ws.mergeCells(1, 1, 1, colunas.length);
+        const tituloCel = ws.getCell(1, 1);
+        tituloCel.value = 'Relatório de Notas a Receber — Grupo Soul';
+        tituloCel.font = { bold: true, size: 14, color: { argb: CORES.tituloTexto } };
+
+        ws.mergeCells(2, 1, 2, colunas.length);
+        const subCel = ws.getCell(2, 1);
+        subCel.value = `${nomeEmpresa}  ·  Filtro: ${rotuloFiltro}  ·  Gerado em ${carimbo}  ·  ${dados.length} registro(s)`;
+        subCel.font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } };
+
+        ws.getRow(4).values = colunas.map(c => c.header);
+        ws.columns = colunas.map(c => ({ key: c.key, width: c.width }));
+        const linhaCabecalho = ws.getRow(4);
+        linhaCabecalho.eachCell(cell => {
+            cell.font = { bold: true, color: { argb: CORES.cabecalhoTexto } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.cabecalho } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { bottom: { style: 'thin', color: { argb: CORES.borda } } };
+        });
+        linhaCabecalho.height = 20;
+        ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: colunas.length } };
+
+        const PRIMEIRA_LINHA_DADOS = 5;
+        dados.forEach((nota, idx) => {
+            const bruto = Number(nota.valor_bruto || 0);
+            const impostoNum = bruto - Number(nota.valor_liquido || 0);
+            let dataPagtoStr = '';
+            if (nota.data_pagamento) {
+                const partes = nota.data_pagamento.split('-');
+                dataPagtoStr = `${partes[2]}/${partes[1]}/${partes[0]}`;
+            }
+
+            const linha = ws.addRow({
+                empresa: nota.nome_empresa_cliente || '',
+                desc: nota.descricao || '',
+                nf: nota.numero_nf || '',
+                ref: nota.mes_referencia || '',
+                bruto: bruto,
+                imposto: impostoNum,
+                liquido: 0, // 👈 sobrescrito logo abaixo por uma FÓRMULA de verdade
+                pago: dataPagtoStr,
+                sit: nota.situacao || ''
+            });
+
+            const numLinha = linha.number;
+            // 👇 FÓRMULA DE VERDADE: Líquido = Bruto (col E) - Imposto (col F) dessa mesma linha
+            linha.getCell('liquido').value = { formula: `E${numLinha}-F${numLinha}` };
+
+            const linhaPar = (idx % 2 === 1);
+            linha.eachCell((cell, colNum) => {
+                if (linhaPar) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.zebra } };
+                cell.border = { bottom: { style: 'hair', color: { argb: CORES.borda } } };
+                if (colNum === 5 || colNum === 6 || colNum === 7) cell.numFmt = '"R$" #,##0.00'; // Bruto/Imposto/Líquido
+            });
+            const celSit = linha.getCell('sit');
+            celSit.font = { bold: true, color: { argb: corSituacaoNota(nota.situacao) } };
+        });
+
+        // Linha de TOTAL no rodapé, com fórmula SOMA(...) de verdade sobre o intervalo de dados
+        const ultimaLinhaDados = PRIMEIRA_LINHA_DADOS + dados.length - 1;
+        const linhaTotal = ws.addRow({ empresa: 'TOTAL GERAL' });
+        ws.mergeCells(linhaTotal.number, 1, linhaTotal.number, 4);
+        linhaTotal.getCell('bruto').value = { formula: `SUM(E${PRIMEIRA_LINHA_DADOS}:E${ultimaLinhaDados})` };
+        linhaTotal.getCell('imposto').value = { formula: `SUM(F${PRIMEIRA_LINHA_DADOS}:F${ultimaLinhaDados})` };
+        linhaTotal.getCell('liquido').value = { formula: `SUM(G${PRIMEIRA_LINHA_DADOS}:G${ultimaLinhaDados})` };
+        linhaTotal.eachCell((cell, colNum) => {
+            cell.font = { bold: true, color: { argb: 'FF000000' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CORES.totalFundo } };
+            cell.border = { top: { style: 'thin', color: { argb: CORES.borda } } };
+            if (colNum === 5 || colNum === 6 || colNum === 7) cell.numFmt = '"R$" #,##0.00';
+        });
+
+        const buffer = await wb.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `notas_a_receber_${new Date().toISOString().substring(0, 10)}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+
+        mostrarAlerta(`Excel gerado com ${dados.length} registro(s), com fórmulas de Líquido e Totais.`, 'sucesso');
     } catch (err) {
         mostrarAlerta('Erro ao exportar Excel: ' + err.message, 'erro');
     }
