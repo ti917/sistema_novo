@@ -7289,6 +7289,8 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                     <h4 id="agenda-titulo-mes" style="margin: 0; min-width: 180px; text-align: center; text-transform: capitalize;">-</h4>
                     <button type="button" class="btn-secondary" style="padding: 8px 12px; border-radius: 8px;" onclick="window.navegarMesAgenda(1)"><i class="fa-solid fa-chevron-right"></i></button>
                     <button type="button" class="btn-secondary" style="padding: 8px 12px; border-radius: 8px; font-size: 0.8rem;" onclick="window.irParaMesAtualAgenda()">Hoje</button>
+                    <button type="button" class="btn-secondary" style="padding: 8px 12px; border-radius: 8px; font-size: 0.8rem; border-color:#ffd54f; color:#ffd54f;" onclick="window.abrirModalNovoLembreteFixo()" title="Criar um lembrete que se repete sozinho (ex: toda quarta, todo dia 21)"><i class="fa-solid fa-repeat"></i> Lembrete Fixo</button>
+                    <button type="button" class="btn-secondary" style="padding: 8px 12px; border-radius: 8px; font-size: 0.8rem;" onclick="window.abrirModalGerenciarFixos()" title="Ver, editar ou desativar os lembretes fixos já criados"><i class="fa-solid fa-list-check"></i> Gerenciar Fixos</button>
                 </div>
                 <div style="display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.75rem; color: var(--cor-texto-secundario);">
                     <span><span style="display:inline-block; width:12px; height:12px; border-radius:3px; background:#28a745; margin-right:5px;"></span>Admissão liberada (dia 1 ao 20)</span>
@@ -17764,6 +17766,13 @@ async function escutarTempoReal() {
         // aberta) e escuta mudanças na tabela em tempo real (pública é vista por todo mundo,
         // pessoal só chega pra quem criou porque o Realtime já respeita a RLS da tabela).
         window._agendaLembretesJaAvisados = window._agendaLembretesJaAvisados || new Set();
+        // 👇 Garante que os lembretes fixos do mês ATUAL já existam mesmo que ninguém
+        // tenha aberto a tela Agenda RH hoje — senão o aviso de "vencido" de hoje nunca
+        // dispararia pra um lembrete fixo que ainda não foi materializado.
+        if (typeof window.gerarOcorrenciasLembretesFixos === 'function') {
+            const hojeAgenda = new Date();
+            window.gerarOcorrenciasLembretesFixos(hojeAgenda.getFullYear(), hojeAgenda.getMonth());
+        }
         if (typeof window.checarLembretesVencidosAgenda === 'function') {
             window.checarLembretesVencidosAgenda();
             if (!window._agendaIntervalCheck) {
@@ -29435,6 +29444,131 @@ window.atualizarRegrasRescisao = function() {
         };
         window._agendaLembretesJaAvisados = window._agendaLembretesJaAvisados || new Set();
 
+        // =========================================================================
+        // 🔁 LEMBRETES FIXOS (recorrentes) — "toda quarta", "todo dia 21", etc.
+        // -------------------------------------------------------------------------
+        // Guardamos a REGRA numa tabela separada (agenda_lembretes_fixos) e, sempre
+        // que um mês é aberto/consultado, materializamos (geramos de verdade) as
+        // ocorrências daquele mês dentro da agenda_lembretes normal — cada uma
+        // marcada com fixo_id (de qual regra ela veio) e data_original (a data
+        // "pura" antes de qualquer ajuste de fim de semana/feriado). Isso evita
+        // duplicar: se já existe uma ocorrência com aquele fixo_id + data_original
+        // pra aquele mês, não gera de novo.
+        //
+        // Por que materializar em vez de só "calcular na hora de mostrar"? Porque
+        // cada ocorrência continua sendo um lembrete normal — dá pra marcar como
+        // Concluído, editar só aquele dia, excluir só aquele dia, etc. — sem mexer
+        // na regra geral, exatamente como um Google Calendar trata uma recorrência.
+        //
+        // Ajuste de fim de semana/feriado: usa o MESMO calendário de feriados
+        // nacionais (window.obterFeriadosNacionais) já usado na Escala/Ponto —
+        // inclui os móveis (Carnaval, Sexta Santa, Corpus Christi), não só os fixos.
+        // =========================================================================
+
+        window.ehDiaUtilAgenda = function(dataObj) {
+            const diaSemana = dataObj.getDay();
+            if (diaSemana === 0 || diaSemana === 6) return false; // domingo/sábado
+            const ano = dataObj.getFullYear();
+            const feriados = window.obterFeriadosNacionais(ano);
+            const iso = `${ano}-${String(dataObj.getMonth() + 1).padStart(2, '0')}-${String(dataObj.getDate()).padStart(2, '0')}`;
+            return !feriados[iso];
+        };
+
+        // ajuste: 'antecipar' (volta pro dia útil anterior) ou 'prorrogar' (avança pro próximo dia útil)
+        window.ajustarDataUtilAgenda = function(dataObj, ajuste) {
+            let d = new Date(dataObj);
+            const passo = ajuste === 'antecipar' ? -1 : 1;
+            while (!window.ehDiaUtilAgenda(d)) {
+                d.setDate(d.getDate() + passo);
+            }
+            return d;
+        };
+
+        window.buscarLembretesFixosAtivos = async function() {
+            const { data, error } = await supabaseClient.from('agenda_lembretes_fixos').select('*').eq('ativo', true);
+            if (error) { console.error('Erro ao buscar lembretes fixos:', error); return []; }
+            return data || [];
+        };
+
+        // Gera (se ainda não existirem) as ocorrências do mês/ano informado pra cada
+        // lembrete fixo ativo. Idempotente: pode chamar várias vezes sem duplicar.
+        window.gerarOcorrenciasLembretesFixos = async function(ano, mes) {
+            try {
+                const fixos = await window.buscarLembretesFixosAtivos();
+                if (!fixos.length) return;
+
+                const totalDias = new Date(ano, mes + 1, 0).getDate();
+                const candidatas = []; // { fixo, dataOriginal: Date }
+
+                fixos.forEach(fixo => {
+                    const dataInicio = new Date(fixo.data_inicio + 'T00:00:00');
+                    const dataFim = fixo.data_fim ? new Date(fixo.data_fim + 'T00:00:00') : null;
+
+                    if (fixo.tipo_recorrencia === 'semanal') {
+                        // "Toda quarta", por exemplo — pode cair mais de uma vez no mesmo mês.
+                        for (let dia = 1; dia <= totalDias; dia++) {
+                            const d = new Date(ano, mes, dia);
+                            if (d.getDay() !== fixo.dia_semana) continue;
+                            if (d < dataInicio) continue;
+                            if (dataFim && d > dataFim) continue;
+                            candidatas.push({ fixo, dataOriginal: d });
+                        }
+                    } else if (fixo.tipo_recorrencia === 'mensal') {
+                        // "Todo dia 21" — se o mês não tiver esse dia (ex: dia 31 em Fevereiro),
+                        // usa o último dia do mês.
+                        const diaAlvo = Math.min(fixo.dia_mes, totalDias);
+                        const d = new Date(ano, mes, diaAlvo);
+                        if (d >= dataInicio && (!dataFim || d <= dataFim)) {
+                            candidatas.push({ fixo, dataOriginal: d });
+                        }
+                    }
+                });
+
+                if (!candidatas.length) return;
+
+                const iniIso = `${ano}-${String(mes + 1).padStart(2, '0')}-01`;
+                const fimIso = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(totalDias).padStart(2, '0')}`;
+
+                const { data: existentes } = await supabaseClient.from('agenda_lembretes')
+                    .select('fixo_id, data_original')
+                    .not('fixo_id', 'is', null)
+                    .gte('data_original', iniIso).lte('data_original', fimIso);
+
+                const chaveExistente = new Set((existentes || []).map(e => `${e.fixo_id}_${e.data_original}`));
+
+                const novos = [];
+                candidatas.forEach(({ fixo, dataOriginal }) => {
+                    const isoOriginal = `${dataOriginal.getFullYear()}-${String(dataOriginal.getMonth() + 1).padStart(2, '0')}-${String(dataOriginal.getDate()).padStart(2, '0')}`;
+                    if (chaveExistente.has(`${fixo.id}_${isoOriginal}`)) return; // já existe, não duplica
+
+                    const dataFinal = window.ehDiaUtilAgenda(dataOriginal) ? dataOriginal : window.ajustarDataUtilAgenda(dataOriginal, fixo.ajuste);
+                    const dataFinalIso = `${dataFinal.getFullYear()}-${String(dataFinal.getMonth() + 1).padStart(2, '0')}-${String(dataFinal.getDate()).padStart(2, '0')}`;
+                    const lembrarEm = new Date(`${dataFinalIso}T${fixo.horario}:00`).toISOString();
+
+                    novos.push({
+                        tipo: fixo.tipo,
+                        titulo: fixo.titulo,
+                        descricao: fixo.descricao || null,
+                        data: dataFinalIso,
+                        horario: fixo.horario,
+                        lembrar_em: lembrarEm,
+                        status: 'Agendado',
+                        criado_por: fixo.criado_por,
+                        criado_por_id: fixo.criado_por_id,
+                        fixo_id: fixo.id,
+                        data_original: isoOriginal
+                    });
+                });
+
+                if (novos.length) {
+                    const { error: errInsert } = await supabaseClient.from('agenda_lembretes').insert(novos);
+                    if (errInsert) console.error('Erro ao gerar ocorrências de lembretes fixos:', errInsert);
+                }
+            } catch (e) {
+                console.error('Erro ao gerar ocorrências de lembretes fixos:', e);
+            }
+        };
+
         window.carregarAgendaRH = async function() {
             await window.buscarLembretesAgendaDoMes();
             window.renderizarCalendarioAgenda();
@@ -29442,6 +29576,11 @@ window.atualizarRegrasRescisao = function() {
 
         window.buscarLembretesAgendaDoMes = async function() {
             const { ano, mes } = window.agendaEstado;
+
+            // 👇 Antes de buscar, garante que as ocorrências dos lembretes fixos desse
+            // mês já foram materializadas (se ainda não existirem, gera agora).
+            await window.gerarOcorrenciasLembretesFixos(ano, mes);
+
             const iniIso = `${ano}-${String(mes + 1).padStart(2, '0')}-01`;
             const ultimoDiaMes = new Date(ano, mes + 1, 0).getDate();
             const fimIso = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(ultimoDiaMes).padStart(2, '0')}`;
@@ -29550,7 +29689,8 @@ window.atualizarRegrasRescisao = function() {
                 const chipsHtml = lembretesDoDia.map(l => {
                     const cor = coresStatusAgenda[l.status] || '#a6b0cf';
                     const tituloEscapado = (l.titulo || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                    return `<div class="agenda-chip-lembrete" style="background:${cor}22; color:${cor}; border:1px solid ${cor}55;" onclick="window.abrirModalDetalheLembreteAgenda('${l.id}')" title="${tituloEscapado}">${l.horario || ''} ${l.titulo || ''}</div>`;
+                    const iconeFixo = l.fixo_id ? '<i class="fa-solid fa-repeat" style="font-size:0.6rem; margin-right:2px;" title="Lembrete fixo (recorrente)"></i>' : '';
+                    return `<div class="agenda-chip-lembrete" style="background:${cor}22; color:${cor}; border:1px solid ${cor}55;" onclick="window.abrirModalDetalheLembreteAgenda('${l.id}')" title="${tituloEscapado}">${iconeFixo}${l.horario || ''} ${l.titulo || ''}</div>`;
                 }).join('');
 
                 html += `
@@ -29674,6 +29814,7 @@ window.atualizarRegrasRescisao = function() {
                         <i class="fa-solid fa-${l.tipo === 'Publico' ? 'users' : 'user'}"></i> ${l.tipo === 'Publico' ? 'Agenda Pública' : 'Agenda Pessoal'}
                     </p>
                     ${l.descricao ? `<div class="agenda-quebra-texto" style="font-size: 0.9rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.15); padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; white-space: pre-wrap;">${l.descricao}</div>` : ''}
+                    ${l.fixo_id ? `<p style="font-size: 0.75rem; color: #ffd54f; background: rgba(255,213,79,0.1); border: 1px solid rgba(255,213,79,0.35); padding: 6px 10px; border-radius: 6px; margin-bottom: 10px;"><i class="fa-solid fa-repeat"></i> Faz parte de um lembrete fixo (recorrente).${l.data_original && l.data_original !== l.data ? ` Data original: <b>${formatarDataBR(l.data_original)}</b> — ajustada porque caiu em fim de semana/feriado.` : ''} Editar ou excluir aqui afeta só esta ocorrência.</p>` : ''}
                     <p style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
                         <i class="fa-solid fa-user-pen"></i> Criado por: <b>${l.criado_por || '-'}</b>
                         ${l.status !== 'Agendado' && l.concluido_por ? `<br><i class="fa-solid fa-user-check"></i> Marcado por: <b>${l.concluido_por}</b>` : ''}
@@ -29878,6 +30019,390 @@ window.atualizarRegrasRescisao = function() {
                     }
                 });
             } catch (e) { console.error('Erro ao checar lembretes vencidos da Agenda:', e); }
+        };
+
+        // =========================================================================
+        // 🔁 MODAIS DOS LEMBRETES FIXOS (criar / gerenciar / editar)
+        // =========================================================================
+
+        window.abrirModalNovoLembreteFixo = function() {
+            document.getElementById('modal-novo-lembrete-fixo')?.remove();
+
+            const tipoAtual = window.agendaEstado.aba;
+            const corTipoAtual = tipoAtual === 'Publico' ? '#4fc3f7' : '#b388ff';
+            const rotuloTipo = tipoAtual === 'Publico' ? '<i class="fa-solid fa-globe"></i> Agenda Pública (todo o RH vê)' : '<i class="fa-solid fa-lock"></i> Minha Agenda (só você vê)';
+            const hojeIso = new Date().toISOString().split('T')[0];
+
+            const modalHtml = `
+            <div id="modal-novo-lembrete-fixo" class="modal-arquivo-overlay" style="z-index: 100020; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                <div class="glass-card" style="width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; border: 1px solid #ffd54f; position: relative;">
+                    <button onclick="document.getElementById('modal-novo-lembrete-fixo').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+                    <h3 style="color: #ffd54f; margin-bottom: 6px;"><i class="fa-solid fa-repeat"></i> Novo Lembrete Fixo</h3>
+                    <p style="font-size: 0.8rem; color: ${corTipoAtual}; margin-bottom: 15px; font-weight: 600;">${rotuloTipo}</p>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Título <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="fixo-titulo" maxlength="120" placeholder="Ex: Fechamento da folha" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                    </div>
+
+                    <div class="form-row" style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <div class="form-group" style="flex: 1;">
+                            <label style="font-size: 0.8rem;">Repete</label>
+                            <select id="fixo-tipo-recorrencia" onchange="window.atualizarCamposTipoRecorrenciaFixo()" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                                <option value="semanal">Toda semana (ex: toda quarta)</option>
+                                <option value="mensal">Todo mês (ex: todo dia 21)</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label style="font-size: 0.8rem;">Horário <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="time" id="fixo-horario" value="09:00" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                        </div>
+                    </div>
+
+                    <div id="fixo-campo-dia-semana" class="form-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Dia da semana</label>
+                        <select id="fixo-dia-semana" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                            <option value="0">Domingo</option>
+                            <option value="1">Segunda-feira</option>
+                            <option value="2">Terça-feira</option>
+                            <option value="3" selected>Quarta-feira</option>
+                            <option value="4">Quinta-feira</option>
+                            <option value="5">Sexta-feira</option>
+                            <option value="6">Sábado</option>
+                        </select>
+                    </div>
+
+                    <div id="fixo-campo-dia-mes" class="form-group hidden" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Dia do mês</label>
+                        <input type="number" id="fixo-dia-mes" min="1" max="31" value="21" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                        <p style="font-size: 0.72rem; color: var(--cor-texto-secundario); margin-top: 4px;">Se o mês não tiver esse dia (ex: 31 em Fevereiro), usa o último dia daquele mês.</p>
+                    </div>
+
+                    <div class="form-row" style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <div class="form-group" style="flex: 1;">
+                            <label style="font-size: 0.8rem;">Começa em</label>
+                            <input type="date" id="fixo-data-inicio" value="${hojeIso}" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                        </div>
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Até quando</label>
+                        <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="fixo-ate-quando" value="permanente" checked onchange="window.atualizarCamposAteQuandoFixo()"> Permanente</label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="fixo-ate-quando" value="data" onchange="window.atualizarCamposAteQuandoFixo()"> Até uma data</label>
+                        </div>
+                    </div>
+
+                    <div id="fixo-campo-data-fim" class="form-group hidden" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Data final</label>
+                        <input type="date" id="fixo-data-fim" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="font-size: 0.8rem;">Se cair num sábado, domingo ou feriado</label>
+                        <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="fixo-ajuste" value="antecipar" checked> Antecipar (dia útil anterior)</label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="fixo-ajuste" value="prorrogar"> Prorrogar (próximo dia útil)</label>
+                        </div>
+                        <p style="font-size: 0.72rem; color: var(--cor-texto-secundario); margin-top: 4px;">Ex: caindo num sábado, "Antecipar" leva o lembrete pra sexta; "Prorrogar" leva pra segunda.</p>
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="font-size: 0.8rem;">Descrição (opcional)</label>
+                        <textarea id="fixo-descricao" rows="2" placeholder="Detalhes do lembrete..." style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda); resize: vertical;"></textarea>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                        <button type="button" class="btn-secondary" onclick="document.getElementById('modal-novo-lembrete-fixo').remove()">Cancelar</button>
+                        <button type="button" id="btn-salvar-novo-lembrete-fixo" class="btn-success" style="background: #ffd54f; color: #000; border: none;" onclick="window.salvarNovoLembreteFixo()"><i class="fa-solid fa-check"></i> Criar Lembrete Fixo</button>
+                    </div>
+                </div>
+            </div>`;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            setTimeout(() => document.getElementById('fixo-titulo')?.focus(), 100);
+        };
+
+        window.atualizarCamposTipoRecorrenciaFixo = function() {
+            const tipo = document.getElementById('fixo-tipo-recorrencia').value;
+            document.getElementById('fixo-campo-dia-semana').classList.toggle('hidden', tipo !== 'semanal');
+            document.getElementById('fixo-campo-dia-mes').classList.toggle('hidden', tipo !== 'mensal');
+        };
+
+        window.atualizarCamposAteQuandoFixo = function() {
+            const valor = document.querySelector('input[name="fixo-ate-quando"]:checked')?.value;
+            document.getElementById('fixo-campo-data-fim').classList.toggle('hidden', valor !== 'data');
+        };
+
+        window.salvarNovoLembreteFixo = async function() {
+            const titulo = document.getElementById('fixo-titulo').value.trim();
+            const horario = document.getElementById('fixo-horario').value;
+            const tipoRecorrencia = document.getElementById('fixo-tipo-recorrencia').value;
+            const dataInicio = document.getElementById('fixo-data-inicio').value;
+            const ateQuando = document.querySelector('input[name="fixo-ate-quando"]:checked')?.value;
+            const dataFim = ateQuando === 'data' ? document.getElementById('fixo-data-fim').value : null;
+            const ajuste = document.querySelector('input[name="fixo-ajuste"]:checked')?.value;
+            const descricao = document.getElementById('fixo-descricao').value.trim();
+
+            if (!titulo) return mostrarAlerta("Digite um título pro lembrete.", "aviso");
+            if (!horario) return mostrarAlerta("Selecione o horário.", "aviso");
+            if (!dataInicio) return mostrarAlerta("Selecione a partir de quando ele começa a valer.", "aviso");
+            if (ateQuando === 'data' && !dataFim) return mostrarAlerta("Selecione a data final, ou escolha \"Permanente\".", "aviso");
+            if (ateQuando === 'data' && dataFim < dataInicio) return mostrarAlerta("A data final não pode ser antes da data de início.", "aviso");
+
+            const payload = {
+                tipo: window.agendaEstado.aba,
+                titulo,
+                descricao: descricao || null,
+                horario,
+                tipo_recorrencia: tipoRecorrencia,
+                dia_semana: tipoRecorrencia === 'semanal' ? parseInt(document.getElementById('fixo-dia-semana').value, 10) : null,
+                dia_mes: tipoRecorrencia === 'mensal' ? parseInt(document.getElementById('fixo-dia-mes').value, 10) : null,
+                data_inicio: dataInicio,
+                data_fim: dataFim,
+                ajuste,
+                ativo: true,
+                criado_por: usuarioAtual.nome,
+                criado_por_id: usuarioAtual.id
+            };
+
+            if (tipoRecorrencia === 'mensal' && (!payload.dia_mes || payload.dia_mes < 1 || payload.dia_mes > 31)) {
+                return mostrarAlerta("Informe um dia do mês válido (1 a 31).", "aviso");
+            }
+
+            const btn = document.getElementById('btn-salvar-novo-lembrete-fixo');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...'; }
+
+            const { error } = await supabaseClient.from('agenda_lembretes_fixos').insert([payload]);
+
+            if (error) {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Criar Lembrete Fixo'; }
+                return mostrarAlerta("Erro ao criar lembrete fixo: " + error.message, "erro");
+            }
+
+            document.getElementById('modal-novo-lembrete-fixo')?.remove();
+            mostrarAlerta("Lembrete fixo criado! Já vai aparecer no calendário deste mês em diante.", "sucesso");
+
+            // Gera na hora as ocorrências do mês que está sendo visto, pra já aparecer sem esperar.
+            await window.buscarLembretesAgendaDoMes();
+            window.renderizarCalendarioAgenda();
+        };
+
+        // 👇 Descreve a regra do fixo numa fraseamigável, reaproveitada tanto na lista de
+        // gerenciamento quanto no detalhe de uma ocorrência gerada por ele.
+        window.descreverRegraLembreteFixo = function(fixo) {
+            const nomesDias = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+            let base = fixo.tipo_recorrencia === 'semanal'
+                ? `Toda ${nomesDias[fixo.dia_semana]}`
+                : `Todo dia ${fixo.dia_mes}`;
+            const ateTexto = fixo.data_fim ? `até ${formatarDataBR(fixo.data_fim)}` : 'permanente';
+            const ajusteTexto = fixo.ajuste === 'antecipar' ? 'antecipa se cair em fim de semana/feriado' : 'prorroga se cair em fim de semana/feriado';
+            return `${base}, ${fixo.horario} — ${ateTexto} (${ajusteTexto})`;
+        };
+
+        window.abrirModalGerenciarFixos = async function() {
+            document.getElementById('modal-gerenciar-fixos')?.remove();
+
+            const modalHtmlBase = `
+            <div id="modal-gerenciar-fixos" class="modal-arquivo-overlay" style="z-index: 100020; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                <div class="glass-card" style="width: 100%; max-width: 620px; max-height: 90vh; overflow-y: auto; border: 1px solid #ffd54f; position: relative;">
+                    <button onclick="document.getElementById('modal-gerenciar-fixos').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+                    <h3 style="color: #ffd54f; margin-bottom: 15px;"><i class="fa-solid fa-list-check"></i> Lembretes Fixos — ${window.agendaEstado.aba === 'Publico' ? 'Agenda Pública' : 'Minha Agenda'}</h3>
+                    <div id="lista-gerenciar-fixos"><p style="color: var(--cor-texto-secundario); font-size: 0.85rem;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</p></div>
+                </div>
+            </div>`;
+            document.body.insertAdjacentHTML('beforeend', modalHtmlBase);
+
+            const { data, error } = await supabaseClient.from('agenda_lembretes_fixos')
+                .select('*').eq('tipo', window.agendaEstado.aba).order('created_at', { ascending: false });
+
+            const container = document.getElementById('lista-gerenciar-fixos');
+            if (!container) return;
+
+            if (error) {
+                container.innerHTML = `<p style="color: var(--cor-perigo); font-size: 0.85rem;">Erro ao carregar: ${error.message}</p>`;
+                return;
+            }
+
+            if (!data || data.length === 0) {
+                container.innerHTML = `<p style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhum lembrete fixo criado ainda nesta agenda.</p>`;
+                return;
+            }
+
+            container.innerHTML = data.map(fixo => `
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; background: var(--cor-fundo-input); border: 1px solid var(--cor-borda); margin-bottom: 8px; ${!fixo.ativo ? 'opacity: 0.55;' : ''}">
+                    <div style="min-width: 0;">
+                        <div style="font-weight: 700; font-size: 0.88rem; color: var(--cor-texto-principal);" class="agenda-quebra-texto">${fixo.titulo} ${!fixo.ativo ? '<span style="font-size:0.68rem; color: var(--cor-perigo); font-weight:700;">(DESATIVADO)</span>' : ''}</div>
+                        <div style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${window.descreverRegraLembreteFixo(fixo)}</div>
+                    </div>
+                    <div style="display: flex; gap: 8px; flex-shrink: 0;">
+                        <button type="button" onclick="window.abrirModalEditarLembreteFixo('${fixo.id}')" style="background: none; border: none; color: #4fc3f7; cursor: pointer; font-size: 1rem;" title="Editar regra"><i class="fa-solid fa-pen"></i></button>
+                        ${fixo.ativo
+                            ? `<button type="button" onclick="window.desativarLembreteFixo('${fixo.id}')" style="background: none; border: none; color: #ff9800; cursor: pointer; font-size: 1rem;" title="Desativar (para de gerar novas ocorrências)"><i class="fa-solid fa-pause"></i></button>`
+                            : `<button type="button" onclick="window.reativarLembreteFixo('${fixo.id}')" style="background: none; border: none; color: #28a745; cursor: pointer; font-size: 1rem;" title="Reativar"><i class="fa-solid fa-play"></i></button>`
+                        }
+                        <button type="button" onclick="window.excluirLembreteFixoDefinitivo('${fixo.id}')" style="background: none; border: none; color: var(--cor-perigo); cursor: pointer; font-size: 1rem;" title="Excluir esta regra (as ocorrências já geradas não são apagadas)"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+        window.desativarLembreteFixo = async function(idFixo) {
+            const confirmado = await mostrarConfirmacao("Desativar este lembrete fixo? Ele para de gerar novas ocorrências nos próximos meses — as que já foram criadas continuam normalmente na agenda.", "Desativar Lembrete Fixo");
+            if (!confirmado) return;
+            const { error } = await supabaseClient.from('agenda_lembretes_fixos').update({ ativo: false }).eq('id', idFixo);
+            if (error) return mostrarAlerta("Erro ao desativar: " + error.message, "erro");
+            mostrarAlerta("Lembrete fixo desativado.", "sucesso");
+            window.abrirModalGerenciarFixos();
+        };
+
+        window.reativarLembreteFixo = async function(idFixo) {
+            const { error } = await supabaseClient.from('agenda_lembretes_fixos').update({ ativo: true }).eq('id', idFixo);
+            if (error) return mostrarAlerta("Erro ao reativar: " + error.message, "erro");
+            mostrarAlerta("Lembrete fixo reativado.", "sucesso");
+            window.abrirModalGerenciarFixos();
+        };
+
+        window.excluirLembreteFixoDefinitivo = async function(idFixo) {
+            const confirmado = await mostrarConfirmacao("Excluir esta regra de lembrete fixo definitivamente? As ocorrências já criadas no calendário (passadas e futuras) NÃO são apagadas — só a regra que gera novas. Se quiser, exclua elas manualmente pelo calendário depois.", "Excluir Lembrete Fixo");
+            if (!confirmado) return;
+            const { error } = await supabaseClient.from('agenda_lembretes_fixos').delete().eq('id', idFixo);
+            if (error) return mostrarAlerta("Erro ao excluir: " + error.message, "erro");
+            mostrarAlerta("Regra de lembrete fixo excluída.", "sucesso");
+            window.abrirModalGerenciarFixos();
+        };
+
+        window.abrirModalEditarLembreteFixo = async function(idFixo) {
+            const { data: fixo, error } = await supabaseClient.from('agenda_lembretes_fixos').select('*').eq('id', idFixo).single();
+            if (error || !fixo) return mostrarAlerta("Não foi possível carregar este lembrete fixo.", "erro");
+
+            document.getElementById('modal-editar-lembrete-fixo')?.remove();
+            const tituloEscapado = (fixo.titulo || '').replace(/"/g, '&quot;');
+
+            const modalHtml = `
+            <div id="modal-editar-lembrete-fixo" class="modal-arquivo-overlay" style="z-index: 100030; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                <div class="glass-card" style="width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; border: 1px solid #4fc3f7; position: relative;">
+                    <button onclick="document.getElementById('modal-editar-lembrete-fixo').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+                    <h3 style="color: #4fc3f7; margin-bottom: 6px;"><i class="fa-solid fa-pen"></i> Editar Lembrete Fixo</h3>
+                    <p style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">As alterações só valem pras próximas ocorrências geradas — as que já existem no calendário não mudam sozinhas.</p>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Título <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="text" id="editar-fixo-titulo" maxlength="120" value="${tituloEscapado}" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                    </div>
+
+                    <div class="form-row" style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <div class="form-group" style="flex: 1;">
+                            <label style="font-size: 0.8rem;">Repete</label>
+                            <select id="editar-fixo-tipo-recorrencia" onchange="window.atualizarCamposTipoRecorrenciaEditarFixo()" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                                <option value="semanal" ${fixo.tipo_recorrencia === 'semanal' ? 'selected' : ''}>Toda semana</option>
+                                <option value="mensal" ${fixo.tipo_recorrencia === 'mensal' ? 'selected' : ''}>Todo mês</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label style="font-size: 0.8rem;">Horário <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="time" id="editar-fixo-horario" value="${fixo.horario}" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                        </div>
+                    </div>
+
+                    <div id="editar-fixo-campo-dia-semana" class="form-group ${fixo.tipo_recorrencia !== 'semanal' ? 'hidden' : ''}" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Dia da semana</label>
+                        <select id="editar-fixo-dia-semana" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                            <option value="0" ${fixo.dia_semana === 0 ? 'selected' : ''}>Domingo</option>
+                            <option value="1" ${fixo.dia_semana === 1 ? 'selected' : ''}>Segunda-feira</option>
+                            <option value="2" ${fixo.dia_semana === 2 ? 'selected' : ''}>Terça-feira</option>
+                            <option value="3" ${fixo.dia_semana === 3 ? 'selected' : ''}>Quarta-feira</option>
+                            <option value="4" ${fixo.dia_semana === 4 ? 'selected' : ''}>Quinta-feira</option>
+                            <option value="5" ${fixo.dia_semana === 5 ? 'selected' : ''}>Sexta-feira</option>
+                            <option value="6" ${fixo.dia_semana === 6 ? 'selected' : ''}>Sábado</option>
+                        </select>
+                    </div>
+
+                    <div id="editar-fixo-campo-dia-mes" class="form-group ${fixo.tipo_recorrencia !== 'mensal' ? 'hidden' : ''}" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Dia do mês</label>
+                        <input type="number" id="editar-fixo-dia-mes" min="1" max="31" value="${fixo.dia_mes || 21}" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Até quando</label>
+                        <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="editar-fixo-ate-quando" value="permanente" ${!fixo.data_fim ? 'checked' : ''} onchange="window.atualizarCamposAteQuandoEditarFixo()"> Permanente</label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="editar-fixo-ate-quando" value="data" ${fixo.data_fim ? 'checked' : ''} onchange="window.atualizarCamposAteQuandoEditarFixo()"> Até uma data</label>
+                        </div>
+                    </div>
+
+                    <div id="editar-fixo-campo-data-fim" class="form-group ${!fixo.data_fim ? 'hidden' : ''}" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.8rem;">Data final</label>
+                        <input type="date" id="editar-fixo-data-fim" value="${fixo.data_fim || ''}" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="font-size: 0.8rem;">Se cair num sábado, domingo ou feriado</label>
+                        <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 0.85rem;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="editar-fixo-ajuste" value="antecipar" ${fixo.ajuste === 'antecipar' ? 'checked' : ''}> Antecipar</label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="radio" name="editar-fixo-ajuste" value="prorrogar" ${fixo.ajuste === 'prorrogar' ? 'checked' : ''}> Prorrogar</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group" style="margin-bottom: 15px;">
+                        <label style="font-size: 0.8rem;">Descrição (opcional)</label>
+                        <textarea id="editar-fixo-descricao" rows="2" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda); resize: vertical;">${fixo.descricao || ''}</textarea>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                        <button type="button" class="btn-secondary" onclick="document.getElementById('modal-editar-lembrete-fixo').remove()">Cancelar</button>
+                        <button type="button" id="btn-salvar-editar-lembrete-fixo" class="btn-success" style="background: #4fc3f7; color: #000; border: none;" onclick="window.salvarEdicaoLembreteFixo('${fixo.id}')"><i class="fa-solid fa-check"></i> Salvar Alterações</button>
+                    </div>
+                </div>
+            </div>`;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+        };
+
+        window.atualizarCamposTipoRecorrenciaEditarFixo = function() {
+            const tipo = document.getElementById('editar-fixo-tipo-recorrencia').value;
+            document.getElementById('editar-fixo-campo-dia-semana').classList.toggle('hidden', tipo !== 'semanal');
+            document.getElementById('editar-fixo-campo-dia-mes').classList.toggle('hidden', tipo !== 'mensal');
+        };
+
+        window.atualizarCamposAteQuandoEditarFixo = function() {
+            const valor = document.querySelector('input[name="editar-fixo-ate-quando"]:checked')?.value;
+            document.getElementById('editar-fixo-campo-data-fim').classList.toggle('hidden', valor !== 'data');
+        };
+
+        window.salvarEdicaoLembreteFixo = async function(idFixo) {
+            const titulo = document.getElementById('editar-fixo-titulo').value.trim();
+            const horario = document.getElementById('editar-fixo-horario').value;
+            const tipoRecorrencia = document.getElementById('editar-fixo-tipo-recorrencia').value;
+            const ateQuando = document.querySelector('input[name="editar-fixo-ate-quando"]:checked')?.value;
+            const dataFim = ateQuando === 'data' ? document.getElementById('editar-fixo-data-fim').value : null;
+            const ajuste = document.querySelector('input[name="editar-fixo-ajuste"]:checked')?.value;
+            const descricao = document.getElementById('editar-fixo-descricao').value.trim();
+
+            if (!titulo) return mostrarAlerta("Digite um título pro lembrete.", "aviso");
+            if (!horario) return mostrarAlerta("Selecione o horário.", "aviso");
+            if (ateQuando === 'data' && !dataFim) return mostrarAlerta("Selecione a data final, ou escolha \"Permanente\".", "aviso");
+
+            const payload = {
+                titulo, descricao: descricao || null, horario,
+                tipo_recorrencia: tipoRecorrencia,
+                dia_semana: tipoRecorrencia === 'semanal' ? parseInt(document.getElementById('editar-fixo-dia-semana').value, 10) : null,
+                dia_mes: tipoRecorrencia === 'mensal' ? parseInt(document.getElementById('editar-fixo-dia-mes').value, 10) : null,
+                data_fim: dataFim,
+                ajuste
+            };
+
+            const btn = document.getElementById('btn-salvar-editar-lembrete-fixo');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...'; }
+
+            const { error } = await supabaseClient.from('agenda_lembretes_fixos').update(payload).eq('id', idFixo);
+
+            if (error) {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Salvar Alterações'; }
+                return mostrarAlerta("Erro ao salvar edição: " + error.message, "erro");
+            }
+
+            document.getElementById('modal-editar-lembrete-fixo')?.remove();
+            mostrarAlerta("Lembrete fixo atualizado!", "sucesso");
+            window.abrirModalGerenciarFixos();
         };
 
         document.getElementById('form-rescisao').addEventListener('submit', async (e) => {
