@@ -27017,9 +27017,12 @@ window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, cl
         return resultadoVazio;
     }
 
-    // IDs válidos = as mesmas caixinhas de window.CONFIG_ANEXOS_ADMISSAO. 'foto-cracha' fica
-    // de fora de propósito: é a foto de rosto pro crachá, não um documento pra classificar.
-    const TIPOS_VALIDOS = ['rg', 'carteira-trabalho', 'reservista', 'titulo-eleitor', 'cnh', 'certidao-filhos', 'conjuge', 'comprovante-endereco', 'outros'];
+    // IDs válidos = as mesmas caixinhas de window.CONFIG_ANEXOS_ADMISSAO. 'foto-cracha' agora
+    // ENTRA nessa lista (03/09/2026) — antes ficava de fora de propósito, mas passou a ser
+    // reconhecida quando o Gestor manda a foto 3x4 junto no mesmo PDF dos outros documentos,
+    // em vez de anexar solta. Ver o tratamento especial dela mais abaixo (não vira PDF, vira
+    // JPG direto, porque a caixinha do crachá só aceita imagem).
+    const TIPOS_VALIDOS = ['rg', 'carteira-trabalho', 'reservista', 'titulo-eleitor', 'cnh', 'certidao-filhos', 'conjuge', 'comprovante-endereco', 'foto-cracha', 'outros'];
 
     // Garante que as caixinhas (e a visibilidade de cada uma, já que os campos de texto acima
     // já foram preenchidos pela Clara — ex: Sexo, Estado Civil, Possui PIS) estão atualizadas
@@ -27041,8 +27044,9 @@ window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, cl
         const ultimoGrupo = grupos[grupos.length - 1];
         if (ultimoGrupo && ultimoGrupo.arquivo === meta._arquivoOrigem && ultimoGrupo.tipo === tipo && meta._paginaOrigem != null) {
             ultimoGrupo.paginas.push(meta._paginaOrigem);
+            ultimoGrupo.metas.push(meta); // 👈 guarda o meta de cada página (usado pela foto-cracha, ver abaixo)
         } else {
-            grupos.push({ arquivo: meta._arquivoOrigem, tipo, paginas: meta._paginaOrigem != null ? [meta._paginaOrigem] : [] });
+            grupos.push({ arquivo: meta._arquivoOrigem, tipo, paginas: meta._paginaOrigem != null ? [meta._paginaOrigem] : [], metas: [meta] });
         }
     });
 
@@ -27053,6 +27057,32 @@ window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, cl
 
     for (const grupo of grupos) {
         try {
+            // 🆕 FOTO 3X4 PRA CRACHÁ (03/09/2026): tratamento diferente de todos os outros
+            // tipos — a caixinha de "Foto para o Crachá" só aceita imagem (JPG/PNG), nunca
+            // PDF, então aqui a gente NÃO embrulha em PDF como faz com os documentos normais.
+            // Em vez disso, reaproveita a própria imagem que já foi renderizada daquela página
+            // pra mandar pro Gemini (meta.base64Puro) — é literalmente o "print" daquela
+            // página específica, sem precisar reabrir/rasterizar o PDF de novo.
+            if (grupo.tipo === 'foto-cracha') {
+                const metaFoto = grupo.metas && grupo.metas[0];
+                if (!metaFoto || !metaFoto.base64Puro) { ignorados++; continue; }
+
+                const binario = atob(metaFoto.base64Puro);
+                const bytesFoto = new Uint8Array(binario.length);
+                for (let b = 0; b < binario.length; b++) bytesFoto[b] = binario.charCodeAt(b);
+
+                const mimeFoto = metaFoto.mimeType || 'image/jpeg';
+                const extFoto = mimeFoto.includes('png') ? 'png' : 'jpg';
+                const arquivoFoto = new File([bytesFoto], `Foto 3x4 - Separado por Clara IA.${extFoto}`, { type: mimeFoto });
+
+                if (!window.arquivosAcumuladosAdmissao['foto-cracha']) window.arquivosAcumuladosAdmissao['foto-cracha'] = [];
+                // Foto de crachá é campo único — a mais recente que a Clara achar substitui
+                // uma anterior que ela mesma tenha separado antes (não acumula várias).
+                window.arquivosAcumuladosAdmissao['foto-cracha'] = [arquivoFoto];
+                resumo.push({ tipo: 'foto-cracha', paginas: grupo.paginas.length || 1 });
+                continue;
+            }
+
             const pdfFinal = await PDFLib.PDFDocument.create();
 
             if (grupo.arquivo.type === 'application/pdf') {
