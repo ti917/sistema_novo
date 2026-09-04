@@ -44646,6 +44646,30 @@ window.gerarPdfBlobTermoAvulso = async function(doc) {
         paraDataUrl(doc.documento_pdf)
     ]);
 
+    // Pega o tamanho real da logo pra não esticar/deformar ela no PDF (antes tava
+    // sendo forçada num box 30x15 fixo e saía ovalada/torta) — calcula a proporção
+    // de verdade e encaixa dentro de uma caixa máxima mantendo o formato original.
+    const carregarDimensoesImagem = (dataUrl) => new Promise((resolveImg) => {
+        if (!dataUrl) return resolveImg(null);
+        const imgEl = new Image();
+        imgEl.onload = () => resolveImg({ w: imgEl.naturalWidth, h: imgEl.naturalHeight });
+        imgEl.onerror = () => resolveImg(null);
+        imgEl.src = dataUrl;
+    });
+    const dimsLogo = await carregarDimensoesImagem(logoDataUrl);
+    let logoLarg = 30, logoAlt = 15;
+    if (dimsLogo && dimsLogo.w > 0 && dimsLogo.h > 0) {
+        const MAX_LARG_LOGO = 34, MAX_ALT_LOGO = 20;
+        const proporcao = dimsLogo.w / dimsLogo.h;
+        if (MAX_LARG_LOGO / proporcao <= MAX_ALT_LOGO) {
+            logoLarg = MAX_LARG_LOGO;
+            logoAlt = MAX_LARG_LOGO / proporcao;
+        } else {
+            logoAlt = MAX_ALT_LOGO;
+            logoLarg = MAX_ALT_LOGO * proporcao;
+        }
+    }
+
     // ---------- MONTAGEM DO PDF (vetorial) ----------
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
     const LARG_PAGINA = 210, ALT_PAGINA = 297;
@@ -44657,8 +44681,8 @@ window.gerarPdfBlobTermoAvulso = async function(doc) {
     // Cabeçalho: logo (se disponível) + título do documento
     if (logoDataUrl) {
         try {
-            pdf.addImage(logoDataUrl, 'PNG', (LARG_PAGINA - 30) / 2, y, 30, 15, undefined, 'FAST');
-            y += 18;
+            pdf.addImage(logoDataUrl, 'PNG', (LARG_PAGINA - logoLarg) / 2, y, logoLarg, logoAlt, undefined, 'FAST');
+            y += logoAlt + 4;
         } catch (e) { /* segue sem a logo se falhar */ }
     }
 
@@ -44690,20 +44714,54 @@ window.gerarPdfBlobTermoAvulso = async function(doc) {
         }
     };
 
+    // Desenha um parágrafo respeitando as tags <b>...</b> que vêm salvas no texto —
+    // antes elas apareciam escritas literalmente ("<b>NOME</b>") porque o texto virou
+    // texto puro no PDF vetorial. Agora cada palavra é medida e desenhada com a fonte
+    // certa (negrito ou normal), quebrando linha manualmente na largura útil da página.
+    const desenharParagrafoComNegrito = (paragrafo) => {
+        const partes = paragrafo.split(/(<\/?b>)/i);
+        let negritoAtivo = false;
+        const tokens = [];
+        partes.forEach(parte => {
+            if (/^<b>$/i.test(parte)) { negritoAtivo = true; return; }
+            if (/^<\/b>$/i.test(parte)) { negritoAtivo = false; return; }
+            if (!parte) return;
+            parte.split(/(\s+)/).forEach(w => {
+                if (w === '') return;
+                tokens.push({ texto: w, negrito: negritoAtivo });
+            });
+        });
+
+        let x = MARGEM;
+        garantirEspaco(ALTURA_LINHA);
+        tokens.forEach(tok => {
+            const ehEspaco = /^\s+$/.test(tok.texto);
+            pdf.setFont('helvetica', tok.negrito ? 'bold' : 'normal');
+            const largura = pdf.getTextWidth(tok.texto);
+            if (ehEspaco) {
+                if (x > MARGEM) x += largura;
+                return;
+            }
+            if (x + largura > MARGEM + LARG_UTIL) {
+                y += ALTURA_LINHA;
+                garantirEspaco(ALTURA_LINHA);
+                x = MARGEM;
+            }
+            pdf.text(tok.texto, x, y);
+            x += largura;
+        });
+        y += ALTURA_LINHA + 1.5;
+    };
+
     const paragrafos = (doc.conteudo_texto || '').replace(/\r\n/g, '\n').split('\n');
     paragrafos.forEach(paragrafo => {
         if (paragrafo.trim() === '') {
             y += 3;
             return;
         }
-        const linhas = pdf.splitTextToSize(paragrafo, LARG_UTIL);
-        linhas.forEach(linha => {
-            garantirEspaco(ALTURA_LINHA);
-            pdf.text(linha, MARGEM, y);
-            y += ALTURA_LINHA;
-        });
-        y += 1.5;
+        desenharParagrafoComNegrito(paragrafo);
     });
+    pdf.setFont('helvetica', 'normal');
 
     // Bloco de assinatura — sempre inteiro na mesma página
     garantirEspaco(55);
