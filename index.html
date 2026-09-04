@@ -44600,140 +44600,164 @@ window.baixarDossieCompletoColaborador = async function() {
 // =========================================================================
 // 📄 GERADOR AUXILIAR: MONTA O PDF REAL DO TERMO AVULSO (SEM CORTES)
 // =========================================================================
+// 👇 CORREÇÃO 3: html2canvas (mesmo com o elemento tirado fisicamente da tela) continuou
+// saindo em branco — em algumas máquinas/navegadores ele simplesmente falha em "fotografar"
+// um elemento fora da área visível, não importa a técnica usada pra escondê-lo. Pra acabar
+// de vez com isso, o PDF agora é desenhado 100% VETORIAL com jsPDF puro (texto real, não
+// "foto" de HTML) — o mesmo método já usado e comprovado na Escala de Plantões e na
+// Rescisão/Admissão do sistema. Sem html2canvas, sem elemento escondido, sem risco de branco.
 window.gerarPdfBlobTermoAvulso = async function(doc) {
-    const dataAssinatura = doc.assinado_em 
-        ? new Date(doc.assinado_em).toLocaleDateString('pt-BR') + ' às ' + new Date(doc.assinado_em).toLocaleTimeString('pt-BR', {hour: '2-digit', minute:'2-digit'}) 
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        throw new Error("A biblioteca de PDF (jsPDF) ainda não carregou. Tente novamente em alguns segundos.");
+    }
+    const { jsPDF } = window.jspdf;
+
+    const dataAssinatura = doc.assinado_em
+        ? new Date(doc.assinado_em).toLocaleDateString('pt-BR') + ' às ' + new Date(doc.assinado_em).toLocaleTimeString('pt-BR', {hour: '2-digit', minute:'2-digit'})
         : 'Data não registrada';
 
-    let urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/logo%20soul.png'; 
+    let urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/logo%20soul.png';
     if (doc.empresa && doc.empresa.trim().toUpperCase().includes('VILLAC')) {
         urlLogoReal = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
     }
 
-    // 🚀 CONVERSOR BASE64: Elimina bloqueios CORS que deixam o documento transparente
-    const urlParaBase64 = async (url) => {
-        if (!url || typeof url !== 'string' || !url.startsWith('http')) return '';
+    // Baixa logo + assinatura (a assinatura fica salva no campo documento_pdf, que na
+    // verdade guarda a imagem PNG da assinatura, não um PDF) e converte pra dataURL —
+    // o jsPDF só aceita imagem embutida assim.
+    const paraDataUrl = typeof window._imagemParaDataURL === 'function' ? window._imagemParaDataURL : async (url) => {
+        if (!url) return null;
         try {
             const res = await fetch(url);
             const blob = await res.blob();
             return await new Promise((resBase) => {
                 const reader = new FileReader();
                 reader.onloadend = () => resBase(reader.result);
+                reader.onerror = () => resBase(null);
                 reader.readAsDataURL(blob);
             });
         } catch (e) {
             console.warn("Erro ao converter imagem para Base64:", url, e);
-            return '';
+            return null;
         }
     };
 
-    // Baixa as imagens para a memória
-    const [logoBase64, assingBase64] = await Promise.all([
-        urlParaBase64(urlLogoReal),
-        urlParaBase64(doc.documento_pdf)
+    const [logoDataUrl, assinaturaDataUrl] = await Promise.all([
+        paraDataUrl(urlLogoReal),
+        paraDataUrl(doc.documento_pdf)
     ]);
 
-    let paragrafosHtml = (doc.conteudo_texto || '')
-        .replace(/\r\n/g, '\n')
-        .split('\n')
-        .map(linha => {
-            if(linha.trim() === '') return '<div style="height: 10px;"></div>';
-            return `<div style="margin-bottom: 8px; line-height: 1.5; text-align: justify; word-wrap: break-word;">${linha}</div>`;
-        }).join('');
+    // ---------- MONTAGEM DO PDF (vetorial) ----------
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    const LARG_PAGINA = 210, ALT_PAGINA = 297;
+    const MARGEM = 20;
+    const LARG_UTIL = LARG_PAGINA - (MARGEM * 2);
+    const RODAPE_Y = ALT_PAGINA - 12;
+    let y = MARGEM;
 
-    // 👇 CORREÇÃO 2: o z-index negativo (como no PDF de Avaliação de Experiência) deixou
-    // de funcionar aqui porque, com HTML montado na hora via innerHTML (e não um clone
-    // de elemento já existente na tela), o navegador às vezes NEM CHEGA a pintar o
-    // conteúdo que está "atrás" de tudo (z-index:-9999) antes do html2canvas tirar a
-    // "foto" — daí o branco total. A solução mais robusta (padrão usado por qualquer
-    // lib de html2canvas) é NÃO escoder atrás com z-index negativo, e sim tirar o
-    // elemento fisicamente da área visível da tela (position:fixed; left bem negativo),
-    // mantendo ele com stacking normal (z-index positivo) pra garantir que o navegador
-    // sempre pinte o conteúdo antes da captura.
-    return new Promise(async (resolve, reject) => {
-        // Salva o scroll atual e joga a tela pro topo (html2canvas odeia tela rolada)
-        const scrollAnterior = window.scrollY;
-        window.scrollTo(0, 0);
-
-        const container = document.createElement('div');
-        container.style.position = 'fixed';
-        container.style.top = '0';
-        container.style.left = '-9999px';
-        container.style.zIndex = '999999';
-        container.style.width = '800px';
-        container.style.background = '#ffffff';
-        container.innerHTML = `
-            <div style="font-family: Arial, sans-serif; color: #000000; box-sizing: border-box; width: 800px; background: #ffffff;">
-                <div class="folha-conteudo-avulso" style="width: 700px; margin: 0 auto; padding: 30px 20px; box-sizing: border-box;">
-                    <!-- CABEÇALHO -->
-                    <div style="text-align: center; margin-bottom: 25px; page-break-inside: avoid;">
-                        ${logoBase64 ? `<img src="${logoBase64}" style="max-width: 120px; max-height: 60px; object-fit: contain; margin-bottom: 12px;">` : ''}
-                        <h2 style="font-size: 16px; text-transform: uppercase; margin: 0; color: #002347; font-weight: bold;">${doc.titulo_documento || doc.titulo || 'TERMO'}</h2>
-                    </div>
-
-                    <!-- CORPO DO TEXTO -->
-                    <div style="font-size: 13px; color: #111111; box-sizing: border-box;">
-                        ${paragrafosHtml}
-                    </div>
-
-                    <!-- BLOCO DE ASSINATURA BLINDADO CONTRA CORTES -->
-                    <div style="margin-top: 30px; text-align: center; page-break-inside: avoid !important; break-inside: avoid !important;">
-                        <div style="height: 70px; display: flex; align-items: flex-end; justify-content: center; margin-bottom: 5px;">
-                            ${assingBase64 ? `<img src="${assingBase64}" style="max-height: 65px; max-width: 240px; object-fit: contain; display: block; margin: 0 auto;">` : ''}
-                        </div>
-                        <div style="border-top: 1px solid #000000; width: 280px; margin: 0 auto 6px auto;"></div>
-                        <b style="font-size: 13px; color: #000000; display: block; margin: 0;">${doc.nome_colaborador || doc.nome}</b>
-                        <span style="font-size: 11px; color: #444444; display: block; margin-top: 2px;">CPF: ${doc.cpf || 'Não informado'}</span>
-                        <span style="font-size: 9px; color: #666666; margin-top: 10px; display: block;">Assinado digitalmente em: ${dataAssinatura}</span>
-                        <span style="font-size: 8px; color: #888888; display: block; word-break: break-all; max-width: 400px; margin: 2px auto 0 auto;">Hash/Token: ${doc.token || 'N/A'}</span>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        document.body.appendChild(container);
-
-        // Aguarda a renderização completa das imagens (logo/assinatura) já em Base64,
-        // esperando cada <img> individualmente (decode/onload) além do tempo fixo —
-        // assim garante que a logo e a assinatura já estão pintadas antes da "foto".
-        const imgsParaEsperar = Array.from(container.querySelectorAll('img'));
-        await Promise.all(imgsParaEsperar.map(imgEl => {
-            if (imgEl.complete) return Promise.resolve();
-            return new Promise(resolveImg => {
-                imgEl.onload = () => resolveImg();
-                imgEl.onerror = () => resolveImg();
-                setTimeout(resolveImg, 1500);
-            });
-        }));
-        await new Promise(resolveEspera => setTimeout(resolveEspera, 300));
-
+    // Cabeçalho: logo (se disponível) + título do documento
+    if (logoDataUrl) {
         try {
-            const opt = {
-                margin: [8, 8, 8, 8],
-                filename: 'Termo.pdf',
-                image: { type: 'jpeg', quality: 0.98 },
-                html2canvas: {
-                    scale: 2,
-                    logging: false,
-                    useCORS: true,
-                    windowWidth: 800,
-                    scrollY: 0,
-                    scrollX: 0
-                },
-                jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-                pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
-            };
+            pdf.addImage(logoDataUrl, 'PNG', (LARG_PAGINA - 30) / 2, y, 30, 15, undefined, 'FAST');
+            y += 18;
+        } catch (e) { /* segue sem a logo se falhar */ }
+    }
 
-            const pdfBlob = await html2pdf().set(opt).from(container).outputPdf('blob');
-            document.body.removeChild(container);
-            window.scrollTo(0, scrollAnterior);
-            resolve(pdfBlob);
-        } catch (err) {
-            if (document.body.contains(container)) document.body.removeChild(container);
-            window.scrollTo(0, scrollAnterior);
-            reject(err);
-        }
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(13);
+    pdf.setTextColor(0, 35, 71);
+    const tituloDoc = String(doc.titulo_documento || doc.titulo || 'TERMO').toUpperCase();
+    const linhasTitulo = pdf.splitTextToSize(tituloDoc, LARG_UTIL);
+    linhasTitulo.forEach(linha => {
+        pdf.text(linha, LARG_PAGINA / 2, y, { align: 'center' });
+        y += 6;
     });
+    y += 4;
+    pdf.setDrawColor(0, 35, 71);
+    pdf.setLineWidth(0.4);
+    pdf.line(MARGEM, y, LARG_PAGINA - MARGEM, y);
+    y += 10;
+
+    // Corpo do texto
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(10.5);
+    pdf.setTextColor(17, 17, 17);
+    const ALTURA_LINHA = 5.3;
+
+    const garantirEspaco = (alturaNecessaria) => {
+        if (y + alturaNecessaria > RODAPE_Y) {
+            pdf.addPage();
+            y = MARGEM;
+        }
+    };
+
+    const paragrafos = (doc.conteudo_texto || '').replace(/\r\n/g, '\n').split('\n');
+    paragrafos.forEach(paragrafo => {
+        if (paragrafo.trim() === '') {
+            y += 3;
+            return;
+        }
+        const linhas = pdf.splitTextToSize(paragrafo, LARG_UTIL);
+        linhas.forEach(linha => {
+            garantirEspaco(ALTURA_LINHA);
+            pdf.text(linha, MARGEM, y);
+            y += ALTURA_LINHA;
+        });
+        y += 1.5;
+    });
+
+    // Bloco de assinatura — sempre inteiro na mesma página
+    garantirEspaco(55);
+    y += 8;
+    const centroX = LARG_PAGINA / 2;
+
+    if (assinaturaDataUrl) {
+        try {
+            pdf.addImage(assinaturaDataUrl, 'PNG', centroX - 27, y, 54, 20, undefined, 'FAST');
+        } catch (e) { /* se a assinatura falhar, segue só com a linha */ }
+    }
+    y += 22;
+
+    pdf.setDrawColor(0, 0, 0);
+    pdf.setLineWidth(0.3);
+    pdf.line(centroX - 40, y, centroX + 40, y);
+    y += 5;
+
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(11);
+    pdf.setTextColor(0, 0, 0);
+    pdf.text(String(doc.nome_colaborador || doc.nome || ''), centroX, y, { align: 'center' });
+    y += 5;
+
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(68, 68, 68);
+    pdf.text(`CPF: ${doc.cpf || 'Não informado'}`, centroX, y, { align: 'center' });
+    y += 5;
+
+    pdf.setFontSize(7.5);
+    pdf.setTextColor(102, 102, 102);
+    pdf.text(`Assinado digitalmente em: ${dataAssinatura}`, centroX, y, { align: 'center' });
+    y += 4;
+
+    pdf.setFontSize(6.5);
+    pdf.setTextColor(136, 136, 136);
+    const linhasToken = pdf.splitTextToSize(`Hash/Token: ${doc.token || 'N/A'}`, LARG_UTIL);
+    linhasToken.forEach(linha => {
+        pdf.text(linha, centroX, y, { align: 'center' });
+        y += 3.5;
+    });
+
+    // Rodapé com numeração de página
+    const totalPaginas = pdf.internal.getNumberOfPages();
+    for (let p = 1; p <= totalPaginas; p++) {
+        pdf.setPage(p);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(7);
+        pdf.setTextColor(150, 150, 150);
+        pdf.text(`Página ${p} de ${totalPaginas}`, LARG_PAGINA - MARGEM, ALT_PAGINA - 8, { align: 'right' });
+    }
+
+    return pdf.output('blob');
 };
 
 window.carregarDocumentosColaborador = async function() {
