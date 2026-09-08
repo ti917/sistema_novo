@@ -64555,13 +64555,36 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
         const hojeIso = hojeObj.toISOString().split('T')[0];
 
         // 👇 AJUSTE (carência de retorno): agora buscamos também afastamentos/férias
-        // que terminaram nos últimos DIAS_CARENCIA_RETORNO dias, não só os que estão
-        // valendo hoje. É isso que permite calcular "há quantos dias ela voltou" e dar
-        // a carência antes de voltar a cobrar/bloquear esse colaborador específico.
-        const DIAS_CARENCIA_RETORNO = 2;
+        // que terminaram recentemente, não só os que estão valendo hoje. É isso que
+        // permite calcular "há quantos dias ÚTEIS ela voltou" e dar a carência antes
+        // de voltar a cobrar/bloquear esse colaborador específico. O buffer de busca é
+        // maior que a carência em si (2 dias úteis) porque feriado prolongado / fim de
+        // semana comem dias de calendário sem contar como dia útil.
+        const DIAS_CARENCIA_RETORNO = 2; // dias ÚTEIS (não corridos) após o retorno
+        const BUFFER_BUSCA_RETORNO_DIAS = 10; // margem de calendário só pra garantir que a busca traga o registro
         const dataLimiteGraciaObj = new Date(hojeObj);
-        dataLimiteGraciaObj.setDate(dataLimiteGraciaObj.getDate() - DIAS_CARENCIA_RETORNO);
+        dataLimiteGraciaObj.setDate(dataLimiteGraciaObj.getDate() - BUFFER_BUSCA_RETORNO_DIAS);
         const dataLimiteGraciaIso = dataLimiteGraciaObj.toISOString().split('T')[0];
+
+        // 👇 Conta quantos dias ÚTEIS (seg-sex, sem feriado nacional) existem entre o
+        // dia seguinte a "dataBaseIso" e "hojeObjRef" (inclusive). Usada pra carência
+        // de retorno não "gastar" sábado, domingo ou feriado — só conta dia que o
+        // gestor realmente trabalha.
+        function contarDiasUteisDesde(dataBaseIso, hojeObjRef) {
+            const cursor = new Date(dataBaseIso + 'T00:00:00');
+            cursor.setDate(cursor.getDate() + 1); // começa a contar do dia seguinte ao retorno
+            let count = 0;
+            while (cursor <= hojeObjRef) {
+                const diaSemana = cursor.getDay(); // 0 = domingo, 6 = sábado
+                const feriadosDoAno = window.obterFeriadosNacionais ? window.obterFeriadosNacionais(cursor.getFullYear()) : {};
+                const isoCursor = cursor.toISOString().split('T')[0];
+                if (diaSemana !== 0 && diaSemana !== 6 && !feriadosDoAno[isoCursor]) {
+                    count++;
+                }
+                cursor.setDate(cursor.getDate() + 1);
+            }
+            return count;
+        }
 
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
@@ -64628,14 +64651,15 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
             });
 
             // 👇 CARÊNCIA DE RETORNO: se ela voltou de atestado/férias há até
-            // DIAS_CARENCIA_RETORNO dias, ainda não cobra nem mostra nada — dá tempo
-            // do gestor pegar o plantão dela antes de qualquer aviso aparecer.
-            let diasDesdeRetorno = null;
+            // DIAS_CARENCIA_RETORNO dias ÚTEIS, ainda não cobra nem mostra nada — dá
+            // tempo do gestor pegar o plantão dela antes de qualquer aviso aparecer.
+            // Sábado, domingo e feriado nacional NÃO contam como dia de carência
+            // (o gestor não trabalha nesses dias, então não "gasta" a carência à toa).
+            let diasUteisDesdeRetorno = null;
             if (!taEmAfastamentoOuFeriasReal && dataFimMaisRecenteAfastamento) {
-                const dRetorno = new Date(dataFimMaisRecenteAfastamento + 'T00:00:00');
-                diasDesdeRetorno = Math.floor((hojeObj - dRetorno) / (1000 * 60 * 60 * 24));
+                diasUteisDesdeRetorno = contarDiasUteisDesde(dataFimMaisRecenteAfastamento, hojeObj);
             }
-            const emCarenciaDeRetorno = diasDesdeRetorno !== null && diasDesdeRetorno <= DIAS_CARENCIA_RETORNO;
+            const emCarenciaDeRetorno = diasUteisDesdeRetorno !== null && diasUteisDesdeRetorno <= DIAS_CARENCIA_RETORNO;
 
             // 👇 AJUSTE PEDIDO: colaborador afastado (atestado/férias) de verdade HOJE,
             // ou ainda dentro da carência de retorno, nem entra na lista de Pendentes
