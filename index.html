@@ -64553,12 +64553,21 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
         const hojeObj = new Date();
         hojeObj.setHours(0,0,0,0);
         const hojeIso = hojeObj.toISOString().split('T')[0];
-        
+
+        // 👇 AJUSTE (carência de retorno): agora buscamos também afastamentos/férias
+        // que terminaram nos últimos DIAS_CARENCIA_RETORNO dias, não só os que estão
+        // valendo hoje. É isso que permite calcular "há quantos dias ela voltou" e dar
+        // a carência antes de voltar a cobrar/bloquear esse colaborador específico.
+        const DIAS_CARENCIA_RETORNO = 2;
+        const dataLimiteGraciaObj = new Date(hojeObj);
+        dataLimiteGraciaObj.setDate(dataLimiteGraciaObj.getDate() - DIAS_CARENCIA_RETORNO);
+        const dataLimiteGraciaIso = dataLimiteGraciaObj.toISOString().split('T')[0];
+
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
             supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
-            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
-            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', dataLimiteGraciaIso),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataLimiteGraciaIso)
         ]);
 
         if (resColabs.error) throw resColabs.error; 
@@ -64593,22 +64602,52 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
             if (diffDiasEmpresa < 85) return; 
 
             let taAfastadoHoje = false;
+            let taEmAfastamentoOuFeriasReal = false; // atestado/afastamento/férias de verdade (não é a folga normal da escala)
+            let dataFimMaisRecenteAfastamento = null; // pra calcular há quantos dias ela voltou
 
-            // Verifica Atestados/Ausências HOJE
+            // Verifica Atestados/Ausências (hoje e, se já terminou, quando terminou)
             const ausColab = ausenciasGlobais.filter(a => a.colaborador_id === c.id);
             ausColab.forEach(a => {
-                if (a.data_inicio <= hojeIso && a.data_fim >= hojeIso) taAfastadoHoje = true;
+                if (a.data_inicio <= hojeIso && a.data_fim >= hojeIso) {
+                    taAfastadoHoje = true;
+                    taEmAfastamentoOuFeriasReal = true;
+                } else if (a.data_fim < hojeIso && (!dataFimMaisRecenteAfastamento || a.data_fim > dataFimMaisRecenteAfastamento)) {
+                    dataFimMaisRecenteAfastamento = a.data_fim;
+                }
             });
 
-            // Verifica Férias HOJE
+            // Verifica Férias (hoje e, se já terminou, quando terminou)
             const ferColab = feriasGlobais.filter(f => f.colaborador_id === c.id);
             ferColab.forEach(f => {
-                if (f.data_inicio_ferias <= hojeIso && f.data_fim_ferias >= hojeIso) taAfastadoHoje = true;
+                if (f.data_inicio_ferias <= hojeIso && f.data_fim_ferias >= hojeIso) {
+                    taAfastadoHoje = true;
+                    taEmAfastamentoOuFeriasReal = true;
+                } else if (f.data_fim_ferias < hojeIso && (!dataFimMaisRecenteAfastamento || f.data_fim_ferias > dataFimMaisRecenteAfastamento)) {
+                    dataFimMaisRecenteAfastamento = f.data_fim_ferias;
+                }
             });
+
+            // 👇 CARÊNCIA DE RETORNO: se ela voltou de atestado/férias há até
+            // DIAS_CARENCIA_RETORNO dias, ainda não cobra nem mostra nada — dá tempo
+            // do gestor pegar o plantão dela antes de qualquer aviso aparecer.
+            let diasDesdeRetorno = null;
+            if (!taEmAfastamentoOuFeriasReal && dataFimMaisRecenteAfastamento) {
+                const dRetorno = new Date(dataFimMaisRecenteAfastamento + 'T00:00:00');
+                diasDesdeRetorno = Math.floor((hojeObj - dRetorno) / (1000 * 60 * 60 * 24));
+            }
+            const emCarenciaDeRetorno = diasDesdeRetorno !== null && diasDesdeRetorno <= DIAS_CARENCIA_RETORNO;
+
+            // 👇 AJUSTE PEDIDO: colaborador afastado (atestado/férias) de verdade HOJE,
+            // ou ainda dentro da carência de retorno, nem entra na lista de Pendentes
+            // nem conta pra tarja/bloqueio — o sistema detecta a volta dela sozinho
+            // (deixa de existir atestado/afastamento cobrindo hoje) e só volta a avisar
+            // depois da carência. A folga normal da escala (abaixo) continua mostrando
+            // normalmente, não é afastamento de verdade.
+            if (taEmAfastamentoOuFeriasReal || emCarenciaDeRetorno) return;
 
             // Verifica Folga Padrão da Escala HOJE
             if (window.isDiaDeFolga && window.isDiaDeFolga(c, hojeIso)) {
-                taAfastadoHoje = true; 
+                taAfastadoHoje = true;
             }
 
             // 👇 LIBERAÇÃO TEMPORÁRIA APROVADA PELO RH (só vale por hoje)
@@ -64627,10 +64666,12 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
                 }
             }
 
-            // 👇 AJUSTE: NÃO pula mais o cara da lista se ele estiver de atestado/férias/folga hoje.
-            // Ele continua aparecendo em Desempenho (pro gestor ver com antecedência, útil pro
-            // pessoal do noturno), mas o BLOQUEIO do sistema continua respeitando a ausência dele
-            // hoje (ver mais abaixo: deveBloquearEsseCara só ativa com !taAfastadoHoje).
+            // 👇 Quem chegou até aqui não está em afastamento/férias de verdade nem na
+            // carência de retorno (isso já foi filtrado lá em cima). Quem está só de
+            // folga normal da escala continua aparecendo em Desempenho, pro gestor ver
+            // com antecedência (útil pro pessoal do noturno) — mas o BLOQUEIO do sistema
+            // continua respeitando a folga dele hoje (deveBloquearEsseCara só ativa com
+            // !taAfastadoHoje).
 
             const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
             let taAtrasado = false;
