@@ -79887,8 +79887,11 @@ window.carregarTutorialAdmin = async function() {
         return;
     }
 
-    container.innerHTML = data.map(m => {
+    container.innerHTML = data.map((m, i) => {
         const corBadge = m.publico_alvo === 'Admin' ? '#4fc3f7' : '#28a745';
+        // 👇 Reordenação só faz sentido dentro do mesmo público (Admin/Gestor), já que é isso que separa os grupos na lista 👇
+        const primeiroDoGrupo = i === 0 || data[i - 1].publico_alvo !== m.publico_alvo;
+        const ultimoDoGrupo = i === data.length - 1 || data[i + 1].publico_alvo !== m.publico_alvo;
         return `
         <div class="admissao-card" style="display:flex; justify-content:space-between; align-items:center; border-left:4px solid #5c6bc0; margin-bottom:10px; flex-wrap: wrap; gap: 10px;">
             <div style="flex:1; min-width: 200px;">
@@ -79896,12 +79899,45 @@ window.carregarTutorialAdmin = async function() {
                 <span style="color:${corBadge}; font-size:0.75rem; font-weight:bold; background:${corBadge}22; padding:3px 10px; border-radius:20px; border:1px solid ${corBadge}55;">${m.publico_alvo === 'Admin' ? 'Para Admins' : 'Para Gestores'}</span>
             </div>
             <div style="display:flex; gap:8px;">
+                <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;${primeiroDoGrupo ? ' opacity:0.3; cursor:not-allowed;' : ''}" ${primeiroDoGrupo ? 'disabled' : ''} onclick="moverModuloTutorial('${m.id}', 'cima')" title="Mover para cima"><i class="fa-solid fa-arrow-up"></i></button>
+                <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;${ultimoDoGrupo ? ' opacity:0.3; cursor:not-allowed;' : ''}" ${ultimoDoGrupo ? 'disabled' : ''} onclick="moverModuloTutorial('${m.id}', 'baixo')" title="Mover para baixo"><i class="fa-solid fa-arrow-down"></i></button>
                 <button class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="abrirGestaoTemasTutorial('${m.id}', '${(m.titulo || '').replace(/'/g, "\\'")}', '${m.publico_alvo}')"><i class="fa-solid fa-list"></i> Temas</button>
                 <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;" onclick="abrirModalModuloTutorial('${m.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
                 <button class="btn-danger-mini" style="padding:6px 10px; font-size:0.8rem;" onclick="excluirModuloTutorial('${m.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>`;
     }).join('');
+};
+
+// 👇 Move um módulo pra cima/baixo na lista, sem sair do grupo (Admin/Gestor) dele.
+//    Renormaliza a ordem de todo o grupo (0, 10, 20...) e já troca os dois de posição, tudo numa passada só. 👇
+window.moverModuloTutorial = async function(idModulo, direcao) {
+    try {
+        const { data: moduloAlvo, error: errAlvo } = await supabaseClient.from('tutorial_modulos').select('publico_alvo').eq('id', idModulo).single();
+        if (errAlvo || !moduloAlvo) throw errAlvo || new Error('Módulo não encontrado.');
+
+        const { data: grupo, error: errGrupo } = await supabaseClient.from('tutorial_modulos')
+            .select('id, ordem')
+            .eq('publico_alvo', moduloAlvo.publico_alvo)
+            .order('ordem', { ascending: true, nullsFirst: false })
+            .order('created_at', { ascending: true });
+        if (errGrupo) throw errGrupo;
+
+        const idx = grupo.findIndex(m => m.id === idModulo);
+        const idxAlvo = direcao === 'cima' ? idx - 1 : idx + 1;
+        if (idx === -1 || idxAlvo < 0 || idxAlvo >= grupo.length) return;
+
+        const idsNaOrdemFinal = grupo.map(m => m.id);
+        [idsNaOrdemFinal[idx], idsNaOrdemFinal[idxAlvo]] = [idsNaOrdemFinal[idxAlvo], idsNaOrdemFinal[idx]];
+
+        await Promise.all(idsNaOrdemFinal.map((id, i) =>
+            supabaseClient.from('tutorial_modulos').update({ ordem: i * 10 }).eq('id', id)
+        ));
+
+        carregarTutorialAdmin();
+    } catch (err) {
+        mostrarAlerta("Erro ao reordenar módulo: " + err.message, "erro");
+    }
 };
 
 window.abrirModalModuloTutorial = async function(idModulo) {
@@ -79948,7 +79984,10 @@ window.salvarModuloTutorial = async function(idModulo) {
             const { error } = await supabaseClient.from('tutorial_modulos').update({ titulo, publico_alvo: publico }).eq('id', idModulo);
             if (error) throw error;
         } else {
-            const { error } = await supabaseClient.from('tutorial_modulos').insert([{ titulo, publico_alvo: publico, criado_por: usuarioAtual.nome }]);
+            // 👇 Novo módulo entra sempre no final da lista do seu público (Admin/Gestor) 👇
+            const { count } = await supabaseClient.from('tutorial_modulos').select('*', { count: 'exact', head: true }).eq('publico_alvo', publico);
+            const proximaOrdem = ((count || 0) + 1) * 10;
+            const { error } = await supabaseClient.from('tutorial_modulos').insert([{ titulo, publico_alvo: publico, ordem: proximaOrdem, criado_por: usuarioAtual.nome }]);
             if (error) throw error;
         }
         mostrarAlerta("Módulo salvo com sucesso!", "sucesso");
@@ -79998,18 +80037,55 @@ window.abrirGestaoTemasTutorial = async function(moduloId, tituloModulo, publico
         return;
     }
 
-    container.innerHTML = data.map(t => `
+    container.innerHTML = data.map((t, i) => {
+        const eDoTopo = i === 0;
+        const eDoFim = i === data.length - 1;
+        return `
         <div class="admissao-card" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap: wrap; gap: 10px;">
             <div style="flex:1; min-width: 200px;">
                 <strong style="color: var(--cor-texto-principal); display:block;"><i class="fa-solid fa-circle-play" style="color:#5c6bc0;"></i> ${t.titulo}</strong>
                 ${t.video_youtube_url ? `<a href="${t.video_youtube_url}" target="_blank" style="color:var(--cor-texto-secundario); font-size:0.75rem; text-decoration:none;"><i class="fa-brands fa-youtube"></i> Ver link do vídeo</a>` : `<span style="color:var(--cor-perigo); font-size:0.75rem;">Sem vídeo cadastrado</span>`}
             </div>
             <div style="display:flex; gap:8px;">
+                <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;${eDoTopo ? ' opacity:0.3; cursor:not-allowed;' : ''}" ${eDoTopo ? 'disabled' : ''} onclick="moverTemaTutorial('${t.id}', 'cima')" title="Mover para cima"><i class="fa-solid fa-arrow-up"></i></button>
+                <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;${eDoFim ? ' opacity:0.3; cursor:not-allowed;' : ''}" ${eDoFim ? 'disabled' : ''} onclick="moverTemaTutorial('${t.id}', 'baixo')" title="Mover para baixo"><i class="fa-solid fa-arrow-down"></i></button>
                 <button class="btn-secondary" style="padding:6px 10px; font-size:0.8rem;" onclick="abrirModalTemaTutorial('${t.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
                 <button class="btn-danger-mini" style="padding:6px 10px; font-size:0.8rem;" onclick="excluirTemaTutorial('${t.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
+};
+
+// 👇 Move um tema/vídeo pra cima/baixo dentro do módulo aberto — mesma lógica de renormalização usada nos módulos 👇
+window.moverTemaTutorial = async function(idTema, direcao) {
+    try {
+        const moduloId = window.moduloTutorialAtualAdmin;
+        if (!moduloId) return;
+
+        const { data: grupo, error: errGrupo } = await supabaseClient.from('tutorial_temas')
+            .select('id, ordem')
+            .eq('modulo_id', moduloId)
+            .order('ordem', { ascending: true, nullsFirst: false })
+            .order('created_at', { ascending: true });
+        if (errGrupo) throw errGrupo;
+
+        const idx = grupo.findIndex(t => t.id === idTema);
+        const idxAlvo = direcao === 'cima' ? idx - 1 : idx + 1;
+        if (idx === -1 || idxAlvo < 0 || idxAlvo >= grupo.length) return;
+
+        const idsNaOrdemFinal = grupo.map(t => t.id);
+        [idsNaOrdemFinal[idx], idsNaOrdemFinal[idxAlvo]] = [idsNaOrdemFinal[idxAlvo], idsNaOrdemFinal[idx]];
+
+        await Promise.all(idsNaOrdemFinal.map((id, i) =>
+            supabaseClient.from('tutorial_temas').update({ ordem: i * 10 }).eq('id', id)
+        ));
+
+        const tituloModuloAtual = document.getElementById('titulo-modulo-tutorial-admin').innerText;
+        abrirGestaoTemasTutorial(moduloId, tituloModuloAtual);
+    } catch (err) {
+        mostrarAlerta("Erro ao reordenar tema: " + err.message, "erro");
+    }
 };
 
 window.voltarModulosTutorialAdmin = function() {
@@ -80162,7 +80238,10 @@ window.salvarTemaTutorial = async function(idTema) {
             const { error } = await supabaseClient.from('tutorial_temas').update({ titulo, video_youtube_url: videoUrl, descricao, observacoes }).eq('id', idTema);
             if (error) throw error;
         } else {
-            const { error } = await supabaseClient.from('tutorial_temas').insert([{ modulo_id: window.moduloTutorialAtualAdmin, titulo, video_youtube_url: videoUrl, descricao, observacoes }]);
+            // 👇 Novo tema/vídeo entra sempre no final da lista do módulo 👇
+            const { count } = await supabaseClient.from('tutorial_temas').select('*', { count: 'exact', head: true }).eq('modulo_id', window.moduloTutorialAtualAdmin);
+            const proximaOrdem = ((count || 0) + 1) * 10;
+            const { error } = await supabaseClient.from('tutorial_temas').insert([{ modulo_id: window.moduloTutorialAtualAdmin, titulo, video_youtube_url: videoUrl, descricao, observacoes, ordem: proximaOrdem }]);
             if (error) throw error;
         }
         mostrarAlerta("Tema salvo com sucesso!", "sucesso");
