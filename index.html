@@ -7195,9 +7195,11 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
             <i class="fa-solid fa-search"></i>
             <input type="text" id="busca-rescisoes-arquivadas" placeholder="Buscar arquivadas por nome ou unidade..." oninput="window.executarComAtraso(filtrarArquivadasRescAdmin)">
         </div>
-        <div class="input-wrapper" style="width: 180px;">
-            <i class="fa-regular fa-calendar"></i>
-            <input type="month" id="filtro-mes-rescisoes-arquivadas" onchange="filtrarArquivadasRescAdmin()" title="Filtrar por Mês" onclick="this.showPicker()">
+        <div class="input-wrapper" style="width: 260px;" title="Filtra pelo Último Dia do desligamento">
+            <i class="fa-solid fa-calendar-day"></i>
+            <input type="text" id="arquivadas-resc-periodo-flatpickr" placeholder="Filtrar por período (Início e Fim)..." readonly style="width: 100%; cursor: pointer; font-weight: bold;">
+            <input type="hidden" id="filtro-data-de-rescisoes-arquivadas">
+            <input type="hidden" id="filtro-data-ate-rescisoes-arquivadas">
         </div>
         <div class="input-wrapper" style="width: 250px;">
             <i class="fa-solid fa-filter"></i>
@@ -7211,6 +7213,9 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                 <option value="Falecimento">Rescisão por Falecimento (Óbito)</option>
             </select>
         </div>
+        <button type="button" class="btn-success" style="padding: 0 20px; border-radius: 8px; height: 45px; border: none; font-weight: bold; background: #28a745; color: #fff; display: inline-flex; align-items: center; gap: 6px;" onclick="window.exportarRelatorioRescisoesArquivadasExcel()" title="Exportar Planilha das Arquivadas (respeita os filtros acima)">
+            <i class="fa-solid fa-file-excel"></i> Gerar Relatório
+        </button>
     </div>
     <div id="lista-rescisoes-arquivadas-container"></div>
     <div id="paginacao-rescisoes-arquivadas" class="paginacao-container"></div>
@@ -31891,8 +31896,12 @@ let rescisoesArquivadasFiltradas = [];
 
 window.filtrarArquivadasRescAdmin = function() {
     const termo = window.removerAcentos(document.getElementById('busca-rescisoes-arquivadas').value);
-    const mesFiltro = document.getElementById('filtro-mes-rescisoes-arquivadas').value;
     const tipoFiltro = document.getElementById('filtro-tipo-rescisoes-arquivadas')?.value || '';
+    // 👇 Filtro por período (calendário Início/Fim) no lugar do antigo filtro de mês único —
+    // assim dá pra puxar o ano todo de uma vez, ou qualquer intervalo. Usa o Último Dia do
+    // desligamento como referência, igual ao filtro de período do Processo Rescisório Final.
+    const dataDeFiltro = document.getElementById('filtro-data-de-rescisoes-arquivadas')?.value || '';
+    const dataAteFiltro = document.getElementById('filtro-data-ate-rescisoes-arquivadas')?.value || '';
 
     rescisoesArquivadasFiltradas = todasRescisoesAprovadas.filter(c => {
         const resc = c.dados_rescisao || {};
@@ -31903,13 +31912,13 @@ window.filtrarArquivadasRescAdmin = function() {
         const matchTexto = window.removerAcentos(c.nome).includes(termo) || window.removerAcentos(c.unidade || '').includes(termo);
 
         let matchData = true;
-        if (mesFiltro) {
-            const ultimoDiaTexto = resc.ultimo_dia || '';
-            const regexData = ultimoDiaTexto.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-            if (regexData) {
-                const mesAnoUltimoDia = `${regexData[3]}-${regexData[2]}`;
-                if (mesAnoUltimoDia !== mesFiltro) matchData = false;
-            } else { matchData = false; }
+        if (dataDeFiltro || dataAteFiltro) {
+            const dataRef = window.converterDataBrParaIso(resc.ultimo_dia);
+            if (!dataRef) matchData = false;
+            else {
+                if (dataDeFiltro && dataRef < dataDeFiltro) matchData = false;
+                if (dataAteFiltro && dataRef > dataAteFiltro) matchData = false;
+            }
         }
 
         const matchTipo = !tipoFiltro || resc.tipo === tipoFiltro;
@@ -69199,6 +69208,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initPeriodoRangePicker('vt-periodo-flatpickr', 'vt-data-inicio', 'vt-data-fim');
     initPeriodoRangePicker('vr-periodo-flatpickr', 'vr-data-inicio', 'vr-data-fim');
     initPeriodoRangePicker('processo-resc-periodo-flatpickr', 'filtro-data-de-processo-admin', 'filtro-data-ate-processo-admin', () => { if (typeof filtrarProcessosRescAdmin === 'function') filtrarProcessosRescAdmin(); });
+    initPeriodoRangePicker('arquivadas-resc-periodo-flatpickr', 'filtro-data-de-rescisoes-arquivadas', 'filtro-data-ate-rescisoes-arquivadas', () => { if (typeof window.filtrarArquivadasRescAdmin === 'function') window.filtrarArquivadasRescAdmin(); });
     window.iniciarPeriodoBI();
     window.iniciarPeriodoExtratoBH();
     if (typeof window.iniciarPeriodoAuditoria === 'function') window.iniciarPeriodoAuditoria();
@@ -80303,6 +80313,186 @@ window.alternarVisaoEscala = function(visaoSelecionada) {
 
     } catch (err) {
         console.error("Erro ao gerar Excel de desligamentos:", err);
+        mostrarAlerta("Erro interno do sistema ao compilar o arquivo Excel.", "erro");
+    }
+};
+
+// =========================================================================
+// 🔧 RELATÓRIO EXCEL — aba "Arquivadas (Concluídas)". Respeita os filtros já
+// aplicados na tela (nome/unidade, período Início-Fim e Tipo de Desligamento),
+// pra dar pra tirar, por exemplo, só os "Justa Causa" de um período/ano
+// inteiro. Reaproveita o mesmo layout de planilha (uma aba por mês) do
+// relatório de "Histórico e Pendências", só que a fonte dos dados é
+// `rescisoesArquivadasFiltradas` em vez de `rescisoesFiltradas`.
+// =========================================================================
+window.exportarRelatorioRescisoesArquivadasExcel = async function() {
+    if (typeof rescisoesArquivadasFiltradas === 'undefined' || !rescisoesArquivadasFiltradas || rescisoesArquivadasFiltradas.length === 0) {
+        return mostrarAlerta("Nenhum desligamento arquivado encontrado com os filtros atuais para exportar.", "aviso");
+    }
+
+    try {
+        mostrarAlerta("Separando registros por mês e gerando planilhas...", "sucesso");
+
+        const dataDeFiltro = document.getElementById('filtro-data-de-rescisoes-arquivadas')?.value || '';
+        const dataAteFiltro = document.getElementById('filtro-data-ate-rescisoes-arquivadas')?.value || '';
+        const tipoFiltro = document.getElementById('filtro-tipo-rescisoes-arquivadas')?.value || '';
+        const dataHoje = new Date().toLocaleDateString('pt-BR');
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Portal';
+        workbook.calcProperties.fullCalcOnLoad = true;
+
+        // 1. AGRUPAMENTO INTELIGENTE: Agrupa os colaboradores por Ano-Mês (YYYY-MM)
+        const gruposPorMes = {};
+
+        rescisoesArquivadasFiltradas.forEach(c => {
+            const resc = c.dados_rescisao || {};
+            const ultimoDiaTexto = resc.ultimo_dia || '';
+            const regexData = ultimoDiaTexto.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+
+            let chaveMes = 'Sem_Data';
+            if (regexData) {
+                chaveMes = `${regexData[3]}-${regexData[2]}`; // Formato interno: YYYY-MM
+            }
+
+            if (!gruposPorMes[chaveMes]) {
+                gruposPorMes[chaveMes] = [];
+            }
+            gruposPorMes[chaveMes].push(c);
+        });
+
+        const chavesMesesOrdenadas = Object.keys(gruposPorMes).sort();
+
+        // 2. CRIAÇÃO DINÂMICA DAS ABAS POR MÊS
+        chavesMesesOrdenadas.forEach(chave => {
+            const colaboradoresDoMes = gruposPorMes[chave];
+
+            let nomeDaAba = "Sem Data";
+            if (chave !== 'Sem_Data') {
+                const [ano, mes] = chave.split('-');
+                nomeDaAba = `${mes}-${ano}`;
+            }
+
+            const sheet = workbook.addWorksheet(nomeDaAba);
+
+            sheet.mergeCells('A1:I1');
+            const titulo = sheet.getCell('A1');
+            titulo.value = 'RELATÓRIO DE DESLIGAMENTOS ARQUIVADOS (CONCLUÍDOS)';
+            titulo.font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+            titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+            titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.mergeCells('A2:I2');
+            const subtitulo = sheet.getCell('A2');
+            const filtrosTexto = [
+                (dataDeFiltro || dataAteFiltro) ? `PERÍODO: ${dataDeFiltro ? dataDeFiltro.split('-').reverse().join('/') : '...'} a ${dataAteFiltro ? dataAteFiltro.split('-').reverse().join('/') : '...'}` : null,
+                tipoFiltro ? `TIPO: ${tipoFiltro}` : null
+            ].filter(Boolean).join('   |   ');
+            subtitulo.value = `MÊS DE REFERÊNCIA: ${nomeDaAba}   |   GERADO EM: ${dataHoje}   |   TOTAL NESTA ABA: ${colaboradoresDoMes.length} REGISTROS${filtrosTexto ? '   |   ' + filtrosTexto : ''}`;
+            subtitulo.font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+            subtitulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+            subtitulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+            sheet.addRow([]);
+
+            const headerRow = sheet.addRow([
+                "NOME DO COLABORADOR",
+                "DATA ADMISSÃO",
+                "DATA RESCISÃO (ÚLTIMO DIA)",
+                "TIPO DE AVISO / RESCISÃO",
+                "DATA LIMITE PAGAMENTO",
+                "VALOR DA RESCISÃO (MANUAL)",
+                "FGTS (MANUAL)",
+                "LOCAL (UNIDADE)",
+                "MOTIVO / JUSTIFICATIVA DO GESTOR"
+            ]);
+
+            headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+            headerRow.height = 25;
+            headerRow.eachCell((cell) => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDC3545' } };
+                cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+                cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+            });
+
+            sheet.columns = [
+                { width: 35 }, { width: 16 }, { width: 28 }, { width: 32 },
+                { width: 24 }, { width: 26 }, { width: 18 }, { width: 25 }, { width: 70 }
+            ];
+
+            let currentRow = 5;
+
+            colaboradoresDoMes.sort((a, b) => a.nome.localeCompare(b.nome)).forEach(c => {
+                const adm = c.dados_admissao || {};
+                const resc = c.dados_rescisao || {};
+
+                const dtAdmissao = adm.jornada?.data_inicio || adm.data_inicio ? formatarDataBR(adm.jornada?.data_inicio || adm.data_inicio) : '-';
+                const dtRescisao = resc.ultimo_dia ? resc.ultimo_dia.split('<')[0].split('(')[0].trim() : '-';
+                const dtPagamento = resc.data_pagamento ? resc.data_pagamento.trim() : '-';
+
+                let motivoLimpo = (resc.motivo || '-').trim();
+                if (motivoLimpo.includes('[COBERTURA_POR:')) {
+                    motivoLimpo = motivoLimpo.replace(/\[COBERTURA_POR:[^\]]+\]\s*/g, '').trim();
+                }
+
+                const row = sheet.addRow([
+                    c.nome,
+                    dtAdmissao,
+                    dtRescisao,
+                    resc.tipo || '-',
+                    dtPagamento,
+                    "",
+                    "",
+                    c.unidade || '-',
+                    motivoLimpo
+                ]);
+
+                row.height = 24;
+
+                row.getCell(6).numFmt = '"R$ "#,##0.00';
+                row.getCell(7).numFmt = '"R$ "#,##0.00';
+
+                row.eachCell((cell, colNumber) => {
+                    cell.border = {
+                        top: {style:'thin', color: {argb:'FFDDDDDD'}},
+                        bottom: {style:'thin', color: {argb:'FFDDDDDD'}},
+                        left: {style:'thin', color: {argb:'FFDDDDDD'}},
+                        right: {style:'thin', color: {argb:'FFDDDDDD'}}
+                    };
+
+                    if (colNumber === 9) {
+                        cell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+                    } else if (colNumber === 1 || colNumber === 8) {
+                        cell.alignment = { horizontal: 'left', vertical: 'middle' };
+                    } else {
+                        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                    }
+                });
+
+                if (currentRow % 2 === 0) {
+                    row.eachCell(cell => cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDF8F8' } });
+                }
+
+                currentRow++;
+            });
+        });
+
+        // 3. COMPILAÇÃO DO BINÁRIO E DISPARO DE DOWNLOAD
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+
+        const sufixoTipo = tipoFiltro ? '_' + tipoFiltro.replace(/[^a-zA-Z0-9]+/g, '_') : '';
+        const sufixoPeriodo = (dataDeFiltro || dataAteFiltro) ? `_${dataDeFiltro || '...'}_a_${dataAteFiltro || '...'}` : '';
+        link.download = `Desligamentos_Arquivados${sufixoTipo}${sufixoPeriodo || '_Geral'}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        mostrarAlerta("Planilha de arquivados gerada com sucesso!", "sucesso");
+
+    } catch (err) {
+        console.error("Erro ao gerar Excel de desligamentos arquivados:", err);
         mostrarAlerta("Erro interno do sistema ao compilar o arquivo Excel.", "erro");
     }
 };
