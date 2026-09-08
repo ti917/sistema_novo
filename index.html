@@ -52613,7 +52613,11 @@ window.analisarArquivosLote = async function(input) {
 
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa);
     
-    let statusColabsEmpresa = colabs.map(c => ({ ...c, achadoNoPdf: false, paginas: [] }));
+    // 👇 MUDANÇA: cada colaborador acumula "ocorrências" — um registro por ARQUIVO em que foi
+    // encontrado (guardando o PDF de origem daquele arquivo e as páginas dele lá), em vez de
+    // zerar a cada arquivo processado. Isso permite juntar num PDF só quando a mesma pessoa
+    // aparece em mais de um arquivo do mesmo lote, mandando 1 WhatsApp em vez de 2.
+    let statusColabsEmpresa = colabs.map(c => ({ ...c, ocorrencias: [] }));
     const colabsOrdenados = [...statusColabsEmpresa].sort((a, b) => b.nome.length - a.nome.length);
 
     arquivosLoteValidados = [];
@@ -52634,6 +52638,10 @@ window.analisarArquivosLote = async function(input) {
             const arrayBuffer = await file.arrayBuffer();
             const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             const pdfLibDoc = await PDFLib.PDFDocument.load(arrayBuffer);
+
+            // Páginas achadas NESTE arquivo, por colaborador — só vira "ocorrência" dele no
+            // final do arquivo, pra não misturar com o que for achado nos outros arquivos.
+            const paginasDesteArquivoPorColab = new Map();
 
             for (let j = 1; j <= pdfjsDoc.numPages; j++) {
                 const page = await pdfjsDoc.getPage(j);
@@ -52665,10 +52673,10 @@ window.analisarArquivosLote = async function(input) {
                     const nomeBancoSemEspaco = padronizarNome(c.nome).replace(/\s/g, '');
 
                     if (pageTextSemEspaco.includes(nomeBancoSemEspaco)) {
-                        c.achadoNoPdf = true;
-                        c.paginas.push(j - 1);
+                        if (!paginasDesteArquivoPorColab.has(c.id)) paginasDesteArquivoPorColab.set(c.id, []);
+                        paginasDesteArquivoPorColab.get(c.id).push(j - 1);
                         achouAlguemNestaPagina = true;
-                        break; 
+                        break;
                     }
                 }
 
@@ -52692,57 +52700,82 @@ window.analisarArquivosLote = async function(input) {
                 }
             }
 
+            // Fecha o arquivo: registra, pra cada colaborador achado nele, uma "ocorrência"
+            // com o PDF de origem e as páginas dele aqui — sem juntar nem enviar ainda, isso
+            // só acontece depois de TODOS os arquivos do lote serem lidos, pra dar tempo de
+            // descobrir se ele também está em outro arquivo do mesmo lote.
             for (let c of colabsOrdenados) {
-                if (c.achadoNoPdf && c.paginas.length > 0) {
-                    const novoPdf = await PDFLib.PDFDocument.create();
-                    const paginasCopiadas = await novoPdf.copyPages(pdfLibDoc, c.paginas);
-                    paginasCopiadas.forEach(p => novoPdf.addPage(p));
-                    
-                    const novoPdfBytes = await novoPdf.save();
-                    const novoFile = new File([novoPdfBytes], `${c.nome}.pdf`, { type: 'application/pdf' });
-
-                    const fone = c.dados_admissao?.telefone;
-                    if (fone) {
-                        // 👇 MÁGICA: Geramos um ID único para este item do lote
-                        const itemLoteId = `lote_${Math.random().toString(36).substr(2, 9)}`;
-                        
-                        arquivosLoteValidados.push({ id: itemLoteId, file: novoFile, colab: c, valido: true });
-                        
-                        htmlSucesso += `
-                        <tr id="row-${itemLoteId}" style="background: rgba(139, 92, 246, 0.05); box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: 0.2s;">
-                            <td style="padding: 12px; border-radius: 8px 0 0 8px; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2); border-left: 4px solid #8b5cf6;">
-                                <span class="badge" style="background: #8b5cf6; color: white;"><i class="fa-solid fa-file-pdf"></i> Pág: ${(c.paginas.map(p => p+1)).join(', ')}</span>
-                            </td>
-                            <td style="padding: 12px; color: var(--cor-texto-principal); font-weight: bold; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2);">
-                                <i class="fa-solid fa-user-check" style="color: #28a745;"></i> ${c.nome}
-                            </td>
-                            <td style="padding: 12px; text-align: right; border-radius: 0 8px 8px 0; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2); border-right: 1px solid rgba(139, 92, 246, 0.2); display: flex; gap: 10px; justify-content: flex-end; align-items: center;">
-                                <span class="badge ativo" style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid #28a745;"><i class="fa-brands fa-whatsapp"></i> Pronto</span>
-                                <button type="button" class="btn-danger-mini" onclick="removerItemLote('${itemLoteId}')" title="Remover da lista de envio">
-                                    <i class="fa-solid fa-trash"></i>
-                                </button>
-                            </td>
-                        </tr>`;
-                        countSucesso++;
-                    } else {
-                        htmlAvisos += `
-                        <tr style="background: rgba(220, 53, 69, 0.05); box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-                            <td style="padding: 12px; border-radius: 8px 0 0 8px; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-left: 4px solid var(--cor-perigo);">
-                                <span style="color: var(--cor-texto-secundario); font-size: 0.85rem;"><i class="fa-solid fa-file-pdf"></i> Pag: ${(c.paginas.map(p => p+1)).join(', ')}</span>
-                            </td>
-                            <td style="padding: 12px; color: var(--cor-perigo); font-weight: bold; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2);">
-                                <i class="fa-solid fa-user-slash"></i> ${c.nome}
-                            </td>
-                            <td style="padding: 12px; text-align: right; border-radius: 0 8px 8px 0; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-right: 1px solid rgba(220, 53, 69, 0.2);">
-                                <span class="badge desligado">Sem WhatsApp</span>
-                            </td>
-                        </tr>`;
-                    }
-                    c.achadoNoPdf = false; 
-                    c.paginas = [];
+                const paginas = paginasDesteArquivoPorColab.get(c.id);
+                if (paginas && paginas.length > 0) {
+                    c.ocorrencias.push({ nomeArquivo: file.name, pdfLibDoc, paginas });
                 }
             }
         } catch (err) { console.error(err); }
+    }
+
+    // 👇 Agora sim: pra cada colaborador com 1+ ocorrências, monta o PDF final juntando as
+    // páginas de TODOS os arquivos em que ele apareceu (na ordem em que os arquivos foram
+    // anexados). Se ele só apareceu em 1 arquivo, o resultado é idêntico a antes; se apareceu
+    // em 2 ou mais, vira um PDF único com todas as páginas, pra mandar tudo de uma vez.
+    for (let c of colabsOrdenados) {
+        if (c.ocorrencias.length === 0) continue;
+
+        const novoPdf = await PDFLib.PDFDocument.create();
+        for (const oc of c.ocorrencias) {
+            const paginasCopiadas = await novoPdf.copyPages(oc.pdfLibDoc, oc.paginas);
+            paginasCopiadas.forEach(p => novoPdf.addPage(p));
+        }
+
+        const novoPdfBytes = await novoPdf.save();
+        const novoFile = new File([novoPdfBytes], `${c.nome}.pdf`, { type: 'application/pdf' });
+
+        // Se juntou mais de um arquivo, mostra de qual arquivo veio cada trecho, pra dar pro
+        // RH conferir que a junção ficou certa antes de disparar.
+        const juntouVariosArquivos = c.ocorrencias.length > 1;
+        const descricaoPaginas = juntouVariosArquivos
+            ? c.ocorrencias.map(oc => `${oc.nomeArquivo}: pág. ${oc.paginas.map(p => p + 1).join(', ')}`).join(' + ')
+            : `Pág: ${c.ocorrencias[0].paginas.map(p => p + 1).join(', ')}`;
+        const badgeJuncao = juntouVariosArquivos
+            ? `<br><span class="badge" style="background: rgba(139,92,246,0.15); color:#8b5cf6; border:1px solid #8b5cf6; margin-top:4px; font-size:0.65rem;"><i class="fa-solid fa-object-group"></i> ${c.ocorrencias.length} PDFs unidos em 1</span>`
+            : '';
+
+        const fone = c.dados_admissao?.telefone;
+        if (fone) {
+            // 👇 MÁGICA: Geramos um ID único para este item do lote
+            const itemLoteId = `lote_${Math.random().toString(36).substr(2, 9)}`;
+
+            arquivosLoteValidados.push({ id: itemLoteId, file: novoFile, colab: c, valido: true });
+
+            htmlSucesso += `
+            <tr id="row-${itemLoteId}" style="background: rgba(139, 92, 246, 0.05); box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: 0.2s;">
+                <td style="padding: 12px; border-radius: 8px 0 0 8px; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2); border-left: 4px solid #8b5cf6;">
+                    <span class="badge" style="background: #8b5cf6; color: white;"><i class="fa-solid fa-file-pdf"></i> ${descricaoPaginas}</span>${badgeJuncao}
+                </td>
+                <td style="padding: 12px; color: var(--cor-texto-principal); font-weight: bold; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2);">
+                    <i class="fa-solid fa-user-check" style="color: #28a745;"></i> ${c.nome}
+                </td>
+                <td style="padding: 12px; text-align: right; border-radius: 0 8px 8px 0; border-top: 1px solid rgba(139, 92, 246, 0.2); border-bottom: 1px solid rgba(139, 92, 246, 0.2); border-right: 1px solid rgba(139, 92, 246, 0.2); display: flex; gap: 10px; justify-content: flex-end; align-items: center;">
+                    <span class="badge ativo" style="background: rgba(40,167,69,0.2); color: #28a745; border: 1px solid #28a745;"><i class="fa-brands fa-whatsapp"></i> Pronto</span>
+                    <button type="button" class="btn-danger-mini" onclick="removerItemLote('${itemLoteId}')" title="Remover da lista de envio">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </td>
+            </tr>`;
+            countSucesso++;
+        } else {
+            htmlAvisos += `
+            <tr style="background: rgba(220, 53, 69, 0.05); box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <td style="padding: 12px; border-radius: 8px 0 0 8px; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-left: 4px solid var(--cor-perigo);">
+                    <span style="color: var(--cor-texto-secundario); font-size: 0.85rem;"><i class="fa-solid fa-file-pdf"></i> ${descricaoPaginas}</span>
+                </td>
+                <td style="padding: 12px; color: var(--cor-perigo); font-weight: bold; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2);">
+                    <i class="fa-solid fa-user-slash"></i> ${c.nome}
+                </td>
+                <td style="padding: 12px; text-align: right; border-radius: 0 8px 8px 0; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-right: 1px solid rgba(220, 53, 69, 0.2);">
+                    <span class="badge desligado">Sem WhatsApp</span>
+                </td>
+            </tr>`;
+        }
     }
 
     // REMOVIDA: A lógica que exibia "Não achou no PDF" para quem não estava no arquivo! Fica só o que importa.
