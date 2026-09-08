@@ -275,11 +275,10 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                 // 2. Carrega o documento no pdf-lib
                 const pdfDoc = await PDFLib.PDFDocument.load(pdfBytesOriginal);
                 const pages = pdfDoc.getPages();
-                const lastPage = pages[pages.length - 1]; 
-                const { width, height } = lastPage.getSize();
-                
+                const fontSelo = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+
                 const signatureImage = await pdfDoc.embedPng(signaturePad.toDataURL());
-                const sigDims = signatureImage.scale(0.12);
+                const sigDimsPadrao = signatureImage.scale(0.12); // tamanho "normal", usado no fallback e na Folha de Ponto
 
                 // 3. Prepara o Selo Digital
                 const agora = new Date();
@@ -287,44 +286,134 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                 const horaFormatada = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
                 const textoSelo = `Assinado digitalmente em ${dataFormatada} às ${horaFormatada}`;
 
-                // 4. LÓGICA DO RADAR: Achar a posição exata da palavra "Colaborador"
-                let posX = (width / 2) - (sigDims.width / 2) + 130; 
-                let posY = 12; 
+                // 4. LÓGICA DO RADAR: agora varre TODAS AS PÁGINAS do documento (não só a
+                // última), procurando TODOS os pontos em que o colaborador precisa assinar —
+                // isso cobre dois casos:
+                //   a) Holerites com 2 vias por página (via empresa + via colaborador), cada
+                //      uma com seu próprio "Assinatura do Funcionário" impresso na lateral
+                //      (texto rotacionado 90°) — assina as duas vias.
+                //   b) Quando o RH junta o PDF de 2 documentos do mesmo colaborador num só
+                //      arquivo antes de mandar pra assinatura (2+ páginas) — assina em cada
+                //      página, ao invés de só na última.
+                // Se não achar nenhum ponto de assinatura reconhecido (outros tipos de
+                // documento sem esse texto padrão), cai no comportamento antigo: 1 carimbo só,
+                // num canto padrão da última página — pra nunca deixar o documento sem assinar.
+                const normalizarTexto = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+                let pontosParaAssinar = [];
 
-                const tipoDoc = dadosDoc.tipo_documento.toUpperCase();
+                try {
+                    const loadingTask = pdfjsLib.getDocument({ data: pdfBytesOriginal });
+                    const pdfJsDoc = await loadingTask.promise;
 
-                if (tipoDoc.includes("PONTO")) {
-                    try {
-                        const loadingTask = pdfjsLib.getDocument({ data: pdfBytesOriginal });
-                        const pdfJsDoc = await loadingTask.promise;
-                        const pdfPage = await pdfJsDoc.getPage(pdfJsDoc.numPages); 
+                    for (let numPagina = 1; numPagina <= pdfJsDoc.numPages; numPagina++) {
+                        const pdfPage = await pdfJsDoc.getPage(numPagina);
                         const textContent = await pdfPage.getTextContent();
-                        
-                        for (let i = textContent.items.length - 1; i >= 0; i--) {
-                            const item = textContent.items[i];
-                            
-                            if (item.str.toUpperCase().includes('COLABORADOR') || item.str.includes('_____')) {
-                                posX = item.transform[4] - (sigDims.width / 4); 
-                                posY = item.transform[5] + 15; 
-                                break; 
+                        const items = textContent.items;
+
+                        // a) "Assinatura do Funcionário" — texto impresso na lateral, girado
+                        // 90° (padrão dos holerites/recibos). Pega TODAS as ocorrências da
+                        // página: esse texto só aparece mesmo em cima da linha de assinatura,
+                        // nunca em cabeçalho repetido, então cada ocorrência = 1 via pra assinar.
+                        let achouAssinaturaFuncionarioNestaPagina = false;
+                        for (const item of items) {
+                            const txt = normalizarTexto(item.str);
+                            if (txt.includes('ASSINATURA') && txt.includes('FUNCION')) {
+                                achouAssinaturaFuncionarioNestaPagina = true;
+                                const b = item.transform[1], c = item.transform[2];
+                                const ex = item.transform[4], ey = item.transform[5];
+                                const rotacionado = Math.abs(b) > 0.01 || Math.abs(c) > 0.01;
+
+                                if (rotacionado) {
+                                    // A linha de assinatura de verdade é bem estreita (do
+                                    // tamanho do próprio texto) e fica coladinha à esquerda
+                                    // dele — por isso usa uma assinatura BEM menor aqui, do
+                                    // tamanho dessa linha, ao invés do tamanho "normal".
+                                    const distanciaLinha = item.width; // comprimento da linha, igual ao do texto
+                                    const maxComprimento = Math.min(58, distanciaLinha);
+                                    const maxEspessura = 18;
+                                    const escala = Math.min(maxComprimento / signatureImage.width, maxEspessura / signatureImage.height);
+                                    const sigW = signatureImage.width * escala;
+                                    const sigH = signatureImage.height * escala;
+
+                                    const gap = 6; // espaço entre a linha impressa e a assinatura
+                                    const pivotX = ex - gap;
+                                    const pivotY = ey + (distanciaLinha - sigW) / 2; // centraliza no comprimento da linha
+
+                                    const seloSize = 5;
+                                    const seloWidth = fontSelo.widthOfTextAtSize(textoSelo, seloSize);
+                                    const bufferSelo = 6;
+
+                                    pontosParaAssinar.push({
+                                        pagina: numPagina - 1, rotacionado: true,
+                                        sigX: pivotX, sigY: pivotY, sigW, sigH,
+                                        seloX: pivotX - 2, seloY: pivotY - bufferSelo - seloWidth, seloSize
+                                    });
+                                } else {
+                                    // Fallback bem raro (texto "Assinatura do Funcionário" sem
+                                    // rotação nenhuma) — usa o tamanho normal, na horizontal.
+                                    pontosParaAssinar.push({
+                                        pagina: numPagina - 1, rotacionado: false,
+                                        sigX: ex - (sigDimsPadrao.width / 4), sigY: ey + 15,
+                                        sigW: sigDimsPadrao.width, sigH: sigDimsPadrao.height
+                                    });
+                                }
                             }
                         }
-                    } catch(e) {
-                        console.warn("Radar falhou, usando posição padrão para o Ponto.", e);
-                        posX = 150; 
-                        posY = 150;
+
+                        // b) Fallback "COLABORADOR" / linha "_____" (Folha de Ponto, padrão
+                        // horizontal) — só pega a ÚLTIMA ocorrência da página, igual à lógica
+                        // original, pra não cair em cabeçalhos tipo "Nome do Colaborador". Só
+                        // roda se a página NÃO tiver o padrão rotacionado do holerite acima —
+                        // senão a linha do campo "Data" (____/____/____) do próprio holerite
+                        // batia com o "_____" e criava uma assinatura fantasma ali.
+                        if (!achouAssinaturaFuncionarioNestaPagina) {
+                            for (let i = items.length - 1; i >= 0; i--) {
+                                const item = items[i];
+                                if (item.str.toUpperCase().includes('COLABORADOR') || item.str.includes('_____')) {
+                                    pontosParaAssinar.push({
+                                        pagina: numPagina - 1, rotacionado: false,
+                                        sigX: item.transform[4] - (sigDimsPadrao.width / 4), sigY: item.transform[5] + 15,
+                                        sigW: sigDimsPadrao.width, sigH: sigDimsPadrao.height
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Radar de assinatura falhou, vou usar a posição padrão.', e);
+                }
+
+                if (pontosParaAssinar.length === 0) {
+                    // Comportamento antigo: 1 carimbo só, num canto padrão da última página.
+                    const lastPage = pages[pages.length - 1];
+                    const { width } = lastPage.getSize();
+                    pontosParaAssinar.push({
+                        pagina: pages.length - 1, rotacionado: false,
+                        sigX: (width / 2) - (sigDimsPadrao.width / 2) + 130, sigY: 12,
+                        sigW: sigDimsPadrao.width, sigH: sigDimsPadrao.height
+                    });
+                }
+
+                // 5. Desenha a Assinatura (e o Selo, ao lado dela) em cada ponto achado
+                for (const pt of pontosParaAssinar) {
+                    const pagina = pages[pt.pagina];
+                    if (!pagina) continue;
+                    const opcoesRotacao = pt.rotacionado ? { rotate: PDFLib.degrees(90) } : {};
+                    pagina.drawImage(signatureImage, { x: pt.sigX, y: pt.sigY, width: pt.sigW, height: pt.sigH, ...opcoesRotacao });
+
+                    if (pt.rotacionado) {
+                        pagina.drawText(textoSelo, { x: pt.seloX, y: pt.seloY, size: pt.seloSize, color: PDFLib.rgb(0.4, 0.4, 0.4), font: fontSelo, ...opcoesRotacao });
+                    } else {
+                        pagina.drawText(textoSelo, { x: pt.sigX - 10, y: pt.sigY - 8, size: 6.5, color: PDFLib.rgb(0.4, 0.4, 0.4), font: fontSelo });
                     }
                 }
 
-                // Desenha a Assinatura e o Selo
-                lastPage.drawImage(signatureImage, { x: posX, y: posY, width: sigDims.width, height: sigDims.height });
-                lastPage.drawText(textoSelo, { x: posX - 10, y: posY - 8, size: 6.5, color: PDFLib.rgb(0.4, 0.4, 0.4) });
-
-                // 5. Salva o novo PDF gerado
+                // 6. Salva o novo PDF gerado
                 const pdfBytesAssinado = await pdfDoc.save();
                 const pdfBlob = new Blob([pdfBytesAssinado], { type: 'application/pdf' });
-                
-                // 6. Upload
+
+                // 7. Upload
                 const nomeLimpo = dadosDoc.nome.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
                 const nomeArquivo = `Assinados/${Date.now()}_${nomeLimpo}.pdf`;
                 const { error: uploadError } = await supabaseClient.storage.from('documentos').upload(nomeArquivo, pdfBlob);
