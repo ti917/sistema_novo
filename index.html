@@ -22005,6 +22005,13 @@ window.corrigirFichaDevolvida = async function(idColab) {
 
     // 👇 Guarda os anexos já enviados anteriormente (por tipo) — se o Gestor não
     // trocar um documento específico na correção, o antigo continua valendo.
+    // 🐛 CORREÇÃO: faltava limpar window.arquivosAcumuladosAdmissao aqui. Sem isso, se
+    // sobrasse algum arquivo acumulado de uma ficha anterior (outra admissão, ou uma
+    // correção diferente aberta antes na mesma sessão do navegador), esses arquivos velhos
+    // ficavam "grudados" no acumulador e eram reenviados JUNTO com os novos ao reenviar —
+    // aí sim duplicava (o antigo mantido automaticamente + um residual acumulado, ou dois
+    // residuais de fichas diferentes). Agora sempre começa zerado.
+    window.arquivosAcumuladosAdmissao = {};
     window.docsAntigosCorrecaoAdmissao = adm.documentosDetalhados || {};
     if (typeof window.renderizarAnexosAdmissaoTipados === 'function') window.renderizarAnexosAdmissaoTipados();
 
@@ -27883,9 +27890,26 @@ window.atualizarStatusDocAntigo = function(idTipoDoc) {
         return;
     }
 
-    const linksHtml = urlsAntigas.map((url, i) => `<a href="${url}" target="_blank" style="color:#28a745; text-decoration:none; margin-right:10px;"><i class="fa-solid fa-file-pdf"></i> Ver arquivo ${urlsAntigas.length > 1 ? (i + 1) : ''}</a>`).join('');
+    const linksHtml = urlsAntigas.map((url, i) => `
+        <span style="display:inline-flex; align-items:center; gap:4px; margin-right:10px;">
+            <a href="${url}" target="_blank" style="color:#28a745; text-decoration:none;"><i class="fa-solid fa-file-pdf"></i> Ver arquivo ${urlsAntigas.length > 1 ? (i + 1) : ''}</a>
+            <button type="button" onclick="window.removerDocAntigoCorrecaoAdmissao('${idTipoDoc}', ${i})" title="Remover este documento antigo (sem anexar outro no lugar)" style="background:none; border:none; color: var(--cor-perigo); cursor:pointer; padding: 0 2px; font-size: 0.85rem;"><i class="fa-solid fa-xmark"></i></button>
+        </span>`).join('');
     statusBox.style.display = 'block';
     statusBox.innerHTML = `<div style="background: rgba(40,167,69,0.1); border: 1px solid #28a745; border-radius: 6px; padding: 8px 12px; font-size: 0.78rem; color: #28a745;"><i class="fa-solid fa-check-circle"></i> Já anexado anteriormente (mantido). ${linksHtml}</div>`;
+};
+
+// 👇 Remove um documento antigo (já enviado numa ficha anterior) da correção de "Ficha
+// Devolvida" SEM precisar anexar outro no lugar — antes só dava pra "trocar" subindo um
+// novo arquivo; não tinha como simplesmente apagar. Só mexe na cópia em memória
+// (window.docsAntigosCorrecaoAdmissao); só vira definitivo quando reenviar a ficha.
+window.removerDocAntigoCorrecaoAdmissao = function(idTipoDoc, index) {
+    if (!window.docsAntigosCorrecaoAdmissao || !window.docsAntigosCorrecaoAdmissao[idTipoDoc]) return;
+    window.docsAntigosCorrecaoAdmissao[idTipoDoc].splice(index, 1);
+    if (window.docsAntigosCorrecaoAdmissao[idTipoDoc].length === 0) {
+        delete window.docsAntigosCorrecaoAdmissao[idTipoDoc];
+    }
+    window.atualizarStatusDocAntigo(idTipoDoc);
 };
 
 // 👇 Bloqueia qualquer arquivo que não seja PDF (por extensão E por MIME type),
@@ -28532,8 +28556,17 @@ if (erroDependente) {
 
             let docsAntigos = {};
             if (idCorrecao) {
-                const { data: colabAntigoDocs } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idCorrecao).single();
-                docsAntigos = colabAntigoDocs?.dados_admissao?.documentosDetalhados || {};
+                // 🐛 CORREÇÃO: antes buscava direto do banco de novo aqui, ignorando qualquer
+                // remoção que o Gestor tivesse feito na tela (o "✕" de "Já anexado
+                // anteriormente") — o documento removido voltava do banco como se nada tivesse
+                // acontecido. Agora usa a cópia em memória (window.docsAntigosCorrecaoAdmissao),
+                // que é a mesma que já reflete os "✕" clicados; só cai pro banco se por algum
+                // motivo essa variável não tiver sido preenchida.
+                docsAntigos = window.docsAntigosCorrecaoAdmissao || {};
+                if (!window.docsAntigosCorrecaoAdmissao) {
+                    const { data: colabAntigoDocs } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idCorrecao).single();
+                    docsAntigos = colabAntigoDocs?.dados_admissao?.documentosDetalhados || {};
+                }
             }
 
             const documentosDetalhados = {};
