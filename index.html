@@ -22622,8 +22622,67 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                 carregarAndamentoRescisoes();
                 if (typeof window.carregarAprovacaoGlobalRescisoes === 'function') window.carregarAprovacaoGlobalRescisoes();
                 if (typeof window.carregarDashboardInicio === 'function') window.carregarDashboardInicio();
+                if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
             } catch (err) {
                 mostrarAlerta("Erro ao aprovar rescisão: " + err.message, "erro");
+            }
+        };
+
+        // 👇 GERAR TERMO RH ANTECIPADO: o RH pede pra gerar/anexar o Termo de Rescisão já,
+        // enquanto o colaborador ainda tá "Aguardando Aprovação Global" (represado esperando
+        // o Diretor/Gestor Global aprovar) — assim o documento já fica pronto (visível no
+        // "Detalhes", no histórico) assim que sair a aprovação, sem o RH precisar ficar
+        // esperando pra só então gerar. NÃO muda o status_aprovacao — continua represado até
+        // alguém aprovar de verdade; só o documento é adiantado.
+        window.gerarTermoRHAntecipado = async function(idColab, nomeColab, unidadeColab, empresaColab) {
+            try {
+                const { data: perfilData, error: errBusca } = await supabaseClient.from('perfis').select('dados_rescisao').eq('id', idColab).single();
+                if (errBusca) throw errBusca;
+
+                let resc = perfilData.dados_rescisao || {};
+                if (resc.doc_gerado_rh) {
+                    return mostrarAlerta("Esse colaborador já tem um Termo RH gerado — veja em Detalhes.", "aviso");
+                }
+                const isAutoGerado = (resc.tipo === 'Pedido da Empresa' || resc.tipo === 'Término de Contrato');
+
+                if (isAutoGerado) {
+                    const confirmado = await mostrarConfirmacao(`Gerar o Termo RH automático de <b>${nomeColab}</b> desde já, mesmo antes da aprovação do Diretor/Gestor Global? Ele fica pronto pro Gestor colher a assinatura assim que a aprovação sair.`, "Gerar Termo RH Antecipado");
+                    if (!confirmado) return;
+
+                    resc.doc_gerado_rh = 'GERADO_SISTEMA';
+                    resc.doc_gerado_por = usuarioAtual.nome;
+
+                    const { error } = await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab);
+                    if (error) throw error;
+
+                    mostrarAlerta("Termo RH gerado! Já disponível em Detalhes, e pronto assim que a aprovação sair.", "sucesso");
+                    if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
+                } else {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'image/*,.pdf';
+                    input.onchange = async () => {
+                        if (!input.files || input.files.length === 0) return;
+                        try {
+                            mostrarAlerta("Subindo arquivo...", "aviso");
+                            const caminhoBase = `${formatarNomePasta(empresaColab || 'Sem_Empresa')}/${formatarNomePasta(unidadeColab)}/${formatarNomePasta(nomeColab)}/Rescisoes`;
+                            const urls = await subirDocumentos(caminhoBase, input.files);
+                            resc.doc_gerado_rh = urls[0];
+                            resc.doc_gerado_por = usuarioAtual.nome;
+
+                            const { error } = await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab);
+                            if (error) throw error;
+
+                            mostrarAlerta("Termo RH anexado! Já disponível em Detalhes, e pronto assim que a aprovação sair.", "sucesso");
+                            if (typeof carregarRescisoesParaAdmin === 'function') carregarRescisoesParaAdmin(true);
+                        } catch (e) {
+                            mostrarAlerta("Erro ao anexar termo: " + e.message, "erro");
+                        }
+                    };
+                    input.click();
+                }
+            } catch (e) {
+                mostrarAlerta("Erro ao gerar termo: " + e.message, "erro");
             }
         };
 
@@ -31940,8 +31999,18 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         ? `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800; font-weight: bold;" onclick="window.voltarRescisaoParaSolicitacoes('${a.id}', '${a.nome.replace(/'/g, "\\'")}')" title="Desfazer a aprovação do RH e devolver para Solicitações Pendentes — como se o Gestor tivesse acabado de enviar de novo. Documentos e observações não são apagados."><i class="fa-solid fa-rotate-left"></i> Voltar p/ Solicitações</button>`
         : '';
 
+    // 👇 NOVO: enquanto está "Aguardando Aprovação Global" (represado esperando o Diretor/
+    // Gestor Global aprovar), o RH ainda não tinha como gerar o Termo RH — só dava pra fazer
+    // isso depois que virasse "Rescisão Pendente". Agora o RH pode adiantar e já gerar/anexar
+    // o Termo aqui, sem precisar esperar a aprovação: fica pronto (visível em "Detalhes")
+    // assim que sair a aprovação, sem mudar o status_aprovacao.
+    const btnGerarTermoAntecipado = (usuarioAtual.perfil === 'Admin' && a.status_aprovacao === 'Aguardando Aprovação Global' && !resc.doc_gerado_rh)
+        ? `<button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #e91e63; color: #e91e63; font-weight: bold;" onclick="window.gerarTermoRHAntecipado('${a.id}', '${a.nome.replace(/'/g, "\\'")}', '${a.unidade}', '${(a.empresa || '').replace(/'/g, "\\'")}')" title="Gera/anexa o Termo RH desde já, mesmo antes da aprovação do Diretor/Gestor Global — fica pronto pro Gestor assinar assim que aprovar."><i class="fa-solid fa-file-circle-plus"></i> Gerar Termo RH</button>`
+        : '';
+
     btnAdminAcoes = `
         ${btnVoltarSolicitacoes}
+        ${btnGerarTermoAntecipado}
         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255, 193, 7, 0.1);" onclick="abrirModalObsaRescisao('${a.id}')" title="Gerar Requisição de Rescisão (OBSA)"><i class="fa-solid fa-file-invoice"></i> OBSA</button>
         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarRescisaoAdmin('${a.id}')" title="Editar Rescisão"><i class="fa-solid fa-pen"></i></button>
         <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirRescisaoAdmin('${a.id}')" title="Excluir Rescisão"><i class="fa-solid fa-trash"></i></button>
