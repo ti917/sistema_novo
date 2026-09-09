@@ -80088,36 +80088,10 @@ window.carregarYoutubeIframeAPI = function() {
     return window.__promiseYoutubeApiPronta;
 };
 
-// Cria um player controlável (via API) pra cada tema com vídeo válido, e escuta o evento
-// de "terminou de assistir" (ENDED) pra marcar automaticamente como concluído.
-window.__playersTutorialAtivos = [];
-window.criarPlayersTutorialTemas = async function(temas, moduloId) {
-    await window.carregarYoutubeIframeAPI();
-
-    // Limpa players de uma visita anterior a outro módulo, se houver.
-    window.__playersTutorialAtivos.forEach(p => { try { p.destroy(); } catch(e) {} });
-    window.__playersTutorialAtivos = [];
-
-    temas.forEach(t => {
-        const videoId = window.youtubeParaId(t.video_youtube_url);
-        const elId = `yt-player-tema-${t.id}`;
-        if (!videoId || !document.getElementById(elId)) return;
-
-        const player = new YT.Player(elId, {
-            videoId: videoId,
-            playerVars: { rel: 0 },
-            events: {
-                onStateChange: function(evento) {
-                    // 0 = YT.PlayerState.ENDED (vídeo chegou ao fim)
-                    if (evento.data === 0) {
-                        window.marcarTemaConcluidoTutorial(t.id, moduloId);
-                    }
-                }
-            }
-        });
-        window.__playersTutorialAtivos.push(player);
-    });
-};
+// 👇 Criação dos players agora é sob demanda (um de cada vez, só quando a aula é aberta —
+// ver window.criarPlayerTutorialSobDemanda mais abaixo, perto do accordion da lista de temas).
+// Isso evita carregar vários iframes do YouTube simultâneos e facilita pausar sozinho
+// quando a pessoa rola a tela, troca de aba ou sai do vídeo.
 
 // Upsert do progresso: marca o tema como concluído pra esse usuário e atualiza a
 // telinha na hora (badge do card + barra de progresso do módulo), sem precisar recarregar.
@@ -80268,31 +80242,137 @@ window.abrirModuloTutorialView = async function(moduloId, tituloModulo) {
         .in('tema_id', temaIds);
     const concluidosSet = new Set((progressoData || []).filter(p => p.concluido).map(p => p.tema_id));
 
+    // 👇 LISTA ORGANIZADA (Accordion): em vez de abrir TODOS os vídeos do módulo de uma vez
+    // (uma parede de players carregados simultaneamente), cada aula agora é uma linha
+    // fechada — só expande (e só cria/toca o player) quando a pessoa clica nela. Abrir uma
+    // aula fecha e pausa a anterior automaticamente, então só toca um vídeo por vez.
+    window.__temasTutorialDataAtual = {};
+    window.__temaTutorialAberto = null;
+    window.pararPlayerTutorialAtivo();
+
     container.innerHTML = data.map(t => {
         const videoId = window.youtubeParaId(t.video_youtube_url);
         const jaConcluido = concluidosSet.has(t.id);
+        window.__temasTutorialDataAtual[t.id] = { videoId, moduloId };
         return `
-        <div class="glass-card" style="margin-bottom:20px; padding:20px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:15px;">
-                <h4 style="color:#8e44ad; margin:0;"><i class="fa-solid fa-circle-play"></i> ${t.titulo}</h4>
-                <span id="badge-concluido-tema-${t.id}" style="font-size:0.75rem; font-weight:bold; padding:4px 12px; border-radius:20px; border:1px solid ${jaConcluido ? '#28a745' : 'var(--cor-borda)'}; background:${jaConcluido ? 'rgba(40,167,69,0.15)' : 'rgba(255,255,255,0.05)'}; color:${jaConcluido ? '#28a745' : 'var(--cor-texto-secundario)'}; white-space:nowrap;">
-                    <i class="fa-solid ${jaConcluido ? 'fa-circle-check' : 'fa-circle'}"></i> ${jaConcluido ? 'Concluído' : 'Não assistido'}
-                </span>
+        <div class="tutorial-tema-item" id="item-tema-${t.id}" style="border:1px solid var(--cor-borda); border-radius:10px; margin-bottom:12px; overflow:hidden; background: rgba(255,255,255,0.02);">
+            <div onclick="window.alternarTemaTutorial('${t.id}', '${moduloId}')" style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:14px 18px; cursor:pointer; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                    <i class="fa-solid fa-circle-play" style="color:#8e44ad; font-size:1.15rem; flex-shrink:0;"></i>
+                    <strong style="color: var(--cor-texto-principal); font-size:1rem;">${t.titulo}</strong>
+                </div>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span id="badge-concluido-tema-${t.id}" style="font-size:0.75rem; font-weight:bold; padding:4px 12px; border-radius:20px; border:1px solid ${jaConcluido ? '#28a745' : 'var(--cor-borda)'}; background:${jaConcluido ? 'rgba(40,167,69,0.15)' : 'rgba(255,255,255,0.05)'}; color:${jaConcluido ? '#28a745' : 'var(--cor-texto-secundario)'}; white-space:nowrap;">
+                        <i class="fa-solid ${jaConcluido ? 'fa-circle-check' : 'fa-circle'}"></i> ${jaConcluido ? 'Concluído' : 'Não assistido'}
+                    </span>
+                    <i class="fa-solid fa-chevron-down" id="seta-tema-${t.id}" style="color: var(--cor-texto-secundario); transition: transform 0.2s;"></i>
+                </div>
             </div>
-            ${videoId ? `
-            <div style="position:relative; padding-bottom:56.25%; height:0; overflow:hidden; border-radius:10px; margin-bottom:15px; background:#000;">
-                <div id="yt-player-tema-${t.id}" style="position:absolute; top:0; left:0; width:100%; height:100%;"></div>
-            </div>` : `<p style="color: var(--cor-perigo); font-size:0.85rem; margin-bottom:15px;"><i class="fa-solid fa-triangle-exclamation"></i> Vídeo não configurado corretamente.</p>`}
-            ${t.descricao ? `<p style="color: var(--cor-texto-principal); font-size:0.9rem; margin-bottom:8px;"><b>Descrição:</b> ${t.descricao}</p>` : ''}
-            ${t.observacoes ? `<p style="color: var(--cor-texto-secundario); font-size:0.85rem;"><b>Observações:</b> ${t.observacoes}</p>` : ''}
+            <div class="hidden" id="corpo-tema-${t.id}" style="padding: 0 18px 18px;">
+                ${videoId ? `
+                <div style="position:relative; padding-bottom:56.25%; height:0; overflow:hidden; border-radius:10px; margin-bottom:15px; background:#000;">
+                    <div id="yt-player-tema-${t.id}" style="position:absolute; top:0; left:0; width:100%; height:100%;"></div>
+                </div>` : `<p style="color: var(--cor-perigo); font-size:0.85rem; margin-bottom:15px;"><i class="fa-solid fa-triangle-exclamation"></i> Vídeo não configurado corretamente.</p>`}
+                ${t.descricao ? `<p style="color: var(--cor-texto-principal); font-size:0.9rem; margin-bottom:8px;"><b>Descrição:</b> ${t.descricao}</p>` : ''}
+                ${t.observacoes ? `<p style="color: var(--cor-texto-secundario); font-size:0.85rem;"><b>Observações:</b> ${t.observacoes}</p>` : ''}
+            </div>
         </div>`;
     }).join('');
 
     window.atualizarResumoProgressoModuloTutorial();
-    window.criarPlayersTutorialTemas(data, moduloId);
 };
 
+// 👇 Abre/fecha a aula clicada (accordion — só uma aberta por vez). Ao abrir, cria (ou
+// reaproveita) o player daquele vídeo sob demanda; ao fechar (clicando de novo, trocando de
+// aula, saindo do módulo, trocando de aba ou rolando o vídeo pra fora da tela) ele pausa.
+window.alternarTemaTutorial = async function(temaId, moduloId) {
+    const jaEstavaAberto = window.__temaTutorialAberto === temaId;
+    const idAnterior = window.__temaTutorialAberto;
+
+    if (idAnterior) {
+        window.pararPlayerTutorialAtivo();
+        const corpoAnterior = document.getElementById(`corpo-tema-${idAnterior}`);
+        const setaAnterior = document.getElementById(`seta-tema-${idAnterior}`);
+        if (corpoAnterior) corpoAnterior.classList.add('hidden');
+        if (setaAnterior) setaAnterior.style.transform = 'rotate(0deg)';
+        window.__temaTutorialAberto = null;
+    }
+
+    if (jaEstavaAberto) return; // clicou de novo na mesma aula: só fecha
+
+    const corpo = document.getElementById(`corpo-tema-${temaId}`);
+    const seta = document.getElementById(`seta-tema-${temaId}`);
+    if (corpo) corpo.classList.remove('hidden');
+    if (seta) seta.style.transform = 'rotate(180deg)';
+    window.__temaTutorialAberto = temaId;
+
+    const info = window.__temasTutorialDataAtual[temaId];
+    if (info && info.videoId) {
+        await window.criarPlayerTutorialSobDemanda(temaId, info.videoId, moduloId);
+    }
+
+    setTimeout(() => { corpo?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 150);
+};
+
+// Cria o player só da aula que foi aberta (evita carregar N iframes do YouTube ao mesmo
+// tempo) e escuta o fim do vídeo (ENDED) pra marcar como concluído automaticamente.
+window.__playerTutorialAtivo = null;
+window.__observerScrollTutorial = null;
+window.criarPlayerTutorialSobDemanda = async function(temaId, videoId, moduloId) {
+    await window.carregarYoutubeIframeAPI();
+    const elId = `yt-player-tema-${temaId}`;
+    if (!document.getElementById(elId)) return;
+
+    if (window.__playerTutorialAtivo) {
+        try { window.__playerTutorialAtivo.destroy(); } catch (e) {}
+        window.__playerTutorialAtivo = null;
+    }
+
+    window.__playerTutorialAtivo = new YT.Player(elId, {
+        videoId: videoId,
+        playerVars: { rel: 0, autoplay: 1 },
+        events: {
+            onStateChange: function(evento) {
+                if (evento.data === 0) window.marcarTemaConcluidoTutorial(temaId, moduloId);
+            }
+        }
+    });
+
+    // Se a pessoa rolar a tela e o vídeo sumir de vista (sem trocar de aula/fechar o
+    // accordion), pausa sozinho — evita o áudio continuar tocando "escondido".
+    if (window.__observerScrollTutorial) { try { window.__observerScrollTutorial.disconnect(); } catch (e) {} }
+    const alvo = document.getElementById(elId);
+    if (alvo && 'IntersectionObserver' in window) {
+        window.__observerScrollTutorial = new IntersectionObserver((entries) => {
+            entries.forEach(entry => { if (!entry.isIntersecting) window.pausarPlayerTutorialAtivo(); });
+        }, { threshold: 0.1 });
+        window.__observerScrollTutorial.observe(alvo);
+    }
+};
+
+window.pausarPlayerTutorialAtivo = function() {
+    if (window.__playerTutorialAtivo) {
+        try { window.__playerTutorialAtivo.pauseVideo(); } catch (e) {}
+    }
+};
+
+// Fecha de vez o player ativo (usado ao trocar de módulo/aula ou sair da Central de
+// Tutoriais) — diferente de só pausar, aqui destrói o player e para de observar o scroll.
+window.pararPlayerTutorialAtivo = function() {
+    if (window.__observerScrollTutorial) { try { window.__observerScrollTutorial.disconnect(); } catch (e) {} window.__observerScrollTutorial = null; }
+    if (window.__playerTutorialAtivo) { try { window.__playerTutorialAtivo.destroy(); } catch (e) {} window.__playerTutorialAtivo = null; }
+};
+
+// 👇 Trocou de aba/minimizou: pausa o vídeo da Central de Tutoriais que estiver tocando.
+document.addEventListener('visibilitychange', function() {
+    if (document.hidden && typeof window.pausarPlayerTutorialAtivo === 'function') {
+        window.pausarPlayerTutorialAtivo();
+    }
+});
+
 window.voltarModulosTutorial = function() {
+    window.pararPlayerTutorialAtivo();
+    window.__temaTutorialAberto = null;
     document.getElementById('bloco-temas-tutorial').classList.add('hidden');
     document.getElementById('bloco-modulos-tutorial').classList.remove('hidden');
 };
