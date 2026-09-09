@@ -14529,6 +14529,10 @@ window.gerarDadosBI = async function() {
                 } else if (p.status === 'Ativo') {
                     if (p.status_aprovacao === 'Pendente') {
                         // Admissão/correção ainda não aprovada pelo RH em Solicitações — não conta como ativo ainda.
+                    } else if (p.status_aprovacao === 'Aguardando Liberação de Vaga') {
+                        // Vaga excedente aguardando liberação da Diretoria — continua contando "por baixo"
+                        // pro alerta da Clara disparar certinho quando aprovado, mas não aparece aqui na
+                        // Lotação de Unidades do BI até o RH aprovar de verdade.
                     } else if (mapaAfastamentos[p.id]) {
                         isInss = true;
                         dadosInss = mapaAfastamentos[p.id];
@@ -18917,12 +18921,16 @@ async function escutarTempoReal() {
 
     const ocupantesGeral = (resAtivos.data || []).filter(c => {
         if (c.status !== 'Ativo' && c.status !== 'Aguardando ASO') return false;
-        const isAviso = c.status_aprovacao === 'Rescisão Pendente' || 
-                        c.status_aprovacao === 'Aguardando Assinatura' || 
+        const isAviso = c.status_aprovacao === 'Rescisão Pendente' ||
+                        c.status_aprovacao === 'Aguardando Assinatura' ||
                         c.status === 'Desligado';
         if (isAviso) return false;
         // Admissão/correção ainda não aprovada pelo RH em Solicitações — não conta como ativo ainda.
         if (c.status_aprovacao === 'Pendente') return false;
+        // 👇 Vaga excedente aguardando liberação da Diretoria — continua contando internamente
+        // (pra Clara alertar certinho no WhatsApp), mas NÃO aparece aqui na Lotação oficial
+        // até o RH aprovar de verdade.
+        if (c.status_aprovacao === 'Aguardando Liberação de Vaga') return false;
         if (setAfastados.has(c.id)) return false;
         return true;
     });
@@ -21291,12 +21299,27 @@ window.aprovarFeriasModal = async function(idFerias, idColab, nomeColab, unidade
         }
 
         // Puxa quantos ativos já tem nesse cargo
-        const { data: ativosDb } = await supabaseClient.from('perfis').select('id, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', nomeUnidade).contains('dados_admissao', { cargo: cargo });
+        // 🐛 CORREÇÃO: antes usava filtrarAtivosE_AvisoPrevio (que conta quem tá Cumprindo
+        // Aviso/Rescisão) e ainda somava +1 por fora — só que essa pessoa que a Diretoria
+        // acabou de liberar JÁ vem incluída nessa mesma consulta (mesma unidade/cargo, status
+        // Ativo), então tava sendo contada 2x, além de contar gente que nem deveria ocupar
+        // vaga (aviso prévio). Agora usa a MESMA regra de "ativo real" já usada lá na hora de
+        // detectar o excedente (linha ~28289): ignora quem tá de aviso/rescisão/afastado, e
+        // sem somar +1 (já que a pessoa aprovada agora já está no resultado da consulta).
+        const hojeIsoAlerta = new Date().toISOString().split('T')[0];
+        const { data: ativosDb } = await supabaseClient.from('perfis').select('id, status, status_aprovacao, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', nomeUnidade).contains('dados_admissao', { cargo: cargo });
+        const { data: ausAlerta } = await supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIsoAlerta).gte('data_fim', hojeIsoAlerta).neq('sigla', 'FA');
+        const idsAfastadosAlerta = (ausAlerta || []).map(a => a.colaborador_id);
         if (ativosDb) {
-            ativosReaisCount = window.filtrarAtivosE_AvisoPrevio(ativosDb).length;
+            ativosReaisCount = ativosDb.filter(c => {
+                if (c.status === 'Cancelado(a)' || c.status === 'Excluído') return false;
+                if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura' || c.status === 'Desligado') return false;
+                if (idsAfastadosAlerta.includes(c.id)) return false;
+                return c.status === 'Ativo' || c.status === 'Aguardando ASO' || c.status_aprovacao === 'Pendente';
+            }).length;
         }
 
-        const ocupacaoAtual = String(ativosReaisCount + 1); 
+        const ocupacaoAtual = String(ativosReaisCount);
         const limiteString = String(limiteMaximo);
         
         // 👇 A MÁGICA: Juntamos a Unidade com quem deu a canetada! 👇
@@ -48966,8 +48989,12 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
             menuSidebar.classList.add('sidebar-bloqueada'); 
             if(btnMenuExp) {
                 btnMenuExp.classList.remove('hidden');
-                btnMenuExp.style.pointerEvents = 'auto'; 
-                if (!foiCliqueManual) btnMenuExp.click(); 
+                btnMenuExp.style.pointerEvents = 'auto';
+                // 👇 REMOVIDO o clique automático: antes, assim que essa checagem rodava
+                // (ex: logo após concluir OUTRA avaliação/bloqueio), o sistema já jogava o
+                // usuário direto pra essa aba, mesmo que ele não tivesse pedido. Agora só
+                // mostra a tarja de aviso e deixa o botão disponível — quem navega é o
+                // próprio usuário, clicando quando quiser. 👇
             }
         }
         
@@ -65214,7 +65241,8 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
                 btnMenuDes.classList.remove('hidden');
                 btnMenuDes.style.display = '';
                 btnMenuDes.style.pointerEvents = 'auto';
-                if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-alerta-exp')) btnMenuDes.click();
+                // 👇 REMOVIDO o clique automático (mesmo motivo do bloqueio de Experiência):
+                // só mostra a tarja e deixa o botão disponível, sem forçar a navegação. 👇
             }
         } 
         else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
@@ -76199,9 +76227,11 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
 
         if (btnMenuAdm) {
             btnMenuAdm.classList.remove('hidden'); btnMenuAdm.style.display = ''; btnMenuAdm.style.pointerEvents = 'auto';
-            if (!foiCliqueManual && !document.getElementById('aviso-bloqueio-exp') && !document.getElementById('aviso-bloqueio-des')) {
-                window.abrirContratosPendentesGestor();
-            }
+            // 👇 REMOVIDO o redirecionamento automático pra aba de Contratos: antes, assim que
+            // essa checagem rodava (ex: logo após concluir a Avaliação de Experiência), o
+            // sistema já jogava o usuário direto pra lá, mesmo sem ele pedir. Agora só mostra
+            // a tarja vermelha (que já é clicável — window.abrirContratosPendentesGestor() —
+            // pra quem QUISER ir na hora) e deixa o botão do menu disponível. 👇
         }
     }
     else if ((deveBloquearSistema && destravamento.liberado) || temAlerta) {
