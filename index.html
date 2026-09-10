@@ -45952,27 +45952,89 @@ window.trocarSubTelaDigitalizar = function(nome) {
 // lado só) ANTES de esticar os níveis. Sem isso, o auto-níveis sozinho não dá conta: ele olha
 // a foto inteira de uma vez, então se um canto tá mais escuro que o outro, ele não consegue
 // deixar os dois brancos ao mesmo tempo.
-// Como funciona: reduz a foto bem pequena (tipo 4% do tamanho) e depois aumenta de volta —
-// isso vira uma versão bem borrada, que captura só a "cor de fundo" de cada região do papel e
-// ignora o texto (que é fino demais pra sobreviver a uma redução tão forte). Essa borrada é o
-// mapa de iluminação. Daí cada pixel da foto original é dividido pelo valor correspondente
-// desse mapa — clareando mais onde tava mais escuro (sombra) e menos onde já tava claro — o
-// que deixa a iluminação uniforme em qualquer canto da foto.
-function achatarIluminacaoCanvas(canvasOrigem, ctx, w, h) {
-    const ESCALA_MINI = 0.04;
-    const miniW = Math.max(8, Math.round(w * ESCALA_MINI));
-    const miniH = Math.max(8, Math.round(h * ESCALA_MINI));
+//
+// Como funciona: divide a foto numa grade de blocos pequenos e pega o valor MAIS CLARO (máximo)
+// de cada bloco — isso representa o "branco do papel" daquele pedaço, já que mesmo num trecho
+// com bastante texto sempre sobra algum respiro de papel entre as letras. (A primeira versão
+// disso usava uma média/borrão em vez de máximo, e em trechos de texto muito denso — tipo um
+// título em negrito — a média ficava contaminada pela tinta e criava uma mancha clara "comendo"
+// pedaço de letra; usar o máximo evita isso.) Depois "cura" qualquer bloco que ainda assim tenha
+// ficado contaminado (texto cobrindo o bloco quase todo) pegando o máximo entre ele e os blocos
+// vizinhos — uma sombra de verdade continua baixa porque afeta uma área grande, mas um bloco
+// isolado escurecido só por causa de tinta é resgatado pelos vizinhos limpos. Por fim, essa
+// grade vira um mapa suave do tamanho da foto, e cada pixel é dividido pelo valor do mapa
+// naquele ponto — clareando mais onde tava mais escuro (sombra) e menos onde já tava claro.
+function achatarIluminacaoCanvas(ctx, w, h) {
+    const BLOCO = 16;         // tamanho de cada bloco da grade, em pixels
+    const JANELA_DILATA = 5;  // quantos blocos de raio olha pra "curar" um bloco contaminado
+    const bx = Math.ceil(w / BLOCO), by = Math.ceil(h / BLOCO);
 
-    const miniCanvas = document.createElement('canvas');
-    miniCanvas.width = miniW; miniCanvas.height = miniH;
-    miniCanvas.getContext('2d').drawImage(canvasOrigem, 0, 0, miniW, miniH);
+    const origData = ctx.getImageData(0, 0, w, h).data;
+    const maxR = new Uint8ClampedArray(bx * by);
+    const maxG = new Uint8ClampedArray(bx * by);
+    const maxB = new Uint8ClampedArray(bx * by);
+    for (let byi = 0; byi < by; byi++) {
+        const y0 = byi * BLOCO, y1 = Math.min(h, y0 + BLOCO);
+        for (let bxi = 0; bxi < bx; bxi++) {
+            const x0 = bxi * BLOCO, x1 = Math.min(w, x0 + BLOCO);
+            let mr = 0, mg = 0, mb = 0;
+            for (let y = y0; y < y1; y++) {
+                let idx = (y * w + x0) * 4;
+                for (let x = x0; x < x1; x++, idx += 4) {
+                    if (origData[idx] > mr) mr = origData[idx];
+                    if (origData[idx + 1] > mg) mg = origData[idx + 1];
+                    if (origData[idx + 2] > mb) mb = origData[idx + 2];
+                }
+            }
+            const bi = byi * bx + bxi;
+            maxR[bi] = mr; maxG[bi] = mg; maxB[bi] = mb;
+        }
+    }
+
+    function dilatar(mapa) {
+        const raio = Math.floor(JANELA_DILATA / 2);
+        const tmp = new Uint8ClampedArray(bx * by);
+        for (let y = 0; y < by; y++) {
+            for (let x = 0; x < bx; x++) {
+                let m = 0;
+                for (let k = -raio; k <= raio; k++) {
+                    const xx = Math.min(bx - 1, Math.max(0, x + k));
+                    const v = mapa[y * bx + xx];
+                    if (v > m) m = v;
+                }
+                tmp[y * bx + x] = m;
+            }
+        }
+        const out = new Uint8ClampedArray(bx * by);
+        for (let x = 0; x < bx; x++) {
+            for (let y = 0; y < by; y++) {
+                let m = 0;
+                for (let k = -raio; k <= raio; k++) {
+                    const yy = Math.min(by - 1, Math.max(0, y + k));
+                    const v = tmp[yy * bx + x];
+                    if (v > m) m = v;
+                }
+                out[y * bx + x] = m;
+            }
+        }
+        return out;
+    }
+    const mR = dilatar(maxR), mG = dilatar(maxG), mB = dilatar(maxB);
+
+    const blocoData = new Uint8ClampedArray(bx * by * 4);
+    for (let i = 0; i < bx * by; i++) {
+        blocoData[i * 4] = mR[i]; blocoData[i * 4 + 1] = mG[i]; blocoData[i * 4 + 2] = mB[i]; blocoData[i * 4 + 3] = 255;
+    }
+    const blocoCanvas = document.createElement('canvas');
+    blocoCanvas.width = bx; blocoCanvas.height = by;
+    blocoCanvas.getContext('2d').putImageData(new ImageData(blocoData, bx, by), 0, 0);
 
     const fundoCanvas = document.createElement('canvas');
     fundoCanvas.width = w; fundoCanvas.height = h;
     const fundoCtx = fundoCanvas.getContext('2d');
     fundoCtx.imageSmoothingEnabled = true;
     fundoCtx.imageSmoothingQuality = 'high';
-    fundoCtx.drawImage(miniCanvas, 0, 0, w, h);
+    fundoCtx.drawImage(blocoCanvas, 0, 0, w, h);
     const fundo = fundoCtx.getImageData(0, 0, w, h).data;
 
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -46054,7 +46116,7 @@ window.processarImagemDigitalizada = function(file) {
                     // "Modo scanner": primeiro achata a iluminação desigual (sombra de canto etc.),
                     // depois estica os níveis — nessa ordem, porque o auto-níveis sozinho não dá
                     // conta de sombra que varia de um canto pra outro da mesma foto.
-                    achatarIluminacaoCanvas(canvas, ctx, w, h);
+                    achatarIluminacaoCanvas(ctx, w, h);
                     autoNivelarCanvas(ctx, w, h);
 
                     // Comprime em JPEG (é isso que deixa o PDF final leve)
