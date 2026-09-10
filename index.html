@@ -46116,10 +46116,20 @@ function autoNivelarCanvas(ctx, w, h) {
         for (let v = 0; v < 256; v++) t[v] = Math.round((v - baixo) * 255 / (alto - baixo));
         return t;
     }
+    // Um pouquinho de contraste extra em cima do auto-níveis (centrado em 128,
+    // igual um "S" suave) — é o que dá aquela cara de "documento escaneado de
+    // verdade" (fundo bem branco, texto bem preto) em vez de foto só clareada,
+    // parecido com o que apps de scanner tipo CamScanner aplicam por padrão.
+    const CONTRASTE = 1.18;
+    const tabContraste = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) tabContraste[v] = Math.round(128 + (v - 128) * CONTRASTE);
+
     const tabR = tabela(lr.baixo, lr.alto), tabG = tabela(lg.baixo, lg.alto), tabB = tabela(lb.baixo, lb.alto);
 
     for (let i = 0; i < d.length; i += 4) {
-        d[i] = tabR[d[i]]; d[i + 1] = tabG[d[i + 1]]; d[i + 2] = tabB[d[i + 2]];
+        d[i] = tabContraste[tabR[d[i]]];
+        d[i + 1] = tabContraste[tabG[d[i + 1]]];
+        d[i + 2] = tabContraste[tabB[d[i + 2]]];
     }
     ctx.putImageData(imgData, 0, 0);
 }
@@ -46129,11 +46139,11 @@ function autoNivelarCanvas(ctx, w, h) {
 // que sai meio "borrado". Kernel pequeno e suave de propósito — não é pra
 // criar ruído/serrilhado, só destacar a borda do texto um pouco.
 function realcarNitidezCanvas(ctx, w, h) {
-    if (w * h > 6000000) return; // imagem grande demais: não compensa o custo, resultado já sai nítido
+    if (w * h > 9000000) return; // imagem grande demais: não compensa o custo, resultado já sai nítido
     const origem = ctx.getImageData(0, 0, w, h);
     const src = origem.data;
     const saida = new Uint8ClampedArray(src.length);
-    const peso = 0.35; // força do realce (0 = nada, 1 = forte)
+    const peso = 0.5; // força do realce (0 = nada, 1 = forte)
     for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
             const i = (y * w + x) * 4;
@@ -46565,9 +46575,13 @@ window.processarImagemDigitalizada = function(file) {
             img.onload = async () => {
                 try {
                     let w = img.naturalWidth, h = img.naturalHeight;
-                    const MAX_DIM = 1700; // bom equilíbrio nitidez x tamanho do PDF final
-                    if (w > MAX_DIM || h > MAX_DIM) {
-                        const escala = MAX_DIM / Math.max(w, h);
+                    // Resolução de trabalho pro recorte: dá bastante folga (o corte em si
+                    // só fica com o pedaço do documento, que é menor que a foto inteira —
+                    // se limitasse demais aqui, o resultado final saía com menos nitidez
+                    // do que a foto original permitiria, tipo comparado ao CamScanner).
+                    const MAX_DIM_TRABALHO = 2200;
+                    if (w > MAX_DIM_TRABALHO || h > MAX_DIM_TRABALHO) {
+                        const escala = MAX_DIM_TRABALHO / Math.max(w, h);
                         w = Math.round(w * escala);
                         h = Math.round(h * escala);
                     }
@@ -46607,15 +46621,34 @@ window.processarImagemDigitalizada = function(file) {
                         canvas = endireitado.canvas; ctx = endireitado.ctx; w = endireitado.w; h = endireitado.h;
                     }
 
-                    // 2) "Modo scanner": achata a iluminação desigual (sombra de canto etc.)
-                    // e depois estica os níveis — nessa ordem porque o auto-níveis sozinho
-                    // não dá conta de sombra que varia de um canto pra outro da mesma foto.
+                    // Só agora, DEPOIS de já ter cortado o documento, limita o tamanho
+                    // final — assim a resolução de verdade fica toda dedicada ao
+                    // documento em si, não desperdiçada com o fundo da foto que já foi
+                    // cortado fora.
+                    const MAX_DIM_FINAL = 2000;
+                    if (w > MAX_DIM_FINAL || h > MAX_DIM_FINAL) {
+                        const escala = MAX_DIM_FINAL / Math.max(w, h);
+                        const wf = Math.round(w * escala), hf = Math.round(h * escala);
+                        const canvasMenor = document.createElement('canvas');
+                        canvasMenor.width = wf; canvasMenor.height = hf;
+                        const ctxMenor = canvasMenor.getContext('2d');
+                        ctxMenor.imageSmoothingEnabled = true;
+                        ctxMenor.imageSmoothingQuality = 'high';
+                        ctxMenor.drawImage(canvas, 0, 0, wf, hf);
+                        canvas = canvasMenor; ctx = ctxMenor; w = wf; h = hf;
+                    }
+
+                    // 2) "Modo scanner": achata a iluminação desigual (sombra de canto etc.),
+                    // depois estica os níveis e realça a nitidez — nessa ordem porque o
+                    // auto-níveis sozinho não dá conta de sombra que varia de um canto pra
+                    // outro da mesma foto.
                     achatarIluminacaoCanvas(ctx, w, h);
                     autoNivelarCanvas(ctx, w, h);
                     try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
 
-                    // Comprime em JPEG (é isso que deixa o PDF final leve)
-                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.72), dataUrlOriginal, cantosAuto });
+                    // Comprime em JPEG (qualidade um pouco mais alta que antes — agora que
+                    // o documento ocupa a imagem inteira, vale a pena manter mais detalhe)
+                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.82), dataUrlOriginal, cantosAuto });
                 } catch (e) { reject(e); }
             };
             img.src = leitor.result;
@@ -46962,7 +46995,7 @@ window.__aplicarAjusteCorte = async function(item, img, cantos) {
     autoNivelarCanvas(ctx, w, h);
     try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
 
-    const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.72);
+    const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.82);
     item.dataUrl = dataUrl;
     item.tamanhoFinal = window.tamanhoDataUrlEmBytes(dataUrl);
     item.cantosAuto = cantos; // lembra o ajuste, caso reabra a tela de corte
