@@ -46358,24 +46358,37 @@ function acharQuad4PontosPorBorda(src, areaImagem) {
     const hierarchy = new cv.Mat();
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
+    // O quanto simplificar o contorno (% do perímetro) até virar um
+    // quadrilátero de 4 pontos varia de foto pra foto — um epsilon fixo
+    // deixa passar batido documentos com uma leve dobra/curva na borda (o
+    // contorno "verdadeiro" vira uma linha poligonal de 8, 10, 14 pontos em
+    // vez de 4 retos). Por isso testa uma faixa de valores, do mais rígido
+    // pro mais tolerante, e fica com o primeiro que simplificar certinho
+    // pra 4 pontos — sem exagerar a ponto de perder um canto de verdade.
+    const EPSILONS = [0.02, 0.025, 0.03, 0.035, 0.04];
+
     let melhorCantos = null, melhorArea = 0;
     for (let i = 0; i < contours.size(); i++) {
         const c = contours.get(i);
         const peri = cv.arcLength(c, true);
-        const approx = new cv.Mat();
-        cv.approxPolyDP(c, approx, 0.02 * peri, true);
-        if (approx.rows === 4) {
-            const area = Math.abs(cv.contourArea(approx));
-            // Só considera se for um pedaço razoavelmente grande da foto (pelo menos
-            // 15%) — evita pegar um contorno pequeno de reflexo/objeto qualquer.
-            if (area > areaImagem * 0.15 && area > melhorArea) {
-                melhorArea = area;
-                const pts = [];
-                for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-                melhorCantos = ordenarCantos(pts);
+        for (const fatorEpsilon of EPSILONS) {
+            const approx = new cv.Mat();
+            cv.approxPolyDP(c, approx, fatorEpsilon * peri, true);
+            if (approx.rows === 4) {
+                const area = Math.abs(cv.contourArea(approx));
+                // Só considera se for um pedaço razoavelmente grande da foto (pelo
+                // menos 15%) — evita pegar um contorno pequeno de reflexo/objeto qualquer.
+                if (area > areaImagem * 0.15 && area > melhorArea) {
+                    melhorArea = area;
+                    const pts = [];
+                    for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+                    melhorCantos = ordenarCantos(pts);
+                }
+                approx.delete();
+                break; // achou 4 pontos com esse epsilon — não precisa tentar os mais soltos
             }
+            approx.delete();
         }
-        approx.delete();
         c.delete();
     }
 
@@ -46416,7 +46429,11 @@ function acharQuadPorLimiarBrilho(src, areaImagem) {
             // reto encostado nas bordas, então o mínimo aqui é mais tolerante
             // (12%) do que na estratégia A — mas ainda ignora manchas pequenas
             // (reflexo, dedo, canto de teclado etc.).
-            if (area > areaImagem * 0.12 && area < areaImagem * 0.97) {
+            // Limita o teto em 90% (não 97%): uma mancha que já cobre quase a
+            // foto inteira normalmente é sinal de que o limiar juntou o papel
+            // com um fundo claro (mesa, parede) em vez de separar os dois —
+            // nesse caso é melhor não "cortar" nada do que cortar errado.
+            if (area > areaImagem * 0.12 && area < areaImagem * 0.90) {
                 const rect = cv.minAreaRect(c);
                 const areaRect = rect.size.width * rect.size.height;
                 // Retangularidade: o quanto a mancha real preenche o retângulo
@@ -46498,15 +46515,16 @@ function detectarEcortarDocumento(canvasEntrada) {
         try { achadoBorda = acharQuad4PontosPorBorda(src, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(src, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
-        // Prioriza quem achou a maior área (documento mais "completo") — na
-        // prática a estratégia de borda tende a ser mais precisa quando acha
-        // algo, então em empate técnico ela ganha.
-        let escolhido = null, margem = 0;
-        if (achadoBorda && achadoBrilho) {
-            escolhido = achadoBrilho.area > achadoBorda.area * 1.15 ? achadoBrilho : achadoBorda;
-        } else {
-            escolhido = achadoBorda || achadoBrilho;
-        }
+        // A estratégia de borda (Canny + 4 pontos) exige um contorno reto
+        // bem definido pra funcionar, então quando ela acha algo é porque o
+        // documento tem cantos de verdade ali — muito mais confiável do que
+        // a estratégia de brilho, que é só uma aproximação por mancha de
+        // brilho e pode confundir o papel com uma mesa clara por perto. Por
+        // isso, sempre que a de borda encontrar um quadrilátero plausível,
+        // usa ele direto; a de brilho só entra como alternativa quando a de
+        // borda não encontra nada (documento curvado/amassado, sem 4 cantos retos).
+        let escolhido = achadoBorda || achadoBrilho;
+        let margem = 0;
 
         if (escolhido === achadoBrilho) {
             // Refina de perto pra tirar o excesso de fundo que a detecção
