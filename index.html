@@ -45956,6 +45956,11 @@ window.trocarSubTelaDigitalizar = function(nome) {
     const alvo = document.getElementById('subview-digitalizar-' + nome);
     if (alvo) alvo.classList.remove('hidden');
 
+    // 👇 Já começa a carregar a biblioteca de recorte automático em segundo plano assim
+    // que o usuário abre a aba de fotos, pra já estar pronta quando ele terminar de
+    // escolher as fotos (evita esperar ela carregar só na hora de processar a 1ª foto).
+    if (nome === 'fotos' && typeof garantirOpenCVCarregado === 'function') garantirOpenCVCarregado();
+
     document.querySelectorAll('.tab-digitalizar').forEach(btn => {
         const ativo = btn.dataset.subview === nome;
         btn.style.background = ativo ? '#4fc3f7' : 'transparent';
@@ -46207,6 +46212,125 @@ function endireitarCanvas(canvas, ctx, w, h) {
     return { canvas: canvasRotado, ctx: ctxRotado, w: novoW, h: novoH };
 }
 
+// =========================================================================
+// ✂️ RECORTE AUTOMÁTICO DO DOCUMENTO (tipo o scanner do WhatsApp): acha os 4
+// cantos da folha/recibo na foto — mesmo com mesa, sombra, reflexo etc. no
+// fundo — e corta + endireita em perspectiva, sobrando só o documento com
+// fundo branco. Usa a biblioteca OpenCV.js (carregada sob demanda, só quando
+// essa tela é usada, pra não pesar o carregamento do sistema pra quem não
+// mexe em digitalização) pra detectar bordas (Canny) e achar o maior contorno
+// de 4 lados que pareça o papel.
+// =========================================================================
+window.__cvCarregandoPromise = null;
+function garantirOpenCVCarregado() {
+    if (window.__cvCarregandoPromise) return window.__cvCarregandoPromise;
+    window.__cvCarregandoPromise = new Promise((resolve) => {
+        if (window.cv && window.cv.Mat) return resolve(true);
+        try {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.2/dist/opencv.js';
+            script.onerror = () => resolve(false);
+            script.onload = () => {
+                const t0 = Date.now();
+                const iv = setInterval(() => {
+                    if (window.cv && window.cv.Mat) { clearInterval(iv); resolve(true); }
+                    else if (Date.now() - t0 > 20000) { clearInterval(iv); resolve(false); }
+                }, 100);
+            };
+            document.head.appendChild(script);
+        } catch (e) { resolve(false); }
+    });
+    return window.__cvCarregandoPromise;
+}
+
+// Tenta achar o documento e devolver { canvas, pontos } já cortado/endireitado
+// em perspectiva. Devolve null se não conseguir achar um contorno de 4 lados
+// confiável (ex.: fundo muito parecido com o papel) — quem chamar deve cair
+// pro endireitarCanvas simples nesse caso, sem quebrar o fluxo.
+function detectarEcortarDocumento(canvasEntrada) {
+    const src = cv.imread(canvasEntrada);
+    let resultado = null;
+    try {
+        const gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        const blur = new cv.Mat();
+        cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+        const edges = new cv.Mat();
+        cv.Canny(blur, edges, 50, 150);
+        const kernel = cv.Mat.ones(5, 5, cv.CV_8U);
+        cv.dilate(edges, edges, kernel);
+
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+        cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+        let melhorQuad = null, melhorArea = 0;
+        const areaImagem = src.rows * src.cols;
+        for (let i = 0; i < contours.size(); i++) {
+            const c = contours.get(i);
+            const peri = cv.arcLength(c, true);
+            const approx = new cv.Mat();
+            cv.approxPolyDP(c, approx, 0.02 * peri, true);
+            if (approx.rows === 4) {
+                const area = Math.abs(cv.contourArea(approx));
+                // Só considera se for um pedaço razoavelmente grande da foto (pelo menos
+                // 15%) — evita pegar um contorno pequeno de reflexo/objeto qualquer.
+                if (area > areaImagem * 0.15 && area > melhorArea) {
+                    melhorArea = area;
+                    if (melhorQuad) melhorQuad.delete();
+                    melhorQuad = approx;
+                } else {
+                    approx.delete();
+                }
+            } else {
+                approx.delete();
+            }
+            c.delete();
+        }
+
+        if (melhorQuad) {
+            const pts = [];
+            for (let i = 0; i < 4; i++) pts.push({ x: melhorQuad.data32S[i * 2], y: melhorQuad.data32S[i * 2 + 1] });
+            pts.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+            const tl = pts[0];
+            pts.sort((a, b) => (a.x - a.y) - (b.x - b.y));
+            const bl = pts[0];
+            pts.sort((a, b) => (b.x + b.y) - (a.x + a.y));
+            const br = pts[0];
+            pts.sort((a, b) => (b.x - b.y) - (a.x - a.y));
+            const tr = pts[0];
+
+            const larguraTopo = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+            const larguraBase = Math.hypot(br.x - bl.x, br.y - bl.y);
+            const alturaEsq = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+            const alturaDir = Math.hypot(br.x - tr.x, br.y - tr.y);
+            const larguraFinal = Math.round(Math.max(larguraTopo, larguraBase));
+            const alturaFinal = Math.round(Math.max(alturaEsq, alturaDir));
+
+            if (larguraFinal > 10 && alturaFinal > 10) {
+                const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
+                const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, larguraFinal, 0, larguraFinal, alturaFinal, 0, alturaFinal]);
+                const M = cv.getPerspectiveTransform(srcTri, dstTri);
+                const dst = new cv.Mat();
+                cv.warpPerspective(src, dst, M, new cv.Size(larguraFinal, alturaFinal));
+
+                const canvasSaida = document.createElement('canvas');
+                canvasSaida.width = larguraFinal; canvasSaida.height = alturaFinal;
+                cv.imshow(canvasSaida, dst);
+                resultado = { canvas: canvasSaida, pontos: { tl, tr, br, bl } };
+
+                srcTri.delete(); dstTri.delete(); M.delete(); dst.delete();
+            }
+            melhorQuad.delete();
+        }
+
+        gray.delete(); blur.delete(); edges.delete(); kernel.delete(); contours.delete(); hierarchy.delete();
+    } finally {
+        src.delete();
+    }
+    return resultado;
+}
+
 // Lê o arquivo de imagem, desenha num canvas (redimensionando pra não ficar
 // gigante), aplica o "modo scanner" (clareia o fundo de verdade) e devolve já comprimido em JPEG.
 window.processarImagemDigitalizada = function(file) {
@@ -46216,7 +46340,7 @@ window.processarImagemDigitalizada = function(file) {
         leitor.onload = () => {
             const img = new Image();
             img.onerror = () => reject(new Error('Não consegui abrir a imagem ' + file.name));
-            img.onload = () => {
+            img.onload = async () => {
                 try {
                     let w = img.naturalWidth, h = img.naturalHeight;
                     const MAX_DIM = 1700; // bom equilíbrio nitidez x tamanho do PDF final
@@ -46230,13 +46354,34 @@ window.processarImagemDigitalizada = function(file) {
                     let ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, w, h);
 
-                    // "Modo scanner": primeiro endireita (se a foto foi tirada torta),
-                    // depois achata a iluminação desigual (sombra de canto etc.), e por
-                    // último estica os níveis — nessa ordem porque o auto-níveis sozinho
-                    // não dá conta de sombra que varia de um canto pra outro da mesma foto.
-                    const endireitado = endireitarCanvas(canvas, ctx, w, h);
-                    canvas = endireitado.canvas; ctx = endireitado.ctx; w = endireitado.w; h = endireitado.h;
+                    // 1) Tenta achar e cortar as bordas do documento (recorte automático).
+                    // Se não conseguir (fundo parecido com o papel, foto maluca, biblioteca
+                    // não carregou etc.), cai pro "endireitar" simples de antes — nunca deixa
+                    // a foto pior do que já processávamos.
+                    let cortado = false;
+                    try {
+                        const cvOk = await garantirOpenCVCarregado();
+                        if (cvOk && window.cv && window.cv.Mat) {
+                            const resultado = detectarEcortarDocumento(canvas);
+                            if (resultado) {
+                                canvas = resultado.canvas;
+                                ctx = canvas.getContext('2d');
+                                w = canvas.width; h = canvas.height;
+                                cortado = true;
+                            }
+                        }
+                    } catch (eCv) {
+                        console.warn('Falha ao tentar recortar o documento automaticamente, seguindo sem cortar:', eCv);
+                    }
 
+                    if (!cortado) {
+                        const endireitado = endireitarCanvas(canvas, ctx, w, h);
+                        canvas = endireitado.canvas; ctx = endireitado.ctx; w = endireitado.w; h = endireitado.h;
+                    }
+
+                    // 2) "Modo scanner": achata a iluminação desigual (sombra de canto etc.)
+                    // e depois estica os níveis — nessa ordem porque o auto-níveis sozinho
+                    // não dá conta de sombra que varia de um canto pra outro da mesma foto.
                     achatarIluminacaoCanvas(ctx, w, h);
                     autoNivelarCanvas(ctx, w, h);
 
