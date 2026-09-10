@@ -29422,6 +29422,9 @@ window.abrirModalHubUsuario = function(idUser) {
             <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #ff9800; color: #ff9800; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalPermissoes('${u.id}')">
                 <i class="fa-solid fa-lock" style="width: 30px;"></i> Configurar Acessos do Menu
             </button>
+            <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #dc3545; color: #dc3545; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalEditarLoginUsuario('${u.id}')">
+                <i class="fa-solid fa-key" style="width: 30px;"></i> Editar Login (E-mail / Senha)
+            </button>
             <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #ffc107; color: #ffc107; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalConfigAprovacoes('${u.id}')">
                 <i class="fa-solid fa-bell-concierge" style="width: 30px;"></i> Recebimento de Solicitações (Sino)
             </button>
@@ -29475,6 +29478,138 @@ window.abrirModalHubUsuario = function(idUser) {
         </div>
     </div>`;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// =========================================================
+// EDITAR LOGIN (E-MAIL / SENHA) — só Admin/Gestor têm conta de login de
+// verdade no Supabase Auth. Isso não pode ser feito só com o site: exige a
+// Edge Function 'gerenciar-acesso-usuario' (Service Role) rodando uma ação
+// nova ('obter_email' pra mostrar o e-mail atual e 'editar_login' pra
+// gravar o novo e-mail/senha) — igual já é feito com 'banir'/'reativar'.
+// =========================================================
+window.abrirModalEditarLoginUsuario = async function(idUser) {
+    const u = todosUsuariosCadastrados.find(x => x.id === idUser);
+    if (!u) return mostrarAlerta("Usuário não encontrado.", "erro");
+
+    const modalHtml = `
+    <div id="modal-editar-login-usuario" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10006; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 480px; border: 1px solid #dc3545; position: relative;">
+            <button onclick="document.getElementById('modal-editar-login-usuario').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #dc3545; margin-bottom: 5px;"><i class="fa-solid fa-key"></i> Editar Login</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Alterando o acesso de: <b style="color: #fff;">${u.nome}</b> (${u.perfil})</p>
+
+            <div style="background: rgba(220,53,69,0.08); border: 1px solid rgba(220,53,69,0.3); border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; font-size: 0.8rem; color: var(--cor-texto-secundario);">
+                <i class="fa-solid fa-triangle-exclamation" style="color: #dc3545;"></i> A pessoa vai passar a usar o e-mail e/ou senha novos no próximo login. Deixe um campo em branco pra manter o que já está cadastrado.
+            </div>
+
+            <div class="form-group">
+                <label>E-mail de login atual</label>
+                <div id="login-email-atual-display" style="padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid var(--cor-borda); border-radius: 8px; color: var(--cor-texto-secundario); font-size: 0.9rem;"><i class="fa-solid fa-spinner fa-spin"></i> Buscando...</div>
+            </div>
+
+            <div class="form-group">
+                <label>Novo E-mail (deixe em branco pra não alterar)</label>
+                <input type="email" id="edit-login-novo-email" placeholder="novo@exemplo.com">
+            </div>
+
+            <div class="form-group">
+                <label>Nova Senha (mínimo 6 caracteres, deixe em branco pra não alterar)</label>
+                <input type="password" id="edit-login-nova-senha" placeholder="Nova senha" autocomplete="new-password">
+            </div>
+
+            <div class="form-group">
+                <label>Confirmar Nova Senha</label>
+                <input type="password" id="edit-login-confirma-senha" placeholder="Repita a nova senha" autocomplete="new-password">
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                <button type="button" class="btn-secondary" style="flex: 1;" onclick="document.getElementById('modal-editar-login-usuario').remove()">Cancelar</button>
+                <button type="button" id="btn-salvar-login-usuario" class="btn-success" style="flex: 1; background: #dc3545; border: none; color: #fff; font-weight: bold;" onclick="window.salvarEdicaoLoginUsuario('${u.id}')"><i class="fa-solid fa-floppy-disk"></i> Salvar</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Busca o e-mail atual (Auth) em segundo plano — precisa da Edge Function porque o
+    // e-mail de login fica só no Supabase Auth, a tabela "perfis" não guarda essa coluna.
+    try {
+        const { data, error } = await supabaseClient.functions.invoke('gerenciar-acesso-usuario', {
+            body: { userId: idUser, acao: 'obter_email' }
+        });
+        const displayEl = document.getElementById('login-email-atual-display');
+        if (!displayEl) return; // modal já foi fechado
+
+        if (error || !data || !data.email) {
+            // 👇 Mesmo padrão já usado no resto do sistema pra ler o motivo real do
+            // erro (a Edge Function manda em "erro" ou "error" no corpo da resposta).
+            let detalhe = data?.erro || data?.error || null;
+            if (error && error.context) {
+                try {
+                    const corpo = await error.context.clone().json();
+                    detalhe = corpo?.erro || corpo?.error || detalhe;
+                } catch (_e1) { /* sem corpo legível */ }
+            }
+            displayEl.innerHTML = `<i class="fa-solid fa-circle-exclamation" style="color: #ff9800;"></i> ${detalhe || 'Não foi possível carregar o e-mail atual.'}`;
+        } else {
+            displayEl.innerText = data.email;
+        }
+    } catch (e) {
+        const displayEl = document.getElementById('login-email-atual-display');
+        if (displayEl) displayEl.innerHTML = '<i class="fa-solid fa-circle-exclamation" style="color: #ff9800;"></i> Não foi possível carregar o e-mail atual.';
+    }
+};
+
+window.salvarEdicaoLoginUsuario = async function(idUser) {
+    const novoEmail = document.getElementById('edit-login-novo-email').value.trim();
+    const novaSenha = document.getElementById('edit-login-nova-senha').value;
+    const confirmaSenha = document.getElementById('edit-login-confirma-senha').value;
+
+    if (!novoEmail && !novaSenha) {
+        return mostrarAlerta("Preencha o novo e-mail e/ou a nova senha (ou os dois) para salvar. Deixe em branco só o que não quer alterar.", "aviso");
+    }
+    if (novaSenha && novaSenha.length < 6) {
+        return mostrarAlerta("A senha deve ter no mínimo 6 caracteres.", "aviso");
+    }
+    if (novaSenha && novaSenha !== confirmaSenha) {
+        return mostrarAlerta("As senhas não coincidem. Digite-as novamente.", "aviso");
+    }
+
+    const confirmado = await mostrarConfirmacao("Tem certeza? Isso muda o login dessa pessoa imediatamente — ela vai precisar usar os novos dados no próximo acesso.", "Confirmar Alteração de Login");
+    if (!confirmado) return;
+
+    const btn = document.getElementById('btn-salvar-login-usuario');
+    const textoOriginalBtn = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+
+    try {
+        const body = { userId: idUser, acao: 'editar_login' };
+        if (novoEmail) body.novo_email = novoEmail;
+        if (novaSenha) body.nova_senha = novaSenha;
+
+        const { data, error } = await supabaseClient.functions.invoke('gerenciar-acesso-usuario', { body });
+
+        if (error || (data && data.erro)) {
+            // 👇 Mesmo padrão já usado no resto do sistema pra ler o motivo real do
+            // erro (a Edge Function manda em "erro" ou "error" no corpo da resposta) —
+            // é assim que aparece a mensagem certa de permissão negada, por exemplo.
+            let detalhe = data?.erro || data?.error || null;
+            if (error && error.context) {
+                try {
+                    const corpo = await error.context.clone().json();
+                    detalhe = corpo?.erro || corpo?.error || detalhe;
+                } catch (_e1) { /* sem corpo legível */ }
+            }
+            throw new Error(detalhe || (error && error.message) || 'Erro desconhecido');
+        }
+
+        mostrarAlerta("Login atualizado com sucesso!", "sucesso");
+        document.getElementById('modal-editar-login-usuario')?.remove();
+    } catch (e) {
+        mostrarAlerta("Erro ao atualizar o login: " + (e.message || 'Erro desconhecido') + ". Confira se a Edge Function 'gerenciar-acesso-usuario' já foi atualizada com a ação \"editar_login\".", "erro");
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = textoOriginalBtn; }
+    }
 };
 
       // =========================================================
