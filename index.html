@@ -46550,11 +46550,16 @@ window.processarImagemDigitalizada = function(file) {
                     let ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, w, h);
 
+                    // Guarda a foto original (só redimensionada, sem cortar/realçar) — é
+                    // o que a tela de "ajustar corte manual" usa como base, caso o RH
+                    // precise corrigir um recorte automático que não ficou perfeito.
+                    const dataUrlOriginal = canvas.toDataURL('image/jpeg', 0.85);
+
                     // 1) Tenta achar e cortar as bordas do documento (recorte automático).
                     // Se não conseguir (fundo parecido com o papel, foto maluca, biblioteca
                     // não carregou etc.), cai pro "endireitar" simples de antes — nunca deixa
                     // a foto pior do que já processávamos.
-                    let cortado = false;
+                    let cortado = false, cantosAuto = null;
                     try {
                         const cvOk = await garantirOpenCVCarregado();
                         if (cvOk && window.cv && window.cv.Mat) {
@@ -46564,6 +46569,7 @@ window.processarImagemDigitalizada = function(file) {
                                 ctx = canvas.getContext('2d');
                                 w = canvas.width; h = canvas.height;
                                 cortado = true;
+                                cantosAuto = resultado.pontos;
                             }
                         }
                     } catch (eCv) {
@@ -46583,7 +46589,7 @@ window.processarImagemDigitalizada = function(file) {
                     try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
 
                     // Comprime em JPEG (é isso que deixa o PDF final leve)
-                    resolve(canvas.toDataURL('image/jpeg', 0.72));
+                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.72), dataUrlOriginal, cantosAuto });
                 } catch (e) { reject(e); }
             };
             img.src = leitor.result;
@@ -46601,6 +46607,8 @@ window.adicionarFotosDigitalizar = function(fileList) {
             id: 'pag_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
             nomeArquivo: file.name,
             dataUrl: null,
+            dataUrlOriginal: null,
+            cantosAuto: null,
             tamanhoOriginal: file.size,
             tamanhoFinal: null,
             processando: true,
@@ -46608,9 +46616,11 @@ window.adicionarFotosDigitalizar = function(fileList) {
         };
         window.__paginasDigitalizar.push(item);
 
-        window.processarImagemDigitalizada(file).then(dataUrl => {
-            item.dataUrl = dataUrl;
-            item.tamanhoFinal = window.tamanhoDataUrlEmBytes(dataUrl);
+        window.processarImagemDigitalizada(file).then(res => {
+            item.dataUrl = res.dataUrl;
+            item.dataUrlOriginal = res.dataUrlOriginal;
+            item.cantosAuto = res.cantosAuto;
+            item.tamanhoFinal = window.tamanhoDataUrlEmBytes(res.dataUrl);
             item.processando = false;
             window.renderizarListaDigitalizar();
         }).catch(e => {
@@ -46706,6 +46716,10 @@ window.renderizarListaDigitalizar = function() {
                 <span style="position:absolute; top:6px; left:6px; background:rgba(0,0,0,0.65); color:#fff; font-size:0.7rem; font-weight:bold; padding:2px 8px; border-radius:10px;">Pág. ${idx + 1}</span>
             </div>
             ${rodapeInfo}
+            ${(!p.erro && !p.processando && p.dataUrlOriginal) ? `
+            <div style="padding:0 6px 6px;">
+                <button type="button" onclick="window.abrirAjusteCorte('${p.id}')" style="width:100%; background:rgba(79,195,247,0.12); border:1px solid #4fc3f7; color:#4fc3f7; border-radius:6px; padding:5px 6px; cursor:pointer; font-size:0.72rem; font-weight:bold;"><i class="fa-solid fa-crop-simple"></i> Ajustar corte</button>
+            </div>` : ''}
             <div style="display:flex; align-items:center; justify-content:space-between; gap:4px; padding:6px;">
                 <button type="button" title="Mover pra cima" ${idx === 0 ? 'disabled' : ''} onclick="window.moverPaginaDigitalizar('${p.id}', -1)" style="background:none; border:1px solid var(--cor-borda); color:var(--cor-texto-secundario); border-radius:6px; width:26px; height:26px; cursor:pointer;"><i class="fa-solid fa-arrow-up"></i></button>
                 <button type="button" title="Mover pra baixo" ${idx === lista.length - 1 ? 'disabled' : ''} onclick="window.moverPaginaDigitalizar('${p.id}', 1)" style="background:none; border:1px solid var(--cor-borda); color:var(--cor-texto-secundario); border-radius:6px; width:26px; height:26px; cursor:pointer;"><i class="fa-solid fa-arrow-down"></i></button>
@@ -46713,6 +46727,220 @@ window.renderizarListaDigitalizar = function() {
             </div>
         </div>`;
     }).join('');
+};
+
+// =========================================================================
+// 🔧 AJUSTE MANUAL DO CORTE: pro caso do recorte automático não ficar
+// perfeito (documento bem amassado/curvado, fundo parecido demais com o
+// papel etc.), o RH pode abrir essa tela e arrastar os 4 cantos na própria
+// foto original — igual o recorte manual que o CamScanner também oferece —
+// garantindo um resultado perfeito sempre, mesmo nos casos mais difíceis
+// que nenhuma detecção automática consegue sozinha.
+// =========================================================================
+window.abrirAjusteCorte = function(id) {
+    const item = window.__paginasDigitalizar.find(p => p.id === id);
+    if (!item || !item.dataUrlOriginal) return;
+    const img = new Image();
+    img.onload = () => window.__montarModalAjusteCorte(item, img);
+    img.onerror = () => mostrarAlerta('Não consegui abrir a foto original pra ajustar o corte.', 'erro');
+    img.src = item.dataUrlOriginal;
+};
+
+window.__montarModalAjusteCorte = function(item, img) {
+    const antigo = document.getElementById('modal-ajuste-corte');
+    if (antigo) antigo.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'modal-ajuste-corte';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.88); z-index:99999; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:16px; gap:12px;';
+
+    const titulo = document.createElement('div');
+    titulo.style.cssText = 'color:#fff; font-weight:bold; text-align:center; font-size:0.9rem; max-width:520px;';
+    titulo.innerHTML = '<i class="fa-solid fa-crop-simple"></i> Arraste os 4 cantos pra encostar exatamente nas bordas do documento';
+    overlay.appendChild(titulo);
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:relative; max-width:100%; max-height:68vh; line-height:0; touch-action:none; -webkit-user-select:none; user-select:none;';
+    overlay.appendChild(wrap);
+
+    const imgEl = document.createElement('img');
+    imgEl.src = img.src;
+    imgEl.draggable = false;
+    imgEl.style.cssText = 'display:block; max-width:100%; max-height:68vh; width:auto; height:auto; pointer-events:none; border-radius:6px;';
+    wrap.appendChild(imgEl);
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.style.cssText = 'position:absolute; top:0; left:0; width:100%; height:100%; touch-action:none;';
+    wrap.appendChild(svg);
+
+    const poligono = document.createElementNS(svgNS, 'polygon');
+    poligono.setAttribute('fill', 'rgba(79,195,247,0.22)');
+    poligono.setAttribute('stroke', '#4fc3f7');
+    poligono.setAttribute('stroke-width', '2');
+    svg.appendChild(poligono);
+
+    // Converte coordenadas da foto original (pixels reais) <-> tela (pixels exibidos)
+    let escala = 1, offX = 0, offY = 0;
+    function recalcularEscala() {
+        const rect = imgEl.getBoundingClientRect();
+        const wrapRect = wrap.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        escala = rect.width / img.naturalWidth;
+        offX = rect.left - wrapRect.left;
+        offY = rect.top - wrapRect.top;
+        svg.setAttribute('viewBox', `0 0 ${wrapRect.width} ${wrapRect.height}`);
+    }
+
+    // Cantos iniciais: usa a detecção automática se teve, senão um retângulo
+    // com uma margem pequena da foto inteira.
+    let cantos;
+    if (item.cantosAuto && item.cantosAuto.tl) {
+        cantos = JSON.parse(JSON.stringify(item.cantosAuto));
+    } else {
+        const mx = img.naturalWidth * 0.06, my = img.naturalHeight * 0.06;
+        cantos = {
+            tl: { x: mx, y: my }, tr: { x: img.naturalWidth - mx, y: my },
+            br: { x: img.naturalWidth - mx, y: img.naturalHeight - my }, bl: { x: mx, y: img.naturalHeight - my }
+        };
+    }
+
+    const ordemHandles = ['tl', 'tr', 'br', 'bl'];
+    const handles = {};
+    ordemHandles.forEach(k => {
+        const h = document.createElementNS(svgNS, 'circle');
+        h.setAttribute('r', '14');
+        h.setAttribute('fill', '#4fc3f7');
+        h.setAttribute('stroke', '#fff');
+        h.setAttribute('stroke-width', '2');
+        h.style.cursor = 'grab';
+        h.style.touchAction = 'none';
+        svg.appendChild(h);
+        handles[k] = h;
+    });
+
+    function redesenhar() {
+        const pts = ordemHandles.map(k => {
+            const px = offX + cantos[k].x * escala;
+            const py = offY + cantos[k].y * escala;
+            handles[k].setAttribute('cx', px);
+            handles[k].setAttribute('cy', py);
+            return `${px},${py}`;
+        });
+        poligono.setAttribute('points', pts.join(' '));
+    }
+
+    let handleAtivo = null;
+    ordemHandles.forEach(k => {
+        handles[k].addEventListener('pointerdown', (ev) => {
+            handleAtivo = k;
+            try { handles[k].setPointerCapture(ev.pointerId); } catch (e) {}
+            handles[k].style.cursor = 'grabbing';
+            ev.preventDefault();
+        });
+    });
+    svg.addEventListener('pointermove', (ev) => {
+        if (!handleAtivo) return;
+        const wrapRect = wrap.getBoundingClientRect();
+        const px = ev.clientX - wrapRect.left - offX;
+        const py = ev.clientY - wrapRect.top - offY;
+        let x = px / escala, y = py / escala;
+        x = Math.min(Math.max(x, 0), img.naturalWidth);
+        y = Math.min(Math.max(y, 0), img.naturalHeight);
+        cantos[handleAtivo] = { x, y };
+        redesenhar();
+    });
+    function soltarHandle() {
+        if (handleAtivo) { handles[handleAtivo].style.cursor = 'grab'; handleAtivo = null; }
+    }
+    svg.addEventListener('pointerup', soltarHandle);
+    svg.addEventListener('pointercancel', soltarHandle);
+    svg.addEventListener('pointerleave', soltarHandle);
+
+    const aoRedimensionar = () => { recalcularEscala(); redesenhar(); };
+    window.addEventListener('resize', aoRedimensionar);
+
+    const botoes = document.createElement('div');
+    botoes.style.cssText = 'display:flex; gap:10px; flex-wrap:wrap; justify-content:center;';
+    overlay.appendChild(botoes);
+
+    function fechar() {
+        window.removeEventListener('resize', aoRedimensionar);
+        overlay.remove();
+    }
+
+    const btnCancelar = document.createElement('button');
+    btnCancelar.type = 'button';
+    btnCancelar.innerHTML = 'Cancelar';
+    btnCancelar.style.cssText = 'padding:10px 18px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background:transparent; color:#fff; cursor:pointer; font-weight:bold;';
+    btnCancelar.onclick = fechar;
+    botoes.appendChild(btnCancelar);
+
+    const btnResetar = document.createElement('button');
+    btnResetar.type = 'button';
+    btnResetar.innerHTML = '<i class="fa-solid fa-expand"></i> Foto inteira';
+    btnResetar.style.cssText = 'padding:10px 18px; border-radius:8px; border:1px solid rgba(255,255,255,0.3); background:transparent; color:#fff; cursor:pointer; font-weight:bold;';
+    btnResetar.onclick = () => {
+        cantos = { tl: { x: 0, y: 0 }, tr: { x: img.naturalWidth, y: 0 }, br: { x: img.naturalWidth, y: img.naturalHeight }, bl: { x: 0, y: img.naturalHeight } };
+        redesenhar();
+    };
+    botoes.appendChild(btnResetar);
+
+    const btnConfirmar = document.createElement('button');
+    btnConfirmar.type = 'button';
+    btnConfirmar.innerHTML = '<i class="fa-solid fa-check"></i> Usar esse corte';
+    btnConfirmar.style.cssText = 'padding:10px 22px; border-radius:8px; border:none; background:#4caf50; color:#fff; cursor:pointer; font-weight:bold;';
+    btnConfirmar.onclick = async () => {
+        btnConfirmar.disabled = true;
+        btnConfirmar.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Aplicando...';
+        try {
+            await window.__aplicarAjusteCorte(item, img, cantos);
+            fechar();
+        } catch (e) {
+            console.error(e);
+            mostrarAlerta('Não consegui aplicar esse corte: ' + (e.message || e), 'erro');
+            btnConfirmar.disabled = false;
+            btnConfirmar.innerHTML = '<i class="fa-solid fa-check"></i> Usar esse corte';
+        }
+    };
+    botoes.appendChild(btnConfirmar);
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => { recalcularEscala(); redesenhar(); });
+};
+
+// Aplica o corte em perspectiva com os 4 cantos ajustados manualmente,
+// e refaz o mesmo "modo scanner" (achatar iluminação + níveis + nitidez)
+// que o processamento automático usa, pra manter o resultado consistente.
+window.__aplicarAjusteCorte = async function(item, img, cantos) {
+    const cvOk = await garantirOpenCVCarregado();
+    if (!cvOk || !window.cv || !window.cv.Mat) throw new Error('A biblioteca de recorte não carregou. Tenta de novo em alguns segundos.');
+
+    const canvasOrig = document.createElement('canvas');
+    canvasOrig.width = img.naturalWidth; canvasOrig.height = img.naturalHeight;
+    canvasOrig.getContext('2d').drawImage(img, 0, 0);
+
+    const src = cv.imread(canvasOrig);
+    let canvasFinal;
+    try {
+        const cortado = recortarPorCantos(src, cantos, 0);
+        if (!cortado) throw new Error('Esse corte ficou pequeno demais — ajusta os cantos e tenta de novo.');
+        canvasFinal = cortado.canvas;
+    } finally {
+        src.delete();
+    }
+
+    const ctx = canvasFinal.getContext('2d');
+    const w = canvasFinal.width, h = canvasFinal.height;
+    achatarIluminacaoCanvas(ctx, w, h);
+    autoNivelarCanvas(ctx, w, h);
+    try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
+
+    const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.72);
+    item.dataUrl = dataUrl;
+    item.tamanhoFinal = window.tamanhoDataUrlEmBytes(dataUrl);
+    item.cantosAuto = cantos; // lembra o ajuste, caso reabra a tela de corte
+    window.renderizarListaDigitalizar();
 };
 
 window.gerarPdfDigitalizado = async function() {
@@ -46791,7 +47019,7 @@ window.adicionarArquivosJuntar = function(fileList) {
                     const doc = await PDFLib.PDFDocument.load(bytes);
                     item.paginas = doc.getPageCount();
                 } else {
-                    item.dataUrl = await window.processarImagemDigitalizada(file);
+                    item.dataUrl = (await window.processarImagemDigitalizada(file)).dataUrl;
                     item.paginas = 1;
                 }
             } catch (e) {
