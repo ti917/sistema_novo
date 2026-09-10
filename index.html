@@ -45948,8 +45948,49 @@ window.trocarSubTelaDigitalizar = function(nome) {
 // SUB-TELA 1: DIGITALIZAR FOTOS
 // ======================================================================
 
+// "Auto-níveis" por canal: olha o histograma de cada cor (R, G, B) da própria foto,
+// acha onde está o "quase branco" (o fundo do papel) e o "quase preto" (o texto/tinta)
+// IGNORANDO os extremos (sombra de canto, reflexo de flash), e estica isso pra virar
+// 0-255 de verdade. É essa esticada que deixa o fundo branco de verdade — diferente de
+// só somar brilho/contraste fixo, que não dá conta de foto tirada com pouca luz ou
+// papel meio amarelado, porque cada foto tem um "cinza de fundo" diferente.
+function autoNivelarCanvas(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    const histR = new Uint32Array(256), histG = new Uint32Array(256), histB = new Uint32Array(256);
+    for (let i = 0; i < d.length; i += 4) {
+        histR[d[i]]++; histG[d[i + 1]]++; histB[d[i + 2]]++;
+    }
+    const totalPixels = d.length / 4;
+    const CORTE = totalPixels * 0.006; // ignora ~0.6% de cada ponta (evita esticar por causa de sombra/reflexo isolado)
+
+    function acharLimites(hist) {
+        let baixo = 0, acumBaixo = 0;
+        while (baixo < 255 && acumBaixo < CORTE) { acumBaixo += hist[baixo]; baixo++; }
+        let alto = 255, acumAlto = 0;
+        while (alto > 0 && acumAlto < CORTE) { acumAlto += hist[alto]; alto--; }
+        if (alto <= baixo) return { baixo: 0, alto: 255 }; // foto já uniforme/contrastada: não mexe
+        return { baixo, alto };
+    }
+    const lr = acharLimites(histR), lg = acharLimites(histG), lb = acharLimites(histB);
+
+    // Tabela de conversão (0-255 -> 0-255) calculada uma vez por canal, bem mais rápido
+    // que fazer a conta pixel a pixel.
+    function tabela(baixo, alto) {
+        const t = new Uint8ClampedArray(256);
+        for (let v = 0; v < 256; v++) t[v] = Math.round((v - baixo) * 255 / (alto - baixo));
+        return t;
+    }
+    const tabR = tabela(lr.baixo, lr.alto), tabG = tabela(lg.baixo, lg.alto), tabB = tabela(lb.baixo, lb.alto);
+
+    for (let i = 0; i < d.length; i += 4) {
+        d[i] = tabR[d[i]]; d[i + 1] = tabG[d[i + 1]]; d[i + 2] = tabB[d[i + 2]];
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
 // Lê o arquivo de imagem, desenha num canvas (redimensionando pra não ficar
-// gigante), aplica contraste/brilho tipo "scanner" e devolve já comprimido em JPEG.
+// gigante), aplica o "modo scanner" (clareia o fundo de verdade) e devolve já comprimido em JPEG.
 window.processarImagemDigitalizada = function(file) {
     return new Promise((resolve, reject) => {
         const leitor = new FileReader();
@@ -45971,18 +46012,8 @@ window.processarImagemDigitalizada = function(file) {
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, w, h);
 
-                    // "Modo scanner": aumenta o contraste e clareia um pouco o fundo,
-                    // pra ficar com a cara de documento escaneado em vez de foto de celular.
-                    const imgData = ctx.getImageData(0, 0, w, h);
-                    const d = imgData.data;
-                    const CONTRASTE = 1.35;
-                    const BRILHO = 18;
-                    for (let i = 0; i < d.length; i += 4) {
-                        d[i]     = Math.max(0, Math.min(255, (d[i]     - 128) * CONTRASTE + 128 + BRILHO));
-                        d[i + 1] = Math.max(0, Math.min(255, (d[i + 1] - 128) * CONTRASTE + 128 + BRILHO));
-                        d[i + 2] = Math.max(0, Math.min(255, (d[i + 2] - 128) * CONTRASTE + 128 + BRILHO));
-                    }
-                    ctx.putImageData(imgData, 0, 0);
+                    // "Modo scanner": estica os níveis pra clarear o fundo de verdade (auto-níveis)
+                    autoNivelarCanvas(ctx, w, h);
 
                     // Comprime em JPEG (é isso que deixa o PDF final leve)
                     resolve(canvas.toDataURL('image/jpeg', 0.72));
