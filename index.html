@@ -47036,29 +47036,6 @@ function acharQuad4PontosPorSaturacao(src, areaImagem) {
     return melhorCantos ? { cantos: melhorCantos, area: melhorArea } : null;
 }
 
-// Mapa binário de "isto parece papel": pixels com baixa saturação de cor
-// (independente de brilho/sombra) viram branco (255), o resto fica preto.
-// Usado para validar qual candidato de recorte (borda, saturação ou brilho)
-// realmente cai em cima do papel, em vez de confiar cegamente numa ordem
-// de prioridade fixa entre as estratégias.
-function construirMapaPapel(src) {
-    const rgb = new cv.Mat();
-    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-    const hsv = new cv.Mat();
-    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
-    rgb.delete();
-    const canais = new cv.MatVector();
-    cv.split(hsv, canais);
-    const sat = canais.get(1).clone();
-    hsv.delete();
-    for (let i = 0; i < canais.size(); i++) canais.get(i).delete();
-    canais.delete();
-    const mapa = new cv.Mat();
-    cv.threshold(sat, mapa, 60, 255, cv.THRESH_BINARY_INV);
-    sat.delete();
-    return mapa;
-}
-
 // Estratégia B: separa o papel do fundo pelo brilho (limiar automático de
 // Otsu, testando papel-claro-em-fundo-escuro e o contrário) e usa o menor
 // retângulo girado que envolve o maior contorno achado (minAreaRect) — bem
@@ -47229,63 +47206,20 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         try { achadoSaturacao = acharQuad4PontosPorSaturacao(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de saturação falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
-        // 🐛 CORREÇÃO (09/2026): antes a gente confiava cegamente na ordem
-        // borda > saturação > brilho — "se a borda achou 4 pontos, é porque
-        // tem canto de verdade ali". Isso quebrou numa foto de documento em
-        // cima de pano XADREZ: o próprio desenho do tecido tem um monte de
-        // linha reta e cantos de verdade, e o Canny (Estratégia de Borda)
-        // "achou" um quadrilátero de 4 pontos bem plausível — só que feito de
-        // linhas do PANO, não do papel, cortando o documento errado. Em vez
-        // de confiar cegamente em qual estratégia achou primeiro, agora a
-        // gente CONFERE cada candidato: mede que fração dos pixels dentro do
-        // quadrilátero realmente parece papel (baixa saturação de cor) e fica
-        // com o candidato mais "puro" — não o mais rápido de achar. Um
-        // quadrilátero de pano estampado vai ter uma fração bem menor de
-        // "parece papel" do que o quadrilátero certo, então perde a disputa.
-        const mapaPapel = construirMapaPapel(pequeno);
-        function purezaDoCandidato(achado) {
-            if (!achado) return -1;
-            const { tl, tr, br, bl } = achado.cantos;
-            const contorno = cv.matFromArray(4, 1, cv.CV_32SC2, [
-                Math.round(tl.x), Math.round(tl.y), Math.round(tr.x), Math.round(tr.y),
-                Math.round(br.x), Math.round(br.y), Math.round(bl.x), Math.round(bl.y)
-            ]);
-            const contornosVec = new cv.MatVector();
-            contornosVec.push_back(contorno);
-            const maskQuad = cv.Mat.zeros(mapaPapel.rows, mapaPapel.cols, cv.CV_8U);
-            cv.drawContours(maskQuad, contornosVec, 0, new cv.Scalar(255), -1);
-            contorno.delete(); contornosVec.delete();
-
-            const dentroPapel = new cv.Mat();
-            cv.bitwise_and(mapaPapel, maskQuad, dentroPapel);
-            const totalQuad = cv.countNonZero(maskQuad);
-            const totalPapel = cv.countNonZero(dentroPapel);
-            maskQuad.delete(); dentroPapel.delete();
-            return totalQuad > 0 ? totalPapel / totalQuad : 0;
-        }
-
-        const candidatos = [
-            { achado: achadoBorda, chave: 'borda' },
-            { achado: achadoSaturacao, chave: 'saturacao' },
-            { achado: achadoBrilho, chave: 'brilho' }
-        ].filter(c => c.achado);
-
-        let melhorChave = null, melhorPureza = -1;
-        for (const cand of candidatos) {
-            const p = purezaDoCandidato(cand.achado);
-            if (p > melhorPureza) { melhorPureza = p; melhorChave = cand.chave; }
-        }
-        mapaPapel.delete();
-
-        // Se nem o melhor candidato bateu uma pureza razoável, é mais seguro
-        // não cortar nada (o RH ajusta na mão) do que cortar puxando fundo —
-        // um crop óbvio de "foto inteira" é fácil de perceber e corrigir; um
-        // crop sutilmente errado passa despercebido até alguém reparar depois.
-        const LIMIAR_PUREZA_MINIMA = 0.72;
-        let escolhido = null;
-        if (melhorChave && melhorPureza >= LIMIAR_PUREZA_MINIMA) {
-            escolhido = melhorChave === 'borda' ? achadoBorda : melhorChave === 'saturacao' ? achadoSaturacao : achadoBrilho;
-        }
+        // Ordem de confiança, da mais certeira pra mais "grosseira":
+        // 1) Borda (Canny + 4 pontos): exige um contorno reto bem definido,
+        //    então quando acha algo é porque o documento tem cantos de
+        //    verdade ali.
+        // 2) Saturação (cor + 4 pontos): quando o fundo é colorido (mesa de
+        //    madeira, pano, toalha) mas a textura dele atrapalha o Canny, a
+        //    saturação ainda separa bem papel (sem cor) de fundo (com cor) —
+        //    e como também usa approxPolyDP, o quadrilátero acompanha o
+        //    formato real do papel, sem sobrar fundo grudado num canto.
+        // 3) Brilho (mancha + minAreaRect): a mais grosseira das três — só
+        //    entra quando nem borda nem cor conseguiram achar 4 cantos de
+        //    verdade (documento muito curvado/amassado, ou fundo tão parecido
+        //    com o papel que nem a cor separa).
+        let escolhido = achadoBorda || achadoSaturacao || achadoBrilho;
         let margem = 0;
 
         if (escolhido === achadoBrilho) {
