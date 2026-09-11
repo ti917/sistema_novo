@@ -46751,7 +46751,14 @@ function limparBordaResidualCanvas(ctx, w, h, alcancePct) {
 // Onde não há traço nenhum (papel liso: faixa local pequena) ele não encosta,
 // então não amplifica granulado de sombra.
 // =========================================================================
-function firmarTracoCanvas(ctx, w, h) {
+// faixaMinParam/ganhoParam: quando a foto de entrada chega MUITO comprimida
+// (imagem reenviada por WhatsApp: ~0,1 byte por pixel), o JPEG deixa dois
+// defeitos que este realce, por ser local, amplificaria em vez de corrigir —
+// o "toque" de 8x8 blocos e o chiado (ringing) em volta de cada letra. Ambos
+// têm contraste BAIXO, então basta exigir uma faixa local maior pra ele
+// simplesmente não encostar neles, e aliviar o ganho pra não transformar o
+// chiado em sujeira preta. Quem chama mede a compressão e decide.
+function firmarTracoCanvas(ctx, w, h, faixaMinParam, ganhoParam) {
     const n = w * h;
     if (n > 16000000) return;
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -46806,8 +46813,8 @@ function firmarTracoCanvas(ctx, w, h) {
     // "brilho estourado" antes). FAIXA_MIN mais baixo faz ele também firmar
     // carimbo apagado, caneta fraca e letra miúda de formulário, que antes
     // ficavam de fora por terem pouco contraste.
-    const FAIXA_MIN = 16; // abaixo disso é papel liso/granulado: não mexe
-    const GANHO = 2.4;    // o quanto empurra pras pontas da faixa local
+    const FAIXA_MIN = faixaMinParam != null ? faixaMinParam : 16; // abaixo disso é papel liso/granulado: não mexe
+    const GANHO = ganhoParam != null ? ganhoParam : 2.4;          // o quanto empurra pras pontas da faixa local
     for (let p = 0, i = 0; p < n; p++, i += 4) {
         const lo = escuroLocal[p], hi = claroLocal[p];
         const faixa = hi - lo;
@@ -46846,7 +46853,8 @@ function firmarTracoCanvas(ctx, w, h) {
 // É async e devolve o controle pro navegador entre uma etapa e outra: são 6
 // passadas por cima de vários milhões de pixels, e sem esse respiro a tela
 // congelaria durante o processamento (pior ainda com várias fotos na fila).
-window.__aplicarModoScanner = async function(ctx, w, h) {
+window.__aplicarModoScanner = async function(ctx, w, h, opcoes) {
+    const entradaComprimida = !!(opcoes && opcoes.entradaComprimida);
     const respirar = () => new Promise(r => setTimeout(r, 0));
     try { suavizarRuidoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao suavizar ruído de cor, seguindo sem:', e); }
     await respirar();
@@ -46886,9 +46894,18 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     // continua, mas só como um toque final bem leve (0.25), pra dar aquele
     // último "pinga" de definição em letra muito pequena; nessa força ele não
     // tem energia pra criar halo visível.
-    try { firmarTracoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao firmar o traço, seguindo sem:', e); }
+    try {
+        // Foto esmagada pelo WhatsApp: exige mais contraste pra agir (não pega
+        // o chiado do JPEG) e empurra menos forte.
+        if (entradaComprimida) firmarTracoCanvas(ctx, w, h, 26, 2.0);
+        else firmarTracoCanvas(ctx, w, h);
+    } catch (e) { console.warn('Falha ao firmar o traço, seguindo sem:', e); }
     await respirar();
-    try { realcarNitidezCanvas(ctx, w, h, 0.25, 20); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+    // O unsharp é o passo que mais evidencia artefato de compressão (ele realça
+    // o bloco 8x8 junto com a letra), então em foto comprimida ele sai de cena.
+    if (!entradaComprimida) {
+        try { realcarNitidezCanvas(ctx, w, h, 0.25, 20); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+    }
 };
 
 // =========================================================================
@@ -47943,8 +47960,18 @@ window.processarImagemDigitalizada = function(file) {
                         canvas = canvasMenor; ctx = ctxMenor; w = wf; h = hf;
                     }
 
-                    // 2) "Modo scanner" completo.
-                    await window.__aplicarModoScanner(ctx, w, h);
+                    // 2) "Modo scanner" completo. Mede a compressão da foto de
+                    // ENTRADA (bytes por pixel do arquivo original): câmera
+                    // entrega 0,3-1,0; imagem reenviada por WhatsApp cai pra
+                    // ~0,1. Abaixo de 0,18 o tratamento troca pro modo suave,
+                    // senão a gente realça o defeito do JPEG junto com a letra.
+                    const bytesPorPixel = file.size / Math.max(1, (img.naturalWidth * img.naturalHeight));
+                    const entradaComprimida = bytesPorPixel < 0.18;
+                    if (entradaComprimida) {
+                        console.log('🔍 [DIGITALIZAR] Entrada muito comprimida (' + bytesPorPixel.toFixed(3) +
+                            ' bytes/pixel) — usando tratamento suave pra não realçar artefato de JPEG.');
+                    }
+                    await window.__aplicarModoScanner(ctx, w, h, { entradaComprimida });
 
                     // 3) 🖼️ ENQUADRAMENTO: o recorte sai colado no papel, borda
                     // com borda. Scanner de verdade (e o CamScanner) sempre
@@ -48035,6 +48062,7 @@ window.adicionarFotosDigitalizar = function(fileList) {
             item.dataUrl = res.dataUrl;
             item.dataUrlOriginal = res.dataUrlOriginal;
             item.cantosAuto = res.cantosAuto;
+            item.diagResolucao = res.diagResolucao;
             item.tamanhoFinal = window.tamanhoDataUrlEmBytes(res.dataUrl);
             item.processando = false;
             window.renderizarListaDigitalizar();
@@ -48118,6 +48146,16 @@ window.renderizarListaDigitalizar = function() {
             miolo = `<div style="display:flex; align-items:center; justify-content:center; height:100%; color:#4fc3f7;"><i class="fa-solid fa-spinner fa-spin fa-lg"></i></div>`;
         } else {
             miolo = `<img src="${p.dataUrl}" style="width:100%; height:100%; object-fit:cover; display:block;">`;
+            // ⚠️ AVISO DE FOTO RUIM NA ENTRADA: a causa nº 1 de "ficou feio, não
+            // parece o CamScanner" não é o tratamento — é a foto chegar já
+            // esmagada (imagem reenviada por WhatsApp vem com ~900px e 100-200KB,
+            // contra 3000px+ e vários MB da câmera). Isso não tem conserto depois:
+            // o pixel da letra não existe mais. Avisar AQUI, na miniatura, é o
+            // que permite o RH refazer a foto na hora, antes de gerar o PDF e
+            // arquivar um documento ilegível.
+            if (p.diagResolucao && /BAIXA/.test(p.diagResolucao.avaliacao || '')) {
+                miolo += `<div title="Foto de entrada: ${p.diagResolucao.fotoQueEntrou} (${p.diagResolucao.tamanhoDoArquivo}). Refaça pela câmera ou peça o arquivo original — imagem reenviada por WhatsApp perde definição e não tem como recuperar." style="position:absolute; left:0; right:0; bottom:0; background:rgba(255,152,0,0.92); color:#000; font-size:0.62rem; font-weight:700; padding:3px 5px; line-height:1.25; text-align:center; cursor:help;"><i class="fa-solid fa-triangle-exclamation"></i> Foto de baixa resolução (${p.diagResolucao.fotoQueEntrou})</div>`;
+            }
             if (p.tamanhoOriginal && p.tamanhoFinal) {
                 const pct = Math.round((1 - p.tamanhoFinal / p.tamanhoOriginal) * 100);
                 rodapeInfo = `<div style="font-size:0.68rem; color:var(--cor-texto-secundario); text-align:center; padding:2px 4px 4px;">${window.formatarTamanhoDigitalizar(p.tamanhoOriginal)} → ${window.formatarTamanhoDigitalizar(p.tamanhoFinal)}${pct > 0 ? ` <span style="color:#4caf50;">(-${pct}%)</span>` : ''}</div>`;
