@@ -47096,6 +47096,43 @@ function ordenarCantos(ptsEntrada) {
 // converter o resultado de cv.minAreaRect() (centro+tamanho+ângulo) em 4
 // cantos — então calculamos manualmente por trigonometria (validado contra
 // um quadrado girado 90° conhecido).
+// Ajusta um QUADRILÁTERO de 4 pontos num contorno (em vez do retângulo que o
+// envolve). É a diferença entre "acompanhar o papel inclinado" e "desenhar uma
+// caixa em volta dele engolindo o fundo dos cantos". Tenta simplificar o
+// contorno com tolerância crescente; se o papel tiver canto dobrado ou
+// arredondado e não simplificar, tenta de novo pelo casco convexo (o contorno
+// "idealizado", sem as reentrâncias). Devolve null se não der 4 pontos.
+function quadrilateroDoContorno(contorno) {
+    try {
+        const tentar = (cont) => {
+            const peri = cv.arcLength(cont, true);
+            for (const f of [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06]) {
+                const ap = new cv.Mat();
+                cv.approxPolyDP(cont, f * peri, true, ap);
+                if (ap.rows === 4) {
+                    const pts = [];
+                    for (let j = 0; j < 4; j++) pts.push({ x: ap.data32S[j * 2], y: ap.data32S[j * 2 + 1] });
+                    ap.delete();
+                    return pts;
+                }
+                ap.delete();
+            }
+            return null;
+        };
+        let pts = tentar(contorno);
+        if (!pts) {
+            const hull = new cv.Mat();
+            cv.convexHull(contorno, hull);
+            pts = tentar(hull);
+            hull.delete();
+        }
+        return pts;
+    } catch (e) {
+        console.warn('Não consegui ajustar quadrilátero no contorno, usando retângulo:', e);
+        return null;
+    }
+}
+
 function cantosDoRectRotacionado(rect) {
     const cx = rect.center.x, cy = rect.center.y;
     const w = rect.size.width / 2, h = rect.size.height / 2;
@@ -47341,28 +47378,39 @@ function acharQuadPorPapelDessaturado(src, areaImagem) {
     const kernel = cv.Mat.ones(9, 9, cv.CV_8U);
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
+    let S = null, V = null;
     let resultado = null;
     try {
         cv.GaussianBlur(src, suave, new cv.Size(7, 7), 0);
         cv.cvtColor(suave, rgb, cv.COLOR_RGBA2RGB);
         cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
         cv.split(hsv, canais);
-        const S = canais.get(1), V = canais.get(2);
+        if (canais.size() < 3) return null;
+        S = canais.get(1); V = canais.get(2);
 
         // Limiar de brilho: Otsu no canal V, afrouxado em 25% pra não recortar
         // a parte do papel que caiu na sombra.
+        // ⚠️ Blindagem: nem toda build do OpenCV.js devolve o limiar calculado
+        // por cv.threshold. Se vier undefined/NaN e a gente usasse direto, o
+        // limiar seguinte viraria NaN, a máscara sairia vazia e a estratégia
+        // INTEIRA falharia calada (caindo no método antigo sem ninguém
+        // perceber). Por isso o valor é conferido e tem um padrão de segurança.
         const tmp = new cv.Mat();
         const otsuV = cv.threshold(V, tmp, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
         tmp.delete();
-        const limiarV = Math.max(90, otsuV * 0.75);
+        const otsuValido = (typeof otsuV === 'number' && isFinite(otsuV) && otsuV > 0) ? otsuV : 170;
+        const limiarV = Math.max(90, Math.round(otsuValido * 0.75));
 
         // SATURAÇÃO BAIXA (é papel, não madeira/pano/capa colorida) E claro.
         cv.threshold(S, maskS, 70, 255, cv.THRESH_BINARY_INV);
         cv.threshold(V, maskV, limiarV, 255, cv.THRESH_BINARY);
         cv.bitwise_and(maskS, maskV, mask);
         // Fecha buraco (texto, dobra, grampo) e depois tira respingo solto.
-        cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
-        cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
+        // Em Mat separada: morfologia "in-place" não é garantida em toda build.
+        const morf = new cv.Mat();
+        cv.morphologyEx(mask, morf, cv.MORPH_CLOSE, kernel);
+        cv.morphologyEx(morf, mask, cv.MORPH_OPEN, kernel);
+        morf.delete();
 
         cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
         let maior = null, maiorArea = 0;
@@ -47378,34 +47426,14 @@ function acharQuadPorPapelDessaturado(src, areaImagem) {
         }
 
         // Quadrilátero que ACOMPANHA a mancha (não o retângulo que a envolve).
-        function quadDe(contorno) {
-            const peri = cv.arcLength(contorno, true);
-            for (const f of [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06]) {
-                const ap = new cv.Mat();
-                cv.approxPolyDP(contorno, f * peri, true, ap);
-                if (ap.rows === 4) {
-                    const pts = [];
-                    for (let j = 0; j < 4; j++) pts.push({ x: ap.data32S[j * 2], y: ap.data32S[j * 2 + 1] });
-                    ap.delete();
-                    return pts;
-                }
-                ap.delete();
-            }
-            return null;
-        }
-        let pts = quadDe(maior);
-        if (!pts) {
-            // Papel com canto dobrado/arredondado: o casco convexo vira o
-            // contorno "idealizado" e aí o quadrilátero sai.
-            const hull = new cv.Mat();
-            cv.convexHull(maior, hull);
-            pts = quadDe(hull);
-            hull.delete();
-        }
+        const pts = quadrilateroDoContorno(maior);
         maior.delete();
         if (!pts) return null;
         resultado = { cantos: ordenarCantos(pts), area: maiorArea };
     } finally {
+        // Cada Mat do OpenCV.js ocupa memória fora do coletor de lixo do
+        // navegador: esquecer um delete aqui vaza memória a cada foto da fila.
+        if (S) S.delete(); if (V) V.delete();
         rgb.delete(); hsv.delete(); suave.delete(); canais.delete();
         maskS.delete(); maskV.delete(); mask.delete(); kernel.delete();
         contours.delete(); hierarchy.delete();
@@ -47469,7 +47497,19 @@ function acharQuadPorLimiarBrilho(src, areaImagem, relaxado) {
                 // quando não há alternativa.
                 if (area > areaImagem * 0.90) pontuacao *= 0.55;
                 if (retangularidade > RETANGULARIDADE_MIN && (!melhor || pontuacao > melhor.pontuacao)) {
-                    melhor = { cantos: ordenarCantos(cantosDoRectRotacionado(rect)), area, pontuacao };
+                    // 🐛 CORREÇÃO GRAVE (11/09/2026): aqui devolvia direto o
+                    // `minAreaRect`, que é o RETÂNGULO QUE ENVOLVE a mancha. Com
+                    // papel inclinado/em perspectiva — o caso normal de foto de
+                    // celular — esse retângulo engole os cantos de fundo: foi ele
+                    // que colocou a faixa de mesa de madeira e a tarja preta
+                    // dentro do documento "recortado" do RH (medido na foto real:
+                    // o minAreaRect cobria 98,2% da imagem enquanto o papel de
+                    // verdade ocupava 88%). Agora tenta primeiro ajustar um
+                    // QUADRILÁTERO na mancha, que acompanha a perspectiva; o
+                    // retângulo só entra se a mancha não simplificar pra 4 pontos.
+                    let cantosQuad = quadrilateroDoContorno(c);
+                    if (!cantosQuad) cantosQuad = cantosDoRectRotacionado(rect);
+                    melhor = { cantos: ordenarCantos(cantosQuad), area, pontuacao };
                 }
             }
             c.delete();
@@ -47777,6 +47817,16 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         try { achadoBorda = acharQuad4PontosPorBorda(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
         try { achadoPapel = acharQuadPorPapelDessaturado(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de papel (dessaturação) falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
+
+        // Carimbo de versão: serve pra confirmar num piscar de olhos se o
+        // arquivo novo realmente entrou (cache do navegador já enganou a
+        // gente achando que uma correção "não funcionou").
+        console.log('🔍 [DIGITALIZAR] versão do digitalizador: v10.1');
+        // Log imediato das 3 estratégias: quando o recorte sai errado, é isso
+        // que diz em qual delas mexer, sem ter que adivinhar pelo resultado.
+        const pctArea = (r) => r ? (100 * r.area / areaImagem).toFixed(1) + '% da foto' : 'NAO ACHOU';
+        console.log('🔍 [DIGITALIZAR] Estratégias — borda:', pctArea(achadoBorda),
+            '| papel/dessaturação:', pctArea(achadoPapel), '| brilho:', pctArea(achadoBrilho));
 
         // A estratégia de borda (Canny + 4 pontos) exige um contorno reto
         // bem definido pra funcionar, então quando ela acha algo é porque o
