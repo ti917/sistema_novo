@@ -5791,7 +5791,16 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
 
                         <div id="rodape-acoes-digitalizar" class="hidden" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 25px; flex-wrap: wrap; border-top: 1px solid var(--cor-borda); padding-top: 20px;">
                             <div id="resumo-economia-digitalizar" style="font-size: 0.82rem; color: var(--cor-texto-secundario);"></div>
-                            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                                <!-- 👇 OCR opcional: só lê o texto e cola uma camada INVISÍVEL por baixo da
+                                     foto no PDF (pra dar pra pesquisar/copiar o texto) — a imagem que aparece
+                                     continua sendo a foto tratada, então não existe risco de "reescrever
+                                     errado" um dado: se o OCR errar uma letra, isso fica só na camada
+                                     escondida, ninguém vê e ninguém assina em cima disso. -->
+                                <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color: var(--cor-texto-secundario); cursor:pointer;" title="Deixa o texto do documento pesquisável/copiável no PDF, sem mudar a imagem. Deixa a geração um pouco mais lenta.">
+                                    <input type="checkbox" id="chk-ocr-digitalizar" style="width:15px; height:15px; cursor:pointer;">
+                                    Tornar PDF pesquisável (OCR)
+                                </label>
                                 <button class="btn-secondary" style="border-color: var(--cor-perigo); color: var(--cor-perigo);" onclick="window.limparDigitalizacao()">
                                     <i class="fa-solid fa-trash"></i> Limpar Tudo
                                 </button>
@@ -46112,7 +46121,12 @@ function autoNivelarCanvas(ctx, w, h) {
         histR[d[i]]++; histG[d[i + 1]]++; histB[d[i + 2]]++;
     }
     const totalPixels = d.length / 4;
-    const CORTE = totalPixels * 0.006; // ignora ~0.6% de cada ponta (evita esticar por causa de sombra/reflexo isolado)
+    // 🐛 CORREÇÃO (09/2026): 0.6% de corte deixava a esticada forte demais em
+    // fotos que já estavam bem iluminadas (o "branco" do histograma ficava
+    // perto de 255 de qualquer jeito, mas o corte ainda arredondava pra cima
+    // e estourava o resultado). 0.35% estica só o suficiente pra corrigir foto
+    // mal iluminada, sem exagerar na que já tava boa.
+    const CORTE = totalPixels * 0.0035; // ignora ~0.35% de cada ponta (evita esticar por causa de sombra/reflexo isolado)
 
     function acharLimites(hist) {
         let baixo = 0, acumBaixo = 0;
@@ -46135,7 +46149,9 @@ function autoNivelarCanvas(ctx, w, h) {
     // igual um "S" suave) — é o que dá aquela cara de "documento escaneado de
     // verdade" (fundo bem branco, texto bem preto) em vez de foto só clareada,
     // parecido com o que apps de scanner tipo CamScanner aplicam por padrão.
-    const CONTRASTE = 1.18;
+    // 🐛 CORREÇÃO (09/2026): 1.18 empilhado com o joelho de branco do
+    // acabamentoDeCorCanvas (abaixo) estourava o brilho — baixado pra 1.08.
+    const CONTRASTE = 1.08;
     const tabContraste = new Uint8ClampedArray(256);
     for (let v = 0; v < 256; v++) tabContraste[v] = Math.round(128 + (v - 128) * CONTRASTE);
 
@@ -46175,7 +46191,13 @@ function acabamentoDeCorCanvas(ctx, w, h) {
     const d = imgData.data;
 
     // --- Tabela de tons (0-255 -> 0-255), calculada uma vez ---
-    const JOELHO_BRANCO = 214;  // daqui pra cima começa a virar branco puro
+    // 🐛 CORREÇÃO (09/2026): 214 pegava até tom de papel meio-claro que ainda
+    // tinha detalhe (textura, marca d'água, carimbo apagado) e virava branco
+    // puro — somado à esticada do auto-níveis, o resultado saía com brilho
+    // estourado. Subido pra 228: só o que já tava bem perto do branco vira
+    // branco puro, e o efeito "documento escaneado" continua por conta do
+    // auto-níveis + curva S.
+    const JOELHO_BRANCO = 228;  // daqui pra cima começa a virar branco puro
     const JOELHO_PRETO = 46;    // daqui pra baixo começa a virar preto de verdade
     const FORCA_S = 0.16;       // intensidade da curva S no meio-tom
     const tom = new Uint8ClampedArray(256);
@@ -46730,6 +46752,49 @@ function garantirOpenCVCarregado() {
         } catch (e) { resolve(false); }
     });
     return window.__cvCarregandoPromise;
+}
+
+// =========================================================================
+// 📖 OCR (leitura de texto) pra PDF pesquisável: usa o Tesseract.js — é
+// GRATUITO, roda 100% no navegador (não manda a foto pra nenhum servidor,
+// então documento de RH não sai da máquina) e não precisa de chave de API.
+// Carregada sob demanda igual o OpenCV, só quando o RH marca a caixinha de
+// "Tornar PDF pesquisável".
+// IMPORTANTE: isso só serve pra dar uma camada de texto PESQUISÁVEL/COPIÁVEL
+// por baixo da imagem — a imagem que aparece no PDF continua sendo a foto
+// tratada de sempre. Não existe risco de "virar um dado errado visível":
+// se o OCR ler uma palavra errada, ela fica escondida atrás da imagem, sem
+// efeito nenhum no que a pessoa vê ou assina.
+// =========================================================================
+window.__tesseractCarregandoPromise = null;
+function garantirTesseractCarregado() {
+    if (window.__tesseractCarregandoPromise) return window.__tesseractCarregandoPromise;
+    window.__tesseractCarregandoPromise = new Promise((resolve) => {
+        if (window.Tesseract) return resolve(true);
+        try {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+            script.onerror = () => resolve(false);
+            script.onload = () => resolve(!!window.Tesseract);
+            document.head.appendChild(script);
+        } catch (e) { resolve(false); }
+    });
+    return window.__tesseractCarregandoPromise;
+}
+
+// Lê o texto de uma imagem (dataUrl) e devolve as palavras com a posição
+// (bbox em pixel da própria imagem) — é isso que deixa colar cada palavra
+// no lugar certo, escondida, por baixo da foto no PDF.
+window.__ocrWorkerPromise = null;
+async function ocrLerPalavras(dataUrl, idioma) {
+    if (!window.__ocrWorkerPromise) {
+        // 'por' = português; um worker só, reaproveitado entre as páginas
+        // (criar um novo por página seria bem mais lento).
+        window.__ocrWorkerPromise = window.Tesseract.createWorker(idioma || 'por');
+    }
+    const worker = await window.__ocrWorkerPromise;
+    const { data } = await worker.recognize(dataUrl);
+    return (data.words || []).filter(p => p.text && p.text.trim());
 }
 
 // Ordena 4 pontos soltos (em qualquer ordem) nos cantos tl/tr/br/bl.
@@ -47693,6 +47758,17 @@ window.gerarPdfDigitalizado = async function() {
     const textoOriginal = btn ? btn.innerHTML : null;
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando PDF...'; }
 
+    // OCR é opcional (caixinha "Tornar PDF pesquisável") porque deixa a
+    // geração bem mais lenta — sem marcar, o PDF sai do jeito de sempre.
+    const chkOcr = document.getElementById('chk-ocr-digitalizar');
+    const comOcr = !!(chkOcr && chkOcr.checked);
+    let ocrOk = true;
+    if (comOcr) {
+        if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Carregando leitor de texto...';
+        ocrOk = await garantirTesseractCarregado();
+        if (!ocrOk) mostrarAlerta('Não consegui carregar o leitor de texto (OCR) — o PDF vai sair sem a camada pesquisável.', 'aviso');
+    }
+
     try {
         const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
         const LARG_PAGINA = 210, ALT_PAGINA = 297, MARGEM = 8;
@@ -47707,6 +47783,36 @@ window.gerarPdfDigitalizado = async function() {
             const x = (LARG_PAGINA - w) / 2;
             const y = (ALT_PAGINA - h) / 2;
             pdf.addImage(paginas[i].dataUrl, 'JPEG', x, y, w, h, undefined, 'FAST');
+
+            // 📖 Camada de texto INVISÍVEL por baixo da foto (pesquisável/copiável).
+            // A imagem que aparece é sempre a foto — o texto lido só existe
+            // "escondido" atrás dela, então um erro de leitura nunca aparece
+            // pro usuário nem muda o documento visualmente.
+            if (comOcr && ocrOk) {
+                if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo texto da página ' + (i + 1) + ' de ' + paginas.length + '...';
+                try {
+                    const palavras = await ocrLerPalavras(paginas[i].dataUrl, 'por');
+                    // escala px-da-foto -> mm-do-PDF, pra colar cada palavra exatamente
+                    // embaixo de onde ela aparece na imagem.
+                    const escalaX = w / props.width, escalaY = h / props.height;
+                    pdf.setTextColor(255, 255, 255); // cinto de segurança extra: mesmo se o renderingMode falhar em algum leitor, fica branco e ilegível sobre a foto
+                    for (const p of palavras) {
+                        const bx0 = x + p.bbox.x0 * escalaX, by0 = y + p.bbox.y0 * escalaY;
+                        const alturaPx = p.bbox.y1 - p.bbox.y0;
+                        const larguraMm = (p.bbox.x1 - p.bbox.x0) * escalaX;
+                        const alturaMm = alturaPx * escalaY;
+                        if (larguraMm <= 0 || alturaMm <= 0) continue;
+                        // tamanho da fonte em pt (jsPDF.setFontSize é sempre em pt) que faz o
+                        // texto ocupar aproximadamente a mesma largura da palavra na imagem.
+                        const tamanhoPt = Math.max(4, alturaMm * 2.83465);
+                        pdf.setFontSize(tamanhoPt);
+                        pdf.text(p.text, bx0, by0 + alturaMm * 0.85, { renderingMode: 'invisible', maxWidth: larguraMm });
+                    }
+                } catch (eOcr) {
+                    console.warn('OCR falhou na página ' + (i + 1) + ':', eOcr);
+                    // não interrompe o PDF por causa disso — a página sai só sem texto pesquisável.
+                }
+            }
         }
 
         const agora = new Date();
