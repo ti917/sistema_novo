@@ -45999,8 +45999,21 @@ function achatarIluminacaoCanvas(ctx, w, h) {
     // maiores dão mais chance de cada bloco pegar um pixel branco de verdade,
     // sem perder a capacidade de corrigir sombra de canto (que varia bem mais
     // devagar que isso pela foto).
-    const BLOCO = 24;         // tamanho de cada bloco da grade, em pixels
-    const JANELA_DILATA = 7;  // quantos blocos de raio olha pra "curar" um bloco contaminado
+    //
+    // 🐛 CORREÇÃO 2 (09/2026): sombra FECHADA no meio do papel (a sombra da
+    // própria mão/celular na hora da foto) continuava aparecendo como uma
+    // mancha cinza. O culpado era a "cura" por DILATAÇÃO: ela substituía cada
+    // bloco pelo MAIS CLARO de uma janela de 7 blocos de raio (~170px), o que
+    // apagava do mapa de fundo qualquer sombra menor que isso — e sem ela no
+    // mapa, o pixel nunca era clareado. Trocamos por uma cura pela MEDIANA da
+    // vizinhança: um bloco isolado escurecido por tinta densa é um ponto fora
+    // da curva e a mediana dos vizinhos o resgata, mas uma sombra de verdade
+    // escurece o bloco E os vizinhos juntos, então a mediana também é baixa e a
+    // sombra CONTINUA no mapa — que é exatamente o que precisa acontecer pra
+    // ela ser corrigida depois. É a diferença entre "curar contaminação" e
+    // "apagar sombra", que a dilatação não sabia distinguir.
+    const BLOCO = Math.max(14, Math.min(32, Math.round(Math.max(w, h) / 70)));
+    const RAIO_CURA = 2;      // blocos de raio olhados pra "curar" um bloco contaminado por tinta
     const bx = Math.ceil(w / BLOCO), by = Math.ceil(h / BLOCO);
 
     const origData = ctx.getImageData(0, 0, w, h).data;
@@ -46025,35 +46038,37 @@ function achatarIluminacaoCanvas(ctx, w, h) {
         }
     }
 
-    function dilatar(mapa) {
-        const raio = Math.floor(JANELA_DILATA / 2);
-        const tmp = new Uint8ClampedArray(bx * by);
+    // Cura pela mediana: cada bloco vira o MAIOR entre ele mesmo e a mediana da
+    // sua vizinhança. Bloco engolido por tinta (outlier escuro no meio de
+    // vizinhos claros) sobe pra mediana e é resgatado; bloco dentro de uma
+    // sombra tem vizinhos igualmente escuros, a mediana é baixa e ele fica como
+    // está — a sombra permanece registrada no mapa de fundo e, por isso, é
+    // corrigida. A mediana também é imune a um único vizinho muito claro
+    // (reflexo de flash), diferente da dilatação.
+    function curarPelaMediana(mapa) {
+        const out = new Uint8ClampedArray(bx * by);
+        const janela = [];
         for (let y = 0; y < by; y++) {
             for (let x = 0; x < bx; x++) {
-                let m = 0;
-                for (let k = -raio; k <= raio; k++) {
-                    const xx = Math.min(bx - 1, Math.max(0, x + k));
-                    const v = mapa[y * bx + xx];
-                    if (v > m) m = v;
+                janela.length = 0;
+                for (let dy = -RAIO_CURA; dy <= RAIO_CURA; dy++) {
+                    const yy = y + dy;
+                    if (yy < 0 || yy >= by) continue;
+                    for (let dx = -RAIO_CURA; dx <= RAIO_CURA; dx++) {
+                        const xx = x + dx;
+                        if (xx < 0 || xx >= bx) continue;
+                        janela.push(mapa[yy * bx + xx]);
+                    }
                 }
-                tmp[y * bx + x] = m;
-            }
-        }
-        const out = new Uint8ClampedArray(bx * by);
-        for (let x = 0; x < bx; x++) {
-            for (let y = 0; y < by; y++) {
-                let m = 0;
-                for (let k = -raio; k <= raio; k++) {
-                    const yy = Math.min(by - 1, Math.max(0, y + k));
-                    const v = tmp[yy * bx + x];
-                    if (v > m) m = v;
-                }
-                out[y * bx + x] = m;
+                janela.sort((a, b) => a - b);
+                const mediana = janela[Math.floor(janela.length / 2)];
+                const proprio = mapa[y * bx + x];
+                out[y * bx + x] = mediana > proprio ? mediana : proprio;
             }
         }
         return out;
     }
-    const mR = dilatar(maxR), mG = dilatar(maxG), mB = dilatar(maxB);
+    const mR = curarPelaMediana(maxR), mG = curarPelaMediana(maxG), mB = curarPelaMediana(maxB);
 
     const blocoData = new Uint8ClampedArray(bx * by * 4);
     for (let i = 0; i < bx * by; i++) {
@@ -46456,6 +46471,99 @@ function limparFundoCanvas(ctx, w, h) {
 }
 
 // =========================================================================
+// 🪚 LIMPEZA DA BORDA RESIDUAL: agora que o recorte folga um pouquinho pra fora
+// (pra nunca comer conteúdo encostado na margem do papel), sobra às vezes um
+// fiapo do fundo — uma tirinha da mesa, da toalha, da sombra — colada na borda.
+// Esse fiapo é escuro, então além de feio ele atrapalha os passos seguintes
+// (o achatamento de iluminação o interpreta como sombra e tenta clareá-lo).
+//
+// A limpeza é por "alagamento" a partir das bordas: começa nos pixels da moldura
+// que estão escuros e vai espalhando pelos vizinhos igualmente escuros. Fundo é
+// escuro E encosta na borda, então é todo alcançado; o texto do documento é
+// escuro mas fica ilhado no meio do papel branco, então o alagamento nunca chega
+// nele. Se a área alagada passar de 28% da imagem, é sinal de que o recorte foi
+// mal e a "borda" na verdade é metade da foto — aí não mexe em nada, porque
+// apagar conteúdo seria muito pior do que deixar o fundo aparecendo.
+// =========================================================================
+function limparBordaResidualCanvas(ctx, w, h) {
+    const n = w * h;
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+
+    const lum = new Uint8ClampedArray(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+
+    // Mediana aproximada (por histograma) = o brilho típico da página.
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < n; p++) hist[lum[p]]++;
+    let acum = 0, mediana = 255;
+    for (let v = 0; v < 256; v++) { acum += hist[v]; if (acum >= n / 2) { mediana = v; break; } }
+    // Página escura demais (foto muito subexposta): não dá pra separar fundo de
+    // conteúdo com segurança, então não arrisca.
+    if (mediana < 60) return;
+    const LIMIAR = Math.max(30, Math.round(mediana * 0.62));
+
+    const marcado = new Uint8Array(n);
+    const pilha = new Int32Array(n);
+    let topo = 0, alagados = 0;
+    function semear(p) { if (!marcado[p] && lum[p] < LIMIAR) { marcado[p] = 1; pilha[topo++] = p; alagados++; } }
+    for (let x = 0; x < w; x++) { semear(x); semear((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { semear(y * w); semear(y * w + w - 1); }
+
+    while (topo > 0) {
+        const p = pilha[--topo];
+        const x = p % w, y = (p - x) / w;
+        if (x > 0) semear(p - 1);
+        if (x < w - 1) semear(p + 1);
+        if (y > 0) semear(p - w);
+        if (y < h - 1) semear(p + w);
+    }
+
+    if (alagados === 0 || alagados > n * 0.28) return;
+
+    // Engorda a área alagada em alguns pixels: a transição entre o fundo e o
+    // papel é meio cinza (desfoque da lente) e, sem isso, ficaria um contorno
+    // acinzentado exatamente onde estava o fiapo.
+    // Dilatação separável (uma passada horizontal + uma vertical) em vez de
+    // varrer um quadrado inteiro por pixel — mesmo resultado, muito mais rápido.
+    const RAIO = Math.max(2, Math.round(Math.max(w, h) / 500));
+    const linha = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+        const base = y * w;
+        let ultimoMarcado = -1e9;
+        for (let x = 0; x < w; x++) {
+            if (marcado[base + x]) ultimoMarcado = x;
+            if (x - ultimoMarcado <= RAIO) linha[base + x] = 1;
+        }
+        ultimoMarcado = 1e9;
+        for (let x = w - 1; x >= 0; x--) {
+            if (marcado[base + x]) ultimoMarcado = x;
+            if (ultimoMarcado - x <= RAIO) linha[base + x] = 1;
+        }
+    }
+    const engordado = new Uint8Array(n);
+    for (let x = 0; x < w; x++) {
+        let ultimoMarcado = -1e9;
+        for (let y = 0; y < h; y++) {
+            if (linha[y * w + x]) ultimoMarcado = y;
+            if (y - ultimoMarcado <= RAIO) engordado[y * w + x] = 1;
+        }
+        ultimoMarcado = 1e9;
+        for (let y = h - 1; y >= 0; y--) {
+            if (linha[y * w + x]) ultimoMarcado = y;
+            if (ultimoMarcado - y <= RAIO) engordado[y * w + x] = 1;
+        }
+    }
+
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        if (engordado[p]) { d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; }
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
 // 🖨️ MODO SCANNER (a receita completa, na ordem que importa). A ordem não é
 // arbitrária — cada passo depende do anterior:
 //   1. Ruído de cor primeiro: o passo 2 divide a imagem pelo fundo estimado e
@@ -46479,6 +46587,13 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     const respirar = () => new Promise(r => setTimeout(r, 0));
     try { suavizarRuidoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao suavizar ruído de cor, seguindo sem:', e); }
     await respirar();
+    achatarIluminacaoCanvas(ctx, w, h);
+    await respirar();
+    // Segunda passada: a primeira derruba a sombra de ~116 pra ~250, mas em
+    // sombra bem fechada sobra um véu de uns 5 tons. Como a imagem já está
+    // quase plana, essa segunda passada é praticamente inócua onde não há
+    // sombra (o mapa de fundo fica uniforme e a divisão não muda nada) e
+    // limpa justamente esse resto.
     achatarIluminacaoCanvas(ctx, w, h);
     await respirar();
     autoNivelarCanvas(ctx, w, h);
@@ -46716,8 +46831,12 @@ function proporcaoRealDoDocumento(cantos, larguraFoto, alturaFoto) {
 // encolhendo um pouquinho pra dentro (margemPct) pra não sobrar uma tira
 // de fundo na borda — devolve o canvas final ou null se ficar pequeno demais.
 function recortarPorCantos(src, cantos, margemPct) {
+    // margemPct positivo encolhe pra dentro; NEGATIVO folga pra fora. Hoje usamos
+    // folga: perder uma letra encostada na borda do papel é um estrago que o
+    // usuário só descobre depois, enquanto sobrar um fiapo de fundo é cosmético
+    // — e ainda por cima o fiapo é apagado logo em seguida pela limpeza de borda.
     let { tl, tr, br, bl } = cantos;
-    if (margemPct > 0) {
+    if (margemPct !== 0) {
         const cx = (tl.x + tr.x + br.x + bl.x) / 4;
         const cy = (tl.y + tr.y + br.y + bl.y) / 4;
         const encolher = (p) => ({ x: p.x + (cx - p.x) * margemPct, y: p.y + (cy - p.y) * margemPct });
@@ -46841,7 +46960,11 @@ function acharQuad4PontosPorBorda(src, areaImagem) {
 // mais tolerante a papel curvado/amassado ou recibo comprido, porque não
 // exige um contorno perfeitamente reto de 4 lados, só uma mancha grande e
 // consistente de um lado do limiar de brilho.
-function acharQuadPorLimiarBrilho(src, areaImagem) {
+// O parâmetro `relaxado` liga um modo "última tentativa", usado só quando as
+// duas estratégias normais não acharam nada: aceita manchas menos retangulares
+// e que ocupem quase a foto inteira. É melhor um recorte aproximado do que
+// entregar a foto com a mesa/toalha estampada em volta do documento.
+function acharQuadPorLimiarBrilho(src, areaImagem, relaxado) {
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     const blur = new cv.Mat();
@@ -46872,7 +46995,17 @@ function acharQuadPorLimiarBrilho(src, areaImagem) {
             // foto inteira normalmente é sinal de que o limiar juntou o papel
             // com um fundo claro (mesa, parede) em vez de separar os dois —
             // nesse caso é melhor não "cortar" nada do que cortar errado.
-            if (area > areaImagem * 0.12 && area < areaImagem * 0.90) {
+            // 🐛 CORREÇÃO (09/2026): o teto de 90% rejeitava um caso MUITO comum —
+            // a pessoa aproxima o celular e o papel ocupa quase o enquadramento
+            // inteiro. Nesses casos a detecção era descartada e a foto saía sem
+            // recorte nenhum, com a mesa/toalha aparecendo em volta. Agora o teto
+            // vai até 97% e, em vez de rejeitar de cara, uma mancha muito grande
+            // só perde pontos na disputa: se existir um candidato melhor, ele
+            // ganha; se não existir, é melhor cortar por ela do que não cortar.
+            const TETO = relaxado ? 0.985 : 0.97;
+            const PISO = relaxado ? 0.10 : 0.12;
+            const RETANGULARIDADE_MIN = relaxado ? 0.35 : 0.55;
+            if (area > areaImagem * PISO && area < areaImagem * TETO) {
                 const rect = cv.minAreaRect(c);
                 const areaRect = rect.size.width * rect.size.height;
                 // Retangularidade: o quanto a mancha real preenche o retângulo
@@ -46880,8 +47013,13 @@ function acharQuadPorLimiarBrilho(src, areaImagem) {
                 // (confiável); baixo = forma irregular (provavelmente não é
                 // o papel, é sombra/mistura com o fundo).
                 const retangularidade = areaRect > 0 ? area / areaRect : 0;
-                const pontuacao = area * Math.min(1, retangularidade + 0.15);
-                if (retangularidade > 0.55 && (!melhor || pontuacao > melhor.pontuacao)) {
+                let pontuacao = area * Math.min(1, retangularidade + 0.15);
+                // Penaliza mancha que cobre quase a foto toda: pode ser o papel
+                // preenchendo o enquadramento (ótimo) ou o limiar tendo juntado o
+                // papel com uma mesa clara (ruim). Perdendo pontos, ela só vence
+                // quando não há alternativa.
+                if (area > areaImagem * 0.90) pontuacao *= 0.55;
+                if (retangularidade > RETANGULARIDADE_MIN && (!melhor || pontuacao > melhor.pontuacao)) {
                     melhor = { cantos: ordenarCantos(cantosDoRectRotacionado(rect)), area, pontuacao };
                 }
             }
@@ -46972,6 +47110,17 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         // isso, sempre que a de borda encontrar um quadrilátero plausível,
         // usa ele direto; a de brilho só entra como alternativa quando a de
         // borda não encontra nada (documento curvado/amassado, sem 4 cantos retos).
+        // Última tentativa: nenhuma das duas achou nada (fundo estampado, papel
+        // encostando nas bordas da foto, outra folha aparecendo no canto...).
+        // Antes disso a foto saía SEM recorte nenhum, com a mesa aparecendo em
+        // volta — que é o pior resultado possível. Aqui afrouxamos as exigências
+        // de formato e tamanho: um recorte aproximado é melhor do que nenhum, e
+        // o usuário ainda tem o "Ajustar corte" pra refinar.
+        if (!achadoBorda && !achadoBrilho) {
+            try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem, true); }
+            catch (e) { console.warn('Tentativa relaxada de detecção falhou:', e); }
+        }
+
         let escolhido = achadoBorda || achadoBrilho;
         let margem = 0;
 
@@ -46982,13 +47131,12 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             if (refinado && refinado.area > areaImagem * 0.05) {
                 escolhido = refinado;
             }
-            margem = 0.012; // minAreaRect costuma sobrar uma bordinha
+            // Folga pra fora: o retângulo do minAreaRect pode encostar exatamente
+            // na borda do papel, e qualquer imprecisão de 2-3 pixels come a
+            // primeira letra de uma linha que começa bem na margem.
+            margem = -0.008;
         } else if (escolhido === achadoBorda) {
-            // Mesmo com cantos bem detectados sobra quase sempre um fio da
-            // sombra/borda da mesa colado na margem, e esse fio escuro estraga
-            // o "achatar iluminação" depois (vira uma faixa cinza na lateral).
-            // Uma raspadinha de 0,4% resolve sem comer conteúdo.
-            margem = 0.004;
+            margem = -0.005;
         }
 
         if (escolhido) {
@@ -47106,6 +47254,10 @@ window.processarImagemDigitalizada = function(file) {
                                 ctx = canvas.getContext('2d');
                                 w = canvas.width; h = canvas.height;
                                 cortado = true;
+                                // Apaga o fiapo de fundo que a folga do recorte
+                                // deixou colado na borda (ver a função).
+                                try { limparBordaResidualCanvas(ctx, w, h); }
+                                catch (eB) { console.warn('Falha ao limpar a borda residual, seguindo sem:', eB); }
                                 // Os cantos voltam na escala da foto de DETECÇÃO; a tela de
                                 // corte manual trabalha na escala da foto de REFERÊNCIA
                                 // (dataUrlOriginal), então converte aqui — senão os cantos
@@ -47512,6 +47664,8 @@ window.__aplicarAjusteCorte = async function(item, img, cantos) {
 
     const ctx = canvasFinal.getContext('2d');
     const w = canvasFinal.width, h = canvasFinal.height;
+    try { limparBordaResidualCanvas(ctx, w, h); }
+    catch (eB) { console.warn('Falha ao limpar a borda residual, seguindo sem:', eB); }
     await window.__aplicarModoScanner(ctx, w, h);
 
     const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.9);
