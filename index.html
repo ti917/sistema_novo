@@ -46949,6 +46949,93 @@ function acharQuad4PontosPorBorda(src, areaImagem) {
     return melhorCantos ? { cantos: melhorCantos, area: melhorArea } : null;
 }
 
+// =========================================================================
+// 🎨 ESTRATÉGIA NOVA (09/2026): separa o papel do fundo pela SATURAÇÃO da
+// cor, não pelo brilho. Foi criada depois de um caso real onde o RH tirou a
+// foto do documento em cima de uma mesa de madeira/pano estampado — a
+// Estratégia A (Canny) não achava um contorno de 4 lados limpo (a textura da
+// madeira/tecido cria um monte de bordinha falsa), e a Estratégia B (brilho)
+// confundia parte da mesa com o papel, porque a madeira era CLARA o
+// suficiente pra passar no mesmo limiar de brilho do papel branco — mas ela
+// tem COR (marrom/laranja), enquanto papel de documento é branco/cinza
+// (saturação baixíssima, perto de zero) mesmo em foto com iluminação ruim.
+// Isso separa papel de mesa de madeira, tecido estampado, tampo colorido
+// etc. muito melhor do que olhar só o quão claro/escuro cada pixel é.
+//
+// Ao contrário da Estratégia B (que usa minAreaRect — um retângulo que
+// ENVOLVE o contorno inteiro, então "estoura" pra fora do papel de verdade
+// se a máscara tiver qualquer bolha/dedo grudado), aqui a gente usa o mesmo
+// truque da Estratégia A (approxPolyDP até virar 4 pontos) — o que dá um
+// quadrilátero que acompanha o formato real do papel (inclusive a
+// perspectiva torta de uma foto tirada em ângulo), em vez de um retângulo
+// "reto" que sobra fundo grudado num dos cantos.
+// =========================================================================
+function acharQuad4PontosPorSaturacao(src, areaImagem) {
+    const rgb = new cv.Mat();
+    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    const hsv = new cv.Mat();
+    cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+    rgb.delete();
+
+    const canais = new cv.MatVector();
+    cv.split(hsv, canais);
+    const saturacao = canais.get(1).clone(); // canal S (0 = cinza/branco puro, alto = cor viva)
+    hsv.delete();
+    for (let i = 0; i < canais.size(); i++) canais.get(i).delete();
+    canais.delete();
+
+    const blur = new cv.Mat();
+    cv.GaussianBlur(saturacao, blur, new cv.Size(7, 7), 0);
+    saturacao.delete();
+
+    const mask = new cv.Mat();
+    // INV: satura BAIXA (papel) vira branco (255) na máscara — o limiar exato
+    // (Otsu) se ajusta sozinho a cada foto, não é um número fixo.
+    cv.threshold(blur, mask, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+    blur.delete();
+
+    // Abre (tira fiapo/reflexo pequeno solto) e SÓ DEPOIS fecha (funde
+    // rachadura fina dentro do próprio papel) — nessa ordem, ao contrário da
+    // Estratégia B, evita colar um pedaço de fundo vizinho que só encostou
+    // no papel por 1-2 pixels (kernel pequeno de propósito, pra não ser
+    // generoso demais nessa fusão).
+    const kernel = cv.Mat.ones(5, 5, cv.CV_8U);
+    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
+    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+    kernel.delete();
+
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    mask.delete();
+
+    const EPSILONS = [0.02, 0.025, 0.03, 0.035, 0.04, 0.05];
+    let melhorCantos = null, melhorArea = 0;
+    for (let i = 0; i < contours.size(); i++) {
+        const c = contours.get(i);
+        const peri = cv.arcLength(c, true);
+        for (const fatorEpsilon of EPSILONS) {
+            const approx = new cv.Mat();
+            cv.approxPolyDP(c, approx, fatorEpsilon * peri, true);
+            if (approx.rows === 4) {
+                const area = Math.abs(cv.contourArea(approx));
+                if (area > areaImagem * 0.15 && area > melhorArea) {
+                    melhorArea = area;
+                    const pts = [];
+                    for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+                    melhorCantos = ordenarCantos(pts);
+                }
+                approx.delete();
+                break;
+            }
+            approx.delete();
+        }
+        c.delete();
+    }
+    contours.delete(); hierarchy.delete();
+    return melhorCantos ? { cantos: melhorCantos, area: melhorArea } : null;
+}
+
 // Estratégia B: separa o papel do fundo pelo brilho (limiar automático de
 // Otsu, testando papel-claro-em-fundo-escuro e o contrário) e usa o menor
 // retângulo girado que envolve o maior contorno achado (minAreaRect) — bem
@@ -47114,19 +47201,25 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
     try {
         const areaImagem = pequeno.rows * pequeno.cols;
 
-        let achadoBorda = null, achadoBrilho = null;
+        let achadoBorda = null, achadoSaturacao = null, achadoBrilho = null;
         try { achadoBorda = acharQuad4PontosPorBorda(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
+        try { achadoSaturacao = acharQuad4PontosPorSaturacao(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de saturação falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
-        // A estratégia de borda (Canny + 4 pontos) exige um contorno reto
-        // bem definido pra funcionar, então quando ela acha algo é porque o
-        // documento tem cantos de verdade ali — muito mais confiável do que
-        // a estratégia de brilho, que é só uma aproximação por mancha de
-        // brilho e pode confundir o papel com uma mesa clara por perto. Por
-        // isso, sempre que a de borda encontrar um quadrilátero plausível,
-        // usa ele direto; a de brilho só entra como alternativa quando a de
-        // borda não encontra nada (documento curvado/amassado, sem 4 cantos retos).
-        let escolhido = achadoBorda || achadoBrilho;
+        // Ordem de confiança, da mais certeira pra mais "grosseira":
+        // 1) Borda (Canny + 4 pontos): exige um contorno reto bem definido,
+        //    então quando acha algo é porque o documento tem cantos de
+        //    verdade ali.
+        // 2) Saturação (cor + 4 pontos): quando o fundo é colorido (mesa de
+        //    madeira, pano, toalha) mas a textura dele atrapalha o Canny, a
+        //    saturação ainda separa bem papel (sem cor) de fundo (com cor) —
+        //    e como também usa approxPolyDP, o quadrilátero acompanha o
+        //    formato real do papel, sem sobrar fundo grudado num canto.
+        // 3) Brilho (mancha + minAreaRect): a mais grosseira das três — só
+        //    entra quando nem borda nem cor conseguiram achar 4 cantos de
+        //    verdade (documento muito curvado/amassado, ou fundo tão parecido
+        //    com o papel que nem a cor separa).
+        let escolhido = achadoBorda || achadoSaturacao || achadoBrilho;
         let margem = 0;
 
         if (escolhido === achadoBrilho) {
@@ -47137,7 +47230,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 escolhido = refinado;
             }
             margem = 0.012; // minAreaRect costuma sobrar uma bordinha
-        } else if (escolhido === achadoBorda) {
+        } else if (escolhido === achadoBorda || escolhido === achadoSaturacao) {
             // Mesmo com cantos bem detectados sobra quase sempre um fio da
             // sombra/borda da mesa colado na margem, e esse fio escuro estraga
             // o "achatar iluminação" depois (vira uma faixa cinza na lateral).
