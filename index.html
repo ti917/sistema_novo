@@ -47461,6 +47461,7 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
             if (melhorS === null || melhorG < GRADIENTE_MIN) continue;
             pts.push({ x: px + nx * melhorS, y: py + ny * melhorS });
         }
+        ajustarLado.ultimaQtd = pts.length; // pro diagnóstico
         if (pts.length < MIN_PONTOS) return null;
 
         // Ajuste de reta por mínimos quadrados TOTAIS (não o y=ax+b comum):
@@ -47516,8 +47517,11 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
         return dist.d <= COLADO ? dist.reta : null;
     }
     let ladosNaBordaDaFoto = 0;
-    function medirLado(A, B) {
+    function medirLado(A, B, nome) {
+        ajustarLado.ultimaQtd = 0;
         const medido = ajustarLado(A, B);
+        const diag = refinarCantosPorLinhas.ultimoDiag;
+        if (diag) diag.pontosPorLado[nome] = ajustarLado.ultimaQtd + (medido ? '' : ' (INSUFICIENTE)');
         if (medido) {
             // Mediu, mas caiu praticamente em cima da borda da foto: prende na
             // borda pra não sobrar (nem faltar) uma tirinha de 1-2px.
@@ -47525,6 +47529,7 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
             if (naBorda) { ladosNaBordaDaFoto++; return naBorda; }
             return medido;
         }
+        // (sem medida confiável — o diagnóstico abaixo registra isso)
         // Não mediu nada confiável: se é um lado que sai da foto, a borda da
         // foto é a resposta correta. Se não é, aí sim desiste.
         const naBorda = retaDaBordaDaFoto(A, B);
@@ -47532,11 +47537,21 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
         return naBorda;
     }
 
-    const ladoTopo = medirLado(cantos.tl, cantos.tr);
-    const ladoDir  = medirLado(cantos.tr, cantos.br);
-    const ladoBase = medirLado(cantos.br, cantos.bl);
-    const ladoEsq  = medirLado(cantos.bl, cantos.tl);
-    if (!ladoTopo || !ladoDir || !ladoBase || !ladoEsq) return null;
+    // Diagnóstico: quantos pontos de borda cada lado conseguiu medir. Lado com
+    // poucos pontos = não achou borda de papel ali (papel saindo da foto,
+    // fundo da mesma cor do papel, sombra colada). É a informação que diz POR
+    // QUE um lado saiu errado, em vez de ter que adivinhar pelo resultado.
+    refinarCantosPorLinhas.ultimoDiag = { pontosPorLado: {}, ladosNaBorda: 0, recusa: null };
+
+    const ladoTopo = medirLado(cantos.tl, cantos.tr, 'topo');
+    const ladoDir  = medirLado(cantos.tr, cantos.br, 'direita');
+    const ladoBase = medirLado(cantos.br, cantos.bl, 'base');
+    const ladoEsq  = medirLado(cantos.bl, cantos.tl, 'esquerda');
+    refinarCantosPorLinhas.ultimoDiag.ladosNaBorda = ladosNaBordaDaFoto;
+    if (!ladoTopo || !ladoDir || !ladoBase || !ladoEsq) {
+        refinarCantosPorLinhas.ultimoDiag.recusa = 'algum lado sem borda medivel';
+        return null;
+    }
 
     function cruzar(r1, r2) {
         const a1 = r1.nx, b1 = r1.ny, c1 = r1.nx * r1.px + r1.ny * r1.py;
@@ -47560,14 +47575,24 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
     // travas (ficar dentro da foto, área plausível) continuam valendo.
     const limite = BANDA * (ladosNaBordaDaFoto > 0 ? 6 : 2.2);
     for (const k of ['tl', 'tr', 'br', 'bl']) {
-        if (Math.hypot(novo[k].x - cantos[k].x, novo[k].y - cantos[k].y) > limite) return null;
-        if (novo[k].x < -w * 0.05 || novo[k].x > w * 1.05 || novo[k].y < -h * 0.05 || novo[k].y > h * 1.05) return null;
+        if (Math.hypot(novo[k].x - cantos[k].x, novo[k].y - cantos[k].y) > limite) {
+            refinarCantosPorLinhas.ultimoDiag.recusa = 'canto ' + k + ' andou demais (' +
+                Math.round(Math.hypot(novo[k].x - cantos[k].x, novo[k].y - cantos[k].y)) + 'px, limite ' + Math.round(limite) + ')';
+            return null;
+        }
+        if (novo[k].x < -w * 0.05 || novo[k].x > w * 1.05 || novo[k].y < -h * 0.05 || novo[k].y > h * 1.05) {
+            refinarCantosPorLinhas.ultimoDiag.recusa = 'canto ' + k + ' caiu fora da foto';
+            return null;
+        }
     }
     const area = (q) =>
         Math.abs((q.tr.x - q.tl.x) * (q.bl.y - q.tl.y) - (q.bl.x - q.tl.x) * (q.tr.y - q.tl.y)) / 2 +
         Math.abs((q.tr.x - q.br.x) * (q.bl.y - q.br.y) - (q.bl.x - q.br.x) * (q.tr.y - q.br.y)) / 2;
     const razao = area(novo) / Math.max(1, area(cantos));
-    if (razao < 0.75 || razao > (ladosNaBordaDaFoto > 0 ? 1.9 : 1.35)) return null;
+    if (razao < 0.75 || razao > (ladosNaBordaDaFoto > 0 ? 1.9 : 1.35)) {
+        refinarCantosPorLinhas.ultimoDiag.recusa = 'area mudou demais (x' + razao.toFixed(2) + ')';
+        return null;
+    }
     return novo;
 }
 
@@ -47711,6 +47736,31 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                     margem = -0.0015;
                     usouRefino = true;
                 }
+                // 🔍 DIAGNÓSTICO DO RECORTE: quando o corte sai errado, olhar o
+                // resultado final não diz QUAL das etapas errou — dá pra passar
+                // rodada atrás de rodada chutando parâmetro. Este relatório diz
+                // exatamente o que o detector viu. Aparece no console do
+                // navegador (F12 → Console) e fica guardado em
+                // window.__diagDigitalizacao pro suporte pedir depois.
+                const diag = refinarCantosPorLinhas.ultimoDiag || {};
+                const pct = (v, tot) => (100 * v / tot).toFixed(1) + '%';
+                const c = escolhido.cantos;
+                window.__diagDigitalizacao = {
+                    estrategia: achadoBorda ? 'BORDA (Canny, mais confiavel)' : 'BRILHO (Otsu, aproximada)',
+                    tamanhoFotoDeteccao: pequeno.cols + 'x' + pequeno.rows,
+                    pontosDeBordaMedidosPorLado: diag.pontosPorLado,
+                    ladosPresosNaBordaDaFoto: diag.ladosNaBorda,
+                    refinoSubpixel: usouRefino ? 'ACEITO' : ('RECUSADO — ' + (diag.recusa || 'nao rodou')),
+                    margemDeFolgaUsada: margem,
+                    cantosFinais: c,
+                    distanciaDosCantosAteABordaDaFoto: {
+                        esquerda: pct(Math.min(c.tl.x, c.bl.x), pequeno.cols),
+                        direita: pct(pequeno.cols - Math.max(c.tr.x, c.br.x), pequeno.cols),
+                        topo: pct(Math.min(c.tl.y, c.tr.y), pequeno.rows),
+                        base: pct(pequeno.rows - Math.max(c.bl.y, c.br.y), pequeno.rows)
+                    }
+                };
+                console.log('🔍 [DIGITALIZAR] Diagnóstico do recorte:', window.__diagDigitalizacao);
             } catch (e) { console.warn('Refino subpixel das bordas falhou, seguindo com os cantos brutos:', e); }
         }
 
