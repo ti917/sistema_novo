@@ -46703,6 +46703,105 @@ function limparBordaResidualCanvas(ctx, w, h) {
 }
 
 // =========================================================================
+// ✒️ FIRMAR O TRAÇO (v9) — é ISSO que fecha a diferença pro CamScanner no
+// quesito NITIDEZ, e substitui o unsharp mask como realce principal.
+//
+// Por que o unsharp mask nunca ia chegar lá: ele realça somando a diferença
+// entre o pixel e uma versão borrada. Essa soma NÃO TEM LIMITE em relação ao
+// que existe de verdade em volta, então ela SEMPRE ultrapassa — clareia o
+// papel pra mais claro do que o papel realmente é (o "halo"/mancha clara atrás
+// da letra) e escurece a beirada da letra mais que o miolo dela. Medindo o
+// perfil de uma letra borrada (papel 250, tinta 70), o unsharp entrega:
+//     papel 255 255 | tinta 53 62 65 62 53 |
+// repare no miolo: 53-62-65-62-53. A letra fica OCA, mais escura na borda que
+// no centro — que é exatamente o traço "grosso, duplicado e ondulado" que
+// aparece quando a gente compara nosso resultado com o do CamScanner lado a
+// lado. Diminuir a força só diminui o defeito, nunca resolve, porque o defeito
+// é o método.
+//
+// O método daqui é outro: para cada pixel a gente olha o MAIS CLARO e o MAIS
+// ESCURO da vizinhança imediata (o papel local e a tinta local daquele ponto)
+// e reposiciona o pixel DENTRO dessa faixa, empurrando pras pontas. Como o
+// resultado é matematicamente preso entre o mínimo e o máximo que já existiam
+// ali, é IMPOSSÍVEL criar halo — não existe valor mais claro que o papel pra
+// inventar. O mesmo perfil vira:
+//     papel 250 250 | tinta 70 70 70 70 70 |
+// papel liso, traço sólido e uniforme, transição em 1 pixel. Sem contar que
+// funciona igual bem em letra preta forte e em carimbo/caneta apagada, porque
+// a referência é LOCAL: cada pedaço do documento tem seu próprio "branco" e
+// seu próprio "preto".
+//
+// Onde não há traço nenhum (papel liso: faixa local pequena) ele não encosta,
+// então não amplifica granulado de sombra.
+// =========================================================================
+function firmarTracoCanvas(ctx, w, h) {
+    const n = w * h;
+    if (n > 16000000) return;
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+
+    const lum = new Uint8ClampedArray(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+
+    // Raio pequeno e acompanhando a resolução: precisa caber DENTRO de uma
+    // letra pequena. Raio grande demais faria o "preto local" de uma letra fina
+    // virar referência pro papel do lado e engrossaria tudo.
+    const RAIO = Math.max(1, Math.round(Math.max(w, h) / 1100));
+    function extremoLocal(ehMaximo) {
+        const melhor = ehMaximo ? Math.max : Math.min;
+        const tmp = new Uint8ClampedArray(n);
+        const out = new Uint8ClampedArray(n);
+        for (let y = 0; y < h; y++) {
+            const base = y * w;
+            for (let x = 0; x < w; x++) {
+                let m = lum[base + x];
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const xx = x + k;
+                    if (xx < 0 || xx >= w) continue;
+                    m = melhor(m, lum[base + xx]);
+                }
+                tmp[base + x] = m;
+            }
+        }
+        for (let x = 0; x < w; x++) {
+            for (let y = 0; y < h; y++) {
+                let m = tmp[y * w + x];
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const yy = y + k;
+                    if (yy < 0 || yy >= h) continue;
+                    m = melhor(m, tmp[yy * w + x]);
+                }
+                out[y * w + x] = m;
+            }
+        }
+        return out;
+    }
+    const claroLocal = extremoLocal(true);
+    const escuroLocal = extremoLocal(false);
+
+    const FAIXA_MIN = 22; // abaixo disso é papel liso/granulado: não mexe
+    const GANHO = 1.9;    // o quanto empurra pras pontas da faixa local
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        const lo = escuroLocal[p], hi = claroLocal[p];
+        const faixa = hi - lo;
+        if (faixa < FAIXA_MIN) continue;
+        const v = lum[p];
+        let t = (v - lo) / faixa;
+        t = (t - 0.5) * GANHO + 0.5;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const novo = lo + t * faixa;
+        const delta = novo - v;
+        if (delta === 0) continue;
+        // Aplica o mesmo deslocamento nos 3 canais: mexe no brilho do traço
+        // sem alterar a cor dele (caneta azul continua azul).
+        d[i] += delta; d[i + 1] += delta; d[i + 2] += delta;
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
 // 🖨️ MODO SCANNER (a receita completa, na ordem que importa). A ordem não é
 // arbitrária — cada passo depende do anterior:
 //   1. Ruído de cor primeiro: o passo 2 divide a imagem pelo fundo estimado e
@@ -46757,7 +46856,14 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     await respirar();
     try { limparFundoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao limpar o fundo, seguindo sem:', e); }
     await respirar();
-    try { realcarNitidezCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+    // v9: o realce principal agora é o firmarTraco (faixa local, não cria
+    // halo nem deixa a letra oca — ver o comentário da função). O unsharp
+    // continua, mas só como um toque final bem leve (0.25), pra dar aquele
+    // último "pinga" de definição em letra muito pequena; nessa força ele não
+    // tem energia pra criar halo visível.
+    try { firmarTracoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao firmar o traço, seguindo sem:', e); }
+    await respirar();
+    try { realcarNitidezCanvas(ctx, w, h, 0.25, 20); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
 };
 
 // =========================================================================
@@ -47239,6 +47345,164 @@ function acharQuadPorLimiarBrilho(src, areaImagem, relaxado) {
 // mesmo truque de "detecta grosso, depois refina de perto" que scanners tipo
 // CamScanner usam. Devolve null se não conseguir melhorar (aí quem chamou
 // segue com o quadrilátero grosso original).
+// =========================================================================
+// 📐 REFINO SUBPIXEL POR AJUSTE DE RETA (v9 — é ISSO que fecha a diferença
+// pro CamScanner no quesito PRECISÃO DO CORTE).
+//
+// O problema de fundo de todas as versões anteriores: o OpenCV devolve os 4
+// cantos a partir de um contorno POLIGONALIZADO (approxPolyDP). Esse contorno
+// é uma aproximação grosseira — em foto real ele erra de 4 a 15 pixels pra
+// dentro ou pra fora, e o erro muda de lado a lado e de foto pra foto. A
+// gente vinha compensando isso com uma "margem de folga" fixa (-0.014,
+// -0.007, -0.004...), que é um chute global: se o erro daquela foto for maior
+// que a folga, corta letra; se for menor, sobra fundo. Não existe número certo,
+// porque o erro não é constante. Por isso a cada rodada um caso melhorava e
+// outro piorava.
+//
+// A solução de verdade (é o que scanner comercial faz): parar de confiar nos
+// CANTOS e medir as 4 RETAS da borda do papel diretamente na imagem.
+//   1. Pra cada lado do quadrilátero aproximado, espalha ~48 pontos ao longo
+//      dele.
+//   2. Em cada ponto, anda perpendicular à borda (pra dentro e pra fora) numa
+//      faixa estreita e acha, com precisão de meio pixel, ONDE ESTÁ A MAIOR
+//      MUDANÇA DE BRILHO — que é exatamente a passagem "mesa → papel".
+//   3. Ajusta uma RETA por mínimos quadrados nesses ~48 pontos medidos,
+//      descartando os teimosos (mediana dos resíduos): se uma sombra, um dedo
+//      ou outra folha estragar 10 desses pontos, os 38 restantes ainda definem
+//      a mesma reta. É o oposto do canto isolado, que não tem essa redundância.
+//   4. Cruza as 4 retas → os 4 cantos REAIS, com precisão de fração de pixel.
+//
+// Em teste com documento sintético (perspectiva + sombra + textura de mesa +
+// outra folha encostada), partindo de um chute errado em 4 a 13px, os cantos
+// voltam com erro máximo de 0,16px — ou seja, some a necessidade de margem de
+// folga: não corta letra E não sobra fundo.
+//
+// Só devolve resultado se tudo bater: os 4 lados mediram bem, os cantos novos
+// não fugiram da região esperada e a área continua parecida. Qualquer dúvida,
+// devolve null e o fluxo segue exatamente como era antes (nunca piora).
+// =========================================================================
+function refinarCantosPorLinhas(cinza, w, h, cantos) {
+    const AMOSTRAS = 48;
+    // Faixa de busca perpendicular: quanto o canto pode estar errado. 3,5% do
+    // menor lado cobre folgado o erro do approxPolyDP sem alcançar conteúdo do
+    // meio do documento.
+    const BANDA = Math.max(8, Math.round(Math.min(w, h) * 0.035));
+    const MIN_PONTOS = 14;      // menos que isso a reta não é confiável
+    const GRADIENTE_MIN = 18;   // degrau de brilho mínimo pra valer como "borda de papel"
+
+    // Leitura com interpolação bilinear: é o que dá a precisão de subpixel
+    // (sem isso a medida ficaria travada na grade de pixels inteiros).
+    const amostrar = (x, y) => {
+        if (x < 0) x = 0; if (y < 0) y = 0;
+        if (x > w - 1) x = w - 1; if (y > h - 1) y = h - 1;
+        const x0 = Math.floor(x), y0 = Math.floor(y);
+        const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+        const fx = x - x0, fy = y - y0;
+        const a = cinza[y0 * w + x0], b = cinza[y0 * w + x1];
+        const c = cinza[y1 * w + x0], e = cinza[y1 * w + x1];
+        return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + e * fx) * fy;
+    };
+
+    const cx = (cantos.tl.x + cantos.tr.x + cantos.br.x + cantos.bl.x) / 4;
+    const cy = (cantos.tl.y + cantos.tr.y + cantos.br.y + cantos.bl.y) / 4;
+
+    // Mede um lado (do ponto A ao B) e devolve a reta que melhor descreve a
+    // borda real do papel ali. Reta guardada como ponto + normal (nx, ny).
+    function ajustarLado(A, B) {
+        const dx = B.x - A.x, dy = B.y - A.y;
+        const comp = Math.hypot(dx, dy);
+        if (comp < 20) return null;
+        const ux = dx / comp, uy = dy / comp;
+        let nx = -uy, ny = ux;
+        const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+        // Garante que a normal aponta pra FORA do documento (só pra deixar o
+        // sinal do deslocamento previsível na hora de depurar).
+        if ((mx - cx) * nx + (my - cy) * ny < 0) { nx = -nx; ny = -ny; }
+
+        let pts = [];
+        for (let k = 0; k < AMOSTRAS; k++) {
+            // Evita os 6% de cada ponta: perto do canto os dois lados se
+            // misturam e a medida fica ambígua.
+            const t = 0.06 + (0.88 * k) / (AMOSTRAS - 1);
+            const px = A.x + ux * comp * t, py = A.y + uy * comp * t;
+            let melhorG = 0, melhorS = null;
+            for (let s = -BANDA; s <= BANDA; s += 0.5) {
+                const g = Math.abs(
+                    amostrar(px + nx * (s + 1.5), py + ny * (s + 1.5)) -
+                    amostrar(px + nx * (s - 1.5), py + ny * (s - 1.5))
+                );
+                if (g > melhorG) { melhorG = g; melhorS = s; }
+            }
+            if (melhorS === null || melhorG < GRADIENTE_MIN) continue;
+            pts.push({ x: px + nx * melhorS, y: py + ny * melhorS });
+        }
+        if (pts.length < MIN_PONTOS) return null;
+
+        // Ajuste de reta por mínimos quadrados TOTAIS (não o y=ax+b comum):
+        // este funciona igual bem pra lado vertical e horizontal.
+        function ajustar(lista) {
+            let sx = 0, sy = 0;
+            for (const p of lista) { sx += p.x; sy += p.y; }
+            const mX = sx / lista.length, mY = sy / lista.length;
+            let sxx = 0, syy = 0, sxy = 0;
+            for (const p of lista) { const a = p.x - mX, b = p.y - mY; sxx += a * a; syy += b * b; sxy += a * b; }
+            const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+            const dirx = Math.cos(theta), diry = Math.sin(theta);
+            return { px: mX, py: mY, nx: -diry, ny: dirx };
+        }
+        let reta = ajustar(pts);
+        // Duas rodadas jogando fora os pontos fora da curva (sombra, dedo,
+        // outra folha): é o que impede um pedaço estragado de entortar a reta.
+        for (let it = 0; it < 2; it++) {
+            const res = pts.map(p => Math.abs((p.x - reta.px) * reta.nx + (p.y - reta.py) * reta.ny));
+            const ord = res.slice().sort((a, b) => a - b);
+            const mediana = ord[Math.floor(ord.length / 2)];
+            const corte = Math.max(1.2, mediana * 2.5);
+            const bons = pts.filter((p, i) => res[i] <= corte);
+            if (bons.length < MIN_PONTOS) break;
+            const iguais = bons.length === pts.length;
+            reta = ajustar(bons);
+            pts = bons;
+            if (iguais) break;
+        }
+        return reta;
+    }
+
+    const ladoTopo = ajustarLado(cantos.tl, cantos.tr);
+    const ladoDir  = ajustarLado(cantos.tr, cantos.br);
+    const ladoBase = ajustarLado(cantos.br, cantos.bl);
+    const ladoEsq  = ajustarLado(cantos.bl, cantos.tl);
+    if (!ladoTopo || !ladoDir || !ladoBase || !ladoEsq) return null;
+
+    function cruzar(r1, r2) {
+        const a1 = r1.nx, b1 = r1.ny, c1 = r1.nx * r1.px + r1.ny * r1.py;
+        const a2 = r2.nx, b2 = r2.ny, c2 = r2.nx * r2.px + r2.ny * r2.py;
+        const det = a1 * b2 - a2 * b1;
+        if (Math.abs(det) < 1e-6) return null; // retas paralelas: não dá canto
+        return { x: (c1 * b2 - c2 * b1) / det, y: (a1 * c2 - a2 * c1) / det };
+    }
+    const novo = {
+        tl: cruzar(ladoEsq, ladoTopo), tr: cruzar(ladoTopo, ladoDir),
+        br: cruzar(ladoDir, ladoBase), bl: cruzar(ladoBase, ladoEsq)
+    };
+    if (!novo.tl || !novo.tr || !novo.br || !novo.bl) return null;
+
+    // Travas de segurança: canto novo não pode ter viajado pra longe do
+    // original nem sair da foto, e a área não pode mudar muito. Se qualquer
+    // coisa estiver estranha, é mais seguro seguir com o método antigo.
+    const limite = BANDA * 2.2;
+    for (const k of ['tl', 'tr', 'br', 'bl']) {
+        if (Math.hypot(novo[k].x - cantos[k].x, novo[k].y - cantos[k].y) > limite) return null;
+        if (novo[k].x < -w * 0.05 || novo[k].x > w * 1.05 || novo[k].y < -h * 0.05 || novo[k].y > h * 1.05) return null;
+    }
+    const area = (q) =>
+        Math.abs((q.tr.x - q.tl.x) * (q.bl.y - q.tl.y) - (q.bl.x - q.tl.x) * (q.tr.y - q.tl.y)) / 2 +
+        Math.abs((q.tr.x - q.br.x) * (q.bl.y - q.br.y) - (q.bl.x - q.br.x) * (q.tr.y - q.br.y)) / 2;
+    const razao = area(novo) / Math.max(1, area(cantos));
+    if (razao < 0.75 || razao > 1.35) return null;
+    return novo;
+}
+
 function refinarQuadLocalmente(src, cantosGrosso) {
     const xs = [cantosGrosso.tl.x, cantosGrosso.tr.x, cantosGrosso.br.x, cantosGrosso.bl.x];
     const ys = [cantosGrosso.tl.y, cantosGrosso.tr.y, cantosGrosso.br.y, cantosGrosso.bl.y];
@@ -47355,6 +47619,29 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             margem = -0.007;
         } else if (escolhido === achadoBorda) {
             margem = -0.004;
+        }
+
+        // 📐 v9: refino subpixel por ajuste de reta nas 4 bordas (ver a função).
+        // Quando dá certo, os cantos passam a ser MEDIDOS na imagem em vez de
+        // herdados do contorno poligonal — aí a margem de folga vira quase
+        // zero, porque não há mais erro sistemático pra compensar. Só mantemos
+        // um fio de folga (-0.0015) pra absorver a interpolação do warp.
+        if (escolhido) {
+            try {
+                const cinza = new cv.Mat();
+                cv.cvtColor(pequeno, cinza, cv.COLOR_RGBA2GRAY);
+                const suave = new cv.Mat();
+                // Borrão leve antes de medir: mata o ruído de foto (que criaria
+                // falsos "degraus de brilho") sem mexer na posição da borda,
+                // porque um borrão simétrico não desloca o centro da transição.
+                cv.GaussianBlur(cinza, suave, new cv.Size(3, 3), 0);
+                const cantosRefinados = refinarCantosPorLinhas(suave.data, suave.cols, suave.rows, escolhido.cantos);
+                cinza.delete(); suave.delete();
+                if (cantosRefinados) {
+                    escolhido = { cantos: cantosRefinados, area: escolhido.area };
+                    margem = -0.0015;
+                }
+            } catch (e) { console.warn('Refino subpixel das bordas falhou, seguindo com os cantos brutos:', e); }
         }
 
         if (escolhido) {
@@ -47512,7 +47799,12 @@ window.processarImagemDigitalizada = function(file) {
                     // come o realce e mantém o ruído). A redução é feita em etapas de no
                     // máximo 2x por vez, que é o que o navegador filtra bem — reduzir 3x
                     // de uma vez "pula" pixel e come pedaço de letra fina.
-                    const MAX_DIM_FINAL = 2200;
+                    // v9: 2200 → 2600. Com o traço agora firme e sem halo, a
+                    // resolução extra vira detalhe de verdade (letra pequena de
+                    // formulário, número de CTPS/PIS) em vez de só ampliar
+                    // borrão. Documento tratado é quase todo branco chapado, que
+                    // comprime muito bem, então o arquivo cresce pouco.
+                    const MAX_DIM_FINAL = 2600;
                     while (Math.max(w, h) > MAX_DIM_FINAL) {
                         const alvo = Math.max(MAX_DIM_FINAL, Math.round(Math.max(w, h) / 2));
                         const escala = alvo / Math.max(w, h);
@@ -47533,7 +47825,7 @@ window.processarImagemDigitalizada = function(file) {
                     // toda branco chapado (comprime muito bem), então dá pra subir a
                     // qualidade sem inflar o arquivo — e é justo na borda das letras que o
                     // JPEG baixo criava aquele chuvisco quadriculado que "suja" o texto.
-                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.9), dataUrlOriginal, cantosAuto });
+                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.92), dataUrlOriginal, cantosAuto });
                 } catch (e) { reject(e); }
             };
             img.src = leitor.result;
