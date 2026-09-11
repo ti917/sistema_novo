@@ -46134,34 +46134,361 @@ function autoNivelarCanvas(ctx, w, h) {
     ctx.putImageData(imgData, 0, 0);
 }
 
-// Nitidez leve (unsharp mask simples): realça os contornos das letras pra
-// ficar mais fácil de ler, principalmente em foto de recibo/papel térmico
-// que sai meio "borrado". Kernel pequeno e suave de propósito — não é pra
-// criar ruído/serrilhado, só destacar a borda do texto um pouco.
-function realcarNitidezCanvas(ctx, w, h) {
-    if (w * h > 9000000) return; // imagem grande demais: não compensa o custo, resultado já sai nítido
-    const origem = ctx.getImageData(0, 0, w, h);
-    const src = origem.data;
-    const saida = new Uint8ClampedArray(src.length);
-    const peso = 0.5; // força do realce (0 = nada, 1 = forte)
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            const i = (y * w + x) * 4;
-            for (let c = 0; c < 3; c++) {
-                const centro = src[i + c];
-                const cima = src[i - w * 4 + c] ?? centro;
-                const baixo = src[i + w * 4 + c] ?? centro;
-                const esq = x > 0 ? src[i - 4 + c] : centro;
-                const dir = x < w - 1 ? src[i + 4 + c] : centro;
-                const vizinhanca = (cima + baixo + esq + dir) / 4;
-                saida[i + c] = centro + (centro - vizinhanca) * peso;
+// =========================================================================
+// 🎨 ACABAMENTO DE COR ("magic color"): é esse passo que faltava pra ficar com
+// cara de digitalizado profissional em vez de "foto clareada". Depois do
+// auto-níveis o fundo do papel ainda fica num cinza claro (uns 230-245) e o
+// texto num cinza escuro — de longe parece branco, mas de perto tem aquela
+// sujeirinha acinzentada que denuncia que é foto. Aqui a gente:
+//
+//  1) Gruda o branco: tudo acima de um joelho (~214) sobe suavemente até 255,
+//     então o papel vira branco de verdade, sem escada/degradê visível (a
+//     rampa suave é o que evita o efeito "recortado" de quem só faz
+//     `if (v > 214) v = 255`).
+//  2) Aprofunda o preto: o texto escuro desce pro preto de verdade, deixando
+//     a letra com peso — é o que dá legibilidade em letra pequena.
+//  3) Curva S suave no meio: separa a letra cinza-clara (caneta fraca,
+//     lápis, carimbo apagado) do fundo, sem estourar.
+//  4) Neutraliza o amarelado: em pixel quase-branco (papel), puxa os 3
+//     canais pro mesmo valor, matando o tom amarelo/azulado da luz do
+//     ambiente. Pixel com cor de verdade (caneta azul, carimbo vermelho,
+//     assinatura) é preservado — só o papel é neutralizado, proporcional ao
+//     quão sem-cor ele já é.
+// =========================================================================
+function acabamentoDeCorCanvas(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+
+    // --- Tabela de tons (0-255 -> 0-255), calculada uma vez ---
+    const JOELHO_BRANCO = 214;  // daqui pra cima começa a virar branco puro
+    const JOELHO_PRETO = 46;    // daqui pra baixo começa a virar preto de verdade
+    const FORCA_S = 0.16;       // intensidade da curva S no meio-tom
+    const tom = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+        let x = v / 255;
+
+        // Curva S suave centrada em 0.5 (smoothstep misturado com a reta):
+        // escurece um pouco o que já é escuro e clareia o que já é claro.
+        const s = x * x * (3 - 2 * x);
+        x = x + (s - x) * FORCA_S;
+
+        // Joelho do branco: rampa suave (cosseno) do joelho até 255.
+        const jb = JOELHO_BRANCO / 255;
+        if (x > jb) {
+            const t = Math.min(1, (x - jb) / (1 - jb));
+            x = jb + (1 - jb) * Math.sin(t * Math.PI / 2); // ease-out: chega em 1 rapidinho e cola lá
+        }
+        // Joelho do preto (espelhado): rampa suave do joelho até 0.
+        const jp = JOELHO_PRETO / 255;
+        if (x < jp) {
+            const t = Math.min(1, x / jp);
+            x = jp * (1 - Math.sin((1 - t) * Math.PI / 2));
+        }
+
+        tom[v] = Math.round(Math.max(0, Math.min(1, x)) * 255);
+    }
+
+    for (let i = 0; i < d.length; i += 4) {
+        let r = tom[d[i]], g = tom[d[i + 1]], b = tom[d[i + 2]];
+
+        // Neutraliza o tom do papel: mede o quanto o pixel tem de cor
+        // (distância entre o canal mais forte e o mais fraco). Quanto menos
+        // cor tem, mais forte a gente puxa pro cinza puro — em pixel
+        // colorido de verdade (>34 de diferença) não mexe nada.
+        const maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        const minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        const cor = maxC - minC;
+        if (cor > 0 && cor < 34) {
+            const forca = (1 - cor / 34) * 0.85;
+            const cinza = (r * 0.299 + g * 0.587 + b * 0.114);
+            r += (cinza - r) * forca;
+            g += (cinza - g) * forca;
+            b += (cinza - b) * forca;
+        }
+
+        d[i] = r; d[i + 1] = g; d[i + 2] = b;
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
+// 🔊 REDUÇÃO DE RUÍDO DE COR: foto de celular em luz fraca vem com "confete"
+// colorido (ruído de croma) no papel branco, e o passo que divide pelo fundo
+// pra clarear AMPLIFICA esse confete. Aqui a gente separa brilho (Y) de cor
+// (Cb/Cr), borra SÓ a cor e remonta — o ruído colorido desaparece e a
+// nitidez do texto (que vive no brilho) fica 100% intacta. É por isso que o
+// resultado do CamScanner parece "limpo" mesmo em foto ruim.
+// =========================================================================
+function suavizarRuidoDeCorCanvas(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    const n = w * h;
+    const Y = new Float32Array(n), Cb = new Float32Array(n), Cr = new Float32Array(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const y = 0.299 * r + 0.587 * g + 0.114 * b;
+        Y[p] = y; Cb[p] = b - y; Cr[p] = r - y;
+    }
+
+    // Borrão de caixa separável (horizontal + vertical), raio 2 — barato e
+    // suficiente pra matar o confete sem "vazar" cor de um carimbo pro papel.
+    const RAIO = 2;
+    function borrar(canal) {
+        const tmp = new Float32Array(n);
+        for (let y = 0; y < h; y++) {
+            const base = y * w;
+            for (let x = 0; x < w; x++) {
+                let soma = 0, qtd = 0;
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const xx = x + k;
+                    if (xx < 0 || xx >= w) continue;
+                    soma += canal[base + xx]; qtd++;
+                }
+                tmp[base + x] = soma / qtd;
             }
-            saida[i + 3] = src[i + 3];
+        }
+        for (let x = 0; x < w; x++) {
+            for (let y = 0; y < h; y++) {
+                let soma = 0, qtd = 0;
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const yy = y + k;
+                    if (yy < 0 || yy >= h) continue;
+                    soma += tmp[yy * w + x]; qtd++;
+                }
+                canal[y * w + x] = soma / qtd;
+            }
         }
     }
-    origem.data.set(saida);
-    ctx.putImageData(origem, 0, 0);
+    borrar(Cb); borrar(Cr);
+
+    // Ruído de BRILHO (o granulado cinza): não dá pra simplesmente borrar, senão
+    // some a letra junto. Usa-se um filtro "sigma" (parente do bilateral): a
+    // média é feita SÓ com os vizinhos cujo brilho é parecido com o do pixel do
+    // meio — dentro do papel todos os vizinhos entram e o granulado some; na
+    // borda de uma letra, os vizinhos do outro lado ficam de fora e a borda
+    // continua afiadíssima. Isso aqui é feito ANTES de clarear a sombra de
+    // propósito: clarear uma área escura multiplica o granulado junto, então
+    // limpar depois já seria tarde (é o que deixava o canto que estava na
+    // sombra com cara de foto mesmo depois de tratado).
+    const TOLERANCIA = 11; // diferença de brilho até onde ainda é "o mesmo material"
+    const Ylimpo = new Float32Array(n);
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            const p = y * w + x;
+            const centro = Y[p];
+            let soma = 0, qtd = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                const yy = y + dy;
+                if (yy < 0 || yy >= h) continue;
+                for (let dx = -1; dx <= 1; dx++) {
+                    const xx = x + dx;
+                    if (xx < 0 || xx >= w) continue;
+                    const v = Y[yy * w + xx];
+                    if (v > centro + TOLERANCIA || v < centro - TOLERANCIA) continue;
+                    soma += v; qtd++;
+                }
+            }
+            Ylimpo[p] = qtd > 0 ? soma / qtd : centro;
+        }
+    }
+    Y.set(Ylimpo);
+
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        const y = Y[p], cb = Cb[p], cr = Cr[p];
+        d[i]     = y + cr;
+        d[i + 2] = y + cb;
+        // g sai da definição do Y: y = .299r + .587g + .114b
+        d[i + 1] = (y - 0.299 * (y + cr) - 0.114 * (y + cb)) / 0.587;
+    }
+    ctx.putImageData(imgData, 0, 0);
 }
+
+// =========================================================================
+// ✒️ NITIDEZ (unsharp mask de verdade): a versão antiga usava os 4 vizinhos
+// imediatos, o que é um realce de raio 1 — realça o ruído junto com a letra e
+// cria aquele serrilhado/halo duro. Aqui o realce vem de um borrão gaussiano
+// (aproximado por 2 passadas de caixa, raio proporcional ao tamanho da
+// imagem), aplicado SÓ no brilho (o mesmo delta nos 3 canais), então não
+// aparece franja colorida na borda das letras. E tem um LIMIAR: diferença
+// pequena (papel liso, ruído) é ignorada, só borda de verdade é realçada —
+// é o que deixa a letra recortada e o fundo limpo ao mesmo tempo.
+// =========================================================================
+function realcarNitidezCanvas(ctx, w, h) {
+    const n = w * h;
+    if (n > 16000000) return; // imagem absurda: não compensa o custo
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+
+    const lum = new Float32Array(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+
+    // Raio acompanha a resolução: em imagem grande a letra é maior, então o
+    // realce precisa de um raio maior pra "pegar" a borda inteira da letra.
+    const RAIO = Math.max(1, Math.round(Math.max(w, h) / 900));
+    const borrado = new Float32Array(n);
+    const tmp = new Float32Array(n);
+
+    function passadaCaixa(entrada, saida) {
+        const meio = new Float32Array(n);
+        for (let y = 0; y < h; y++) {
+            const base = y * w;
+            let soma = 0, qtd = 0;
+            for (let x = 0; x <= RAIO && x < w; x++) { soma += entrada[base + x]; qtd++; }
+            for (let x = 0; x < w; x++) {
+                meio[base + x] = soma / qtd;
+                const sai = x - RAIO, entra = x + RAIO + 1;
+                if (sai >= 0) { soma -= entrada[base + sai]; qtd--; }
+                if (entra < w) { soma += entrada[base + entra]; qtd++; }
+            }
+        }
+        for (let x = 0; x < w; x++) {
+            let soma = 0, qtd = 0;
+            for (let y = 0; y <= RAIO && y < h; y++) { soma += meio[y * w + x]; qtd++; }
+            for (let y = 0; y < h; y++) {
+                saida[y * w + x] = soma / qtd;
+                const sai = y - RAIO, entra = y + RAIO + 1;
+                if (sai >= 0) { soma -= meio[sai * w + x]; qtd--; }
+                if (entra < h) { soma += meio[entra * w + x]; qtd++; }
+            }
+        }
+    }
+    // Duas passadas de caixa ≈ gaussiana (bem mais suave que uma só, o que
+    // evita halo quadrado em volta do texto).
+    passadaCaixa(lum, tmp);
+    passadaCaixa(tmp, borrado);
+
+    const FORCA = 0.95;   // força do realce
+    const LIMIAR = 3.5;   // abaixo disso é considerado ruído/papel e não é realçado
+    const TETO = 64;      // trava o realce máximo pra não criar halo branco/preto forte
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        let delta = lum[p] - borrado[p];
+        if (delta > -LIMIAR && delta < LIMIAR) continue;
+        delta -= delta > 0 ? LIMIAR : -LIMIAR; // tira o limiar pra transição não ter degrau
+        delta *= FORCA;
+        if (delta > TETO) delta = TETO; else if (delta < -TETO) delta = -TETO;
+        d[i] += delta; d[i + 1] += delta; d[i + 2] += delta;
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
+// 🧽 LIMPEZA DO FUNDO: mesmo depois de tudo, a região da foto que estava na
+// sombra volta granulada — porque clarear uma área escura multiplica o ruído
+// junto. O olho lê esse granulado como "foto de papel", não como "documento
+// escaneado", e é exatamente o que diferencia o nosso resultado do de um
+// scanner comercial.
+//
+// A limpeza é seletiva, não um borrão: pra cada pixel a gente olha o contraste
+// LOCAL (diferença entre o mais claro e o mais escuro numa janelinha em volta).
+// Onde tem texto, esse contraste é alto — não encosta. Onde é papel liso, o
+// contraste local é baixo (só o granulado) e o pixel já é claro: aí sim
+// empurra pro branco puro. Resultado: papel impecável e letra intacta,
+// inclusive a letra fina, porque letra fina SEMPRE gera contraste local alto.
+// Pixel colorido de verdade (carimbo, caneta) é preservado pela checagem de cor.
+// =========================================================================
+function limparFundoCanvas(ctx, w, h) {
+    const n = w * h;
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+
+    const lum = new Uint8ClampedArray(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+
+    // Mínimo e máximo locais (erosão/dilatação separáveis, raio pequeno).
+    const RAIO = Math.max(2, Math.round(Math.max(w, h) / 700));
+    function extremoLocal(entrada, ehMaximo) {
+        const melhor = (a, b) => ehMaximo ? (a > b ? a : b) : (a < b ? a : b);
+        const tmp = new Uint8ClampedArray(n);
+        for (let y = 0; y < h; y++) {
+            const base = y * w;
+            for (let x = 0; x < w; x++) {
+                let m = entrada[base + x];
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const xx = x + k;
+                    if (xx < 0 || xx >= w) continue;
+                    m = melhor(m, entrada[base + xx]);
+                }
+                tmp[base + x] = m;
+            }
+        }
+        const out = new Uint8ClampedArray(n);
+        for (let x = 0; x < w; x++) {
+            for (let y = 0; y < h; y++) {
+                let m = tmp[y * w + x];
+                for (let k = -RAIO; k <= RAIO; k++) {
+                    const yy = y + k;
+                    if (yy < 0 || yy >= h) continue;
+                    m = melhor(m, tmp[yy * w + x]);
+                }
+                out[y * w + x] = m;
+            }
+        }
+        return out;
+    }
+    const localMax = extremoLocal(lum, true);
+    const localMin = extremoLocal(lum, false);
+
+    const CONTRASTE_TEXTO = 48; // acima disso considera que tem conteúdo por perto
+    const LUM_MINIMA = 176;     // abaixo disso é conteúdo, não papel — nem encosta
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        if (lum[p] < LUM_MINIMA) continue;
+        const contrasteLocal = localMax[p] - localMin[p];
+        if (contrasteLocal >= CONTRASTE_TEXTO) continue; // tem texto na vizinhança
+
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const cor = Math.max(r, g, b) - Math.min(r, g, b);
+        if (cor > 26) continue; // pixel colorido de verdade: preserva
+
+        // Quanto mais liso e mais claro, mais forte o empurrão pro branco —
+        // a transição suave evita "remendo" visível na borda de uma área limpa.
+        const fatorLiso = 1 - contrasteLocal / CONTRASTE_TEXTO;
+        const fatorClaro = Math.min(1, (lum[p] - LUM_MINIMA) / (236 - LUM_MINIMA));
+        const forca = fatorLiso * fatorClaro;
+        d[i] = r + (255 - r) * forca;
+        d[i + 1] = g + (255 - g) * forca;
+        d[i + 2] = b + (255 - b) * forca;
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
+// 🖨️ MODO SCANNER (a receita completa, na ordem que importa). A ordem não é
+// arbitrária — cada passo depende do anterior:
+//   1. Ruído de cor primeiro: o passo 2 divide a imagem pelo fundo estimado e
+//      AMPLIFICA qualquer confete colorido, então tem que limpar antes.
+//   2. Achatar iluminação: tira sombra de canto / luz de um lado só. Precisa
+//      vir antes dos níveis, porque o auto-níveis olha a foto inteira e não
+//      consegue deixar dois cantos com luz diferente brancos ao mesmo tempo.
+//   3. Auto-níveis: estica o histograma de cada canal — fundo vira quase
+//      branco, tinta vira quase preta, e o tom do papel é neutralizado.
+//   4. Acabamento de cor: gruda o branco no 255, aprofunda o preto, curva S e
+//      neutraliza o amarelado do papel. É o passo que dá a cara de
+//      "digitalizado", e só funciona bem DEPOIS do auto-níveis (precisa que o
+//      fundo já esteja perto do branco pra decidir o que vira branco puro).
+//   5. Nitidez por último: realçar antes de qualquer ajuste de tom faria os
+//      passos seguintes esticarem o halo do realce junto.
+// =========================================================================
+// É async e devolve o controle pro navegador entre uma etapa e outra: são 6
+// passadas por cima de vários milhões de pixels, e sem esse respiro a tela
+// congelaria durante o processamento (pior ainda com várias fotos na fila).
+window.__aplicarModoScanner = async function(ctx, w, h) {
+    const respirar = () => new Promise(r => setTimeout(r, 0));
+    try { suavizarRuidoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao suavizar ruído de cor, seguindo sem:', e); }
+    await respirar();
+    achatarIluminacaoCanvas(ctx, w, h);
+    await respirar();
+    autoNivelarCanvas(ctx, w, h);
+    await respirar();
+    try { acabamentoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha no acabamento de cor, seguindo sem:', e); }
+    await respirar();
+    try { limparFundoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao limpar o fundo, seguindo sem:', e); }
+    await respirar();
+    try { realcarNitidezCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+};
 
 // =========================================================================
 // 🧭 ENDIREITAR (DESKEW): se a foto foi tirada torta/meio deitada, detecta o
@@ -46319,6 +46646,72 @@ function cantosDoRectRotacionado(rect) {
     }));
 }
 
+// =========================================================================
+// 📐 PROPORÇÃO REAL DO DOCUMENTO: quando a foto é tirada de ladinho/de cima
+// (o normal — ninguém fotografa exatamente perpendicular), o documento na
+// foto não é um retângulo, é um trapézio. Só "desentortar" o trapézio pro
+// tamanho médio dos lados (o que fazíamos antes) devolve uma folha ESTICADA
+// ou ACHATADA: um A4 sai parecendo ofício ou quadrado. Dá pra recuperar a
+// proporção verdadeira do papel a partir só dos 4 cantos, estimando a
+// distância focal da câmera junto (método clássico de retificação de
+// quadro-branco do Zhang & He, usado por scanners profissionais) — é uma das
+// coisas que fazem o resultado "parecer um scanner de verdade" e não um
+// desentorta-foto. Devolve largura/altura real, ou null quando a conta não
+// fecha (foto quase perpendicular, onde a proporção medida já está certa).
+// =========================================================================
+function proporcaoRealDoDocumento(cantos, larguraFoto, alturaFoto) {
+    // Coordenadas com origem no centro da foto (ponto principal da câmera).
+    const cx = larguraFoto / 2, cy = alturaFoto / 2;
+    // Ordem exigida pelo método: p1=sup.esq, p2=sup.dir, p3=inf.esq, p4=inf.dir
+    const p1 = [cantos.tl.x - cx, cantos.tl.y - cy, 1];
+    const p2 = [cantos.tr.x - cx, cantos.tr.y - cy, 1];
+    const p3 = [cantos.bl.x - cx, cantos.bl.y - cy, 1];
+    const p4 = [cantos.br.x - cx, cantos.br.y - cy, 1];
+
+    const cruz = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const ponto = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+    const c14 = cruz(p1, p4);
+    const den2 = ponto(cruz(p2, p4), p3);
+    const den3 = ponto(cruz(p3, p4), p2);
+    if (Math.abs(den2) < 1e-9 || Math.abs(den3) < 1e-9) return null;
+    const k2 = ponto(c14, p3) / den2;
+    const k3 = ponto(c14, p2) / den3;
+
+    // k2≈1 e k3≈1 => foto praticamente perpendicular, não há o que corrigir.
+    if (Math.abs(k2 - 1) < 1e-4 && Math.abs(k3 - 1) < 1e-4) return null;
+
+    const n2 = [k2 * p2[0] - p1[0], k2 * p2[1] - p1[1], k2 * p2[2] - p1[2]];
+    const n3 = [k3 * p3[0] - p1[0], k3 * p3[1] - p1[1], k3 * p3[2] - p1[2]];
+
+    // Distância focal² deduzida da condição de ortogonalidade dos dois lados.
+    let f2 = null;
+    if (Math.abs(n2[2]) > 1e-9 && Math.abs(n3[2]) > 1e-9) {
+        const candidato = -(n2[0] * n3[0] + n2[1] * n3[1]) / (n2[2] * n3[2]);
+        if (isFinite(candidato) && candidato > 0) f2 = candidato;
+    }
+    if (f2 === null) {
+        // Caso MUITO comum: foto inclinada só num eixo (a pessoa se debruça sobre
+        // o papel e fotografa de cima, sem torcer pro lado). Aí um par de lados
+        // continua paralelo na foto, não existe ponto de fuga nesse eixo e é
+        // matematicamente impossível deduzir a focal — mas ainda dá pra corrigir
+        // a proporção CHUTANDO uma focal típica de câmera de celular
+        // (≈0,62 × a diagonal da foto, que é a faixa de praticamente todo
+        // celular). A correção fica aproximada em vez de exata, mas erra bem
+        // menos que não corrigir nada: nesse caso um A4 fotografado inclinado
+        // vem ~18% achatado, e o chute derruba isso pra uns 2-3%.
+        const focalChute = 0.62 * Math.hypot(larguraFoto, alturaFoto);
+        f2 = focalChute * focalChute;
+    }
+
+    const num = (n2[0] * n2[0] + n2[1] * n2[1]) / f2 + n2[2] * n2[2];
+    const den = (n3[0] * n3[0] + n3[1] * n3[1]) / f2 + n3[2] * n3[2];
+    if (den <= 0 || num <= 0) return null;
+    const proporcao = Math.sqrt(num / den); // largura / altura reais do papel
+    if (!isFinite(proporcao) || proporcao <= 0.05 || proporcao > 20) return null;
+    return proporcao;
+}
+
 // Corta a imagem original em perspectiva usando 4 cantos (tl/tr/br/bl),
 // encolhendo um pouquinho pra dentro (margemPct) pra não sobrar uma tira
 // de fundo na borda — devolve o canvas final ou null se ficar pequeno demais.
@@ -46340,15 +46733,43 @@ function recortarPorCantos(src, cantos, margemPct) {
     const larguraBase = Math.hypot(br.x - bl.x, br.y - bl.y);
     const alturaEsq = Math.hypot(bl.x - tl.x, bl.y - tl.y);
     const alturaDir = Math.hypot(br.x - tr.x, br.y - tr.y);
-    const larguraFinal = Math.round(Math.max(larguraTopo, larguraBase));
-    const alturaFinal = Math.round(Math.max(alturaEsq, alturaDir));
+    let larguraFinal = Math.round(Math.max(larguraTopo, larguraBase));
+    let alturaFinal = Math.round(Math.max(alturaEsq, alturaDir));
+    if (larguraFinal <= 10 || alturaFinal <= 10) return null;
+
+    // Corrige o esticamento da perspectiva: em vez de usar a proporção MEDIDA
+    // na foto (que vem distorcida quando a foto é tirada em ângulo), usa a
+    // proporção REAL do papel calculada a partir dos 4 cantos. Só aceita se a
+    // correção for plausível (até ~1,8x de diferença) — se a conta der algo
+    // muito diferente do medido, provavelmente os cantos estão imprecisos e é
+    // mais seguro manter o comportamento antigo.
+    try {
+        const proporcaoReal = proporcaoRealDoDocumento({ tl, tr, br, bl }, src.cols, src.rows);
+        if (proporcaoReal) {
+            const proporcaoMedida = larguraFinal / alturaFinal;
+            const fator = proporcaoReal / proporcaoMedida;
+            if (fator > 1 / 1.8 && fator < 1.8) {
+                // Mantém a diagonal/área parecida, ajustando só a forma — assim
+                // não se perde resolução ao corrigir.
+                const diagonal = Math.hypot(larguraFinal, alturaFinal);
+                const novaAltura = diagonal / Math.hypot(proporcaoReal, 1);
+                const novaLargura = novaAltura * proporcaoReal;
+                larguraFinal = Math.round(novaLargura);
+                alturaFinal = Math.round(novaAltura);
+            }
+        }
+    } catch (e) { console.warn('Não consegui corrigir a proporção da perspectiva, usando a medida:', e); }
     if (larguraFinal <= 10 || alturaFinal <= 10) return null;
 
     const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
     const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, larguraFinal, 0, larguraFinal, alturaFinal, 0, alturaFinal]);
     const M = cv.getPerspectiveTransform(srcTri, dstTri);
     const dst = new cv.Mat();
-    cv.warpPerspective(src, dst, M, new cv.Size(larguraFinal, alturaFinal));
+    // INTER_CUBIC + borda branca: interpolação cúbica preserva a borda da letra
+    // bem melhor que a bilinear padrão (letra pequena não sai "derretida"), e se
+    // sobrar um fiapo fora da foto ele vem branco em vez de preto.
+    cv.warpPerspective(src, dst, M, new cv.Size(larguraFinal, alturaFinal),
+        cv.INTER_CUBIC, cv.BORDER_REPLICATE, new cv.Scalar(255, 255, 255, 255));
 
     const canvasSaida = document.createElement('canvas');
     canvasSaida.width = larguraFinal; canvasSaida.height = alturaFinal;
@@ -46523,15 +46944,25 @@ function refinarQuadLocalmente(src, cantosGrosso) {
 // mercado em cima de teclado). Devolve null só se as duas falharem — quem
 // chamar deve cair pro endireitarCanvas simples nesse caso, sem quebrar o
 // fluxo.
-function detectarEcortarDocumento(canvasEntrada) {
-    const src = cv.imread(canvasEntrada);
+// canvasDeteccao: versão pequena da foto, onde a detecção roda (mais rápido e,
+//   principalmente, mais CERTEIRO: ao reduzir, a textura da mesa/madeira/tecido
+//   do fundo desaparece e sobra só a borda grande do papel, então o Canny não
+//   se perde em mil bordinhas de textura).
+// canvasCorte: a foto na resolução CHEIA, de onde o recorte é realmente
+//   extraído — os cantos achados no pequeno são multiplicados pela escala. É
+//   isso que faz o documento final sair com a nitidez máxima que a foto
+//   permite, em vez de já vir de uma cópia reduzida.
+function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
+    const pequeno = cv.imread(canvasDeteccao);
+    const src = (canvasCorte && canvasCorte !== canvasDeteccao) ? cv.imread(canvasCorte) : pequeno;
+    const escala = src.cols / pequeno.cols;
     let resultado = null;
     try {
-        const areaImagem = src.rows * src.cols;
+        const areaImagem = pequeno.rows * pequeno.cols;
 
         let achadoBorda = null, achadoBrilho = null;
-        try { achadoBorda = acharQuad4PontosPorBorda(src, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
-        try { achadoBrilho = acharQuadPorLimiarBrilho(src, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
+        try { achadoBorda = acharQuad4PontosPorBorda(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
+        try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
         // A estratégia de borda (Canny + 4 pontos) exige um contorno reto
         // bem definido pra funcionar, então quando ela acha algo é porque o
@@ -46547,18 +46978,40 @@ function detectarEcortarDocumento(canvasEntrada) {
         if (escolhido === achadoBrilho) {
             // Refina de perto pra tirar o excesso de fundo que a detecção
             // "grossa" costuma deixar sobrando.
-            const refinado = refinarQuadLocalmente(src, escolhido.cantos);
+            const refinado = refinarQuadLocalmente(pequeno, escolhido.cantos);
             if (refinado && refinado.area > areaImagem * 0.05) {
                 escolhido = refinado;
             }
             margem = 0.012; // minAreaRect costuma sobrar uma bordinha
+        } else if (escolhido === achadoBorda) {
+            // Mesmo com cantos bem detectados sobra quase sempre um fio da
+            // sombra/borda da mesa colado na margem, e esse fio escuro estraga
+            // o "achatar iluminação" depois (vira uma faixa cinza na lateral).
+            // Uma raspadinha de 0,4% resolve sem comer conteúdo.
+            margem = 0.004;
         }
 
         if (escolhido) {
-            resultado = recortarPorCantos(src, escolhido.cantos, margem);
+            // Leva os cantos achados na versão pequena pra resolução cheia.
+            const ampliar = (p) => ({ x: p.x * escala, y: p.y * escala });
+            const cantosGrandes = {
+                tl: ampliar(escolhido.cantos.tl), tr: ampliar(escolhido.cantos.tr),
+                br: ampliar(escolhido.cantos.br), bl: ampliar(escolhido.cantos.bl)
+            };
+            resultado = recortarPorCantos(src, cantosGrandes, margem);
+            // Os cantos devolvidos pro "ajustar corte manual" precisam estar na
+            // escala da foto de referência guardada (a pequena), não na cheia.
+            if (resultado && resultado.pontos) {
+                const reduzir = (p) => ({ x: p.x / escala, y: p.y / escala });
+                resultado.pontos = {
+                    tl: reduzir(resultado.pontos.tl), tr: reduzir(resultado.pontos.tr),
+                    br: reduzir(resultado.pontos.br), bl: reduzir(resultado.pontos.bl)
+                };
+            }
         }
     } finally {
-        src.delete();
+        if (src !== pequeno) src.delete();
+        pequeno.delete();
     }
     return resultado;
 }
@@ -46579,6 +47032,28 @@ window.processarImagemDigitalizada = function(file) {
                     // só fica com o pedaço do documento, que é menor que a foto inteira —
                     // se limitasse demais aqui, o resultado final saía com menos nitidez
                     // do que a foto original permitiria, tipo comparado ao CamScanner).
+                    // (a) Foto na resolução CHEIA (só com um teto de memória): é DELA que
+                    // o recorte é extraído. Antes o recorte saía de uma cópia já reduzida
+                    // a 2200px, ou seja, a gente jogava resolução fora ANTES de cortar —
+                    // e como o documento é só um pedaço da foto, o resultado final
+                    // chegava nos 2000px já tendo sido ampliado/interpolado, o que
+                    // aparecia exatamente como "falta um pouco de nitidez".
+                    const MAX_DIM_CHEIA = 3600;
+                    let wCheia = img.naturalWidth, hCheia = img.naturalHeight;
+                    if (wCheia > MAX_DIM_CHEIA || hCheia > MAX_DIM_CHEIA) {
+                        const escalaCheia = MAX_DIM_CHEIA / Math.max(wCheia, hCheia);
+                        wCheia = Math.round(wCheia * escalaCheia);
+                        hCheia = Math.round(hCheia * escalaCheia);
+                    }
+                    const canvasCheio = document.createElement('canvas');
+                    canvasCheio.width = wCheia; canvasCheio.height = hCheia;
+                    const ctxCheio = canvasCheio.getContext('2d');
+                    ctxCheio.imageSmoothingEnabled = true;
+                    ctxCheio.imageSmoothingQuality = 'high';
+                    ctxCheio.drawImage(img, 0, 0, wCheia, hCheia);
+
+                    // (b) Foto de referência (2200px): base da tela de "ajustar corte
+                    // manual" e o que guardamos como dataUrlOriginal.
                     const MAX_DIM_TRABALHO = 2200;
                     if (w > MAX_DIM_TRABALHO || h > MAX_DIM_TRABALHO) {
                         const escala = MAX_DIM_TRABALHO / Math.max(w, h);
@@ -46588,12 +47063,34 @@ window.processarImagemDigitalizada = function(file) {
                     let canvas = document.createElement('canvas');
                     canvas.width = w; canvas.height = h;
                     let ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0, w, h);
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'high';
+                    ctx.drawImage(canvasCheio, 0, 0, w, h);
 
                     // Guarda a foto original (só redimensionada, sem cortar/realçar) — é
                     // o que a tela de "ajustar corte manual" usa como base, caso o RH
                     // precise corrigir um recorte automático que não ficou perfeito.
-                    const dataUrlOriginal = canvas.toDataURL('image/jpeg', 0.85);
+                    // Qualidade alta de propósito: um corte manual refeito em cima de um
+                    // JPEG já chapado sairia pior que o automático.
+                    const dataUrlOriginal = canvas.toDataURL('image/jpeg', 0.92);
+                    const wRef = w; // largura da foto de referência (base do corte manual)
+
+                    // (c) Foto de DETECÇÃO (pequena, ~1100px): achar as bordas numa versão
+                    // reduzida é mais rápido E mais certeiro — ao reduzir, a textura do
+                    // fundo (madeira da mesa, tecido, granito) desaparece e sobra só a
+                    // borda grande do papel, então o detector não se perde.
+                    const MAX_DIM_DETECCAO = 1100;
+                    let canvasDeteccao = canvasCheio;
+                    if (Math.max(wCheia, hCheia) > MAX_DIM_DETECCAO) {
+                        const escalaDet = MAX_DIM_DETECCAO / Math.max(wCheia, hCheia);
+                        const wd = Math.round(wCheia * escalaDet), hd = Math.round(hCheia * escalaDet);
+                        canvasDeteccao = document.createElement('canvas');
+                        canvasDeteccao.width = wd; canvasDeteccao.height = hd;
+                        const ctxDet = canvasDeteccao.getContext('2d');
+                        ctxDet.imageSmoothingEnabled = true;
+                        ctxDet.imageSmoothingQuality = 'high';
+                        ctxDet.drawImage(canvasCheio, 0, 0, wd, hd);
+                    }
 
                     // 1) Tenta achar e cortar as bordas do documento (recorte automático).
                     // Se não conseguir (fundo parecido com o papel, foto maluca, biblioteca
@@ -46603,32 +47100,53 @@ window.processarImagemDigitalizada = function(file) {
                     try {
                         const cvOk = await garantirOpenCVCarregado();
                         if (cvOk && window.cv && window.cv.Mat) {
-                            const resultado = detectarEcortarDocumento(canvas);
+                            const resultado = detectarEcortarDocumento(canvasDeteccao, canvasCheio);
                             if (resultado) {
                                 canvas = resultado.canvas;
                                 ctx = canvas.getContext('2d');
                                 w = canvas.width; h = canvas.height;
                                 cortado = true;
-                                cantosAuto = resultado.pontos;
+                                // Os cantos voltam na escala da foto de DETECÇÃO; a tela de
+                                // corte manual trabalha na escala da foto de REFERÊNCIA
+                                // (dataUrlOriginal), então converte aqui — senão os cantos
+                                // apareceriam todos amontoados no canto da imagem.
+                                const kRef = wRef / canvasDeteccao.width;
+                                const paraRef = (p) => ({ x: p.x * kRef, y: p.y * kRef });
+                                cantosAuto = {
+                                    tl: paraRef(resultado.pontos.tl), tr: paraRef(resultado.pontos.tr),
+                                    br: paraRef(resultado.pontos.br), bl: paraRef(resultado.pontos.bl)
+                                };
                             }
                         }
                     } catch (eCv) {
                         console.warn('Falha ao tentar recortar o documento automaticamente, seguindo sem cortar:', eCv);
                     }
 
+                    // Libera a foto em resolução cheia assim que o recorte terminou —
+                    // ela é a maior estrutura da memória (dezenas de MB) e daqui pra
+                    // frente ninguém mais usa. Sem isso, várias fotos na fila derrubariam
+                    // a aba no celular.
+                    try {
+                        if (canvasCheio !== canvas) { canvasCheio.width = 1; canvasCheio.height = 1; }
+                        if (canvasDeteccao !== canvas && canvasDeteccao !== canvasCheio) { canvasDeteccao.width = 1; canvasDeteccao.height = 1; }
+                    } catch (e) { /* liberar memória é oportunista, nunca crítico */ }
+
                     if (!cortado) {
                         const endireitado = endireitarCanvas(canvas, ctx, w, h);
                         canvas = endireitado.canvas; ctx = endireitado.ctx; w = endireitado.w; h = endireitado.h;
                     }
 
-                    // Só agora, DEPOIS de já ter cortado o documento, limita o tamanho
-                    // final — assim a resolução de verdade fica toda dedicada ao
-                    // documento em si, não desperdiçada com o fundo da foto que já foi
-                    // cortado fora.
-                    const MAX_DIM_FINAL = 2000;
-                    if (w > MAX_DIM_FINAL || h > MAX_DIM_FINAL) {
-                        const escala = MAX_DIM_FINAL / Math.max(w, h);
-                        const wf = Math.round(w * escala), hf = Math.round(h * escala);
+                    // Reduz pro tamanho final ANTES de tratar o tom — assim o ruído de
+                    // fotografia já foi diluído pela redução e o realce de nitidez trabalha
+                    // sobre pixel limpo (realçar antes de reduzir é desperdício: a redução
+                    // come o realce e mantém o ruído). A redução é feita em etapas de no
+                    // máximo 2x por vez, que é o que o navegador filtra bem — reduzir 3x
+                    // de uma vez "pula" pixel e come pedaço de letra fina.
+                    const MAX_DIM_FINAL = 2200;
+                    while (Math.max(w, h) > MAX_DIM_FINAL) {
+                        const alvo = Math.max(MAX_DIM_FINAL, Math.round(Math.max(w, h) / 2));
+                        const escala = alvo / Math.max(w, h);
+                        const wf = Math.max(1, Math.round(w * escala)), hf = Math.max(1, Math.round(h * escala));
                         const canvasMenor = document.createElement('canvas');
                         canvasMenor.width = wf; canvasMenor.height = hf;
                         const ctxMenor = canvasMenor.getContext('2d');
@@ -46638,17 +47156,14 @@ window.processarImagemDigitalizada = function(file) {
                         canvas = canvasMenor; ctx = ctxMenor; w = wf; h = hf;
                     }
 
-                    // 2) "Modo scanner": achata a iluminação desigual (sombra de canto etc.),
-                    // depois estica os níveis e realça a nitidez — nessa ordem porque o
-                    // auto-níveis sozinho não dá conta de sombra que varia de um canto pra
-                    // outro da mesma foto.
-                    achatarIluminacaoCanvas(ctx, w, h);
-                    autoNivelarCanvas(ctx, w, h);
-                    try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
+                    // 2) "Modo scanner" completo.
+                    await window.__aplicarModoScanner(ctx, w, h);
 
-                    // Comprime em JPEG (qualidade um pouco mais alta que antes — agora que
-                    // o documento ocupa a imagem inteira, vale a pena manter mais detalhe)
-                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.82), dataUrlOriginal, cantosAuto });
+                    // JPEG com qualidade mais alta: depois do tratamento a imagem é quase
+                    // toda branco chapado (comprime muito bem), então dá pra subir a
+                    // qualidade sem inflar o arquivo — e é justo na borda das letras que o
+                    // JPEG baixo criava aquele chuvisco quadriculado que "suja" o texto.
+                    resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.9), dataUrlOriginal, cantosAuto });
                 } catch (e) { reject(e); }
             };
             img.src = leitor.result;
@@ -46675,6 +47190,12 @@ window.adicionarFotosDigitalizar = function(fileList) {
         };
         window.__paginasDigitalizar.push(item);
 
+        // Processa UMA foto de cada vez (fila), em vez de disparar todas juntas.
+        // O tratamento agora trabalha na resolução cheia e são vários passos
+        // pesados por foto — 5 fotos ao mesmo tempo estouravam a memória da aba
+        // no celular. Enfileirado, cada uma termina rapidinho e a miniatura vai
+        // aparecendo uma por uma, que inclusive dá uma sensação melhor de progresso.
+        window.__filaDigitalizar = (window.__filaDigitalizar || Promise.resolve()).then(() =>
         window.processarImagemDigitalizada(file).then(res => {
             item.dataUrl = res.dataUrl;
             item.dataUrlOriginal = res.dataUrlOriginal;
@@ -46686,7 +47207,7 @@ window.adicionarFotosDigitalizar = function(fileList) {
             item.processando = false;
             item.erro = e.message || 'Erro ao processar';
             window.renderizarListaDigitalizar();
-        });
+        }));
     });
 
     document.getElementById('input-fotos-digitalizar').value = '';
@@ -46991,11 +47512,9 @@ window.__aplicarAjusteCorte = async function(item, img, cantos) {
 
     const ctx = canvasFinal.getContext('2d');
     const w = canvasFinal.width, h = canvasFinal.height;
-    achatarIluminacaoCanvas(ctx, w, h);
-    autoNivelarCanvas(ctx, w, h);
-    try { realcarNitidezCanvas(ctx, w, h); } catch (eNit) { console.warn('Falha ao realçar nitidez, seguindo sem:', eNit); }
+    await window.__aplicarModoScanner(ctx, w, h);
 
-    const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.82);
+    const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.9);
     item.dataUrl = dataUrl;
     item.tamanhoFinal = window.tamanhoDataUrlEmBytes(dataUrl);
     item.cantosAuto = cantos; // lembra o ajuste, caso reabra a tela de corte
