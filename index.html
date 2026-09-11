@@ -46259,8 +46259,16 @@ function acabamentoDeCorCanvas(ctx, w, h) {
 // inclusive a foto da pessoa (é o que causava a pele com manchas
 // roxas/azuladas reportada pelo RH). Aqui a gente mede, por amostragem (não
 // precisa olhar pixel por pixel — uma amostra já representa bem), que fração
-// da foto tem cor de verdade (não é papel/sombra/tinta neutra) — acima de 12%
-// já é sinal forte de documento colorido, não papel.
+// da foto tem cor de verdade (não é papel/sombra/tinta neutra).
+// 🐛 CORREÇÃO GRAVE (09/2026): limiar de 40 + 12% dava falso positivo em
+// papel branco comum fotografado sob luz um pouco amarelada/azulada — essa
+// diferença de canal por causa da temperatura de cor da luz (não é "cor de
+// verdade") passava fácil de 40 na foto INTEIRA, classificando papel branco
+// como "documento colorido" e pulando o clareamento (o RH reportou documento
+// saindo acinzentado/azulado, sem virar branco). Subido bastante o limiar por
+// pixel (65 — cor de luz raramente passa disso, mas o verde estampado de um
+// RG passa fácil) e a fração exigida (25% — um leve tom geral não chega
+// perto disso, mas fundo colorido de verdade ocupa bem mais que isso da foto).
 // =========================================================================
 function medirFracaoColoridaCanvas(ctx, w, h) {
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -46270,7 +46278,7 @@ function medirFracaoColoridaCanvas(ctx, w, h) {
     for (let i = 0; i < d.length; i += PASSO) {
         const r = d[i], g = d[i + 1], b = d[i + 2];
         const cor = Math.max(r, g, b) - Math.min(r, g, b);
-        if (cor > 40) coloridos++;
+        if (cor > 65) coloridos++;
         total++;
     }
     return total > 0 ? coloridos / total : 0;
@@ -46607,14 +46615,28 @@ function limparBordaResidualCanvas(ctx, w, h) {
     const LIMIAR_FRACO = Math.max(35, Math.round(mediana * 0.80));
     const LIMIAR_FORTE = Math.max(28, Math.round(mediana * 0.55));
 
+    // 🐛 CORREÇÃO GRAVE (09/2026): o limiar frouxo (pra pegar sombra em
+    // degradê) tinha um efeito colateral perigoso — essa função roda ANTES do
+    // achatamento de iluminação, na foto ainda crua, e foto crua quase sempre
+    // tem uma variação de luz suave (natural) de um lado pra outro. Se essa
+    // variação for grande o bastante, o alagamento "atravessa" o documento
+    // inteiro por cima dela e apaga conteúdo de verdade no MEIO da página (o
+    // RH reportou tabela inteira sumindo). Trava de segurança: a limpeza só
+    // pode alcançar uma FAIXA perto da borda (onde um fiapo de fundo residual
+    // realmente fica) — nunca o meio do documento, não importa o quão
+    // conectado esteja pelo degradê de luz.
+    const FAIXA_MAX = Math.round(Math.min(w, h) * 0.14);
+
     const marcado = new Uint8Array(n);
     const pilha = new Int32Array(n);
     let topo = 0, alagados = 0, temNucleoEscuro = false;
     function semear(p) {
-        if (!marcado[p] && lum[p] < LIMIAR_FRACO) {
-            marcado[p] = 1; pilha[topo++] = p; alagados++;
-            if (lum[p] < LIMIAR_FORTE) temNucleoEscuro = true;
-        }
+        if (marcado[p] || lum[p] >= LIMIAR_FRACO) return;
+        const x = p % w, y = (p - x) / w;
+        const distBorda = Math.min(x, w - 1 - x, y, h - 1 - y);
+        if (distBorda > FAIXA_MAX) return; // longe demais da borda: nunca é "fiapo residual"
+        marcado[p] = 1; pilha[topo++] = p; alagados++;
+        if (lum[p] < LIMIAR_FORTE) temNucleoEscuro = true;
     }
     for (let x = 0; x < w; x++) { semear(x); semear((h - 1) * w + x); }
     for (let y = 0; y < h; y++) { semear(y * w); semear(y * w + w - 1); }
@@ -46704,7 +46726,7 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     // 🪪 Documento colorido (RG, CNH, carteirinha, cartão) leva um tratamento
     // diferente do papel branco — ver o comentário de medirFracaoColoridaCanvas.
     let colorido = false;
-    try { colorido = medirFracaoColoridaCanvas(ctx, w, h) > 0.12; }
+    try { colorido = medirFracaoColoridaCanvas(ctx, w, h) > 0.25; }
     catch (e) { console.warn('Falha ao medir se o documento é colorido, seguindo como papel:', e); }
 
     if (colorido) {
