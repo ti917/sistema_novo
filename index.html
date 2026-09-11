@@ -46543,8 +46543,14 @@ function limparFundoCanvas(ctx, w, h) {
     const localMax = extremoLocal(lum, true);
     const localMin = extremoLocal(lum, false);
 
+    // 🔧 AJUSTE (11/09/2026): papel mais branco, conforme o RH pediu. Baixar a
+    // LUM_MINIMA faz o branqueamento alcançar também o papel que ficou num
+    // cinza-claro (canto que estava na sombra), e o denominador menor faz o
+    // empurrão chegar ao branco puro mais cedo. Continua 100% seguro pro
+    // conteúdo porque a trava que protege texto é a OUTRA: qualquer pixel com
+    // contraste local alto (ou seja, com letra por perto) é pulado antes disso.
     const CONTRASTE_TEXTO = 48; // acima disso considera que tem conteúdo por perto
-    const LUM_MINIMA = 176;     // abaixo disso é conteúdo, não papel — nem encosta
+    const LUM_MINIMA = 166;     // abaixo disso é conteúdo, não papel — nem encosta
     for (let p = 0, i = 0; p < n; p++, i += 4) {
         if (lum[p] < LUM_MINIMA) continue;
         const contrasteLocal = localMax[p] - localMin[p];
@@ -46557,7 +46563,7 @@ function limparFundoCanvas(ctx, w, h) {
         // Quanto mais liso e mais claro, mais forte o empurrão pro branco —
         // a transição suave evita "remendo" visível na borda de uma área limpa.
         const fatorLiso = 1 - contrasteLocal / CONTRASTE_TEXTO;
-        const fatorClaro = Math.min(1, (lum[p] - LUM_MINIMA) / (236 - LUM_MINIMA));
+        const fatorClaro = Math.min(1, (lum[p] - LUM_MINIMA) / (224 - LUM_MINIMA));
         const forca = fatorLiso * fatorClaro;
         d[i] = r + (255 - r) * forca;
         d[i + 1] = g + (255 - g) * forca;
@@ -46792,8 +46798,16 @@ function firmarTracoCanvas(ctx, w, h) {
     const claroLocal = extremoLocal(true);
     const escuroLocal = extremoLocal(false);
 
-    const FAIXA_MIN = 22; // abaixo disso é papel liso/granulado: não mexe
-    const GANHO = 1.9;    // o quanto empurra pras pontas da faixa local
+    // 🔧 AJUSTE (11/09/2026): o RH pediu papel mais claro e letra preta mais
+    // definida. Os dois números daqui são o lugar CERTO pra isso, porque este
+    // realce é local e limitado à faixa que já existe: apertar aqui deixa o
+    // papel mais branco e a tinta mais preta SEM risco de estourar detalhe
+    // (diferente de mexer em brilho/contraste global, que foi o que já causou
+    // "brilho estourado" antes). FAIXA_MIN mais baixo faz ele também firmar
+    // carimbo apagado, caneta fraca e letra miúda de formulário, que antes
+    // ficavam de fora por terem pouco contraste.
+    const FAIXA_MIN = 16; // abaixo disso é papel liso/granulado: não mexe
+    const GANHO = 2.4;    // o quanto empurra pras pontas da faixa local
     for (let p = 0, i = 0; p < n; p++, i += 4) {
         const lo = escuroLocal[p], hi = claroLocal[p];
         const faixa = hi - lo;
@@ -47479,10 +47493,49 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
         return reta;
     }
 
-    const ladoTopo = ajustarLado(cantos.tl, cantos.tr);
-    const ladoDir  = ajustarLado(cantos.tr, cantos.br);
-    const ladoBase = ajustarLado(cantos.br, cantos.bl);
-    const ladoEsq  = ajustarLado(cantos.bl, cantos.tl);
+    // 🐛 CORREÇÃO (11/09/2026): quando o PAPEL SAI PRA FORA DA FOTO de um lado
+    // (o RH fotografa a ficha de perto e a margem esquerda/o topo ficam fora do
+    // enquadramento), não existe borda de papel pra medir ali — e aí o detector
+    // acaba ancorando na primeira linha ESCURA que encontra, que é a moldura
+    // impressa do formulário. Resultado: o corte passa por cima do texto e come
+    // a primeira letra de cada linha ("Empregado"→"mpregado", "Cadastrado
+    // em"→"adastrado em", o título cortado na metade).
+    // Regra certa nesse caso: se o papel some pra fora da foto, o limite não é
+    // uma borda de papel — é a própria borda da FOTO. Então, num lado que já
+    // está colado na borda da imagem, a gente usa a borda da imagem como reta,
+    // preservando tudo que foi fotografado em vez de raspar conteúdo.
+    const COLADO = Math.max(3, Math.round(Math.min(w, h) * 0.015));
+    function retaDaBordaDaFoto(A, B) {
+        const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+        const dist = [
+            { d: mx, reta: { px: 0, py: my, nx: 1, ny: 0 } },              // esquerda
+            { d: w - 1 - mx, reta: { px: w - 1, py: my, nx: 1, ny: 0 } },  // direita
+            { d: my, reta: { px: mx, py: 0, nx: 0, ny: 1 } },              // topo
+            { d: h - 1 - my, reta: { px: mx, py: h - 1, nx: 0, ny: 1 } }   // base
+        ].sort((a, b) => a.d - b.d)[0];
+        return dist.d <= COLADO ? dist.reta : null;
+    }
+    let ladosNaBordaDaFoto = 0;
+    function medirLado(A, B) {
+        const medido = ajustarLado(A, B);
+        if (medido) {
+            // Mediu, mas caiu praticamente em cima da borda da foto: prende na
+            // borda pra não sobrar (nem faltar) uma tirinha de 1-2px.
+            const naBorda = retaDaBordaDaFoto(A, B);
+            if (naBorda) { ladosNaBordaDaFoto++; return naBorda; }
+            return medido;
+        }
+        // Não mediu nada confiável: se é um lado que sai da foto, a borda da
+        // foto é a resposta correta. Se não é, aí sim desiste.
+        const naBorda = retaDaBordaDaFoto(A, B);
+        if (naBorda) ladosNaBordaDaFoto++;
+        return naBorda;
+    }
+
+    const ladoTopo = medirLado(cantos.tl, cantos.tr);
+    const ladoDir  = medirLado(cantos.tr, cantos.br);
+    const ladoBase = medirLado(cantos.br, cantos.bl);
+    const ladoEsq  = medirLado(cantos.bl, cantos.tl);
     if (!ladoTopo || !ladoDir || !ladoBase || !ladoEsq) return null;
 
     function cruzar(r1, r2) {
@@ -47501,7 +47554,11 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
     // Travas de segurança: canto novo não pode ter viajado pra longe do
     // original nem sair da foto, e a área não pode mudar muito. Se qualquer
     // coisa estiver estranha, é mais seguro seguir com o método antigo.
-    const limite = BANDA * 2.2;
+    // Quando algum lado foi preso na borda da FOTO (papel saindo do
+    // enquadramento), o canto pode legitimamente andar bem mais que a faixa de
+    // busca — então a trava de distância é afrouxada nesse caso. As outras
+    // travas (ficar dentro da foto, área plausível) continuam valendo.
+    const limite = BANDA * (ladosNaBordaDaFoto > 0 ? 6 : 2.2);
     for (const k of ['tl', 'tr', 'br', 'bl']) {
         if (Math.hypot(novo[k].x - cantos[k].x, novo[k].y - cantos[k].y) > limite) return null;
         if (novo[k].x < -w * 0.05 || novo[k].x > w * 1.05 || novo[k].y < -h * 0.05 || novo[k].y > h * 1.05) return null;
@@ -47510,7 +47567,7 @@ function refinarCantosPorLinhas(cinza, w, h, cantos) {
         Math.abs((q.tr.x - q.tl.x) * (q.bl.y - q.tl.y) - (q.bl.x - q.tl.x) * (q.tr.y - q.tl.y)) / 2 +
         Math.abs((q.tr.x - q.br.x) * (q.bl.y - q.br.y) - (q.bl.x - q.br.x) * (q.tr.y - q.br.y)) / 2;
     const razao = area(novo) / Math.max(1, area(cantos));
-    if (razao < 0.75 || razao > 1.35) return null;
+    if (razao < 0.75 || razao > (ladosNaBordaDaFoto > 0 ? 1.9 : 1.35)) return null;
     return novo;
 }
 
@@ -47838,6 +47895,27 @@ window.processarImagemDigitalizada = function(file) {
 
                     // 2) "Modo scanner" completo.
                     await window.__aplicarModoScanner(ctx, w, h);
+
+                    // 3) 🖼️ ENQUADRAMENTO: o recorte sai colado no papel, borda
+                    // com borda. Scanner de verdade (e o CamScanner) sempre
+                    // deixa uma margem branca uniforme em volta — é isso que dá
+                    // a sensação de "página centralizada e certinha" em vez de
+                    // "foto recortada". Além da estética, a margem tem função:
+                    // garante que nada encostado na borda do papel fique
+                    // espremido contra o limite da página no PDF, e dá respiro
+                    // pra impressão (impressora não imprime até a borda).
+                    try {
+                        const MARGEM = Math.max(8, Math.round(Math.min(w, h) * 0.022));
+                        const comMargem = document.createElement('canvas');
+                        comMargem.width = w + MARGEM * 2;
+                        comMargem.height = h + MARGEM * 2;
+                        const ctxMargem = comMargem.getContext('2d');
+                        ctxMargem.fillStyle = '#ffffff';
+                        ctxMargem.fillRect(0, 0, comMargem.width, comMargem.height);
+                        ctxMargem.drawImage(canvas, MARGEM, MARGEM);
+                        canvas = comMargem; ctx = ctxMargem;
+                        w = comMargem.width; h = comMargem.height;
+                    } catch (eM) { console.warn('Falha ao aplicar a margem de enquadramento, seguindo sem:', eM); }
 
                     // JPEG com qualidade mais alta: depois do tratamento a imagem é quase
                     // toda branco chapado (comprime muito bem), então dá pra subir a
