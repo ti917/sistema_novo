@@ -46962,9 +46962,37 @@ function refinarQuadLocalmente(src, cantosGrosso) {
 //   extraído — os cantos achados no pequeno são multiplicados pela escala. É
 //   isso que faz o documento final sair com a nitidez máxima que a foto
 //   permite, em vez de já vir de uma cópia reduzida.
+//
+// 🌥️ CORREÇÃO DE SOMBRA NA DETECÇÃO (09/2026): antes a gente só achatava a
+// iluminação (achatarIluminacaoCanvas) DEPOIS de já ter cortado o documento —
+// ou seja, a detecção dos 4 cantos sempre rodava em cima da foto crua, com
+// sombra e tudo. Numa foto com luz vindo de lado, isso confunde as duas
+// estratégias: o Canny acha uma "borda" falsa bem no meio do gradiente de
+// sombra, e o limiar de Otsu (que calcula UM limiar só pra foto inteira) não
+// separa bem o papel do fundo quando um lado da foto tá bem mais escuro que o
+// outro — dá exatamente o sintoma relatado: corte não centralizado / sobra
+// sombra grudada numa das bordas. Agora achatamos a iluminação numa CÓPIA da
+// foto de detecção antes de procurar os cantos, então as duas estratégias
+// "enxergam" o papel com brilho parecido em toda a extensão, sem o gradiente
+// de sombra atrapalhando. A foto de onde o recorte final é extraído
+// (canvasCorte) continua intocada — só a busca pelos cantos usa a cópia
+// corrigida; a cor final do documento ainda passa pelo modo scanner completo
+// depois do corte, como sempre.
 function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
-    const pequeno = cv.imread(canvasDeteccao);
-    const src = (canvasCorte && canvasCorte !== canvasDeteccao) ? cv.imread(canvasCorte) : pequeno;
+    const canvasDeteccaoSemSombra = document.createElement('canvas');
+    canvasDeteccaoSemSombra.width = canvasDeteccao.width;
+    canvasDeteccaoSemSombra.height = canvasDeteccao.height;
+    const ctxSemSombra = canvasDeteccaoSemSombra.getContext('2d');
+    ctxSemSombra.drawImage(canvasDeteccao, 0, 0);
+    try {
+        achatarIluminacaoCanvas(ctxSemSombra, canvasDeteccaoSemSombra.width, canvasDeteccaoSemSombra.height);
+    } catch (e) {
+        console.warn('Não consegui achatar a sombra antes de detectar os cantos, seguindo com a foto original:', e);
+        ctxSemSombra.drawImage(canvasDeteccao, 0, 0); // garante que fica igual à original se a correção falhou no meio
+    }
+
+    const pequeno = cv.imread(canvasDeteccaoSemSombra);
+    const src = (canvasCorte && canvasCorte !== canvasDeteccao) ? cv.imread(canvasCorte) : cv.imread(canvasDeteccao);
     const escala = src.cols / pequeno.cols;
     let resultado = null;
     try {
@@ -47020,7 +47048,9 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             }
         }
     } finally {
-        if (src !== pequeno) src.delete();
+        // src e pequeno agora são sempre Mats distintos (pequeno é lido da cópia
+        // sem sombra, src da foto crua), então sempre dá pra apagar os dois.
+        src.delete();
         pequeno.delete();
     }
     return resultado;
