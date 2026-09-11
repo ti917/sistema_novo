@@ -46249,6 +46249,68 @@ function acabamentoDeCorCanvas(ctx, w, h) {
 }
 
 // =========================================================================
+// 🪪 DETECÇÃO DE DOCUMENTO COLORIDO (RG, CNH, carteirinha, cartão) vs PAPEL
+// BRANCO comum (contrato, recibo, holerite): o "modo scanner" de cima (achatar
+// sombra dividindo cada canal, esticar cada canal pelo histograma, neutralizar
+// quase-branco) foi desenhado pra papel branco com texto preto — ele PARTE DO
+// PRINCÍPIO de que o fundo devia ser branco/cinza. Num documento com fundo
+// colorido de verdade (o verde estampado de um RG, por exemplo) e uma foto
+// 3x4 no meio, essa esticada por canal é catastrófica: distorce a cor de tudo,
+// inclusive a foto da pessoa (é o que causava a pele com manchas
+// roxas/azuladas reportada pelo RH). Aqui a gente mede, por amostragem (não
+// precisa olhar pixel por pixel — uma amostra já representa bem), que fração
+// da foto tem cor de verdade (não é papel/sombra/tinta neutra) — acima de 12%
+// já é sinal forte de documento colorido, não papel.
+// =========================================================================
+function medirFracaoColoridaCanvas(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    const PASSO = 7 * 4; // amostra 1 a cada 7 pixels — rápido e representativo
+    let coloridos = 0, total = 0;
+    for (let i = 0; i < d.length; i += PASSO) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const cor = Math.max(r, g, b) - Math.min(r, g, b);
+        if (cor > 40) coloridos++;
+        total++;
+    }
+    return total > 0 ? coloridos / total : 0;
+}
+
+// =========================================================================
+// 🎨 CONTRASTE SÓ NA LUMINÂNCIA: versão do auto-níveis segura pra documento
+// colorido — separa brilho (Y) de cor (Cb/Cr) e estica SÓ o brilho, sem tocar
+// na cor. Diferente do autoNivelarCanvas (que estica cada canal R/G/B
+// separado — o que troca a cor de lugar num documento colorido), isso aqui
+// deixa a cor original intacta e só melhora contraste/exposição.
+// =========================================================================
+function autoContrasteLuminanciaCanvas(ctx, w, h) {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    const n = d.length / 4;
+    const Y = new Float32Array(n);
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        Y[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < n; p++) hist[Math.round(Y[p])]++;
+    const CORTE = n * 0.004;
+    let baixo = 0, acumB = 0;
+    while (baixo < 255 && acumB < CORTE) { acumB += hist[baixo]; baixo++; }
+    let alto = 255, acumA = 0;
+    while (alto > 0 && acumA < CORTE) { acumA += hist[alto]; alto--; }
+    if (alto <= baixo) return; // já contrastada: não mexe
+
+    for (let p = 0, i = 0; p < n; p++, i += 4) {
+        const yNovo = Math.max(0, Math.min(255, (Y[p] - baixo) * 255 / (alto - baixo)));
+        const delta = yNovo - Y[p];
+        d[i] = Math.max(0, Math.min(255, d[i] + delta));
+        d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + delta));
+        d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + delta));
+    }
+    ctx.putImageData(imgData, 0, 0);
+}
+
+// =========================================================================
 // 🔊 REDUÇÃO DE RUÍDO DE COR: foto de celular em luz fraca vem com "confete"
 // colorido (ruído de croma) no papel branco, e o passo que divide pelo fundo
 // pra clarear AMPLIFICA esse confete. Aqui a gente separa brilho (Y) de cor
@@ -46350,7 +46412,7 @@ function suavizarRuidoDeCorCanvas(ctx, w, h) {
 // pequena (papel liso, ruído) é ignorada, só borda de verdade é realçada —
 // é o que deixa a letra recortada e o fundo limpo ao mesmo tempo.
 // =========================================================================
-function realcarNitidezCanvas(ctx, w, h) {
+function realcarNitidezCanvas(ctx, w, h, forcaParam, tetoParam) {
     const n = w * h;
     if (n > 16000000) return; // imagem absurda: não compensa o custo
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -46396,9 +46458,13 @@ function realcarNitidezCanvas(ctx, w, h) {
     passadaCaixa(lum, tmp);
     passadaCaixa(tmp, borrado);
 
-    const FORCA = 0.95;   // força do realce
+    // 🐛 CORREÇÃO (09/2026): FORCA 0.95 + TETO 64 criava um halo claro/escuro
+    // visível ao redor de cada letra ("mancha atrás da letra" reportada pelo
+    // RH) — é o efeito colateral clássico de unsharp mask forte demais.
+    // Baixado pra deixar a letra nítida sem o halo aparecer.
+    const FORCA = forcaParam != null ? forcaParam : 0.55;   // força do realce
     const LIMIAR = 3.5;   // abaixo disso é considerado ruído/papel e não é realçado
-    const TETO = 64;      // trava o realce máximo pra não criar halo branco/preto forte
+    const TETO = tetoParam != null ? tetoParam : 36;      // trava o realce máximo pra não criar halo branco/preto forte
     for (let p = 0, i = 0; p < n; p++, i += 4) {
         let delta = lum[p] - borrado[p];
         if (delta > -LIMIAR && delta < LIMIAR) continue;
@@ -46617,6 +46683,22 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     const respirar = () => new Promise(r => setTimeout(r, 0));
     try { suavizarRuidoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao suavizar ruído de cor, seguindo sem:', e); }
     await respirar();
+
+    // 🪪 Documento colorido (RG, CNH, carteirinha, cartão) leva um tratamento
+    // diferente do papel branco — ver o comentário de medirFracaoColoridaCanvas.
+    let colorido = false;
+    try { colorido = medirFracaoColoridaCanvas(ctx, w, h) > 0.12; }
+    catch (e) { console.warn('Falha ao medir se o documento é colorido, seguindo como papel:', e); }
+
+    if (colorido) {
+        try { autoContrasteLuminanciaCanvas(ctx, w, h); } catch (e) { console.warn('Falha no contraste de luminância, seguindo sem:', e); }
+        await respirar();
+        // Nitidez mais suave aqui: numa foto 3x4 pequena dentro do documento,
+        // um realce forte fica com serrilhado feio no rosto.
+        try { realcarNitidezCanvas(ctx, w, h, 0.35, 24); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+        return;
+    }
+
     achatarIluminacaoCanvas(ctx, w, h);
     await respirar();
     // Segunda passada: a primeira derruba a sombra de ~116 pra ~250, mas em
