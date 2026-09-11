@@ -46362,7 +46362,7 @@ function suavizarRuidoDeCorCanvas(ctx, w, h) {
 // pequena (papel liso, ruído) é ignorada, só borda de verdade é realçada —
 // é o que deixa a letra recortada e o fundo limpo ao mesmo tempo.
 // =========================================================================
-function realcarNitidezCanvas(ctx, w, h) {
+function realcarNitidezCanvas(ctx, w, h, baixaResolucao) {
     const n = w * h;
     if (n > 16000000) return; // imagem absurda: não compensa o custo
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -46408,9 +46408,17 @@ function realcarNitidezCanvas(ctx, w, h) {
     passadaCaixa(lum, tmp);
     passadaCaixa(tmp, borrado);
 
-    const FORCA = 0.95;   // força do realce
-    const LIMIAR = 3.5;   // abaixo disso é considerado ruído/papel e não é realçado
-    const TETO = 64;      // trava o realce máximo pra não criar halo branco/preto forte
+    // 📱 Foto que já chegou comprimida (tipo reencaminhada pelo WhatsApp, que
+    // reduz resolução E aplica JPEG agressivo) perde nitidez de verdade — letra
+    // fina vira uma manchinha cinza em vez de um traço definido. Um realce no
+    // mesmo nível de uma foto boa não dá conta de recuperar a legibilidade
+    // nesse caso, então quando a gente já sabe que a imagem passou por
+    // reamostragem (ver melhorarImagemBaixaResolucao) usa um realce mais forte
+    // — e um limiar um pouco mais alto junto, pra não amplificar o
+    // "ondulado" que a própria ampliação cria em vez da letra de verdade.
+    const FORCA = baixaResolucao ? 1.3 : 0.95;   // força do realce
+    const LIMIAR = baixaResolucao ? 4.5 : 3.5;   // abaixo disso é considerado ruído/papel e não é realçado
+    const TETO = baixaResolucao ? 88 : 64;       // trava o realce máximo pra não criar halo branco/preto forte
     for (let p = 0, i = 0; p < n; p++, i += 4) {
         let delta = lum[p] - borrado[p];
         if (delta > -LIMIAR && delta < LIMIAR) continue;
@@ -46505,6 +46513,63 @@ function limparFundoCanvas(ctx, w, h) {
 }
 
 // =========================================================================
+// 📱 FOTO JÁ COMPRIMIDA (tipo reencaminhada pelo WhatsApp): o WhatsApp reduz a
+// resolução da imagem E recomprime em JPEG mais agressivo, então quando o
+// gestor anexa uma foto que já passou por isso (às vezes de segunda ou
+// terceira mão — foto tirada, mandada pro WhatsApp, baixada, reenviada de
+// novo), o documento digitalizado sai desse recorte com letra pequena e o
+// "quadriculado" característico da compressão JPEG (blocos de 8x8 pixels)
+// já embutido nela. Realçar nitidez em cima disso sem tratar antes só deixa
+// o quadriculado mais visível — não a letra.
+//
+// Aqui a gente: 1) suaviza esse quadriculado com um filtro que preserva
+// borda (bilateral — o mesmo tipo de filtro que reduz ruído/compressão sem
+// borrar o contorno da letra, ao contrário de um desfoque comum) enquanto a
+// imagem ainda está no tamanho original (onde os blocos JPEG são exatamente
+// 8x8 px, mais fácil de mirar); 2) amplia a imagem com interpolação suave
+// (bicúbica) pra dar mais "pixel de sobra" pro realce de nitidez trabalhar —
+// letra pequena numa imagem pequena não tem detalhe suficiente pro realce
+// definir a borda, ampliando primeiro ele tem mais o que recortar.
+// Devolve { canvas, ctx, w, h, baixaResolucao } — se a imagem já era grande o
+// bastante, devolve tudo igual e baixaResolucao = false, sem mexer em nada.
+// =========================================================================
+function melhorarImagemBaixaResolucao(canvas, ctx, w, h) {
+    const LIMIAR_BAIXA_RES = 1400; // abaixo disso no maior lado, considera "comprimida"
+    const maiorLado = Math.max(w, h);
+    if (maiorLado >= LIMIAR_BAIXA_RES || !window.cv || !window.cv.Mat) {
+        return { canvas, ctx, w, h, baixaResolucao: false };
+    }
+    try {
+        const src = cv.imread(canvas);
+        const deblocado = new cv.Mat();
+        // d=5 (raio pequeno, não borra letra), sigmaColor/sigmaSpace moderados —
+        // suficiente pra fundir o quadriculado de 8x8 sem lavar o traço da letra.
+        cv.bilateralFilter(src, deblocado, 5, 35, 35, cv.BORDER_DEFAULT);
+        src.delete();
+
+        // Amplia até no máximo 1,6x (o suficiente pra dar "corpo" ao realce
+        // seguinte sem exagerar — ampliar demais só estica o borrão, não cria
+        // detalhe que não existe) e sem passar de 2000px, por memória/tempo.
+        const alvo = Math.min(2000, Math.round(maiorLado * 1.6));
+        const escala = alvo / maiorLado;
+        const wAmpliado = Math.round(w * escala), hAmpliado = Math.round(h * escala);
+        const ampliado = new cv.Mat();
+        cv.resize(deblocado, ampliado, new cv.Size(wAmpliado, hAmpliado), 0, 0, cv.INTER_CUBIC);
+        deblocado.delete();
+
+        const canvasAmpliado = document.createElement('canvas');
+        canvasAmpliado.width = wAmpliado; canvasAmpliado.height = hAmpliado;
+        cv.imshow(canvasAmpliado, ampliado);
+        ampliado.delete();
+
+        return { canvas: canvasAmpliado, ctx: canvasAmpliado.getContext('2d'), w: wAmpliado, h: hAmpliado, baixaResolucao: true };
+    } catch (e) {
+        console.warn('Não consegui melhorar a imagem de baixa resolução, seguindo com a original:', e);
+        return { canvas, ctx, w, h, baixaResolucao: false };
+    }
+}
+
+// =========================================================================
 // 🖨️ MODO SCANNER (a receita completa, na ordem que importa). A ordem não é
 // arbitrária — cada passo depende do anterior:
 //   1. Ruído de cor primeiro: o passo 2 divide a imagem pelo fundo estimado e
@@ -46524,7 +46589,7 @@ function limparFundoCanvas(ctx, w, h) {
 // É async e devolve o controle pro navegador entre uma etapa e outra: são 6
 // passadas por cima de vários milhões de pixels, e sem esse respiro a tela
 // congelaria durante o processamento (pior ainda com várias fotos na fila).
-window.__aplicarModoScanner = async function(ctx, w, h) {
+window.__aplicarModoScanner = async function(ctx, w, h, baixaResolucao) {
     const respirar = () => new Promise(r => setTimeout(r, 0));
     try { suavizarRuidoDeCorCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao suavizar ruído de cor, seguindo sem:', e); }
     await respirar();
@@ -46536,7 +46601,7 @@ window.__aplicarModoScanner = async function(ctx, w, h) {
     await respirar();
     try { limparFundoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao limpar o fundo, seguindo sem:', e); }
     await respirar();
-    try { realcarNitidezCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+    try { realcarNitidezCanvas(ctx, w, h, baixaResolucao); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
 };
 
 // =========================================================================
@@ -47235,8 +47300,19 @@ window.processarImagemDigitalizada = function(file) {
                         canvas = canvasMenor; ctx = ctxMenor; w = wf; h = hf;
                     }
 
+                    // 1.5) Se a foto já chegou pequena/comprimida (reencaminhada pelo
+                    // WhatsApp, por exemplo), trata o quadriculado da compressão e amplia
+                    // ANTES do modo scanner — senão o realce de nitidez do passo seguinte
+                    // só vai deixar o quadriculado mais visível, não a letra.
+                    let baixaResolucao = false;
+                    try {
+                        const melhorado = melhorarImagemBaixaResolucao(canvas, ctx, w, h);
+                        canvas = melhorado.canvas; ctx = melhorado.ctx; w = melhorado.w; h = melhorado.h;
+                        baixaResolucao = melhorado.baixaResolucao;
+                    } catch (e) { console.warn('Falha ao tratar imagem de baixa resolução, seguindo sem:', e); }
+
                     // 2) "Modo scanner" completo.
-                    await window.__aplicarModoScanner(ctx, w, h);
+                    await window.__aplicarModoScanner(ctx, w, h, baixaResolucao);
 
                     // JPEG com qualidade mais alta: depois do tratamento a imagem é quase
                     // toda branco chapado (comprime muito bem), então dá pra subir a
@@ -47637,9 +47713,17 @@ window.__aplicarAjusteCorte = async function(item, img, cantos) {
         src.delete();
     }
 
-    const ctx = canvasFinal.getContext('2d');
-    const w = canvasFinal.width, h = canvasFinal.height;
-    await window.__aplicarModoScanner(ctx, w, h);
+    let ctx = canvasFinal.getContext('2d');
+    let w = canvasFinal.width, h = canvasFinal.height;
+
+    let baixaResolucao = false;
+    try {
+        const melhorado = melhorarImagemBaixaResolucao(canvasFinal, ctx, w, h);
+        canvasFinal = melhorado.canvas; ctx = melhorado.ctx; w = melhorado.w; h = melhorado.h;
+        baixaResolucao = melhorado.baixaResolucao;
+    } catch (e) { console.warn('Falha ao tratar imagem de baixa resolução, seguindo sem:', e); }
+
+    await window.__aplicarModoScanner(ctx, w, h, baixaResolucao);
 
     const dataUrl = canvasFinal.toDataURL('image/jpeg', 0.9);
     item.dataUrl = dataUrl;
