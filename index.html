@@ -46581,7 +46581,18 @@ function limparFundoCanvas(ctx, w, h) {
 // mal e a "borda" na verdade é metade da foto — aí não mexe em nada, porque
 // apagar conteúdo seria muito pior do que deixar o fundo aparecendo.
 // =========================================================================
-function limparBordaResidualCanvas(ctx, w, h) {
+// alcancePct: o quanto a limpeza pode avançar pra dentro, em fração do menor
+// lado. Esse número SÓ existe pra apagar a sobra de fundo que a MARGEM DE
+// FOLGA do recorte deixou — então ele tem que ser proporcional a essa folga.
+// 🐛 REGRESSÃO (11/09/2026, v9): com o refino subpixel de bordas o recorte
+// passou a sair justo (folga de 0,15% em vez de 0,7-1,4%), mas essa função
+// continuou alagando 18% pra dentro. Sem fundo residual pra encontrar, o
+// alagamento passou a se agarrar em CONTEÚDO escuro perto da borda e apagou
+// coluna da direita, topo e a assinatura (o RH viu "517410" virar "51741" e
+// manchas brancas grandes por cima do formulário). Agora quem chama diz o
+// alcance: recorte refinado → alcance mínimo (só o fiapo de 2-3px); recorte
+// pelo método antigo → 18%, como era.
+function limparBordaResidualCanvas(ctx, w, h, alcancePct) {
     const n = w * h;
     const imgData = ctx.getImageData(0, 0, w, h);
     const d = imgData.data;
@@ -46629,7 +46640,7 @@ function limparBordaResidualCanvas(ctx, w, h) {
     // (recorte automático que sobrou generoso num canto) — subido pra 18%,
     // ainda uma trava de segurança e longe do "meio da página" que causou a
     // regressão anterior.
-    const FAIXA_MAX = Math.round(Math.min(w, h) * 0.18);
+    const FAIXA_MAX = Math.max(6, Math.round(Math.min(w, h) * (alcancePct != null ? alcancePct : 0.18)));
 
     const marcado = new Uint8Array(n);
     const pilha = new Int32Array(n);
@@ -47585,6 +47596,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
 
         let escolhido = achadoBorda || achadoBrilho;
         let margem = 0;
+        let usouRefino = false; // v9: os cantos foram MEDIDOS (subpixel) ou herdados do contorno?
 
         if (escolhido === achadoBrilho) {
             // Refina de perto pra tirar o excesso de fundo que a detecção
@@ -47640,6 +47652,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 if (cantosRefinados) {
                     escolhido = { cantos: cantosRefinados, area: escolhido.area };
                     margem = -0.0015;
+                    usouRefino = true;
                 }
             } catch (e) { console.warn('Refino subpixel das bordas falhou, seguindo com os cantos brutos:', e); }
         }
@@ -47652,6 +47665,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 br: ampliar(escolhido.cantos.br), bl: ampliar(escolhido.cantos.bl)
             };
             resultado = recortarPorCantos(src, cantosGrandes, margem);
+            if (resultado) resultado.refinado = usouRefino;
             // Os cantos devolvidos pro "ajustar corte manual" precisam estar na
             // escala da foto de referência guardada (a pequena), não na cheia.
             if (resultado && resultado.pontos) {
@@ -47761,7 +47775,11 @@ window.processarImagemDigitalizada = function(file) {
                                 cortado = true;
                                 // Apaga o fiapo de fundo que a folga do recorte
                                 // deixou colado na borda (ver a função).
-                                try { limparBordaResidualCanvas(ctx, w, h); }
+                                // v9: o alcance da limpeza acompanha o tamanho da
+                                // folga do recorte. Com corte refinado (justo), só
+                                // pode raspar o fiapo da borda — nunca avançar a
+                                // ponto de encostar em coluna, carimbo ou assinatura.
+                                try { limparBordaResidualCanvas(ctx, w, h, resultado.refinado ? 0.004 : 0.18); }
                                 catch (eB) { console.warn('Falha ao limpar a borda residual, seguindo sem:', eB); }
                                 // Os cantos voltam na escala da foto de DETECÇÃO; a tela de
                                 // corte manual trabalha na escala da foto de REFERÊNCIA
@@ -48174,7 +48192,10 @@ window.__aplicarAjusteCorte = async function(item, img, cantos) {
 
     const ctx = canvasFinal.getContext('2d');
     const w = canvasFinal.width, h = canvasFinal.height;
-    try { limparBordaResidualCanvas(ctx, w, h); }
+    // Corte MANUAL: os cantos são os que o usuário desenhou, sem margem de
+    // folga — então aqui também não existe sobra grande de fundo pra limpar, e
+    // um alagamento profundo só teria como estragar conteúdo. Alcance curto.
+    try { limparBordaResidualCanvas(ctx, w, h, 0.03); }
     catch (eB) { console.warn('Falha ao limpar a borda residual, seguindo sem:', eB); }
     await window.__aplicarModoScanner(ctx, w, h);
 
