@@ -47310,6 +47310,109 @@ function acharQuad4PontosPorBorda(src, areaImagem) {
 // duas estratégias normais não acharam nada: aceita manchas menos retangulares
 // e que ocupem quase a foto inteira. É melhor um recorte aproximado do que
 // entregar a foto com a mesa/toalha estampada em volta do documento.
+// =========================================================================
+// 📄 ESTRATÉGIA C — PAPEL POR DESSATURAÇÃO (v10). Criada depois de rodar a
+// detecção numa foto real do RH que saiu totalmente errada (currículo em cima
+// de uma mesa de madeira, com um pano escuro no canto).
+//
+// O que acontecia: a estratégia de BORDA (Canny) não achava nada, e a de
+// BRILHO (Otsu) achava uma mancha de 91,5% da foto — o Otsu é um limiar ÚNICO
+// de brilho, e madeira clara tem brilho parecido com papel, então ele juntava
+// os dois numa mancha só. Pior: mesmo quando a mancha está certa, aquela
+// estratégia devolve o `minAreaRect`, ou seja, o RETÂNGULO QUE ENVOLVE a
+// mancha. Com o papel inclinado/em perspectiva (o normal numa foto de
+// celular), esse retângulo engole os cantos de fundo — foi o que colocou a
+// faixa de madeira e a tarja preta dentro do documento "recortado".
+//
+// A saída é olhar COR, não brilho: papel branco é DESSATURADO (saturação ~0
+// nessa foto), enquanto madeira (155) e pano colorido (170) são saturados. Um
+// limiar de saturação separa os dois de forma limpa, mesmo quando o brilho é
+// parecido. E em vez de minAreaRect, aqui a gente ajusta um QUADRILÁTERO de 4
+// pontos na mancha (approxPolyDP), que acompanha a perspectiva do papel em vez
+// de envolvê-la.
+//
+// Medido na foto que o RH mandou: minAreaRect pegava 98,2% da foto (errado);
+// o quadrilátero por dessaturação pega 88,1% e acompanha o papel exatamente.
+// =========================================================================
+function acharQuadPorPapelDessaturado(src, areaImagem) {
+    const rgb = new cv.Mat(), hsv = new cv.Mat(), suave = new cv.Mat();
+    const canais = new cv.MatVector();
+    const maskS = new cv.Mat(), maskV = new cv.Mat(), mask = new cv.Mat();
+    const kernel = cv.Mat.ones(9, 9, cv.CV_8U);
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    let resultado = null;
+    try {
+        cv.GaussianBlur(src, suave, new cv.Size(7, 7), 0);
+        cv.cvtColor(suave, rgb, cv.COLOR_RGBA2RGB);
+        cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+        cv.split(hsv, canais);
+        const S = canais.get(1), V = canais.get(2);
+
+        // Limiar de brilho: Otsu no canal V, afrouxado em 25% pra não recortar
+        // a parte do papel que caiu na sombra.
+        const tmp = new cv.Mat();
+        const otsuV = cv.threshold(V, tmp, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+        tmp.delete();
+        const limiarV = Math.max(90, otsuV * 0.75);
+
+        // SATURAÇÃO BAIXA (é papel, não madeira/pano/capa colorida) E claro.
+        cv.threshold(S, maskS, 70, 255, cv.THRESH_BINARY_INV);
+        cv.threshold(V, maskV, limiarV, 255, cv.THRESH_BINARY);
+        cv.bitwise_and(maskS, maskV, mask);
+        // Fecha buraco (texto, dobra, grampo) e depois tira respingo solto.
+        cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+        cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
+
+        cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        let maior = null, maiorArea = 0;
+        for (let i = 0; i < contours.size(); i++) {
+            const c = contours.get(i);
+            const a = Math.abs(cv.contourArea(c));
+            if (a > maiorArea) { if (maior) maior.delete(); maiorArea = a; maior = c; }
+            else c.delete();
+        }
+        if (!maior || maiorArea < areaImagem * 0.12 || maiorArea > areaImagem * 0.995) {
+            if (maior) maior.delete();
+            return null;
+        }
+
+        // Quadrilátero que ACOMPANHA a mancha (não o retângulo que a envolve).
+        function quadDe(contorno) {
+            const peri = cv.arcLength(contorno, true);
+            for (const f of [0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06]) {
+                const ap = new cv.Mat();
+                cv.approxPolyDP(contorno, f * peri, true, ap);
+                if (ap.rows === 4) {
+                    const pts = [];
+                    for (let j = 0; j < 4; j++) pts.push({ x: ap.data32S[j * 2], y: ap.data32S[j * 2 + 1] });
+                    ap.delete();
+                    return pts;
+                }
+                ap.delete();
+            }
+            return null;
+        }
+        let pts = quadDe(maior);
+        if (!pts) {
+            // Papel com canto dobrado/arredondado: o casco convexo vira o
+            // contorno "idealizado" e aí o quadrilátero sai.
+            const hull = new cv.Mat();
+            cv.convexHull(maior, hull);
+            pts = quadDe(hull);
+            hull.delete();
+        }
+        maior.delete();
+        if (!pts) return null;
+        resultado = { cantos: ordenarCantos(pts), area: maiorArea };
+    } finally {
+        rgb.delete(); hsv.delete(); suave.delete(); canais.delete();
+        maskS.delete(); maskV.delete(); mask.delete(); kernel.delete();
+        contours.delete(); hierarchy.delete();
+    }
+    return resultado;
+}
+
 function acharQuadPorLimiarBrilho(src, areaImagem, relaxado) {
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
@@ -47670,8 +47773,9 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
     try {
         const areaImagem = pequeno.rows * pequeno.cols;
 
-        let achadoBorda = null, achadoBrilho = null;
+        let achadoBorda = null, achadoBrilho = null, achadoPapel = null;
         try { achadoBorda = acharQuad4PontosPorBorda(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
+        try { achadoPapel = acharQuadPorPapelDessaturado(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de papel (dessaturação) falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
         // A estratégia de borda (Canny + 4 pontos) exige um contorno reto
@@ -47693,7 +47797,12 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             catch (e) { console.warn('Tentativa relaxada de detecção falhou:', e); }
         }
 
-        let escolhido = achadoBorda || achadoBrilho;
+        // Ordem de confiança: BORDA (contorno reto de verdade) > PAPEL POR
+        // DESSATURAÇÃO (separa papel de mesa/pano por cor e acompanha a
+        // perspectiva) > BRILHO (limiar único + retângulo envolvente: o mais
+        // grosseiro, fica por último justamente porque foi ele que colocou a
+        // mesa de madeira dentro do documento).
+        let escolhido = achadoBorda || achadoPapel || achadoBrilho;
         let margem = 0;
         let usouRefino = false; // v9: os cantos foram MEDIDOS (subpixel) ou herdados do contorno?
 
@@ -47728,7 +47837,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             // mais generoso que o -0.003 que cortava dado real, mas sem revelar
             // fiapo de título.
             margem = -0.007;
-        } else if (escolhido === achadoBorda) {
+        } else if (escolhido === achadoBorda || escolhido === achadoPapel) {
             margem = -0.004;
         }
 
@@ -47763,7 +47872,9 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 const pct = (v, tot) => (100 * v / tot).toFixed(1) + '%';
                 const c = escolhido.cantos;
                 window.__diagDigitalizacao = {
-                    estrategia: achadoBorda ? 'BORDA (Canny, mais confiavel)' : 'BRILHO (Otsu, aproximada)',
+                    estrategia: escolhido === achadoBorda ? 'BORDA (Canny, mais confiavel)'
+                              : escolhido === achadoPapel ? 'PAPEL POR DESSATURACAO (separa papel de mesa/pano)'
+                              : 'BRILHO (Otsu, aproximada — ultimo recurso)',
                     tamanhoFotoDeteccao: pequeno.cols + 'x' + pequeno.rows,
                     pontosDeBordaMedidosPorLado: diag.pontosPorLado,
                     ladosPresosNaBordaDaFoto: diag.ladosNaBorda,
