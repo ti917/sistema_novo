@@ -213,6 +213,23 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
 
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
 
+        // 👇 NOVO: pega o IP público de quem está assinando, só pra reforço de auditoria
+        // (fica registrado junto no banco quando o link foi assinado, além do nome/data que
+        // já eram salvos). Usa um serviço público gratuito (ipify) porque o navegador não
+        // tem acesso direto ao próprio IP público. BLINDADO: timeout de 3s e qualquer erro
+        // (sem internet, serviço fora do ar, bloqueado por firewall) devolve null e quem
+        // chamar essa função segue o fluxo normal, sem travar nem exibir erro pro colaborador.
+        async function capturarIpPublico() {
+            try {
+                const resposta = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
+                const dados = await resposta.json();
+                return dados.ip || null;
+            } catch (e) {
+                console.warn('Não foi possível capturar o IP público (seguindo sem ele):', e);
+                return null;
+            }
+        }
+
         async function inicializar() {
             const urlParams = new URLSearchParams(window.location.search);
             const token = urlParams.get('token');
@@ -266,6 +283,14 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
             const btn = document.getElementById('btn-confirmar');
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Autenticando assinatura...';
             btn.disabled = true;
+
+            // 👇 NOVO: dispara a busca do IP público JÁ, em paralelo com o resto do
+            // processamento do PDF logo abaixo — assim ela não atrasa nada. Só isolado
+            // em try/catch com timeout de 3s: se falhar por qualquer motivo (sem sinal,
+            // serviço fora do ar), capturarIpPublico() devolve null e a assinatura
+            // continua normalmente, sem o IP. Isso NÃO mexe em nenhuma parte do "radar
+            // de assinatura" (posições no holerite/folha de ponto) logo abaixo.
+            const promessaIp = capturarIpPublico();
 
             try {
                 // 1. Baixa o PDF original
@@ -422,11 +447,18 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                 
                 const { data: pUrl } = supabaseClient.storage.from('documentos').getPublicUrl(nomeArquivo);
 
+                // 👇 NOVO: só agora espera a resposta do IP (já estava rodando em paralelo
+                // desde o início da função) — se ainda não tiver chegado, no máximo espera o
+                // tanto que faltar até o timeout de 3s. Nunca é null por causa de demora do
+                // resto do processamento, só por falha de rede de verdade.
+                const ipCapturado = await promessaIp;
+
                 // 7. Atualiza o banco
                 const { error: dbError } = await supabaseClient.from('documentos_mensais').update({
                     status: 'Assinado',
                     documento_assinado: pUrl.publicUrl,
-                    assinado_em: agora.toISOString()
+                    assinado_em: agora.toISOString(),
+                    ip_assinatura: ipCapturado
                 }).eq('id', dadosDoc.id);
 
                 if (dbError) throw new Error("Erro ao validar assinatura no banco: " + dbError.message);
