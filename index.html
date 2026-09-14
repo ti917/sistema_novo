@@ -31753,7 +31753,7 @@ window.atualizarRegrasRescisao = function() {
         // 👇 Editar lembrete — acessível pelo lápis dentro do Detalhe (clicando no card do
         // calendário). Mesma regra de permissão do Excluir: Público qualquer Admin edita,
         // Pessoal só quem criou.
-        window.abrirModalEditarLembreteAgenda = function(idLembrete) {
+        window.abrirModalEditarLembreteAgenda = async function(idLembrete) {
             const l = (window.agendaEstado.lembretes || []).find(x => String(x.id) === String(idLembrete));
             if (!l) return mostrarAlerta("Lembrete não encontrado — a lista pode estar desatualizada.", "aviso");
 
@@ -31764,6 +31764,35 @@ window.atualizarRegrasRescisao = function() {
             document.getElementById('modal-editar-lembrete-agenda')?.remove();
 
             const tituloEscapado = (l.titulo || '').replace(/"/g, '&quot;');
+
+            // 👇 NOVO: só faz sentido "também jogar pra Agenda Pessoal de alguém" quando o
+            // lembrete que está sendo editado é da Agenda PÚBLICA — daí a gente busca quem
+            // tem acesso à Agenda RH (perfil Admin, que é quem enxerga essa tela hoje) pra
+            // montar a lista de nomes. Se der erro na busca, simplesmente não mostra a opção
+            // (nunca trava a edição por causa disso).
+            let optionsNomesHtml = '';
+            if (l.tipo === 'Publico') {
+                try {
+                    const { data: admins } = await supabaseClient.from('perfis').select('id, nome').eq('perfil', 'Admin').order('nome', { ascending: true });
+                    optionsNomesHtml = (admins || []).map(a => `<option value="${a.id}" ${a.id === usuarioAtual.id ? 'selected' : ''}>${a.nome}</option>`).join('');
+                } catch (e) {
+                    console.warn('Não deu pra buscar a lista de nomes pra Agenda Pessoal:', e);
+                }
+            }
+
+            const blocoTambemPessoalHtml = (l.tipo === 'Publico' && optionsNomesHtml) ? `
+                    <div class="form-group" style="margin-bottom: 15px; padding: 10px; border: 1px dashed var(--cor-borda); border-radius: 8px;">
+                        <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="editar-lembrete-tambem-pessoal" onchange="document.getElementById('editar-lembrete-pessoal-nome-wrap').style.display = this.checked ? 'block' : 'none';">
+                            Também colocar na Agenda Pessoal de alguém
+                        </label>
+                        <div id="editar-lembrete-pessoal-nome-wrap" style="display: none; margin-top: 8px;">
+                            <label style="font-size: 0.78rem;">Agenda Pessoal de:</label>
+                            <select id="editar-lembrete-pessoal-nome" style="width: 100%; padding: 8px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
+                                ${optionsNomesHtml}
+                            </select>
+                        </div>
+                    </div>` : '';
 
             const modalHtml = `
             <div id="modal-editar-lembrete-agenda" class="modal-arquivo-overlay" style="z-index: 100020; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -31792,6 +31821,8 @@ window.atualizarRegrasRescisao = function() {
                         <label style="font-size: 0.8rem;">Descrição (opcional)</label>
                         <textarea id="editar-lembrete-descricao" rows="3" style="width: 100%; padding: 10px; border-radius: 8px; background: var(--cor-fundo-input); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda); resize: vertical;">${l.descricao || ''}</textarea>
                     </div>
+
+                    ${blocoTambemPessoalHtml}
 
                     <div style="display: flex; justify-content: flex-end; gap: 10px;">
                         <button type="button" class="btn-secondary" onclick="document.getElementById('modal-editar-lembrete-agenda').remove()">Cancelar</button>
@@ -31826,6 +31857,28 @@ window.atualizarRegrasRescisao = function() {
             if (error) {
                 if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Salvar Alterações'; }
                 return mostrarAlerta("Erro ao salvar edição: " + error.message, "erro");
+            }
+
+            // 👇 NOVO: se marcou "também colocar na Agenda Pessoal de alguém", cria uma SEGUNDA
+            // linha (tipo 'Pessoal', dona de quem foi escolhido no select) com os mesmos dados —
+            // sem mexer/duplicar o lembrete Público que acabou de ser salvo acima. Isso é
+            // "best-effort": se der erro aqui, a edição do lembrete público já foi salva
+            // normalmente, só avisa que a cópia pessoal não foi criada.
+            const chkTambemPessoal = document.getElementById('editar-lembrete-tambem-pessoal');
+            if (chkTambemPessoal && chkTambemPessoal.checked) {
+                const selectNome = document.getElementById('editar-lembrete-pessoal-nome');
+                const idEscolhido = selectNome?.value;
+                const nomeEscolhido = selectNome?.selectedOptions?.[0]?.textContent || '';
+                if (idEscolhido) {
+                    const { error: erroPessoal } = await supabaseClient.from('agenda_lembretes').insert([{
+                        tipo: 'Pessoal',
+                        titulo, descricao: descricao || null, data, horario, lembrar_em: lembrarEm,
+                        status: 'Agendado',
+                        criado_por: nomeEscolhido,
+                        criado_por_id: idEscolhido
+                    }]);
+                    if (erroPessoal) mostrarAlerta("O lembrete foi salvo, mas não deu pra criar a cópia na Agenda Pessoal: " + erroPessoal.message, "aviso");
+                }
             }
 
             // Libera pra avisar de novo (pode ter sido adiado pra um horário futuro e ainda
