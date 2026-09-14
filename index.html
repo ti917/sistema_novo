@@ -80076,14 +80076,38 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     const hojeObj = new Date(); hojeObj.setHours(0,0,0,0);
     const hojeIso = hojeObj.toISOString().split('T')[0];
 
-    const dCarencia = new Date(hojeObj); dCarencia.setDate(dCarencia.getDate() - 5);
+    // 👇 AJUSTE (pedido): a busca de afastamentos/férias agora traz também
+    // data_inicio (pra saber se está afastado HOJE de verdade) e usa uma janela
+    // maior (10 dias de calendário) só pra garantir que o registro que já
+    // terminou recentemente apareça na busca — a carência de retorno em si
+    // (DIAS_CARENCIA_CONTRATO dias ÚTEIS) é aplicada linha abaixo, não aqui.
+    const BUFFER_BUSCA_RETORNO_DIAS = 10;
+    const dCarencia = new Date(hojeObj); dCarencia.setDate(dCarencia.getDate() - BUFFER_BUSCA_RETORNO_DIAS);
     const dataCarenciaIso = dCarencia.toISOString().split('T')[0];
 
     const [resColabs, resAusencias, resFerias] = await Promise.all([
         supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
-        supabaseClient.from('ausencias').select('colaborador_id, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').gte('data_fim', dataCarenciaIso),
-        supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_fim_ferias').eq('status', 'Aprovado').gte('data_fim_ferias', dataCarenciaIso)
+        supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').lte('data_inicio', hojeIso).gte('data_fim', dataCarenciaIso),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataCarenciaIso)
     ]);
+
+    // 👇 Conta quantos dias ÚTEIS (seg-sex, sem feriado nacional) existem entre o
+    // dia seguinte a "dataBaseIso" e "hojeObjRef" (inclusive) — mesma lógica já
+    // usada na carência de retorno da Avaliação de Desempenho (ver
+    // window.checarPendenciasDesempenho), só que aqui aplicada ao Contrato.
+    function contarDiasUteisDesdeRetornoCtr(dataBaseIso, hojeObjRef) {
+        const cursor = new Date(dataBaseIso + 'T00:00:00');
+        cursor.setDate(cursor.getDate() + 1);
+        let count = 0;
+        while (cursor <= hojeObjRef) {
+            const diaSemana = cursor.getDay();
+            const feriadosDoAno = window.obterFeriadosNacionais ? window.obterFeriadosNacionais(cursor.getFullYear()) : {};
+            const isoCursor = cursor.toISOString().split('T')[0];
+            if (diaSemana !== 0 && diaSemana !== 6 && !feriadosDoAno[isoCursor]) count++;
+            cursor.setDate(cursor.getDate() + 1);
+        }
+        return count;
+    }
 
     let deveBloquearSistema = false; let temAlerta = false; let menorPrazo = 999;
     let qtdPendentesProrrogacao = 0; let qtdPendentesAdmissional = 0;
@@ -80103,17 +80127,47 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         const dIni = new Date(dataInicioStr + 'T00:00:00');
         const diffDias = Math.floor((hojeObj - dIni) / (1000 * 60 * 60 * 24));
 
-        // 👇 Não bloqueia (nem avisa) quem está afastado/de férias — a mesma
-        // proteção vale tanto pra Admissional quanto pra Prorrogação.
-        let protegidoPorAfastamento = false;
-        if ((resAusencias.data || []).some(a => a.colaborador_id === c.id) || (resFerias.data || []).some(f => f.colaborador_id === c.id)) {
-            protegidoPorAfastamento = true;
+        // 👇 AJUSTE (pedido): quem está afastado/de férias DE VERDADE hoje (pode
+        // durar meses) não tem nada que o gestor precise fazer agora — então nem
+        // aviso nem bloqueio aparecem enquanto durar (evita, por exemplo, ficar
+        // avisando "contrato vencendo" de alguém afastado há 400 dias). Quando a
+        // pessoa volta, o gestor ganha DIAS_CARENCIA_CONTRATO dias ÚTEIS de
+        // carência (mesma folga de 3 dias já dada no início do contrato) pra
+        // colher a assinatura/prorrogação sem ainda aparecer aviso nenhum — só
+        // depois disso é que a checagem volta a valer normalmente, garantindo
+        // que o gestor não esqueça de vez.
+        let taAfastadoOuFeriasHoje = false;
+        let dataFimMaisRecenteAfastamento = null;
+
+        (resAusencias.data || []).filter(a => a.colaborador_id === c.id).forEach(a => {
+            if (a.data_inicio <= hojeIso && a.data_fim >= hojeIso) {
+                taAfastadoOuFeriasHoje = true;
+            } else if (a.data_fim < hojeIso && (!dataFimMaisRecenteAfastamento || a.data_fim > dataFimMaisRecenteAfastamento)) {
+                dataFimMaisRecenteAfastamento = a.data_fim;
+            }
+        });
+        (resFerias.data || []).filter(f => f.colaborador_id === c.id).forEach(f => {
+            if (f.data_inicio_ferias <= hojeIso && f.data_fim_ferias >= hojeIso) {
+                taAfastadoOuFeriasHoje = true;
+            } else if (f.data_fim_ferias < hojeIso && (!dataFimMaisRecenteAfastamento || f.data_fim_ferias > dataFimMaisRecenteAfastamento)) {
+                dataFimMaisRecenteAfastamento = f.data_fim_ferias;
+            }
+        });
+
+        if (taAfastadoOuFeriasHoje) return; // afastado/de férias agora mesmo — sem aviso, sem bloqueio
+
+        if (dataFimMaisRecenteAfastamento) {
+            const diasUteisDesdeRetorno = contarDiasUteisDesdeRetornoCtr(dataFimMaisRecenteAfastamento, hojeObj);
+            if (diasUteisDesdeRetorno <= DIAS_CARENCIA_CONTRATO) return; // carência de retorno — ainda não cobra
         }
 
-        // 👇 NOVO: também não bloqueia (nem avisa) se HOJE é folga dele na escala —
-        // usa a mesma função que já monta a grade de escala (window.isDiaDeFolga),
-        // então respeita 12x36, escala semanal, folguista, exceções pontuais, etc.
-        if (!protegidoPorAfastamento && typeof window.isDiaDeFolga === 'function' && window.isDiaDeFolga(c, hojeIso)) {
+        // 👇 A partir daqui o colaborador NÃO está afastado (nem em carência de
+        // retorno) — só resta a folga NORMAL da escala (1 dia), que continua
+        // dando uma proteção mais leve: não bloqueia nesse dia específico, mas
+        // mantém o aviso (pra não deixar passar batido caso a folga se repita
+        // por vários dias seguidos em cima do prazo já vencido).
+        let protegidoPorAfastamento = false;
+        if (typeof window.isDiaDeFolga === 'function' && window.isDiaDeFolga(c, hojeIso)) {
             protegidoPorAfastamento = true;
         }
 
