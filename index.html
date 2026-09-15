@@ -50534,11 +50534,13 @@ window.calcularVRAgora = async function() {
                         // recebia VR (PJ, cargo "sem Vale Refeição", ou fora do escopo de
                         // "colaboradores específicos" da unidade nunca tiveram VR pra descontar).
                         const regraDaUnidadeDoColab = (regrasVR || []).find(r => (c.unidade || '').split(',').map(u => u.trim().toUpperCase()).includes((r.unidade || '').trim().toUpperCase()));
-                        const dentroDoEscopoVR = !regraDaUnidadeDoColab || regraDaUnidadeDoColab.escopo_recebimento !== 'especificos'
-                            || (Array.isArray(regraDaUnidadeDoColab.colaboradores_recebem) && regraDaUnidadeDoColab.colaboradores_recebem.map(String).includes(String(c.id)));
-                        const recebiaVR = dentroDoEscopoVR
-                            && !(typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(c))
-                            && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(c, 'sem_vr'));
+                        // 🩹 Mesma correção do "recebeVRPorCargo": em escopo "específicos", estar na
+                        // lista marcada pelo RH sobrescreve PJ/exceção de cargo (e estar fora da lista
+                        // sempre exclui, mesmo sem ser PJ/exceção).
+                        const recebiaVR = regraDaUnidadeDoColab && regraDaUnidadeDoColab.escopo_recebimento === 'especificos'
+                            ? (Array.isArray(regraDaUnidadeDoColab.colaboradores_recebem) && regraDaUnidadeDoColab.colaboradores_recebem.map(String).includes(String(c.id)))
+                            : !(typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(c))
+                                && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(c, 'sem_vr'));
                         if (dataUltimoDia >= dI && bateUnidadeVR && recebiaVR) {
                             window.vrExcluidosPorRescisao.push({ id: c.id, nome: c.nome });
                         }
@@ -50621,11 +50623,17 @@ window.calcularVRAgora = async function() {
             // 👇 Escopo configurado na regra da unidade: "unidade" (todo mundo, exceto exceções
             // de cargo) ou "especificos" (só quem o RH marcou manualmente na tela de Configurar
             // Regras) — dá controle fino pro RH sobre quem recebe, além das exceções por cargo.
-            const passaNoEscopoDaUnidade = regraUnidade.escopo_recebimento !== 'especificos'
-                || (Array.isArray(regraUnidade.colaboradores_recebem) && regraUnidade.colaboradores_recebem.map(String).includes(String(colab.id)));
-            const recebeVRPorCargo = passaNoEscopoDaUnidade
-                && !(typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(colab))
-                && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(colabParaExcecaoVR, 'sem_vr'));
+            // 🩹 CORREÇÃO: quando o escopo é "específicos", estar na lista marcada pelo RH é a
+            // palavra final — SOBRESCREVE PJ e "Cargos Sem Benefício", porque o objetivo dessa
+            // tela é justamente permitir que alguém de um cargo normalmente excluído receba o
+            // benefício por decisão manual do RH. Quem está fora da lista marcada não recebe,
+            // mesmo que não seja PJ nem tenha exceção de cargo.
+            const estaNaListaEspecificos = Array.isArray(regraUnidade.colaboradores_recebem) && regraUnidade.colaboradores_recebem.map(String).includes(String(colab.id));
+            const ehExcecaoPorCargo = (typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(colab))
+                || (typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(colabParaExcecaoVR, 'sem_vr'));
+            const recebeVRPorCargo = regraUnidade.escopo_recebimento === 'especificos'
+                ? estaNaListaEspecificos
+                : !ehExcecaoPorCargo;
 
             const valorDiariaUnidade = parseFloat(regraUnidade.valor_diaria) || 0;
             const adm = colab.dados_admissao;
@@ -51858,10 +51866,12 @@ window.calcularVAAgora = async function() {
         await window.carregarExcecoesCargoBeneficio(); // 🩹 Regras de "Cargos Sem Benefício"
 
         // 👇 MÁGICA DO FILTRO INTELIGENTE AQUI 👇
+        // 👇 CORREÇÃO: NÃO exclui mais PJ / "sem Vale Alimentação" aqui — eles continuam fora do
+        // relatório e do total de VA (isso é garantido mais abaixo, no cálculo de elegibilidade),
+        // a menos que o RH tenha marcado a pessoa manualmente em "Colaboradores Específicos",
+        // caso em que a marcação do RH SOBRESCREVE a exceção de cargo.
         const colabsAtivos = (resPerfis.data || []).filter(c => {
             if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
-            if (typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(c)) return false; // PJ não tem VA
-            if (typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(c, 'sem_va')) return false; // 🩹 Cargo marcado como "sem Vale Alimentação" nesta unidade
             if (c.status === 'Ativo') return true;
             if (c.status === 'Desligado' && c.dados_rescisao && c.dados_rescisao.ultimo_dia) {
                 const match = c.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
@@ -51981,10 +51991,16 @@ window.calcularVAAgora = async function() {
             if (!regraUnidade || String(regraUnidade.recebe_va) === 'false') return;
 
             // 👇 Escopo "colaboradores específicos": se a unidade estiver configurada assim,
-            // só quem estiver marcado na tela de Configurar Regras recebe VA.
+            // só quem estiver marcado na tela de Configurar Regras recebe VA — e essa marcação
+            // manual do RH SOBRESCREVE PJ/"Cargo Sem Benefício" (mesma lógica do VR). Fora
+            // desse escopo, valem as exceções de cargo normalmente.
+            const ehExcecaoPorCargoVA = (typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(colab))
+                || (typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(colab, 'sem_va'));
             if (regraUnidade.escopo_recebimento === 'especificos') {
                 const listaEscopoVA = Array.isArray(regraUnidade.colaboradores_recebem) ? regraUnidade.colaboradores_recebem.map(String) : [];
                 if (!listaEscopoVA.includes(String(colab.id))) return;
+            } else if (ehExcecaoPorCargoVA) {
+                return;
             }
 
             const valorPadraoMensal = parseFloat(regraUnidade.valor_mensal) || 0;
