@@ -29784,17 +29784,56 @@ window.listarUsuarios = async function(silencioso = false) {
     // depois que a lista já apareceu, e só re-renderiza quando as fotos chegarem. Antes essa
     // busca entrava no Promise.all junto com os termos da Clara e segurava a tela inteira até
     // terminar — por isso a demora perceptível ao entrar nessa tela.
-    if (idsColaboradores.length > 0) {
+    // 👇 CORREÇÃO: Admin/Gestor também tem crachá — antes só buscava foto pra quem era
+    // 'Colaborador' (idsColaboradores), então Admin/Gestor sempre caía no ícone genérico.
+    // Agora resolve, pra cada Admin/Gestor, qual id de colaborador usar na busca de foto:
+    // 1) o "Colaborador Vinculado" configurado (permissoes.colaborador_vinculado_id), igual
+    //    o avatar do cabeçalho já faz; 2) se não tiver vínculo, tenta a própria conta (algumas
+    //    contas de Admin/Gestor já usam o mesmo id de um colaborador); 3) por último, casa
+    //    pelo nome com uma ficha de Colaborador (mesmo fallback usado em carregarPerfil).
+    const mapaIdFotoPorUsuario = {}; // u.id (perfis) -> id a usar na busca em fotos_cracha
+    const adminsGestoresSemVinculo = [];
+
+    (resPerfis.data || []).forEach(u => {
+        if (u.perfil === 'Colaborador') {
+            mapaIdFotoPorUsuario[u.id] = u.id;
+        } else {
+            const vinculoId = u.permissoes?.colaborador_vinculado_id || null;
+            mapaIdFotoPorUsuario[u.id] = vinculoId || u.id;
+            if (!vinculoId) adminsGestoresSemVinculo.push(u);
+        }
+    });
+
+    if (adminsGestoresSemVinculo.length > 0) {
+        const { data: colabsPorNome } = await supabaseClient
+            .from('perfis')
+            .select('id, nome')
+            .eq('perfil', 'Colaborador')
+            .in('nome', adminsGestoresSemVinculo.map(u => u.nome));
+        if (colabsPorNome) {
+            adminsGestoresSemVinculo.forEach(u => {
+                const match = colabsPorNome.find(c => (c.nome || '').toLowerCase() === (u.nome || '').toLowerCase());
+                if (match) mapaIdFotoPorUsuario[u.id] = match.id;
+            });
+        }
+    }
+
+    const idsParaBuscarFotos = Array.from(new Set(Object.values(mapaIdFotoPorUsuario).filter(Boolean)));
+
+    if (idsParaBuscarFotos.length > 0) {
         supabaseClient
             .from('fotos_cracha')
             .select('colaborador_id, url_foto')
             .eq('status', 'Aprovado')
-            .in('colaborador_id', idsColaboradores)
+            .in('colaborador_id', idsParaBuscarFotos)
             .then(({ data: resFotosCracha }) => {
                 if (!resFotosCracha || resFotosCracha.length === 0) return;
                 const mapaFotosCracha = {};
                 resFotosCracha.forEach(f => { if (f.url_foto) mapaFotosCracha[f.colaborador_id] = f.url_foto; });
-                todosUsuariosCadastrados.forEach(u => { if (mapaFotosCracha[u.id]) u.url_foto_cracha = mapaFotosCracha[u.id]; });
+                todosUsuariosCadastrados.forEach(u => {
+                    const idFoto = mapaIdFotoPorUsuario[u.id];
+                    if (idFoto && mapaFotosCracha[idFoto]) u.url_foto_cracha = mapaFotosCracha[idFoto];
+                });
                 filtrarUsuariosCadastrados(); // re-renderiza só a lista, já com as fotos que chegaram
             });
     }
@@ -29982,9 +30021,15 @@ window.filtrarUsuariosCadastrados = function() {
             ? `<img src="${window.urlFotoCrachaThumb(u.url_foto_cracha, 68)}" alt="${u.nome}" loading="lazy" onerror="this.onerror=null; this.src='${u.url_foto_cracha}';" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover; display: block; border: 1px solid rgba(255,255,255,0.2);">`
             : `<div style="width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.15);"><i class="fa-solid ${iconePerfil}" style="color: var(--cor-texto-secundario); font-size: 0.95rem;"></i></div>`;
 
-        const avatarUsuarioHtml = u.perfil === 'Colaborador'
-            ? `<span style="cursor: pointer; display: inline-block; flex-shrink: 0;" title="${u.url_foto_cracha ? 'Ver foto do crachá em tamanho maior' : 'Sem foto ainda — clique pra cobrar no WhatsApp'}" onclick="${u.url_foto_cracha ? `window.abrirFotoCrachaGrandeModal('${u.url_foto_cracha}', '${u.nome.replace(/'/g, "\\'")}')` : `window.cobrarFotoCrachaColaborador('${u.id}', '${u.nome.replace(/'/g, "\\'")}')`}">${avatarInnerHtml}</span>`
-            : `<span style="display: inline-block; flex-shrink: 0;">${avatarInnerHtml}</span>`;
+        // 👇 CORREÇÃO: Admin/Gestor com foto também pode clicar para ver em tamanho maior —
+        // antes só 'Colaborador' tinha qualquer clique no avatar (Admin/Gestor com foto
+        // ficava sem essa opção). O "cobrar no WhatsApp" continua exclusivo de Colaborador,
+        // já que é o fluxo de pendência de crachá.
+        const avatarUsuarioHtml = u.url_foto_cracha
+            ? `<span style="cursor: pointer; display: inline-block; flex-shrink: 0;" title="Ver foto do crachá em tamanho maior" onclick="window.abrirFotoCrachaGrandeModal('${u.url_foto_cracha}', '${u.nome.replace(/'/g, "\\'")}')">${avatarInnerHtml}</span>`
+            : (u.perfil === 'Colaborador'
+                ? `<span style="cursor: pointer; display: inline-block; flex-shrink: 0;" title="Sem foto ainda — clique pra cobrar no WhatsApp" onclick="window.cobrarFotoCrachaColaborador('${u.id}', '${u.nome.replace(/'/g, "\\'")}')">${avatarInnerHtml}</span>`
+                : `<span style="display: inline-block; flex-shrink: 0;">${avatarInnerHtml}</span>`);
 
         const corZebra = idxLinha % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'transparent';
         htmlAcumulado += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.06); background: ${corZebra}; transition: 0.15s;" onmouseover="this.style.background='rgba(0,0,0,0.22)'" onmouseout="this.style.background='${corZebra}'">
