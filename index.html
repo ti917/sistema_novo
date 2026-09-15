@@ -47759,6 +47759,95 @@ function acharQuadPorLimiarBrilho(src, areaImagem) {
     return melhor;
 }
 
+// =========================================================================
+// 🧵 ESTRATÉGIA NOVA (09/2026 v3): separa o papel do fundo pela TEXTURA, não
+// pela cor/brilho. Nasceu de um caso real: atestado médico (papel branco)
+// fotografado em cima de um cobertor bege/creme bem claro — cor e brilho
+// dos dois ficam parecidos demais pras Estratégias A/B/C (borda, saturação,
+// brilho) separarem certo, e o resultado saía enorme, misturando papel +
+// cobertor. Mas um cobertor peludo tem uma textura MUITO mais irregular que
+// papel liso (cada fio/fiapo é uma "bordinha" de brilho, em alta frequência
+// espacial), mesmo quando a cor média dos dois é quase igual. Aqui a gente
+// mede essa "granulação" local (energia do Laplaciano — quanto mais textura,
+// maior o valor) em vez de cor/brilho puro: papel vira uma mancha LISA
+// (baixa energia) mesmo com texto/linhas impressas (que ocupam pouca área),
+// enquanto tecido vira uma mancha de alta energia por toda parte.
+// =========================================================================
+function acharQuad4PontosPorTextura(src, areaImagem) {
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    const grayF = new cv.Mat();
+    gray.convertTo(grayF, cv.CV_32F);
+    gray.delete();
+
+    const lap = new cv.Mat();
+    cv.Laplacian(grayF, lap, cv.CV_32F, 3);
+    grayF.delete();
+
+    const lap2 = new cv.Mat();
+    cv.multiply(lap, lap, lap2);
+    lap.delete();
+
+    // Suaviza a energia numa janela pra virar uma mancha sólida por região,
+    // em vez de um monte de pontinhos isolados onde teve variação de brilho.
+    const energia = new cv.Mat();
+    cv.boxFilter(lap2, energia, cv.CV_32F, new cv.Size(15, 15));
+    lap2.delete();
+
+    const energiaU8 = new cv.Mat();
+    cv.normalize(energia, energiaU8, 0, 255, cv.NORM_MINMAX, cv.CV_8U);
+    energia.delete();
+
+    const mask = new cv.Mat();
+    // Baixa energia (liso = papel) vira BRANCO na máscara.
+    cv.threshold(energiaU8, mask, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+    energiaU8.delete();
+
+    const kernel = cv.Mat.ones(9, 9, cv.CV_8U);
+    // Fecha primeiro (funde de volta texto/linhas impressas — pontinhos de
+    // alta energia isolados DENTRO do papel — pro papel ficar sólido) e só
+    // depois abre (tira fiapo/mancha lisa isolada do lado do tecido).
+    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, kernel);
+    kernel.delete();
+
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    mask.delete();
+
+    const EPSILONS = [0.02, 0.025, 0.03, 0.035, 0.04, 0.05];
+    let melhorCantos = null, melhorArea = 0;
+    for (let i = 0; i < contours.size(); i++) {
+        const c = contours.get(i);
+        const peri = cv.arcLength(c, true);
+        for (const fatorEpsilon of EPSILONS) {
+            const approx = new cv.Mat();
+            cv.approxPolyDP(c, approx, fatorEpsilon * peri, true);
+            if (approx.rows === 4) {
+                const area = Math.abs(cv.contourArea(approx));
+                // Teto de 85%: se a mancha "lisa" tomou quase a foto toda, é
+                // sinal de que o fundo também é liso (mesa lisa, por ex.) e
+                // essa estratégia não tem como ajudar aqui — melhor deixar
+                // pra Saturação/Brilho, que são mais confiáveis nesse caso.
+                if (area > areaImagem * 0.15 && area < areaImagem * 0.85 && area > melhorArea) {
+                    melhorArea = area;
+                    const pts = [];
+                    for (let j = 0; j < 4; j++) pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+                    melhorCantos = ordenarCantos(pts);
+                }
+                approx.delete();
+                break;
+            }
+            approx.delete();
+        }
+        c.delete();
+    }
+    contours.delete(); hierarchy.delete();
+    return melhorCantos ? { cantos: melhorCantos, area: melhorArea } : null;
+}
+
 // Refinamento local: pega o quadrilátero "grosso" achado pela estratégia de
 // brilho (que tende a sobrar fundo, porque o limiar de Otsu é calculado pra
 // foto inteira e pode juntar o papel com uma mesa clara ou reflexo por perto)
@@ -47855,6 +47944,30 @@ function corteTemFundoDeVerdade(pequeno, cantos, areaImagem, exigirMultiplas) {
         return m;
     }
 
+    // 🧵 CORREÇÃO (09/2026 v3): papel branco em cima de um fundo CLARO (mesa
+    // clara, cobertor/toalha bege) pode ter cor quase idêntica à do papel —
+    // o teste de cor acima (diff > 35) não vê diferença nenhuma, mesmo o
+    // corte estando claramente errado. Mas fundo de tecido (cobertor, toalha,
+    // pano) quase sempre tem TEXTURA bem mais irregular que papel (fiapo,
+    // fibra, trama) — então mede também o desvio-padrão do brilho de cada
+    // lado: se o lado de fora for bem mais "granulado" que o de dentro, isso
+    // também conta como fundo de verdade, mesmo com cor parecida.
+    function texturaRetangulo(x0, y0, x1, y1) {
+        x0 = Math.max(0, Math.round(x0)); y0 = Math.max(0, Math.round(y0));
+        x1 = Math.min(w, Math.round(x1)); y1 = Math.min(h, Math.round(y1));
+        if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+        const roi = pequeno.roi(new cv.Rect(x0, y0, x1 - x0, y1 - y0));
+        const gray = new cv.Mat();
+        cv.cvtColor(roi, gray, cv.COLOR_RGBA2GRAY);
+        roi.delete();
+        const mean = new cv.Mat(), stddev = new cv.Mat();
+        cv.meanStdDev(gray, mean, stddev);
+        gray.delete();
+        const std = stddev.data64F[0];
+        mean.delete(); stddev.delete();
+        return std;
+    }
+
     const bordas = [
         [minY > folgaBorda, [minX, minY, maxX, minY + faixa], [minX, minY - faixa, maxX, minY]],       // topo
         [h - maxY > folgaBorda, [minX, maxY - faixa, maxX, maxY], [minX, maxY, maxX, maxY + faixa]],   // baixo
@@ -47867,9 +47980,21 @@ function corteTemFundoDeVerdade(pequeno, cantos, areaImagem, exigirMultiplas) {
         if (!solta) continue;
         bordasSoltas++;
         const mDentro = mediaRetangulo(...dentro), mFora = mediaRetangulo(...fora);
-        if (!mDentro || !mFora) continue;
-        const diff = Math.abs(mDentro[0] - mFora[0]) + Math.abs(mDentro[1] - mFora[1]) + Math.abs(mDentro[2] - mFora[2]);
-        if (diff > 35) bordasComContraste++;
+        let contraste = false;
+        if (mDentro && mFora) {
+            const diff = Math.abs(mDentro[0] - mFora[0]) + Math.abs(mDentro[1] - mFora[1]) + Math.abs(mDentro[2] - mFora[2]);
+            if (diff > 35) contraste = true;
+        }
+        if (!contraste) {
+            try {
+                const tDentro = texturaRetangulo(...dentro), tFora = texturaRetangulo(...fora);
+                // Exige o de fora bem mais granulado (não só um pouquinho —
+                // sombra/leve gradiente de luz também sobe o desvio-padrão às
+                // vezes) pra não confundir textura de fato com iluminação.
+                if (tDentro !== null && tFora !== null && tFora > tDentro * 1.6 && (tFora - tDentro) > 6) contraste = true;
+            } catch (eTextura) { /* opencv sem meanStdDev ou falha pontual — ignora, segue só com cor */ }
+        }
+        if (contraste) bordasComContraste++;
     }
     if (bordasSoltas === 0) return true; // nada pra checar (todas as bordas encostam na foto)
     if (!exigirMultiplas) return bordasComContraste > 0;
@@ -47930,8 +48055,9 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
     try {
         const areaImagem = pequeno.rows * pequeno.cols;
 
-        let achadoBorda = null, achadoSaturacao = null, achadoBrilho = null;
+        let achadoBorda = null, achadoTextura = null, achadoSaturacao = null, achadoBrilho = null;
         try { achadoBorda = acharQuad4PontosPorBorda(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de borda falhou:', e); }
+        try { achadoTextura = acharQuad4PontosPorTextura(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de textura falhou:', e); }
         try { achadoSaturacao = acharQuad4PontosPorSaturacao(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de saturação falhou:', e); }
         try { achadoBrilho = acharQuadPorLimiarBrilho(pequeno, areaImagem); } catch (e) { console.warn('Estratégia de brilho falhou:', e); }
 
@@ -47939,16 +48065,21 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         // 1) Borda (Canny + 4 pontos): exige um contorno reto bem definido,
         //    então quando acha algo é porque o documento tem cantos de
         //    verdade ali.
-        // 2) Saturação (cor + 4 pontos): quando o fundo é colorido (mesa de
+        // 2) Textura (granulação/Laplaciano + 4 pontos): entra quando a
+        //    borda falha porque papel e fundo têm cor/brilho quase iguais
+        //    (ex: papel branco em cobertor bege claro) — nesse caso a
+        //    diferença que sobra pra separar os dois é a textura (papel
+        //    liso vs. tecido peludo/granulado), não a cor.
+        // 3) Saturação (cor + 4 pontos): quando o fundo é colorido (mesa de
         //    madeira, pano, toalha) mas a textura dele atrapalha o Canny, a
         //    saturação ainda separa bem papel (sem cor) de fundo (com cor) —
         //    e como também usa approxPolyDP, o quadrilátero acompanha o
         //    formato real do papel, sem sobrar fundo grudado num canto.
-        // 3) Brilho (mancha + minAreaRect): a mais grosseira das três — só
-        //    entra quando nem borda nem cor conseguiram achar 4 cantos de
-        //    verdade (documento muito curvado/amassado, ou fundo tão parecido
-        //    com o papel que nem a cor separa).
-        let escolhido = achadoBorda || achadoSaturacao || achadoBrilho;
+        // 4) Brilho (mancha + minAreaRect): a mais grosseira das quatro — só
+        //    entra quando nem borda, textura nem cor conseguiram achar 4
+        //    cantos de verdade (documento muito curvado/amassado, ou fundo
+        //    tão parecido com o papel que nem a cor nem a textura separam).
+        let escolhido = achadoBorda || achadoTextura || achadoSaturacao || achadoBrilho;
 
         // 🩹 CORREÇÃO (09/2026): reflexo/brilho forte em cima do papel cria uma
         // borda reta FALSA no meio do documento (a luz "corta" o papel em duas
@@ -47991,7 +48122,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 return minX >= gMinX && maxX <= gMaxX && minY >= gMinY && maxY <= gMaxY;
             };
             const folgaPx = Math.sqrt(areaImagem) * 0.02; // ~2% da diagonal, pra tolerar imprecisão normal de detecção
-            for (const maior of [achadoSaturacao, achadoBrilho]) {
+            for (const maior of [achadoTextura, achadoSaturacao, achadoBrilho]) {
                 // Além de englobar e ser bem maior, o candidato maior TAMBÉM
                 // precisa ter fundo de verdade — senão estaríamos só trocando
                 // um corte ruim por outro corte ruim (e maior).
@@ -48034,7 +48165,7 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
                 escolhido = refinado;
             }
             margem = 0.012; // minAreaRect costuma sobrar uma bordinha
-        } else if (escolhido === achadoBorda || escolhido === achadoSaturacao) {
+        } else if (escolhido === achadoBorda || escolhido === achadoTextura || escolhido === achadoSaturacao) {
             // Mesmo com cantos bem detectados sobra quase sempre um fio da
             // sombra/borda da mesa colado na margem, e esse fio escuro estraga
             // o "achatar iluminação" depois (vira uma faixa cinza na lateral).
