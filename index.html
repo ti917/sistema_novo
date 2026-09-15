@@ -17186,9 +17186,9 @@ async function carregarPerfil(id) {
     document.getElementById('user-name-display').innerText = data.nome;
     // 👇 Avatar no header: por padrão mostra as iniciais (1ª letra do primeiro nome + 1ª
     // letra do último sobrenome, ex: "Italo Souza Lima" → "IL"; se só tiver um nome, usa só
-    // ele) — e troca pela FOTO DO CRACHÁ do próprio Admin/Gestor, se ele tiver uma cadastrada
-    // (mesma tabela `fotos_cracha`, usando o próprio id dele como colaborador_id). As fotos já
-    // chegam comprimidas (40-100kb) no upload, então não pesa carregar isso 1x por login.
+    // ele) — e troca pela FOTO DO CRACHÁ do próprio Admin/Gestor, se ele tiver uma cadastrada.
+    // As fotos já chegam comprimidas (40-100kb) no upload, então não pesa carregar isso 1x
+    // por login.
     const avatarHeaderEl = document.getElementById('user-avatar-header');
     if (avatarHeaderEl && data.nome) {
         const partesNome = data.nome.trim().split(/\s+/).filter(Boolean);
@@ -17198,15 +17198,46 @@ async function carregarPerfil(id) {
         avatarHeaderEl.textContent = iniciais.toUpperCase();
         avatarHeaderEl.title = data.nome;
 
-        // Busca em segundo plano (não trava o login) — se o Admin/Gestor tiver foto de
-        // crachá aprovada, troca o textContent (iniciais) por uma <img>.
-        supabaseClient.from('fotos_cracha').select('url_foto').eq('colaborador_id', data.id).eq('status', 'Aprovado').maybeSingle()
-            .then(({ data: fotoData }) => {
-                if (fotoData && fotoData.url_foto && avatarHeaderEl) {
-                    avatarHeaderEl.innerHTML = `<img src="${fotoData.url_foto}" alt="${data.nome}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;">`;
+        // 🩹 CORREÇÃO: o login do Admin/Gestor (`perfis.id`) NEM SEMPRE é o mesmo id do
+        // cadastro dele como colaborador (ex.: Gestor tem um vínculo explícito configurado em
+        // "Configurar Acessos" → "Colaborador Vinculado", guardado em
+        // `permissoes.colaborador_vinculado_id`) — é por isso que a foto não aparecia pra quem
+        // tem esse vínculo. Ordem de busca: 1) o id vinculado explicitamente; 2) o próprio id
+        // do login (cobre quem já É o próprio colaborador, ex.: Admin); 3) por último, acha o
+        // colaborador pelo NOME (mesmo critério usado em outras partes do sistema pra ligar
+        // Gestor ↔ colaborador quando não tem vínculo explícito).
+        (async () => {
+            try {
+                const vinculoId = data.permissoes?.colaborador_vinculado_id || null;
+                const idsParaTentar = [vinculoId, data.id].filter(Boolean);
+
+                let urlFoto = null;
+                for (const idTentativa of idsParaTentar) {
+                    const { data: fotoData } = await supabaseClient.from('fotos_cracha')
+                        .select('url_foto').eq('colaborador_id', idTentativa).eq('status', 'Aprovado').maybeSingle();
+                    if (fotoData && fotoData.url_foto) { urlFoto = fotoData.url_foto; break; }
                 }
-            })
-            .catch(() => {}); // Sem foto ou erro na busca: mantém as iniciais, sem incomodar ninguém
+
+                // Sem vínculo explícito e sem foto direta: tenta achar o colaborador com o
+                // MESMO NOME (ex.: Gestor que também está cadastrado como colaboradora dela
+                // mesma, tipicamente cargo "Encarregado").
+                if (!urlFoto && !vinculoId) {
+                    const { data: colabPorNome } = await supabaseClient.from('perfis')
+                        .select('id').ilike('nome', data.nome).neq('id', data.id).limit(1).maybeSingle();
+                    if (colabPorNome?.id) {
+                        const { data: fotoData } = await supabaseClient.from('fotos_cracha')
+                            .select('url_foto').eq('colaborador_id', colabPorNome.id).eq('status', 'Aprovado').maybeSingle();
+                        if (fotoData && fotoData.url_foto) urlFoto = fotoData.url_foto;
+                    }
+                }
+
+                if (urlFoto && avatarHeaderEl) {
+                    avatarHeaderEl.innerHTML = `<img src="${urlFoto}" alt="${data.nome}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;">`;
+                }
+            } catch (e) {
+                // Sem foto ou erro na busca: mantém as iniciais, sem incomodar ninguém
+            }
+        })();
     }
     document.getElementById('user-role-badge').innerText = data.perfil;
     document.getElementById('user-role-badge').className = `badge ${data.perfil.toLowerCase()}`;
