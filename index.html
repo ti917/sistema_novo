@@ -17184,8 +17184,11 @@ async function carregarPerfil(id) {
     }
     // ---------------------------------------------------
     document.getElementById('user-name-display').innerText = data.nome;
-    // 👇 Avatar com iniciais no header: pega a 1ª letra do primeiro nome + 1ª letra do
-    // último sobrenome (ex: "Italo Souza Lima" → "IL"); se só tiver um nome, usa só ele.
+    // 👇 Avatar no header: por padrão mostra as iniciais (1ª letra do primeiro nome + 1ª
+    // letra do último sobrenome, ex: "Italo Souza Lima" → "IL"; se só tiver um nome, usa só
+    // ele) — e troca pela FOTO DO CRACHÁ do próprio Admin/Gestor, se ele tiver uma cadastrada
+    // (mesma tabela `fotos_cracha`, usando o próprio id dele como colaborador_id). As fotos já
+    // chegam comprimidas (40-100kb) no upload, então não pesa carregar isso 1x por login.
     const avatarHeaderEl = document.getElementById('user-avatar-header');
     if (avatarHeaderEl && data.nome) {
         const partesNome = data.nome.trim().split(/\s+/).filter(Boolean);
@@ -17194,6 +17197,16 @@ async function carregarPerfil(id) {
             : (partesNome[0] || '').slice(0, 2);
         avatarHeaderEl.textContent = iniciais.toUpperCase();
         avatarHeaderEl.title = data.nome;
+
+        // Busca em segundo plano (não trava o login) — se o Admin/Gestor tiver foto de
+        // crachá aprovada, troca o textContent (iniciais) por uma <img>.
+        supabaseClient.from('fotos_cracha').select('url_foto').eq('colaborador_id', data.id).eq('status', 'Aprovado').maybeSingle()
+            .then(({ data: fotoData }) => {
+                if (fotoData && fotoData.url_foto && avatarHeaderEl) {
+                    avatarHeaderEl.innerHTML = `<img src="${fotoData.url_foto}" alt="${data.nome}" style="width: 100%; height: 100%; object-fit: cover; border-radius: inherit;">`;
+                }
+            })
+            .catch(() => {}); // Sem foto ou erro na busca: mantém as iniciais, sem incomodar ninguém
     }
     document.getElementById('user-role-badge').innerText = data.perfil;
     document.getElementById('user-role-badge').className = `badge ${data.perfil.toLowerCase()}`;
@@ -51085,8 +51098,13 @@ window.exportarExcelVR = async function() {
         // --- 5. ABA MESTRA (DASHBOARD) ---
         if (resumoTotais.length > 1) {
             const sheetResumo = workbook.addWorksheet('RESUMO GERAL');
-            const temExtras = !!extrasInfo;
-            const ultimaColunaResumo = temExtras ? 'E' : 'C';
+            // 👇 Uma coluna PRA CADA BENEFÍCIO EXTRA cadastrado (ex.: "Ajuda de Custo"), em vez
+            // de uma única coluna genérica "BENEFÍCIOS EXTRAS" — cada benefício aparece com o
+            // próprio nome e linka na fórmula pra aba dele.
+            const nomesBeneficios = extrasInfo ? extrasInfo.nomesBeneficios : [];
+            const temExtras = nomesBeneficios.length > 0;
+            const numColsResumo = temExtras ? (4 + nomesBeneficios.length) : 3;
+            const ultimaColunaResumo = window._letraColunaExcel(numColsResumo);
 
             sheetResumo.mergeCells(`A1:${ultimaColunaResumo}1`);
             sheetResumo.getCell('A1').value = 'PAINEL DE CONTROLE GERAL - VALE REFEIÇÃO';
@@ -51103,7 +51121,7 @@ window.exportarExcelVR = async function() {
             sheetResumo.addRow([]);
 
             const headResumo = sheetResumo.addRow(temExtras
-                ? ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO VR (LÍQUIDO)", "BENEFÍCIOS EXTRAS", "CUSTO TOTAL (VR + EXTRAS)"]
+                ? ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO VR (LÍQUIDO)", ...nomesBeneficios, "CUSTO TOTAL (VR + EXTRAS)"]
                 : ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO TOTAL LÍQUIDO"]);
             headResumo.font = { bold: true, color: { argb: 'FFFFFFFF' } };
             headResumo.height = 25;
@@ -51114,34 +51132,39 @@ window.exportarExcelVR = async function() {
             });
 
             sheetResumo.columns = temExtras
-                ? [ { width: 50 }, { width: 20 }, { width: 22 }, { width: 22 }, { width: 26 } ]
+                ? [ { width: 50 }, { width: 20 }, { width: 22 }, ...nomesBeneficios.map(() => ({ width: 22 })), { width: 26 } ]
                 : [ { width: 50 }, { width: 25 }, { width: 30 } ];
 
             let somaSuperTotal = 0;
             let somaQtdTotal = 0;
-            let somaExtrasTotal = 0;
+            let somasPorBeneficio = nomesBeneficios.map(() => 0);
 
             let arrayFormulaSomaQtd = [];
             let arrayFormulaSomaVR = [];
-            let arrayFormulaSomaExtras = [];
+            let arrayFormulaSomaPorBeneficio = nomesBeneficios.map(() => []);
             let arrayFormulaSomaTotal = [];
 
             resumoTotais.forEach(r => {
                 somaQtdTotal += r.qtd;
-
-                const infoExtraUnidade = temExtras ? extrasInfo.porUnidade[r.unidade] : null;
-                const valorExtraUnidade = infoExtraUnidade ? infoExtraUnidade.valor : 0;
                 somaSuperTotal += r.soma;
-                somaExtrasTotal += valorExtraUnidade;
 
                 const rowNum = sheetResumo.rowCount + 1;
 
                 const valoresLinha = [ r.unidade, r.qtd, { formula: `'${r.sheet}'!K${r.lastRow}`, result: r.soma } ];
+                let somaExtrasUnidade = 0;
                 if (temExtras) {
-                    valoresLinha.push(infoExtraUnidade
-                        ? { formula: `'${extrasInfo.sheetName}'!${String.fromCharCode(64 + extrasInfo.colunaValor)}${infoExtraUnidade.linha}`, result: valorExtraUnidade }
-                        : 0);
-                    valoresLinha.push({ formula: `C${rowNum}+D${rowNum}`, result: r.soma + valorExtraUnidade });
+                    nomesBeneficios.forEach((nomeB, i) => {
+                        const info = extrasInfo.porBeneficio[nomeB];
+                        const infoUnidade = info ? info.porUnidade[r.unidade] : null;
+                        const valorBeneficio = infoUnidade ? infoUnidade.valor : 0;
+                        somaExtrasUnidade += valorBeneficio;
+                        somasPorBeneficio[i] += valorBeneficio;
+                        valoresLinha.push(infoUnidade
+                            ? { formula: `'${info.sheetName}'!${window._letraColunaExcel(info.colunaValor)}${infoUnidade.linha}`, result: valorBeneficio }
+                            : 0);
+                    });
+                    const colsBeneficiosFormula = nomesBeneficios.map((_, i) => `${window._letraColunaExcel(4 + i)}${rowNum}`).join('+');
+                    valoresLinha.push({ formula: `C${rowNum}${colsBeneficiosFormula ? '+' + colsBeneficiosFormula : ''}`, result: r.soma + somaExtrasUnidade });
                 }
 
                 const row = sheetResumo.addRow(valoresLinha);
@@ -51151,12 +51174,16 @@ window.exportarExcelVR = async function() {
                 row.getCell(3).alignment = { horizontal: 'center' };
                 row.getCell(3).font = { bold: true, color: { argb: 'FF28A745' } };
                 if (temExtras) {
-                    row.getCell(4).numFmt = '"R$ "#,##0.00';
-                    row.getCell(4).alignment = { horizontal: 'center' };
-                    row.getCell(4).font = { bold: true, color: { argb: 'FFFF9800' } };
-                    row.getCell(5).numFmt = '"R$ "#,##0.00';
-                    row.getCell(5).alignment = { horizontal: 'center' };
-                    row.getCell(5).font = { bold: true, color: { argb: 'FF002347' } };
+                    for (let i = 0; i < nomesBeneficios.length; i++) {
+                        const cell = row.getCell(4 + i);
+                        cell.numFmt = '"R$ "#,##0.00';
+                        cell.alignment = { horizontal: 'center' };
+                        cell.font = { bold: true, color: { argb: 'FFFF9800' } };
+                    }
+                    const totalCell = row.getCell(4 + nomesBeneficios.length);
+                    totalCell.numFmt = '"R$ "#,##0.00';
+                    totalCell.alignment = { horizontal: 'center' };
+                    totalCell.font = { bold: true, color: { argb: 'FF002347' } };
                 }
 
                 row.eachCell(cell => {
@@ -51166,19 +51193,23 @@ window.exportarExcelVR = async function() {
                 arrayFormulaSomaQtd.push(`B${rowNum}`);
                 arrayFormulaSomaVR.push(`C${rowNum}`);
                 if (temExtras) {
-                    arrayFormulaSomaExtras.push(`D${rowNum}`);
-                    arrayFormulaSomaTotal.push(`E${rowNum}`);
+                    for (let i = 0; i < nomesBeneficios.length; i++) {
+                        arrayFormulaSomaPorBeneficio[i].push(`${window._letraColunaExcel(4 + i)}${rowNum}`);
+                    }
+                    arrayFormulaSomaTotal.push(`${window._letraColunaExcel(4 + nomesBeneficios.length)}${rowNum}`);
                 }
             });
 
             sheetResumo.addRow([]);
 
+            const somaExtrasTotalGeral = somasPorBeneficio.reduce((s, v) => s + v, 0);
+
             const finalRowVals = temExtras
                 ? [ "CUSTO TOTAL GERAL",
                     { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal },
                     { formula: arrayFormulaSomaVR.join('+'), result: somaSuperTotal },
-                    { formula: arrayFormulaSomaExtras.join('+'), result: somaExtrasTotal },
-                    { formula: arrayFormulaSomaTotal.join('+'), result: somaSuperTotal + somaExtrasTotal } ]
+                    ...nomesBeneficios.map((_, i) => ({ formula: arrayFormulaSomaPorBeneficio[i].join('+'), result: somasPorBeneficio[i] })),
+                    { formula: arrayFormulaSomaTotal.join('+'), result: somaSuperTotal + somaExtrasTotalGeral } ]
                 : [ "CUSTO TOTAL GERAL",
                     { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal },
                     { formula: arrayFormulaSomaVR.join('+'), result: somaSuperTotal } ];
@@ -51193,8 +51224,10 @@ window.exportarExcelVR = async function() {
             finalRow.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
             finalRow.getCell(3).numFmt = '"R$ "#,##0.00';
             if (temExtras) {
-                finalRow.getCell(4).numFmt = '"R$ "#,##0.00';
-                finalRow.getCell(5).numFmt = '"R$ "#,##0.00';
+                for (let i = 0; i < nomesBeneficios.length; i++) {
+                    finalRow.getCell(4 + i).numFmt = '"R$ "#,##0.00';
+                }
+                finalRow.getCell(4 + nomesBeneficios.length).numFmt = '"R$ "#,##0.00';
             }
 
             const worksheets = workbook.worksheets;
@@ -51206,7 +51239,7 @@ window.exportarExcelVR = async function() {
         // --- 6. SALVA O ARQUIVO ---
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        
+
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         const nomeArquivo = mesReferencia.replace(/ \/ /g, '_').replace(/ /g, '_');
@@ -52284,8 +52317,12 @@ window.exportarExcelVA = async function() {
         // --- 5. ABA MESTRA (DASHBOARD) ---
         if (resumoTotais.length > 1) {
             const sheetResumo = workbook.addWorksheet('RESUMO GERAL');
-            const temExtras = !!extrasInfo;
-            const ultimaColunaResumo = temExtras ? 'E' : 'C';
+            // 👇 Uma coluna PRA CADA BENEFÍCIO EXTRA cadastrado, em vez de uma coluna genérica
+            // "BENEFÍCIOS EXTRAS" — mesma lógica usada no export do VR.
+            const nomesBeneficios = extrasInfo ? extrasInfo.nomesBeneficios : [];
+            const temExtras = nomesBeneficios.length > 0;
+            const numColsResumo = temExtras ? (4 + nomesBeneficios.length) : 3;
+            const ultimaColunaResumo = window._letraColunaExcel(numColsResumo);
 
             sheetResumo.mergeCells(`A1:${ultimaColunaResumo}1`);
             sheetResumo.getCell('A1').value = 'PAINEL DE CONTROLE GERAL - VALE ALIMENTAÇÃO';
@@ -52302,7 +52339,7 @@ window.exportarExcelVA = async function() {
             sheetResumo.addRow([]);
 
             const headResumo = sheetResumo.addRow(temExtras
-                ? ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO VA (LÍQUIDO)", "BENEFÍCIOS EXTRAS", "CUSTO TOTAL (VA + EXTRAS)"]
+                ? ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO VA (LÍQUIDO)", ...nomesBeneficios, "CUSTO TOTAL (VA + EXTRAS)"]
                 : ["UNIDADE OPERACIONAL", "QTD COLABORADORES", "CUSTO TOTAL LÍQUIDO"]);
             headResumo.font = { bold: true, color: { argb: 'FF000000' } };
             headResumo.height = 25;
@@ -52313,34 +52350,39 @@ window.exportarExcelVA = async function() {
             });
 
             sheetResumo.columns = temExtras
-                ? [ { width: 50 }, { width: 20 }, { width: 22 }, { width: 22 }, { width: 26 } ]
+                ? [ { width: 50 }, { width: 20 }, { width: 22 }, ...nomesBeneficios.map(() => ({ width: 22 })), { width: 26 } ]
                 : [ { width: 50 }, { width: 25 }, { width: 30 } ];
 
             let somaSuperTotal = 0;
             let somaQtdTotal = 0;
-            let somaExtrasTotal = 0;
+            let somasPorBeneficio = nomesBeneficios.map(() => 0);
 
             let arrayFormulaSomaQtd = [];
             let arrayFormulaSomaVA = [];
-            let arrayFormulaSomaExtras = [];
+            let arrayFormulaSomaPorBeneficio = nomesBeneficios.map(() => []);
             let arrayFormulaSomaTotal = [];
 
             resumoTotais.forEach(r => {
                 somaQtdTotal += r.qtd;
-
-                const infoExtraUnidade = temExtras ? extrasInfo.porUnidade[r.unidade] : null;
-                const valorExtraUnidade = infoExtraUnidade ? infoExtraUnidade.valor : 0;
                 somaSuperTotal += r.soma;
-                somaExtrasTotal += valorExtraUnidade;
 
                 const rowNum = sheetResumo.rowCount + 1;
 
                 const valoresLinha = [ r.unidade, r.qtd, { formula: `'${r.sheet}'!G${r.lastRow}`, result: r.soma } ];
+                let somaExtrasUnidade = 0;
                 if (temExtras) {
-                    valoresLinha.push(infoExtraUnidade
-                        ? { formula: `'${extrasInfo.sheetName}'!${String.fromCharCode(64 + extrasInfo.colunaValor)}${infoExtraUnidade.linha}`, result: valorExtraUnidade }
-                        : 0);
-                    valoresLinha.push({ formula: `C${rowNum}+D${rowNum}`, result: r.soma + valorExtraUnidade });
+                    nomesBeneficios.forEach((nomeB, i) => {
+                        const info = extrasInfo.porBeneficio[nomeB];
+                        const infoUnidade = info ? info.porUnidade[r.unidade] : null;
+                        const valorBeneficio = infoUnidade ? infoUnidade.valor : 0;
+                        somaExtrasUnidade += valorBeneficio;
+                        somasPorBeneficio[i] += valorBeneficio;
+                        valoresLinha.push(infoUnidade
+                            ? { formula: `'${info.sheetName}'!${window._letraColunaExcel(info.colunaValor)}${infoUnidade.linha}`, result: valorBeneficio }
+                            : 0);
+                    });
+                    const colsBeneficiosFormula = nomesBeneficios.map((_, i) => `${window._letraColunaExcel(4 + i)}${rowNum}`).join('+');
+                    valoresLinha.push({ formula: `C${rowNum}${colsBeneficiosFormula ? '+' + colsBeneficiosFormula : ''}`, result: r.soma + somaExtrasUnidade });
                 }
 
                 const row = sheetResumo.addRow(valoresLinha);
@@ -52350,12 +52392,16 @@ window.exportarExcelVA = async function() {
                 row.getCell(3).alignment = { horizontal: 'center' };
                 row.getCell(3).font = { bold: true, color: { argb: 'FF28A745' } };
                 if (temExtras) {
-                    row.getCell(4).numFmt = '"R$ "#,##0.00';
-                    row.getCell(4).alignment = { horizontal: 'center' };
-                    row.getCell(4).font = { bold: true, color: { argb: 'FFFF9800' } };
-                    row.getCell(5).numFmt = '"R$ "#,##0.00';
-                    row.getCell(5).alignment = { horizontal: 'center' };
-                    row.getCell(5).font = { bold: true, color: { argb: 'FF002347' } };
+                    for (let i = 0; i < nomesBeneficios.length; i++) {
+                        const cell = row.getCell(4 + i);
+                        cell.numFmt = '"R$ "#,##0.00';
+                        cell.alignment = { horizontal: 'center' };
+                        cell.font = { bold: true, color: { argb: 'FFFF9800' } };
+                    }
+                    const totalCell = row.getCell(4 + nomesBeneficios.length);
+                    totalCell.numFmt = '"R$ "#,##0.00';
+                    totalCell.alignment = { horizontal: 'center' };
+                    totalCell.font = { bold: true, color: { argb: 'FF002347' } };
                 }
 
                 row.eachCell(cell => {
@@ -52365,19 +52411,23 @@ window.exportarExcelVA = async function() {
                 arrayFormulaSomaQtd.push(`B${rowNum}`);
                 arrayFormulaSomaVA.push(`C${rowNum}`);
                 if (temExtras) {
-                    arrayFormulaSomaExtras.push(`D${rowNum}`);
-                    arrayFormulaSomaTotal.push(`E${rowNum}`);
+                    for (let i = 0; i < nomesBeneficios.length; i++) {
+                        arrayFormulaSomaPorBeneficio[i].push(`${window._letraColunaExcel(4 + i)}${rowNum}`);
+                    }
+                    arrayFormulaSomaTotal.push(`${window._letraColunaExcel(4 + nomesBeneficios.length)}${rowNum}`);
                 }
             });
 
             sheetResumo.addRow([]);
 
+            const somaExtrasTotalGeral = somasPorBeneficio.reduce((s, v) => s + v, 0);
+
             const finalRowVals = temExtras
                 ? [ "CUSTO TOTAL GERAL",
                     { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal },
                     { formula: arrayFormulaSomaVA.join('+'), result: somaSuperTotal },
-                    { formula: arrayFormulaSomaExtras.join('+'), result: somaExtrasTotal },
-                    { formula: arrayFormulaSomaTotal.join('+'), result: somaSuperTotal + somaExtrasTotal } ]
+                    ...nomesBeneficios.map((_, i) => ({ formula: arrayFormulaSomaPorBeneficio[i].join('+'), result: somasPorBeneficio[i] })),
+                    { formula: arrayFormulaSomaTotal.join('+'), result: somaSuperTotal + somaExtrasTotalGeral } ]
                 : [ "CUSTO TOTAL GERAL",
                     { formula: arrayFormulaSomaQtd.join('+'), result: somaQtdTotal },
                     { formula: arrayFormulaSomaVA.join('+'), result: somaSuperTotal } ];
@@ -52392,8 +52442,10 @@ window.exportarExcelVA = async function() {
             finalRow.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' };
             finalRow.getCell(3).numFmt = '"R$ "#,##0.00';
             if (temExtras) {
-                finalRow.getCell(4).numFmt = '"R$ "#,##0.00';
-                finalRow.getCell(5).numFmt = '"R$ "#,##0.00';
+                for (let i = 0; i < nomesBeneficios.length; i++) {
+                    finalRow.getCell(4 + i).numFmt = '"R$ "#,##0.00';
+                }
+                finalRow.getCell(4 + nomesBeneficios.length).numFmt = '"R$ "#,##0.00';
             }
 
             const worksheets = workbook.worksheets;
@@ -52405,7 +52457,7 @@ window.exportarExcelVA = async function() {
         // --- 6. SALVA O ARQUIVO ---
         const buffer = await workbook.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        
+
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         const nomeArquivo = mesReferencia.replace(/ \/ /g, '_').replace(/ /g, '_');
@@ -93800,11 +93852,22 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
                 }
             }
 
+            // 👇 NOVO: cada benefício individual (ex.: "Ajuda de Custo") guarda também o seu
+            // próprio "valorRateado" — usa a MESMA proporção (diasPagos/diasPadrao) do total,
+            // pra poder separar por aba/coluna no Excel sem perder o rateio de cada um.
+            const beneficiosComRateio = beneficiosDoColab.map(b => {
+                const valorBase = Number(b.valor) || 0;
+                const valorRateado = tipo === 'vr'
+                    ? (diasPadrao > 0 ? (valorBase / diasPadrao) * diasPagos : 0)
+                    : valorBase;
+                return { nome: b.nome_beneficio, valor: valorBase, valorRateado };
+            });
+
             resultado.push({
                 id: c.id,
                 nome: c.nome,
                 unidade: c.unidade,
-                beneficios: beneficiosDoColab.map(b => ({ nome: b.nome_beneficio, valor: Number(b.valor) })),
+                beneficios: beneficiosComRateio,
                 valorBruto,
                 diasPadrao,
                 diasProporcional,
@@ -93865,97 +93928,161 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
     }
 };
 
-// 👇 NOVO: adiciona os Benefícios Extras como uma aba DENTRO da mesma planilha de VR/VA (em vez
-// de um arquivo separado), com subtotal por unidade — usado tanto pelo exportarExcelVR quanto
-// pelo exportarExcelVA. Retorna null se não houver nenhum Benefício Extra gerado pra esse tipo,
-// ou { porUnidade: { [unidade]: { linha, valor } }, totalGeral, colunaValor, sheetName } quando
-// houver — o "porUnidade[unidade].linha" é a linha exata do subtotal daquela unidade na aba nova,
-// pra poder linkar via fórmula lá no RESUMO GERAL.
+// 👇 Converte um índice de coluna (1 = A, 2 = B, ..., 27 = AA, ...) pra letra do Excel —
+// usado nas fórmulas que apontam pra abas de Benefícios Extras, já que agora o número de
+// colunas do RESUMO GERAL varia de acordo com a quantidade de benefícios cadastrados.
+window._letraColunaExcel = function(indice) {
+    let n = indice, letra = '';
+    while (n > 0) {
+        const resto = (n - 1) % 26;
+        letra = String.fromCharCode(65 + resto) + letra;
+        n = Math.floor((n - 1) / 26);
+    }
+    return letra;
+};
+
+// 👇 NOVO: em vez de uma aba única "BENEFÍCIOS EXTRAS" com tudo misturado, cria UMA ABA PRA
+// CADA BENEFÍCIO CADASTRADO (ex.: "Ajuda de Custo" ganha a própria aba, separada de qualquer
+// outro benefício extra que exista) — usado tanto pelo exportarExcelVR quanto pelo
+// exportarExcelVA. Retorna null se não houver nenhum Benefício Extra gerado pra esse tipo, ou
+// { porBeneficio: { [nomeBeneficio]: { sheetName, colunaValor, porUnidade: { [unidade]: { linha, valor } }, totalGeral } },
+//   nomesBeneficios: [...nomes na ordem em que apareceram], totalGeralTodosBeneficios }
+// quando houver — "porBeneficio[nome].porUnidade[unidade].linha" é a linha exata do subtotal
+// daquela unidade na aba daquele benefício, pra poder linkar via fórmula lá no RESUMO GERAL.
 window._adicionarAbaBeneficiosExtras = function(workbook, tipo) {
     const dados = window.beneficiosExtrasCalculadoPorUnidade ? window.beneficiosExtrasCalculadoPorUnidade[tipo] : null;
     if (!dados || Object.keys(dados).length === 0) return null;
 
     const ehVR = tipo === 'vr';
-    const sheetName = 'BENEFÍCIOS EXTRAS';
-    const sheet = workbook.addWorksheet(sheetName);
-    const ultimaColunaLetra = ehVR ? 'I' : 'D';
-    const colunaValor = ehVR ? 9 : 4;
 
-    sheet.mergeCells(`A1:${ultimaColunaLetra}1`);
-    const titulo = sheet.getCell('A1');
-    titulo.value = `BENEFÍCIOS EXTRAS (PAGOS À PARTE) — ${ehVR ? 'VALE REFEIÇÃO' : 'VALE ALIMENTAÇÃO'}`;
-    titulo.font = { size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
-    titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF997404' } };
-    titulo.alignment = { vertical: 'middle', horizontal: 'center' };
-
-    sheet.addRow([]);
-
-    const headerCols = ehVR
-        ? ['COLABORADOR', 'UNIDADE', 'BENEFÍCIOS', 'DIAS PADRÃO', 'PROPORCIONAL', 'RETROATIVO (+)', 'ABATIMENTOS (-)', 'DIAS PAGOS', 'VALOR RATEADO']
-        : ['COLABORADOR', 'UNIDADE', 'BENEFÍCIOS', 'VALOR TOTAL'];
-    const headerRow = sheet.addRow(headerCols);
-    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    headerRow.eachCell(cell => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC107' } };
-        cell.alignment = { vertical: 'middle', horizontal: 'center' };
-        cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
-    });
-
-    sheet.columns = ehVR
-        ? [{ width: 35 }, { width: 20 }, { width: 45 }, { width: 13 }, { width: 13 }, { width: 14 }, { width: 15 }, { width: 13 }, { width: 16 }]
-        : [{ width: 35 }, { width: 20 }, { width: 45 }, { width: 18 }];
-
-    const porUnidade = {};
-    let totalGeral = 0;
+    // Reagrupa colaborador → benefício → unidade a partir do que já foi calculado
+    // (agrupado só por unidade) em window.beneficiosExtrasCalculadoPorUnidade.
+    const porBeneficioUnidade = {}; // { [nomeBeneficio]: { [unidade]: [ {...linha} ] } }
+    const ordemBeneficios = []; // preserva a ordem em que cada benefício apareceu
 
     Object.entries(dados).forEach(([unidade, colaboradores]) => {
-        let somaUnidade = 0;
         colaboradores.forEach(c => {
-            somaUnidade += c.valorTotal;
-            const linhaBeneficios = c.beneficios.map(b => `${b.nome}: R$ ${b.valor.toFixed(2).replace('.', ',')}`).join('; ');
-            const valoresLinha = ehVR
-                ? [c.nome, c.unidade, linhaBeneficios, c.diasPadrao, (c.diasProporcional !== null && c.diasProporcional !== undefined) ? c.diasProporcional : '', c.retroativo, c.abatimentos, c.diasPagos, c.valorTotal]
-                : [c.nome, c.unidade, linhaBeneficios, c.valorTotal];
-            const row = sheet.addRow(valoresLinha);
-            if (ehVR) {
-                row.getCell(4).numFmt = '0.0';
-                row.getCell(5).numFmt = '0.0';
-                row.getCell(6).numFmt = '0.0';
-                row.getCell(7).numFmt = '0.0';
-                row.getCell(8).numFmt = '0.0';
-                row.getCell(9).numFmt = '"R$" #,##0.00';
-            } else {
-                row.getCell(4).numFmt = '"R$" #,##0.00';
-            }
-            row.eachCell(cell => {
-                cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+            (c.beneficios || []).forEach(b => {
+                if (!porBeneficioUnidade[b.nome]) {
+                    porBeneficioUnidade[b.nome] = {};
+                    ordemBeneficios.push(b.nome);
+                }
+                if (!porBeneficioUnidade[b.nome][unidade]) porBeneficioUnidade[b.nome][unidade] = [];
+                porBeneficioUnidade[b.nome][unidade].push({
+                    nome: c.nome,
+                    unidade: c.unidade,
+                    diasPadrao: c.diasPadrao,
+                    diasProporcional: c.diasProporcional,
+                    retroativo: c.retroativo,
+                    abatimentos: c.abatimentos,
+                    diasPagos: c.diasPagos,
+                    valorRateado: b.valorRateado
+                });
             });
         });
-
-        totalGeral += somaUnidade;
-
-        const subtotalVals = ehVR
-            ? ['', '', `SUBTOTAL — ${unidade.toUpperCase()}`, '', '', '', '', '', somaUnidade]
-            : ['', '', `SUBTOTAL — ${unidade.toUpperCase()}`, somaUnidade];
-        const subtotalRow = sheet.addRow(subtotalVals);
-        subtotalRow.font = { bold: true };
-        subtotalRow.getCell(colunaValor).numFmt = '"R$" #,##0.00';
-        subtotalRow.eachCell(cell => {
-            cell.border = { top: {style:'thin'}, bottom: {style:'thin'} };
-        });
-
-        porUnidade[unidade] = { linha: subtotalRow.number, valor: somaUnidade };
     });
 
-    sheet.addRow([]);
-    const totalRowVals = ehVR
-        ? ['', '', 'TOTAL GERAL — BENEFÍCIOS EXTRAS', '', '', '', '', '', totalGeral]
-        : ['', '', 'TOTAL GERAL — BENEFÍCIOS EXTRAS', totalGeral];
-    const totalRow = sheet.addRow(totalRowVals);
-    totalRow.font = { bold: true, size: 12 };
-    totalRow.getCell(colunaValor).numFmt = '"R$" #,##0.00';
+    const nomesAbasUsados = new Set();
+    const porBeneficio = {};
+    let totalGeralTodosBeneficios = 0;
 
-    return { porUnidade, totalGeral, colunaValor, sheetName };
+    ordemBeneficios.forEach(nomeBeneficio => {
+        const porUnidadeDoBeneficio = porBeneficioUnidade[nomeBeneficio];
+
+        // Nome da aba: até 31 caracteres (limite do Excel), sem caracteres inválidos, e sem
+        // colidir com uma aba já existente (duas outras abas — ex.: unidades do VR — ou dois
+        // benefícios com nome parecido depois de cortado em 31 caracteres).
+        const baseSheetName = String(nomeBeneficio || 'BENEFÍCIO EXTRA').substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '').trim() || 'BENEFÍCIO EXTRA';
+        let sheetNameFinal = baseSheetName;
+        let sufixo = 2;
+        while (nomesAbasUsados.has(sheetNameFinal.toUpperCase()) || workbook.getWorksheet(sheetNameFinal)) {
+            sheetNameFinal = `${baseSheetName.substring(0, 28)} ${sufixo}`;
+            sufixo++;
+        }
+        nomesAbasUsados.add(sheetNameFinal.toUpperCase());
+
+        const sheet = workbook.addWorksheet(sheetNameFinal);
+        const ultimaColunaLetra = ehVR ? 'H' : 'C';
+        const colunaValor = ehVR ? 8 : 3;
+
+        sheet.mergeCells(`A1:${ultimaColunaLetra}1`);
+        const titulo = sheet.getCell('A1');
+        titulo.value = `BENEFÍCIO EXTRA: ${nomeBeneficio} — ${ehVR ? 'VALE REFEIÇÃO' : 'VALE ALIMENTAÇÃO'}`;
+        titulo.font = { size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
+        titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF997404' } };
+        titulo.alignment = { vertical: 'middle', horizontal: 'center' };
+
+        sheet.addRow([]);
+
+        const headerCols = ehVR
+            ? ['COLABORADOR', 'UNIDADE', 'DIAS PADRÃO', 'PROPORCIONAL', 'RETROATIVO (+)', 'ABATIMENTOS (-)', 'DIAS PAGOS', 'VALOR RATEADO']
+            : ['COLABORADOR', 'UNIDADE', 'VALOR'];
+        const headerRow = sheet.addRow(headerCols);
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        headerRow.eachCell(cell => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC107' } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+        });
+
+        sheet.columns = ehVR
+            ? [{ width: 35 }, { width: 20 }, { width: 13 }, { width: 13 }, { width: 14 }, { width: 15 }, { width: 13 }, { width: 16 }]
+            : [{ width: 35 }, { width: 20 }, { width: 18 }];
+
+        const porUnidade = {};
+        let totalGeral = 0;
+
+        Object.entries(porUnidadeDoBeneficio).forEach(([unidade, linhas]) => {
+            let somaUnidade = 0;
+            linhas.forEach(l => {
+                somaUnidade += l.valorRateado;
+                const valoresLinha = ehVR
+                    ? [l.nome, l.unidade, l.diasPadrao, (l.diasProporcional !== null && l.diasProporcional !== undefined) ? l.diasProporcional : '', l.retroativo, l.abatimentos, l.diasPagos, l.valorRateado]
+                    : [l.nome, l.unidade, l.valorRateado];
+                const row = sheet.addRow(valoresLinha);
+                if (ehVR) {
+                    row.getCell(3).numFmt = '0.0';
+                    row.getCell(4).numFmt = '0.0';
+                    row.getCell(5).numFmt = '0.0';
+                    row.getCell(6).numFmt = '0.0';
+                    row.getCell(7).numFmt = '0.0';
+                    row.getCell(8).numFmt = '"R$" #,##0.00';
+                } else {
+                    row.getCell(3).numFmt = '"R$" #,##0.00';
+                }
+                row.eachCell(cell => {
+                    cell.border = { top: {style:'thin', color: {argb:'FFDDDDDD'}}, bottom: {style:'thin', color: {argb:'FFDDDDDD'}} };
+                });
+            });
+
+            totalGeral += somaUnidade;
+
+            const subtotalVals = ehVR
+                ? ['', `SUBTOTAL — ${unidade.toUpperCase()}`, '', '', '', '', '', somaUnidade]
+                : ['', `SUBTOTAL — ${unidade.toUpperCase()}`, somaUnidade];
+            const subtotalRow = sheet.addRow(subtotalVals);
+            subtotalRow.font = { bold: true };
+            subtotalRow.getCell(colunaValor).numFmt = '"R$" #,##0.00';
+            subtotalRow.eachCell(cell => {
+                cell.border = { top: {style:'thin'}, bottom: {style:'thin'} };
+            });
+
+            porUnidade[unidade] = { linha: subtotalRow.number, valor: somaUnidade };
+        });
+
+        sheet.addRow([]);
+        const totalRowVals = ehVR
+            ? ['', `TOTAL GERAL — ${nomeBeneficio.toUpperCase()}`, '', '', '', '', '', totalGeral]
+            : ['', `TOTAL GERAL — ${nomeBeneficio.toUpperCase()}`, totalGeral];
+        const totalRow = sheet.addRow(totalRowVals);
+        totalRow.font = { bold: true, size: 12 };
+        totalRow.getCell(colunaValor).numFmt = '"R$" #,##0.00';
+
+        totalGeralTodosBeneficios += totalGeral;
+        porBeneficio[nomeBeneficio] = { sheetName: sheetNameFinal, colunaValor, porUnidade, totalGeral };
+    });
+
+    return { porBeneficio, nomesBeneficios: ordemBeneficios, totalGeralTodosBeneficios };
 };
 
 window.exportarExcelBeneficiosExtras = async function(tipo) {
