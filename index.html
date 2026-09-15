@@ -50307,7 +50307,11 @@ window.calcularVRAgora = async function() {
 
     tbody.innerHTML = '<tr><td colspan="8" style="text-align: center;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: #ff9800; margin-bottom: 10px;"></i><br>Analisando datas dinâmicas e processando escalas virtuais...</td></tr>';
     btnExcel.classList.add('hidden');
-    window.vrCalculadoPorUnidade = {}; 
+    window.vrCalculadoPorUnidade = {};
+    // 👇 Apuração dos dias (mesma regra do VR) de TODOS que passam pelo cálculo nesse período,
+    // mesmo quem não recebe VR de fato (PJ, cargo "sem Vale Refeição" etc.) — usado só pelo
+    // rateio dos Benefícios Extras, que segue a regra do VR mas não exige receber VR.
+    window.diasApuradosVRPorId = {};
 
     try {
         const { data: regrasVR, error: errRegras } = await supabaseClient.from('config_vr').select('*');
@@ -50368,10 +50372,12 @@ window.calcularVRAgora = async function() {
         // com esse mesmo filtro) continua normal.
         await window.carregarExcecoesCargoBeneficio(); // 🩹 Regras de "Cargos Sem Benefício"
         window.vrExcluidosPorRescisao = [];
+        // 👇 CORREÇÃO: NÃO exclui mais PJ / "sem Vale Refeição" aqui — eles continuam fora do
+        // relatório e do total de VR (isso é garantido mais abaixo, no "recebeVRPorCargo"), mas
+        // agora entram na geração de escala/apuração de dias, porque os Benefícios Extras deles
+        // seguem a MESMA REGRA de dias do VR mesmo sem receber o VR em si.
         const colabsAtivos = (resPerfis.data || []).filter(c => {
             if (c.status === 'Cancelado(a)' || c.status === 'Excluído' || c.status === 'Aguardando ASO') return false;
-            if (typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(c)) return false; // PJ não tem VR
-            if (typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(c, 'sem_vr')) return false; // 🩹 Cargo marcado como "sem Vale Refeição" nesta unidade
 
             let drVR = c.dados_rescisao;
             if (typeof drVR === 'string') { try { drVR = JSON.parse(drVR); } catch(e) {} }
@@ -50387,7 +50393,11 @@ window.calcularVRAgora = async function() {
                         // (dI a dF) — rescisões antigas, de antes do filtro, não aparecem aqui.
                         // E só entra se bater com a unidade escolhida no filtro (ou se for "Todas").
                         const bateUnidadeVR = unidadeSelecionada === 'Todas' || (c.unidade || '').includes(unidadeSelecionada);
-                        if (dataUltimoDia >= dI && bateUnidadeVR) {
+                        // 👇 Só entra na caixinha de "descontar VR não utilizado" quem de fato
+                        // recebia VR (PJ e cargo "sem Vale Refeição" nunca tiveram VR pra descontar).
+                        const recebiaVR = !(typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(c))
+                            && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(c, 'sem_vr'));
+                        if (dataUltimoDia >= dI && bateUnidadeVR && recebiaVR) {
                             window.vrExcluidosPorRescisao.push({ id: c.id, nome: c.nome });
                         }
                         return false;
@@ -50460,6 +50470,14 @@ window.calcularVRAgora = async function() {
             }
 
             if (!regraUnidade || String(regraUnidade.recebe_vr) === 'false') continue;
+
+            // 👇 Continua determinando quem de fato recebe VR (PJ e cargo "sem Vale Refeição" ficam
+            // de fora do relatório/total, exatamente como antes) — só que agora isso é decidido
+            // DEPOIS de apurar os dias, pra poder guardar a apuração de qualquer forma e usar no
+            // rateio dos Benefícios Extras dessas pessoas.
+            const colabParaExcecaoVR = { id: colab.id, unidade: colab.unidadeReal, dados_admissao: colab.dados_admissao, cargo: colab.dados_admissao?.cargo };
+            const recebeVRPorCargo = !(typeof window.ehCargoPJ === 'function' && window.ehCargoPJ(colab))
+                && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio(colabParaExcecaoVR, 'sem_vr'));
 
             const valorDiariaUnidade = parseFloat(regraUnidade.valor_diaria) || 0;
             const adm = colab.dados_admissao;
@@ -50663,6 +50681,22 @@ window.calcularVRAgora = async function() {
 
             let diasAPagarCalculado = baseTotalVR - abatimentosCalculado;
             if (diasAPagarCalculado < 0) diasAPagarCalculado = 0;
+
+            // 👇 Guarda a apuração de dias (mesma regra do VR: Dias Padrão, retroativo, abatimentos
+            // de falta/afastamento etc.) pra ESSE colaborador, mesmo que ele não receba VR de fato
+            // (PJ, cargo "sem Vale Refeição"...) — é isso que os Benefícios Extras vão usar pra
+            // ratear, seguindo a mesma regra sem exigir que a pessoa receba VR.
+            window.diasApuradosVRPorId[colab.id] = {
+                diasPadrao: diasPadraoCalculado,
+                diasAPagar: diasAPagarCalculado,
+                jornada: tipoJornada,
+                recebeVR: recebeVRPorCargo
+            };
+
+            // 👇 Quem não recebe VR de fato (PJ / cargo "sem Vale Refeição") não entra no
+            // relatório nem no total de VR — exatamente como antes dessa apuração de dias ter
+            // passado a rodar também pra eles.
+            if (!recebeVRPorCargo) continue;
 
             const valorVRBruto = diasAPagarCalculado * valorDiariaUnidade;
 
@@ -93476,18 +93510,16 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
     // o valor cadastrado (ex.: R$ 300) é dividido pelos "Dias Padrão" (21.5 p/ 44h ou 15.5
     // p/ 12x36) pra achar o valor do dia, e multiplicado pelos dias que o colaborador de fato
     // tem a pagar no período filtrado (o mesmo "Dias a Pagar" da apuração de VR acima — nunca
-    // pode passar do teto de 21.5/15.5). Isso exige que o relatório de VR já tenha sido gerado
-    // pra essa unidade/período, porque é dali que vêm os "Dias a Pagar" de cada colaborador.
-    let vrPorId = null;
+    // pode passar do teto de 21.5/15.5). Isso exige que o cálculo do VR já tenha rodado pra
+    // essa unidade/período. 👇 IMPORTANTE: usa window.diasApuradosVRPorId (e não
+    // window.vrCalculadoPorUnidade) porque esse mapa tem os dias de TODO MUNDO que passou pela
+    // apuração — inclusive PJ e cargos marcados "sem Vale Refeição", que não aparecem no
+    // relatório/total de VR mas ainda seguem a MESMA REGRA de dias pra ratear o benefício extra.
     if (tipo === 'vr') {
-        if (!window.vrCalculadoPorUnidade || Object.keys(window.vrCalculadoPorUnidade).length === 0) {
+        if (!window.diasApuradosVRPorId || Object.keys(window.diasApuradosVRPorId).length === 0) {
             if (silencioso) return;
-            return mostrarAlerta('Antes de gerar os Benefícios Extras do Vale Refeição, clique em "Calcular" no Vale Refeição (acima) pra apurar os dias do período — o rateio usa os "Dias a Pagar" de cada colaborador.', 'aviso');
+            return mostrarAlerta('Antes de gerar os Benefícios Extras do Vale Refeição, clique em "Calcular" no Vale Refeição (acima) pra apurar os dias do período.', 'aviso');
         }
-        vrPorId = new Map();
-        Object.values(window.vrCalculadoPorUnidade).flat().forEach(c => {
-            if (c.id) vrPorId.set(c.id, c);
-        });
     }
 
     try {
@@ -93523,16 +93555,17 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
             let semApuracaoVR = false;
 
             if (tipo === 'vr') {
-                const infoVR = vrPorId.get(c.id);
-                if (infoVR) {
-                    diasPadrao = Number(infoVR.diasPadrao) || 0;
-                    // Nunca pode passar do teto padrão (21.5/15.5), mesmo que a apuração de VR
-                    // tenha somado retroativo por cima — aqui o teto do rateio é sempre o padrão.
-                    diasPagos = Math.min(Number(infoVR.diasAPagar) || 0, diasPadrao);
+                const infoDias = window.diasApuradosVRPorId ? window.diasApuradosVRPorId[c.id] : null;
+                if (infoDias) {
+                    diasPadrao = Number(infoDias.diasPadrao) || 0;
+                    // Nunca pode passar do teto padrão (21.5/15.5), mesmo que a apuração tenha
+                    // somado retroativo por cima — aqui o teto do rateio é sempre o padrão.
+                    diasPagos = Math.min(Number(infoDias.diasAPagar) || 0, diasPadrao);
                     valorTotal = diasPadrao > 0 ? (valorBruto / diasPadrao) * diasPagos : 0;
                 } else {
-                    // Colaborador não aparece na apuração de VR do período/unidade (não recebe
-                    // VR nesse período) — sem dias apurados, não há base pra ratear o benefício.
+                    // Colaborador nem passou pela apuração de dias nesse período/unidade (ex.:
+                    // admitido depois do fim do filtro, ou a unidade não tem regra de VR
+                    // cadastrada) — sem dias apurados, não há base pra ratear o benefício.
                     diasPadrao = 0;
                     diasPagos = 0;
                     valorTotal = 0;
