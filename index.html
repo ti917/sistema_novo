@@ -80921,8 +80921,13 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     const dCarencia = new Date(hojeObj); dCarencia.setDate(dCarencia.getDate() - BUFFER_BUSCA_RETORNO_DIAS);
     const dataCarenciaIso = dCarencia.toISOString().split('T')[0];
 
+    // 🩹 CORREÇÃO: antes só buscava quem estava com status EXATAMENTE 'Ativo', então
+    // qualquer colaborador em status intermediário (ex.: "Aguardando ASO") nunca chegava
+    // nem a entrar nessa conta — mesmo estando com o Contrato de Trabalho pendente de
+    // assinatura há dias. Agora busca todo mundo da unidade e a exclusão de quem já saiu
+    // de fato da empresa (Cancelado/Excluído/Desligado) é feita no filter abaixo.
     const [resColabs, resAusencias, resFerias] = await Promise.all([
-        supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
+        supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').in('unidade', unids),
         supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').lte('data_inicio', hojeIso).gte('data_fim', dataCarenciaIso),
         supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataCarenciaIso)
     ]);
@@ -80949,9 +80954,11 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     let qtdPendentesProrrogacao = 0; let qtdPendentesAdmissional = 0;
 
     (resColabs.data || []).forEach(c => {
-        // 👇 Regra pedida: só trava quem está Ativo (a query já filtra status='Ativo',
-        // isso aqui é só reforço/documentação da regra).
-        if (c.status !== 'Ativo') return;
+        // 🩹 CORREÇÃO: antes só considerava quem estava com status EXATAMENTE 'Ativo' —
+        // alguém "Aguardando ASO" (ou qualquer outro status intermediário de quem ainda
+        // está na empresa) nunca era cobrado de Contrato de Trabalho, mesmo pendente há
+        // dias. Só exclui de fato quem já saiu da empresa.
+        if (['Cancelado(a)', 'Excluído', 'Desligado'].includes(c.status)) return;
         if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
 
         const adm = c.dados_admissao || {};
@@ -81013,10 +81020,16 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         // ------------------------------------------------------------------
         if (ctr.status === 'Aguardando Assinatura' && ctr.doc_rh) {
             if (diffDias >= DIAS_CARENCIA_CONTRATO) {
+                // 🩹 CORREÇÃO: conta SEMPRE que o contrato estiver vencido, esteja hoje
+                // sendo dia de trabalho ou folga da pessoa — o gestor precisa ver o total
+                // real de pendências. A folga do dia só isenta ESSA pessoa específica de
+                // travar o sistema hoje (ela não tem como assinar num dia que não está lá),
+                // nunca esconde ela do número mostrado no aviso.
+                qtdPendentesAdmissional++;
                 if (protegidoPorAfastamento) {
                     temAlerta = true; if (0 < menorPrazo) menorPrazo = 0;
                 } else {
-                    deveBloquearSistema = true; qtdPendentesAdmissional++;
+                    deveBloquearSistema = true;
                 }
             } else {
                 temAlerta = true;
@@ -81040,10 +81053,12 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
         const limiteBloqueioProrrogacao = regraExp.p1 + DIAS_CARENCIA_CONTRATO;
 
         if (diffDias >= limiteBloqueioProrrogacao) { // 30/45 + carência
+            // 🩹 Mesma correção do Admissional: conta sempre que vencido, folga ou não.
+            qtdPendentesProrrogacao++;
             if (protegidoPorAfastamento) {
                 temAlerta = true; if (0 < menorPrazo) menorPrazo = 0;
             } else {
-                deveBloquearSistema = true; qtdPendentesProrrogacao++;
+                deveBloquearSistema = true;
             }
         }
         else if (diffDias >= (regraExp.p1 - 5)) { // Avisa 5 dias antes do vencimento original (25 ou 40)
