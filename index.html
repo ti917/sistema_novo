@@ -47819,7 +47819,17 @@ function refinarQuadLocalmente(src, cantosGrosso) {
 // diferença ali é pequena. Se NENHUMA borda solta do quadrilátero achado
 // tiver esse contraste de verdade, o corte é descartado — melhor devolver
 // nada (a foto inteira, sem cortar) do que cortar em cima de um reflexo.
-function corteTemFundoDeVerdade(pequeno, cantos, areaImagem) {
+// exigirMultiplas: quando true, uma única borda com contraste não basta —
+// exige pelo menos 2 bordas soltas mostrando contraste real (ou todas, se só
+// existir 1 borda solta pra checar). Usado quando o quadrilátero veio de uma
+// estratégia mais "grosseira" (saturação/brilho, sem confirmação de borda
+// nítida), onde um contraste isolado pode ser só coincidência (ex: o fundo
+// que aparece do lado de fora é a mesa escura atrás de um cobertor claro — e
+// o quadrilátero na verdade engloba papel + cobertor, não só o papel; se
+// SÓ aquela borda contra a mesa tiver contraste e as outras 3 bordas, que
+// deveriam separar papel de cobertor, não tiverem, é sinal de que o corte
+// pegou fundo demais).
+function corteTemFundoDeVerdade(pequeno, cantos, areaImagem, exigirMultiplas) {
     const w = pequeno.cols, h = pequeno.rows;
     const chaves = ['tl', 'tr', 'br', 'bl'];
     const minX = Math.min(...chaves.map(k => cantos[k].x));
@@ -47852,18 +47862,21 @@ function corteTemFundoDeVerdade(pequeno, cantos, areaImagem) {
         [w - maxX > folgaBorda, [maxX - faixa, minY, maxX, maxY], [maxX, minY, maxX + faixa, maxY]],   // direita
     ];
 
-    let temBordaSolta = false, achouContrasteReal = false;
+    let bordasSoltas = 0, bordasComContraste = 0;
     for (const [solta, dentro, fora] of bordas) {
         if (!solta) continue;
-        temBordaSolta = true;
+        bordasSoltas++;
         const mDentro = mediaRetangulo(...dentro), mFora = mediaRetangulo(...fora);
         if (!mDentro || !mFora) continue;
         const diff = Math.abs(mDentro[0] - mFora[0]) + Math.abs(mDentro[1] - mFora[1]) + Math.abs(mDentro[2] - mFora[2]);
-        if (diff > 35) { achouContrasteReal = true; break; }
+        if (diff > 35) bordasComContraste++;
     }
-    // Só desconfia se existia pelo menos uma borda "solta" (dava pra
-    // checar) e MESMO ASSIM nenhuma mostrou contraste real contra o fundo.
-    return !temBordaSolta || achouContrasteReal;
+    if (bordasSoltas === 0) return true; // nada pra checar (todas as bordas encostam na foto)
+    if (!exigirMultiplas) return bordasComContraste > 0;
+    // Modo exigente: pelo menos 2 bordas soltas confirmando fundo real (ou
+    // todas, se só existir 1 pra checar) — uma coincidência isolada não basta.
+    const minimoNecessario = Math.min(bordasSoltas, 2);
+    return bordasComContraste >= minimoNecessario;
 }
 
 // Tenta achar o documento e devolver { canvas, pontos } já cortado/endireitado
@@ -47950,7 +47963,21 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         // pela cor/brilho, não por bordas retas) achou um quadrilátero bem
         // maior que ENGLOBA esse pedaço, é sinal de que o pedaço é só uma
         // fatia do documento de verdade — nesse caso o maior vence.
-        if (escolhido) {
+        // 🩹 CORREÇÃO (09/2026 v2): a troca pra um candidato maior abaixo só
+        // existe pra resgatar o caso do reflexo cortando o papel ao meio — ou
+        // seja, só faz sentido quando o candidato MENOR (escolhido) não tem
+        // fundo de verdade atrás dele (prova de que é só um pedaço, cercado
+        // do mesmo papel continuando pra fora do quadro). Antes essa troca
+        // acontecia mesmo quando o candidato menor já era um corte BOM e
+        // confiável — e nesse caso o "maior" quase sempre é erro de fundo
+        // parecido (ex: papel branco em cima de cobertor bege claro: a
+        // estratégia de saturação enxerga os dois como "sem cor" e devolve
+        // um quadrilátero enorme que engloba o papel + parte do cobertor).
+        // Resultado: um corte perfeito era jogado fora e trocado por um
+        // errado, sobrando fundo na digitalização final. Agora só troca se o
+        // menor não passar no teste de fundo — exatamente o cenário que essa
+        // correção nasceu pra resolver.
+        if (escolhido && !corteTemFundoDeVerdade(pequeno, escolhido.cantos, areaImagem)) {
             const contemQuad = (pequeno, grande, folga) => {
                 const chaves = ['tl', 'tr', 'br', 'bl'];
                 const minX = Math.min(...chaves.map(k => pequeno[k].x));
@@ -47965,8 +47992,12 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
             };
             const folgaPx = Math.sqrt(areaImagem) * 0.02; // ~2% da diagonal, pra tolerar imprecisão normal de detecção
             for (const maior of [achadoSaturacao, achadoBrilho]) {
+                // Além de englobar e ser bem maior, o candidato maior TAMBÉM
+                // precisa ter fundo de verdade — senão estaríamos só trocando
+                // um corte ruim por outro corte ruim (e maior).
                 if (maior && maior !== escolhido && maior.area > escolhido.area * 1.3 &&
-                    contemQuad(escolhido.cantos, maior.cantos, folgaPx)) {
+                    contemQuad(escolhido.cantos, maior.cantos, folgaPx) &&
+                    corteTemFundoDeVerdade(pequeno, maior.cantos, areaImagem, true)) {
                     escolhido = maior;
                     break;
                 }
@@ -47982,7 +48013,13 @@ function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
         // checagem: exige que o candidato final tenha fundo de verdade atrás
         // de pelo menos uma borda solta; sem isso, descarta e deixa quem
         // chamou cair pro endireitarCanvas (foto inteira, só endireitada).
-        if (escolhido && !corteTemFundoDeVerdade(pequeno, escolhido.cantos, areaImagem)) {
+        // Quando o candidato final NÃO vem da estratégia de borda nítida
+        // (Canny) — ou seja, só saturação/brilho apontaram esse quadrilátero,
+        // sem contorno reto confirmando — uma única borda com contraste pode
+        // ser coincidência (ex: fundo escuro atrás de um cobertor claro que,
+        // por sua vez, tem cor parecida com o papel); por isso exige 2+ nesse
+        // caso ("exigirMultiplas").
+        if (escolhido && !corteTemFundoDeVerdade(pequeno, escolhido.cantos, areaImagem, escolhido !== achadoBorda)) {
             console.warn('Corte automático descartado: o quadrilátero achado não tem fundo de verdade atrás de nenhuma borda (provável reflexo/brilho no meio do papel, ou documento enchendo o quadro) — melhor não cortar do que cortar errado.');
             escolhido = null;
         }
