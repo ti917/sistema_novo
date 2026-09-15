@@ -47549,19 +47549,21 @@ function recortarPorCantos(src, cantos, margemPct) {
 // simplifique pra exatamente 4 vértices — ótimo pra folha bem lisa e reta
 // com bom contraste, mas falha em papel curvado/amassado (o contorno real
 // nunca vira um quadrilátero perfeito nesse caso).
-function acharQuad4PontosPorBorda(src, areaImagem) {
-    const gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    const blur = new cv.Mat();
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+// Roda Canny + approxPolyDP numa imagem em tons de cinza já pronta (borrada)
+// e devolve o melhor quadrilátero de 4 pontos achado, ou null. Extraído pra
+// função própria pra poder tentar mais de uma vez com sensibilidades
+// diferentes (ver 🔎 CORREÇÃO abaixo) sem duplicar a lógica de contorno.
+function __acharQuadViaCanny(blurredGray, areaImagem, low, high) {
     const edges = new cv.Mat();
-    cv.Canny(blur, edges, 50, 150);
+    cv.Canny(blurredGray, edges, low, high);
     const kernel = cv.Mat.ones(5, 5, cv.CV_8U);
     cv.dilate(edges, edges, kernel);
+    kernel.delete();
 
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    edges.delete();
 
     // O quanto simplificar o contorno (% do perímetro) até virar um
     // quadrilátero de 4 pontos varia de foto pra foto — um epsilon fixo
@@ -47596,9 +47598,54 @@ function acharQuad4PontosPorBorda(src, areaImagem) {
         }
         c.delete();
     }
-
-    gray.delete(); blur.delete(); edges.delete(); kernel.delete(); contours.delete(); hierarchy.delete();
+    contours.delete(); hierarchy.delete();
     return melhorCantos ? { cantos: melhorCantos, area: melhorArea } : null;
+}
+
+function acharQuad4PontosPorBorda(src, areaImagem) {
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+
+    let resultado = __acharQuadViaCanny(blur, areaImagem, 50, 150);
+
+    // 🔎 CORREÇÃO (09/2026 v3): quando papel e fundo têm cor/brilho quase
+    // idênticos (papel branco em cobertor bege claro), a borda real entre os
+    // dois é um degrau bem fraco de contraste — o Canny padrão (50,150) não
+    // acha gradiente forte o suficiente ali e não fecha um contorno de 4
+    // lados em lugar nenhum. Se isso aconteceu, tenta de novo: primeiro só
+    // baixando a sensibilidade do Canny, e se ainda assim não achar, realça
+    // o contraste local da imagem (CLAHE — equaliza o histograma em blocos
+    // pequenos, então uma diferença sutil de tom que se perde na foto
+    // inteira fica bem mais visível dentro de cada bloco) antes de tentar
+    // de novo com o Canny sensível. Cada tentativa é bem mais barata que a
+    // primeira (já é 8-bit, já é pequena), então o custo extra é mínimo.
+    if (!resultado) {
+        const blurSensivel = new cv.Mat();
+        cv.GaussianBlur(gray, blurSensivel, new cv.Size(3, 3), 0);
+        resultado = __acharQuadViaCanny(blurSensivel, areaImagem, 15, 45);
+        blurSensivel.delete();
+    }
+
+    if (!resultado) {
+        try {
+            const clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+            const realcado = new cv.Mat();
+            clahe.apply(gray, realcado);
+            clahe.delete();
+            const blurRealcado = new cv.Mat();
+            cv.GaussianBlur(realcado, blurRealcado, new cv.Size(3, 3), 0);
+            realcado.delete();
+            resultado = __acharQuadViaCanny(blurRealcado, areaImagem, 15, 45);
+            blurRealcado.delete();
+        } catch (eClahe) {
+            console.warn('CLAHE não disponível/falhou — seguindo sem esse último recurso de contraste:', eClahe);
+        }
+    }
+
+    gray.delete(); blur.delete();
+    return resultado;
 }
 
 // =========================================================================
