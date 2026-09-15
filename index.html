@@ -9003,17 +9003,20 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
         </div>
     </div>
     <p style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-bottom: 10px;">Esses benefícios são configurados no botão "Benefícios Extras" acima e geram um relatório separado — não entram na planilha de Vale Refeição.</p>
+    <p style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-bottom: 10px;"><i class="fa-solid fa-circle-info"></i> O valor é rateado pelas mesmas regras do Vale Refeição: valor cadastrado ÷ Dias Padrão × Dias Pagos (nunca passa do teto de 21.5 ou 15.5). Gere primeiro o cálculo do Vale Refeição acima, no mesmo período/unidade.</p>
     <table id="tabela-beneficios-extras-vr">
         <thead>
             <tr>
                 <th style="text-align: left;">Colaborador</th>
                 <th>Unidade</th>
                 <th style="text-align: left;">Benefícios</th>
+                <th>Dias Padrão</th>
+                <th>Dias Pagos</th>
                 <th>Valor Total</th>
             </tr>
         </thead>
         <tbody id="lista-beneficios-extras-vr-body">
-            <tr><td colspan="4" style="text-align: center; color: var(--cor-texto-secundario);">Selecione a unidade acima e clique em Gerar Benefícios Extras.</td></tr>
+            <tr><td colspan="6" style="text-align: center; color: var(--cor-texto-secundario);">Selecione a unidade acima e clique em Gerar Benefícios Extras.</td></tr>
         </tbody>
     </table>
 </div>
@@ -50697,6 +50700,7 @@ window.calcularVRAgora = async function() {
             }
             
             window.vrCalculadoPorUnidade[nomeDaUnidade].push({
+                id: colab.id,
                 nome: colab.nome,
                 cpf: colab.cpf || adm.cpf || 'Não Cadastrado',
                 jornada: tipoJornada,
@@ -50706,7 +50710,7 @@ window.calcularVRAgora = async function() {
                 retroativo: retroativoCalculado,
                 abatimentos: abatimentosCalculado,
                 diasAPagar: diasAPagarCalculado,
-                beneficioExtraTexto: labelsBeneficiosExcel ? labelsBeneficiosExcel.substring(3) : '-', 
+                beneficioExtraTexto: labelsBeneficiosExcel ? labelsBeneficiosExcel.substring(3) : '-',
                 valorExtra: valorExtraTotal,
                 valorTotal: valorLiquidoFinal
             });
@@ -93380,6 +93384,23 @@ window.calcularBeneficiosExtras = async function(tipo) {
         return mostrarAlerta('Selecione a unidade no topo da aba antes de gerar os Benefícios Extras.', 'aviso');
     }
 
+    // 👇 CORREÇÃO: por enquanto, só o Vale Refeição é rateado pelas mesmas regras do VR —
+    // o valor cadastrado (ex.: R$ 300) é dividido pelos "Dias Padrão" (21.5 p/ 44h ou 15.5
+    // p/ 12x36) pra achar o valor do dia, e multiplicado pelos dias que o colaborador de fato
+    // tem a pagar no período filtrado (o mesmo "Dias a Pagar" da apuração de VR acima — nunca
+    // pode passar do teto de 21.5/15.5). Isso exige que o relatório de VR já tenha sido gerado
+    // pra essa unidade/período, porque é dali que vêm os "Dias a Pagar" de cada colaborador.
+    let vrPorId = null;
+    if (tipo === 'vr') {
+        if (!window.vrCalculadoPorUnidade || Object.keys(window.vrCalculadoPorUnidade).length === 0) {
+            return mostrarAlerta('Antes de gerar os Benefícios Extras do Vale Refeição, clique em "Calcular" no Vale Refeição (acima) pra apurar os dias do período — o rateio usa os "Dias a Pagar" de cada colaborador.', 'aviso');
+        }
+        vrPorId = new Map();
+        Object.values(window.vrCalculadoPorUnidade).flat().forEach(c => {
+            if (c.id) vrPorId.set(c.id, c);
+        });
+    }
+
     try {
         let queryColab = supabaseClient.from('perfis').select('id, nome, unidade').eq('status', 'Ativo');
         if (unidadeSelecionada !== 'Todas') {
@@ -93404,12 +93425,41 @@ window.calcularBeneficiosExtras = async function(tipo) {
                 ...atribPorColaborador.filter(a => a.colaborador_id === c.id)
             ];
             if (beneficiosDoColab.length === 0) return;
-            const valorTotal = beneficiosDoColab.reduce((soma, b) => soma + (Number(b.valor) || 0), 0);
+            const valorBruto = beneficiosDoColab.reduce((soma, b) => soma + (Number(b.valor) || 0), 0);
+
+            // Por padrão (VA, por enquanto) o valor é pago cheio, sem rateio por dia.
+            let diasPadrao = null;
+            let diasPagos = null;
+            let valorTotal = valorBruto;
+            let semApuracaoVR = false;
+
+            if (tipo === 'vr') {
+                const infoVR = vrPorId.get(c.id);
+                if (infoVR) {
+                    diasPadrao = Number(infoVR.diasPadrao) || 0;
+                    // Nunca pode passar do teto padrão (21.5/15.5), mesmo que a apuração de VR
+                    // tenha somado retroativo por cima — aqui o teto do rateio é sempre o padrão.
+                    diasPagos = Math.min(Number(infoVR.diasAPagar) || 0, diasPadrao);
+                    valorTotal = diasPadrao > 0 ? (valorBruto / diasPadrao) * diasPagos : 0;
+                } else {
+                    // Colaborador não aparece na apuração de VR do período/unidade (não recebe
+                    // VR nesse período) — sem dias apurados, não há base pra ratear o benefício.
+                    diasPadrao = 0;
+                    diasPagos = 0;
+                    valorTotal = 0;
+                    semApuracaoVR = true;
+                }
+            }
+
             resultado.push({
                 id: c.id,
                 nome: c.nome,
                 unidade: c.unidade,
                 beneficios: beneficiosDoColab.map(b => ({ nome: b.nome_beneficio, valor: Number(b.valor) })),
+                valorBruto,
+                diasPadrao,
+                diasPagos,
+                semApuracaoVR,
                 valorTotal
             });
         });
@@ -93425,20 +93475,34 @@ window.calcularBeneficiosExtras = async function(tipo) {
         window.beneficiosExtrasCalculadoPorUnidade[tipo] = porUnidade;
 
         const tbody = document.getElementById(`lista-beneficios-extras-${tipo}-body`);
+        const colspanVazio = tipo === 'vr' ? 6 : 4;
         if (resultado.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--cor-texto-secundario);">Nenhum benefício extra cadastrado para essa seleção.</td></tr>';
+            tbody.innerHTML = `<tr><td colspan="${colspanVazio}" style="text-align: center; color: var(--cor-texto-secundario);">Nenhum benefício extra cadastrado para essa seleção.</td></tr>`;
             document.getElementById(`btn-exportar-beneficios-extras-${tipo}`).classList.add('hidden');
             return;
         }
 
-        tbody.innerHTML = resultado.map(r => `
-            <tr>
-                <td>${r.nome}</td>
-                <td style="text-align:center;">${r.unidade}</td>
-                <td>${r.beneficios.map(b => `${b.nome}: R$ ${b.valor.toFixed(2).replace('.', ',')}`).join('<br>')}</td>
-                <td style="text-align:center; font-weight:bold;">R$ ${r.valorTotal.toFixed(2).replace('.', ',')}</td>
-            </tr>
-        `).join('');
+        if (tipo === 'vr') {
+            tbody.innerHTML = resultado.map(r => `
+                <tr>
+                    <td>${r.nome}${r.semApuracaoVR ? '<br><span style="color: #ff5252; font-size: 0.72rem;"><i class="fa-solid fa-triangle-exclamation"></i> Sem apuração de VR no período — benefício zerado</span>' : ''}</td>
+                    <td style="text-align:center;">${r.unidade}</td>
+                    <td>${r.beneficios.map(b => `${b.nome}: R$ ${b.valor.toFixed(2).replace('.', ',')}`).join('<br>')}</td>
+                    <td style="text-align:center;">${r.diasPadrao !== null ? r.diasPadrao.toFixed(1) : '-'}</td>
+                    <td style="text-align:center;">${r.diasPagos !== null ? r.diasPagos.toFixed(1) : '-'}</td>
+                    <td style="text-align:center; font-weight:bold;">R$ ${r.valorTotal.toFixed(2).replace('.', ',')}</td>
+                </tr>
+            `).join('');
+        } else {
+            tbody.innerHTML = resultado.map(r => `
+                <tr>
+                    <td>${r.nome}</td>
+                    <td style="text-align:center;">${r.unidade}</td>
+                    <td>${r.beneficios.map(b => `${b.nome}: R$ ${b.valor.toFixed(2).replace('.', ',')}`).join('<br>')}</td>
+                    <td style="text-align:center; font-weight:bold;">R$ ${r.valorTotal.toFixed(2).replace('.', ',')}</td>
+                </tr>
+            `).join('');
+        }
 
         document.getElementById(`btn-exportar-beneficios-extras-${tipo}`).classList.remove('hidden');
         mostrarAlerta('Benefícios Extras gerados!', 'sucesso');
@@ -93465,14 +93529,17 @@ window.exportarExcelBeneficiosExtras = async function(tipo) {
             let sheetName = unidade.substring(0, 31).replace(/[\\\/\?\*\:\[\]]/g, '');
             const sheet = workbook.addWorksheet(sheetName);
 
-            sheet.mergeCells('A1:D1');
+            const numColsHeader = tipo === 'vr' ? 6 : 4;
+            const ultimaColunaLetra = tipo === 'vr' ? 'F' : 'D';
+
+            sheet.mergeCells(`A1:${ultimaColunaLetra}1`);
             const titulo = sheet.getCell('A1');
             titulo.value = `BENEFÍCIOS EXTRAS (PAGOS À PARTE) — ${nomeAba}`;
             titulo.font = { size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
             titulo.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF997404' } };
             titulo.alignment = { vertical: 'middle', horizontal: 'center' };
 
-            sheet.mergeCells('A2:D2');
+            sheet.mergeCells(`A2:${ultimaColunaLetra}2`);
             const subtitulo = sheet.getCell('A2');
             subtitulo.value = `UNIDADE: ${unidade.toUpperCase()}   |   GERADO EM: ${dataHoje}`;
             subtitulo.font = { size: 10, bold: true, color: { argb: 'FF997404' } };
@@ -93481,7 +93548,10 @@ window.exportarExcelBeneficiosExtras = async function(tipo) {
 
             sheet.addRow([]);
 
-            const headerRow = sheet.addRow(['COLABORADOR', 'UNIDADE', 'BENEFÍCIOS', 'VALOR TOTAL']);
+            const headerCols = tipo === 'vr'
+                ? ['COLABORADOR', 'UNIDADE', 'BENEFÍCIOS', 'VALOR BRUTO', 'DIAS PADRÃO', 'DIAS PAGOS', 'VALOR RATEADO']
+                : ['COLABORADOR', 'UNIDADE', 'BENEFÍCIOS', 'VALOR TOTAL'];
+            const headerRow = sheet.addRow(headerCols);
             headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
             headerRow.eachCell(cell => {
                 cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC107' } };
@@ -93489,22 +93559,37 @@ window.exportarExcelBeneficiosExtras = async function(tipo) {
                 cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
             });
 
-            sheet.columns = [{ width: 35 }, { width: 20 }, { width: 45 }, { width: 18 }];
+            sheet.columns = tipo === 'vr'
+                ? [{ width: 35 }, { width: 20 }, { width: 45 }, { width: 15 }, { width: 13 }, { width: 13 }, { width: 16 }]
+                : [{ width: 35 }, { width: 20 }, { width: 45 }, { width: 18 }];
 
             let somaTotalUnidade = 0;
             colaboradores.forEach(c => {
                 somaTotalUnidade += c.valorTotal;
                 const linhaBeneficios = c.beneficios.map(b => `${b.nome}: R$ ${b.valor.toFixed(2).replace('.', ',')}`).join('; ');
-                const row = sheet.addRow([c.nome, c.unidade, linhaBeneficios, c.valorTotal]);
-                row.getCell(4).numFmt = '"R$" #,##0.00';
+                const valoresLinha = tipo === 'vr'
+                    ? [c.nome, c.unidade, linhaBeneficios, c.valorBruto, c.diasPadrao, c.diasPagos, c.valorTotal]
+                    : [c.nome, c.unidade, linhaBeneficios, c.valorTotal];
+                const row = sheet.addRow(valoresLinha);
+                if (tipo === 'vr') {
+                    row.getCell(4).numFmt = '"R$" #,##0.00';
+                    row.getCell(5).numFmt = '0.0';
+                    row.getCell(6).numFmt = '0.0';
+                    row.getCell(7).numFmt = '"R$" #,##0.00';
+                } else {
+                    row.getCell(4).numFmt = '"R$" #,##0.00';
+                }
                 row.eachCell(cell => {
                     cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
                 });
             });
 
-            const totalRow = sheet.addRow(['', '', 'TOTAL DA UNIDADE', somaTotalUnidade]);
+            const totalRowVals = tipo === 'vr'
+                ? ['', '', 'TOTAL DA UNIDADE', '', '', '', somaTotalUnidade]
+                : ['', '', 'TOTAL DA UNIDADE', somaTotalUnidade];
+            const totalRow = sheet.addRow(totalRowVals);
             totalRow.font = { bold: true };
-            totalRow.getCell(4).numFmt = '"R$" #,##0.00';
+            totalRow.getCell(numColsHeader).numFmt = '"R$" #,##0.00';
         }
 
         const buffer = await workbook.xlsx.writeBuffer();
