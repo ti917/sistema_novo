@@ -5793,6 +5793,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                             style="background:transparent; color:var(--cor-texto-secundario); border:1px solid var(--cor-borda); padding:8px 16px; border-radius:20px; cursor:pointer; font-size:0.85rem; transition:0.15s;">
                             <i class="fa-solid fa-compress"></i> Comprimir Arquivo
                         </button>
+                        <button type="button" class="tab-digitalizar" data-subview="dividir" onclick="window.trocarSubTelaDigitalizar('dividir')"
+                            style="background:transparent; color:var(--cor-texto-secundario); border:1px solid var(--cor-borda); padding:8px 16px; border-radius:20px; cursor:pointer; font-size:0.85rem; transition:0.15s;">
+                            <i class="fa-solid fa-scissors"></i> Dividir PDF
+                        </button>
                     </div>
 
                     <!-- ===== SUBTELA 1: Digitalizar Fotos ===== -->
@@ -5885,6 +5889,44 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                         </div>
 
                         <div id="area-resultado-comprimir" style="margin-top: 20px;"></div>
+                    </div>
+
+                    <!-- ===== SUBTELA 4: Dividir PDF ===== -->
+                    <div id="subview-digitalizar-dividir" class="subview-digitalizar hidden">
+                        <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 20px;">
+                            Escolha um PDF e o sistema mostra cada página como uma foto — aí é só clicar na setinha ↓ pra baixar só aquela página, ou baixar todas de uma vez.
+                        </p>
+
+                        <input type="file" id="input-arquivo-dividir" class="hidden" accept="application/pdf" onchange="window.selecionarArquivoDividir(this.files)">
+
+                        <div id="dropzone-dividir" onclick="document.getElementById('input-arquivo-dividir').click()"
+                            style="border: 2px dashed rgba(79,195,247,0.4); border-radius: 14px; padding: 30px 20px; text-align: center; cursor: pointer; transition: 0.2s; background: rgba(79,195,247,0.04);">
+                            <i class="fa-solid fa-scissors" style="font-size: 2rem; color: #4fc3f7; margin-bottom: 10px; display: block;"></i>
+                            <b style="color: #4fc3f7;">Clique para escolher o PDF</b>
+                            <div style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 4px;">Só um arquivo PDF por vez</div>
+                        </div>
+
+                        <div id="aviso-vazio-dividir" style="text-align: center; padding: 30px; color: var(--cor-texto-secundario); font-size: 0.85rem;">
+                            Nenhum PDF selecionado ainda.
+                        </div>
+
+                        <div id="aviso-carregando-dividir" class="hidden" style="text-align: center; padding: 30px; color: var(--cor-texto-secundario); font-size: 0.85rem;">
+                            <i class="fa-solid fa-spinner fa-spin"></i> Carregando as páginas do PDF...
+                        </div>
+
+                        <div id="lista-paginas-dividir" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin-top: 20px;"></div>
+
+                        <div id="rodape-acoes-dividir" class="hidden" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 25px; flex-wrap: wrap; border-top: 1px solid var(--cor-borda); padding-top: 20px;">
+                            <div id="resumo-contagem-dividir" style="font-size: 0.82rem; color: var(--cor-texto-secundario);"></div>
+                            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                                <button class="btn-secondary" style="border-color: var(--cor-perigo); color: var(--cor-perigo);" onclick="window.limparDividir()">
+                                    <i class="fa-solid fa-trash"></i> Limpar
+                                </button>
+                                <button id="btn-baixar-todas-dividir" class="btn-success" style="font-weight: bold;" onclick="window.baixarTodasPaginasDividir()">
+                                    <i class="fa-solid fa-download"></i> Baixar Todas Separadas
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -49331,6 +49373,180 @@ window.renderizarComprimir = function() {
         ${corpo}
         ${resultado}
     `;
+};
+
+// ======================================================================
+// SUB-TELA 4: DIVIDIR PDF (mostra cada página como miniatura e baixa avulsa)
+// ======================================================================
+window.__arquivoDividir = null;   // { nomeArquivo, bytesOriginais }
+window.__paginasDividir = window.__paginasDividir_lista || [];  // evita colidir com a var de Digitalizar Fotos
+window.__paginasDividir_lista = window.__paginasDividir;
+
+window.selecionarArquivoDividir = function(fileList) {
+    const file = (fileList || [])[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf') {
+        mostrarAlerta('Essa ferramenta só aceita arquivo PDF.', 'erro');
+        return;
+    }
+    window.processarArquivoDividir(file);
+    document.getElementById('input-arquivo-dividir').value = '';
+};
+
+window.processarArquivoDividir = async function(file) {
+    if (typeof pdfjsLib === 'undefined') {
+        mostrarAlerta('A biblioteca de PDF ainda não carregou. Espera um instante e tenta de novo.', 'erro');
+        return;
+    }
+
+    window.__arquivoDividir = { nomeArquivo: file.name };
+    window.__paginasDividir_lista = [];
+    window.__paginasDividir = window.__paginasDividir_lista;
+
+    document.getElementById('aviso-vazio-dividir')?.classList.add('hidden');
+    document.getElementById('aviso-carregando-dividir')?.classList.remove('hidden');
+    document.getElementById('lista-paginas-dividir').innerHTML = '';
+    document.getElementById('rodape-acoes-dividir')?.classList.add('hidden');
+
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        // Guarda os bytes originais (cópia, já que o arrayBuffer acima fica "consumido"
+        // pelo pdf.js) pra poder recortar páginas com o pdf-lib depois, sem precisar
+        // pedir o arquivo de novo pro usuário.
+        window.__arquivoDividir.bytesOriginais = arrayBuffer.slice(0);
+
+        const pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const totalPaginas = pdfDoc.numPages;
+        const LIMITE_PAGINAS = 200;
+        const paginasParaMostrar = Math.min(totalPaginas, LIMITE_PAGINAS);
+
+        for (let i = 1; i <= paginasParaMostrar; i++) {
+            const page = await pdfDoc.getPage(i);
+            const viewport = page.getViewport({ scale: 1 });
+            const escala = Math.min(1.6, 700 / Math.max(viewport.width, viewport.height));
+            const viewportMiniatura = page.getViewport({ scale: escala });
+
+            const canvas = document.createElement('canvas');
+            canvas.width = viewportMiniatura.width;
+            canvas.height = viewportMiniatura.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport: viewportMiniatura }).promise;
+
+            window.__paginasDividir_lista.push({
+                numero: i,
+                dataUrl: canvas.toDataURL('image/jpeg', 0.85)
+            });
+            window.__paginasDividir = window.__paginasDividir_lista;
+
+            // Vai renderizando página a página, assim o usuário já vê as primeiras
+            // enquanto o resto ainda carrega (PDFs grandes não travam a tela toda).
+            window.renderizarListaDividir(totalPaginas);
+        }
+
+        if (totalPaginas > LIMITE_PAGINAS) {
+            mostrarAlerta(`Esse PDF tem ${totalPaginas} páginas — por segurança, só as ${LIMITE_PAGINAS} primeiras foram mostradas aqui.`, 'aviso');
+        }
+    } catch (e) {
+        mostrarAlerta('Erro ao abrir o PDF: ' + (e.message || 'arquivo pode estar corrompido.'), 'erro');
+        window.__arquivoDividir = null;
+        window.__paginasDividir_lista = [];
+        window.__paginasDividir = window.__paginasDividir_lista;
+    } finally {
+        document.getElementById('aviso-carregando-dividir')?.classList.add('hidden');
+        window.renderizarListaDividir();
+    }
+};
+
+window.limparDividir = async function() {
+    if (window.__paginasDividir_lista.length === 0 && !window.__arquivoDividir) return;
+    const ok = await mostrarConfirmacao('Remover o PDF selecionado e começar de novo?', 'Limpar');
+    if (!ok) return;
+    window.__arquivoDividir = null;
+    window.__paginasDividir_lista = [];
+    window.__paginasDividir = window.__paginasDividir_lista;
+    window.renderizarListaDividir();
+};
+
+window.renderizarListaDividir = function(totalPaginasConhecido) {
+    const lista = window.__paginasDividir_lista;
+    const cont = document.getElementById('lista-paginas-dividir');
+    const avisoVazio = document.getElementById('aviso-vazio-dividir');
+    const rodape = document.getElementById('rodape-acoes-dividir');
+    const resumo = document.getElementById('resumo-contagem-dividir');
+    if (!cont) return;
+
+    if (lista.length === 0) {
+        cont.innerHTML = '';
+        if (avisoVazio) avisoVazio.classList.remove('hidden');
+        if (rodape) rodape.classList.add('hidden');
+        return;
+    }
+    if (avisoVazio) avisoVazio.classList.add('hidden');
+    if (rodape) rodape.classList.remove('hidden');
+    if (resumo) {
+        const total = totalPaginasConhecido || lista.length;
+        resumo.textContent = lista.length < total ? `Carregando... ${lista.length} de ${total} página(s)` : `${lista.length} página(s)`;
+    }
+
+    cont.innerHTML = lista.map(p => `
+        <div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden; background:rgba(0,0,0,0.1); position:relative;">
+            <img src="${p.dataUrl}" style="width:100%; display:block; aspect-ratio:0.75; object-fit:contain; background:#fff;">
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-top:1px solid var(--cor-borda);">
+                <span style="font-size:0.75rem; color:var(--cor-texto-secundario);">Página ${p.numero}</span>
+                <button type="button" title="Baixar essa página" onclick="window.baixarPaginaDividir(${p.numero})"
+                    style="background:#4fc3f7; color:#0b1120; border:none; border-radius:6px; width:26px; height:26px; cursor:pointer; font-size:0.8rem;">
+                    <i class="fa-solid fa-arrow-down"></i>
+                </button>
+            </div>
+        </div>`).join('');
+};
+
+// Recorta UMA página do PDF original (usando pdf-lib) e devolve os bytes prontos pra baixar.
+window.__gerarBytesPaginaDividir = async function(numeroPagina) {
+    if (typeof PDFLib === 'undefined') throw new Error('Biblioteca de PDF ainda não carregou.');
+    const alvo = window.__arquivoDividir;
+    if (!alvo || !alvo.bytesOriginais) throw new Error('PDF original não encontrado.');
+    const origem = await PDFLib.PDFDocument.load(alvo.bytesOriginais.slice(0));
+    const novo = await PDFLib.PDFDocument.create();
+    const [copiada] = await novo.copyPages(origem, [numeroPagina - 1]);
+    novo.addPage(copiada);
+    return await novo.save();
+};
+
+window.baixarPaginaDividir = async function(numeroPagina) {
+    try {
+        const bytes = await window.__gerarBytesPaginaDividir(numeroPagina);
+        const blob = new Blob([bytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const nomeBase = (window.__arquivoDividir?.nomeArquivo || 'documento.pdf').replace(/\.pdf$/i, '');
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${nomeBase}-pagina-${numeroPagina}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+    } catch (e) {
+        mostrarAlerta('Erro ao baixar a página: ' + e.message, 'erro');
+    }
+};
+
+window.baixarTodasPaginasDividir = async function() {
+    const lista = window.__paginasDividir_lista;
+    if (!lista || lista.length === 0) return;
+    const btn = document.getElementById('btn-baixar-todas-dividir');
+    const textoOriginal = btn ? btn.innerHTML : null;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Baixando...'; }
+    try {
+        // Baixa uma de cada vez com um pequeno intervalo — baixar tudo ao mesmo tempo faz o
+        // navegador bloquear os downloads extras como se fosse pop-up.
+        for (const p of lista) {
+            await window.baixarPaginaDividir(p.numero);
+            await new Promise(r => setTimeout(r, 350));
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = textoOriginal; }
+    }
 };
 
        // ==========================================
