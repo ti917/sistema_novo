@@ -50075,13 +50075,43 @@ window._primeiroESegundoNome = function(nomeCompleto) {
     return partes.slice(0, 2).join(' ');
 };
 
-// O carimbo leva: razão social da empresa, CNPJ, e o nome (1º e 2º) do Admin logado que
-// está assinando — assim fica registrado quem carimbou, não só a empresa.
+// 👇 O nome que vai no carimbo é o do COLABORADOR VINCULADO ao Admin (o mesmo vínculo
+// configurado em "Configurar Acessos" → "Colaborador Vinculado", `permissoes.
+// colaborador_vinculado_id`) — não necessariamente o nome do login do Admin. Segue o
+// mesmo critério de busca já usado em outras partes do sistema (ver carregarPerfil):
+// 1) o id vinculado explicitamente; 2) por último, casa pelo NOME com uma ficha de
+// Colaborador. Guarda em cache (window.__nomeCarimboAdminCache) pra não ficar
+// consultando o banco toda hora — o vínculo do Admin logado não muda no meio da sessão.
+window.__nomeCarimboAdminCache = null;
+window._resolverNomeCarimboAdmin = async function() {
+    if (window.__nomeCarimboAdminCache) return window.__nomeCarimboAdminCache;
+    let nomeResolvido = (usuarioAtual && usuarioAtual.nome) || '';
+    try {
+        const vinculoId = usuarioAtual?.permissoes?.colaborador_vinculado_id || null;
+        if (vinculoId) {
+            const { data } = await supabaseClient.from('perfis').select('nome').eq('id', vinculoId).maybeSingle();
+            if (data && data.nome) nomeResolvido = data.nome;
+        } else if (usuarioAtual && usuarioAtual.nome) {
+            const { data } = await supabaseClient.from('perfis').select('nome')
+                .eq('perfil', 'Colaborador').ilike('nome', usuarioAtual.nome).neq('id', usuarioAtual.id)
+                .limit(1).maybeSingle();
+            if (data && data.nome) nomeResolvido = data.nome;
+        }
+    } catch (e) {
+        console.warn('Não achou o colaborador vinculado do Admin pro carimbo — usando o nome do login mesmo:', e);
+    }
+    window.__nomeCarimboAdminCache = nomeResolvido;
+    return nomeResolvido;
+};
+
+// O carimbo leva: razão social da empresa, CNPJ, e o nome (1º e 2º) do colaborador
+// vinculado ao Admin que está assinando — assim fica registrado quem carimbou, não só a empresa.
 window._gerarImagemCarimboPadrao = function(empresaKey) {
     const dados = window.CARIMBO_EMPRESAS[empresaKey];
     if (!dados) return null;
 
-    const nomeAdmin = window._primeiroESegundoNome(usuarioAtual && usuarioAtual.nome);
+    const nomeBase = window.__nomeCarimboAdminCache || (usuarioAtual && usuarioAtual.nome);
+    const nomeAdmin = window._primeiroESegundoNome(nomeBase);
     const chaveCache = `${empresaKey}::${nomeAdmin}`;
     if (window._cacheCarimboDataUrl[chaveCache]) return window._cacheCarimboDataUrl[chaveCache];
 
@@ -50103,6 +50133,14 @@ window._gerarImagemCarimboPadrao = function(empresaKey) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
+    // 👇 Espaçamento revisado pra ficar com um ritmo mais uniforme entre as linhas e
+    // sobrar uma margem de verdade embaixo do nome (antes ele ficava colado na borda
+    // de baixo da caixa do carimbo).
+    const Y_TITULO = ALT * 0.22;
+    const Y_DIVISORIA = ALT * 0.42;
+    const Y_CNPJ = ALT * 0.58;
+    const Y_NOME = ALT * 0.76;
+
     // Linha 1: razão social — reduz a fonte automaticamente se o nome não couber
     let tamanhoFonte = 19 * ESCALA;
     ctx.font = `bold ${tamanhoFonte}px Arial`;
@@ -50111,23 +50149,23 @@ window._gerarImagemCarimboPadrao = function(empresaKey) {
         tamanhoFonte -= 1 * ESCALA;
         ctx.font = `bold ${tamanhoFonte}px Arial`;
     }
-    ctx.fillText(dados.razaoSocial, LARG / 2, ALT * 0.26);
+    ctx.fillText(dados.razaoSocial, LARG / 2, Y_TITULO);
 
     // Linha divisória
     ctx.beginPath();
-    ctx.moveTo(LARG / 2 - 90 * ESCALA, ALT * 0.45);
-    ctx.lineTo(LARG / 2 + 90 * ESCALA, ALT * 0.45);
+    ctx.moveTo(LARG / 2 - 90 * ESCALA, Y_DIVISORIA);
+    ctx.lineTo(LARG / 2 + 90 * ESCALA, Y_DIVISORIA);
     ctx.lineWidth = 1 * ESCALA;
     ctx.stroke();
 
     // Linha 2: CNPJ
     ctx.font = `${15 * ESCALA}px Arial`;
-    ctx.fillText(`CNPJ: ${dados.cnpj}`, LARG / 2, ALT * 0.62);
+    ctx.fillText(`CNPJ: ${dados.cnpj}`, LARG / 2, Y_CNPJ);
 
-    // Linha 3: nome de quem assinou (Admin logado)
+    // Linha 3: nome (1º e 2º) do colaborador vinculado ao Admin que assinou
     if (nomeAdmin) {
-        ctx.font = `${13 * ESCALA}px Arial`;
-        ctx.fillText(nomeAdmin.toUpperCase(), LARG / 2, ALT * 0.82);
+        ctx.font = `bold ${14 * ESCALA}px Arial`;
+        ctx.fillText(nomeAdmin.toUpperCase(), LARG / 2, Y_NOME);
     }
 
     const dataUrl = canvas.toDataURL('image/png');
@@ -50183,6 +50221,11 @@ window.selecionarArquivoAssinar = async function(files) {
     chipCarimbo.classList.toggle('chip-desabilitado', !empresaCarimbo);
     window.__assinarDoc.usarCarimbo = usarCarimboInicial;
     window.__assinarDoc.empresaCarimbo = empresaCarimbo;
+
+    // 👇 Resolve ANTES de desenhar o carimbo o nome do colaborador vinculado ao Admin
+    // (pode precisar de uma consulta ao banco na primeira vez) — assim o carimbo já
+    // nasce com o nome certo, em vez de aparecer em branco e trocar depois.
+    await window._resolverNomeCarimboAdmin();
 
     const canvas = document.getElementById('canvas-base-assinar');
 
@@ -50481,6 +50524,10 @@ window.gerarDocumentoAssinado = async function() {
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Gerando...';
 
     try {
+        // 👇 Garante (mais uma vez, é barato — só volta do cache) que o nome do carimbo
+        // já foi resolvido antes de gerar o arquivo final.
+        await window._resolverNomeCarimboAdmin();
+
         const cfg = usuarioAtual.assinatura_admin || {};
         const canvas = document.getElementById('canvas-base-assinar');
         const palco = document.getElementById('palco-assinar-doc');
