@@ -71,6 +71,10 @@
 .chip-toggle-assinar i { font-size: 0.95rem; }
 .chip-toggle-assinar.chip-ativo { background: #4fc3f7; color: #0b1120; border-color: #4fc3f7; box-shadow: 0 2px 10px rgba(79,195,247,0.35); }
 .chip-toggle-assinar.chip-desabilitado { opacity: 0.4; cursor: not-allowed; }
+/* 👇 Variante vermelha pros chips de EXCLUIR assinatura/carimbo de uma página específica —
+   fica visualmente diferente do azul "em uso" (chip-ativo), já que aqui "ativo" significa
+   "removido/desligado nesta página", o oposto do que o azul normalmente representa. */
+.chip-toggle-assinar.chip-ativo-perigo { background: #dc3545; color: #fff; border-color: #dc3545; box-shadow: 0 2px 10px rgba(220,53,69,0.35); }
 .chip-toggle-assinar input[type="checkbox"] { display: none; }
 .modo-preview-assinar .overlay-assinar-wrap { border-color: transparent !important; cursor: default; pointer-events: none; }
 .modo-preview-assinar .resize-handle-assinar, .modo-preview-assinar .rotate-handle-assinar { display: none !important; }
@@ -6025,6 +6029,21 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                                         <i class="fa-solid fa-eye"></i> Ver sem bordas
                                     </button>
                                 </div>
+                            </div>
+
+                            <!-- 👇 Exclui a assinatura/carimbo só DESTA página (útil, por exemplo, pra
+                                 não colocar em uma folha de rosto/capa quando "Assinar todas as páginas"
+                                 está marcado) — some quando o documento só tem 1 página. -->
+                            <div id="bloco-excluir-pagina-assinar" style="display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center;">
+                                <span style="font-size:0.78rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-file-circle-minus"></i> Nesta página:</span>
+                                <label id="chip-excluir-assinatura-pagina" class="chip-toggle-assinar hidden" style="border-color: rgba(220,53,69,0.3);" title="Não coloca a assinatura NESTA página (as outras continuam normalmente)">
+                                    <input type="checkbox" id="chk-excluir-assinatura-pagina" onchange="window.alternarExclusaoPagina('assinatura', this.checked)">
+                                    <i class="fa-solid fa-ban"></i> Sem assinatura aqui
+                                </label>
+                                <label id="chip-excluir-carimbo-pagina" class="chip-toggle-assinar hidden" style="border-color: rgba(220,53,69,0.3);" title="Não coloca o carimbo NESTA página (as outras continuam normalmente)">
+                                    <input type="checkbox" id="chk-excluir-carimbo-pagina" onchange="window.alternarExclusaoPagina('carimbo', this.checked)">
+                                    <i class="fa-solid fa-ban"></i> Sem carimbo aqui
+                                </label>
                             </div>
 
                             <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:0.78rem; color: var(--cor-texto-secundario); margin-bottom: 12px; padding: 8px 12px; background: rgba(79,195,247,0.05); border: 1px solid rgba(79,195,247,0.15); border-radius: 8px;">
@@ -49926,7 +49945,12 @@ window.__assinarDoc = {
     imagemOriginalEl: null,  // <img> em memória, quando o documento é uma foto
     usarAssinatura: true,
     usarCarimbo: false,
-    empresaCarimbo: null     // qual carimbo (de qual empresa) usar — ver window.CARIMBO_EMPRESAS
+    empresaCarimbo: null,    // qual carimbo (de qual empresa) usar — ver window.CARIMBO_EMPRESAS
+    // 👇 Posição/tamanho/rotação da assinatura e do carimbo, GUARDADOS POR PÁGINA, do PDF
+    // que está sendo editado agora (chave = número da página, 1, 2, 3...). Sem isso, ao
+    // trocar de página o app usava sempre o mesmo par de elementos na tela, então mexer
+    // na posição da página 2 "vazava" pra página 1 quando voltava nela.
+    posicoesPorPagina: {}
 };
 
 // 👇 Guarda o último jeito que a assinatura/carimbo ficaram (marcado ou não, posição,
@@ -49971,6 +49995,92 @@ window._salvarConfigAssinarAtual = function() {
         assinatura: window._lerConfigOverlayAssinar('wrap-assinatura-doc'),
         carimbo: window._lerConfigOverlayAssinar('wrap-carimbo-doc')
     };
+};
+
+// 👇 CORREÇÃO: guarda a posição/tamanho/rotação da assinatura e do carimbo NA PÁGINA
+// que está sendo editada agora (dentro do MESMO PDF) — antes, como só existia um par de
+// elementos na tela reaproveitado pra todas as páginas, mexer na posição da página 2 e
+// voltar pra página 1 mostrava a posição da página 2 lá também (perdia a da página 1).
+// Chamado sempre antes de trocar de página.
+window._salvarPosicaoPaginaAtual = function() {
+    const st = window.__assinarDoc;
+    if (!st.posicoesPorPagina) st.posicoesPorPagina = {};
+    st.posicoesPorPagina[st.paginaAtual] = {
+        assinatura: window._lerConfigOverlayAssinar('wrap-assinatura-doc'),
+        carimbo: window._lerConfigOverlayAssinar('wrap-carimbo-doc')
+    };
+};
+
+// 👇 Aplica na tela a posição/tamanho/rotação guardados pra ESSA página específica, se já
+// tiver algo salvo (a pessoa já passou por ela antes e ajustou). Se ainda não tem nada
+// salvo pra essa página, deixa como está (mesma posição visual de quando a página
+// anterior foi deixada) — assim, por padrão, todas as páginas começam iguais, mas cada
+// uma pode ser ajustada à parte sem bagunçar as outras.
+window._restaurarPosicaoDaPagina = function(numPagina) {
+    const st = window.__assinarDoc;
+    const salvo = (st.posicoesPorPagina || {})[numPagina];
+    if (!salvo) return;
+
+    const palco = document.getElementById('palco-assinar-doc');
+    const larguraPalco = palco.clientWidth;
+    const alturaPalco = palco.clientHeight;
+    if (!larguraPalco || !alturaPalco) return;
+
+    const PROPORCAO_ASSINATURA = 0.4; // ver window._posicionarOverlaysAssinarPadrao
+    const PROPORCAO_CARIMBO = 190 / 480; // ver window._gerarImagemCarimboPadrao
+
+    const aplicar = (idWrap, cfg, proporcao) => {
+        if (!cfg) return;
+        const wrap = document.getElementById(idWrap);
+        if (!wrap) return;
+        const larg = Math.round(larguraPalco * cfg.largPct);
+        wrap.style.width = larg + 'px';
+        wrap.style.height = Math.round(larg * proporcao) + 'px';
+        wrap.style.left = Math.round(larguraPalco * cfg.leftPct) + 'px';
+        wrap.style.top = Math.round(alturaPalco * cfg.topPct) + 'px';
+        wrap.style.transform = `rotate(${cfg.rotacao || 0}deg)`;
+        wrap.dataset.rotacao = String(cfg.rotacao || 0);
+    };
+
+    aplicar('wrap-assinatura-doc', salvo.assinatura, PROPORCAO_ASSINATURA);
+    aplicar('wrap-carimbo-doc', salvo.carimbo, PROPORCAO_CARIMBO);
+};
+
+// 👇 Marca/desmarca "sem assinatura/carimbo aqui" PRA PÁGINA que está sendo editada
+// agora — útil, por exemplo, pra não colocar em uma folha de rosto quando "Assinar
+// todas as páginas" está ligado. Só afeta essa página; as outras continuam do jeito
+// que estavam.
+window.alternarExclusaoPagina = function(tipo, excluida) {
+    const st = window.__assinarDoc;
+    if (!st.paginasExcluidas) st.paginasExcluidas = {};
+    if (!st.paginasExcluidas[st.paginaAtual]) st.paginasExcluidas[st.paginaAtual] = {};
+    st.paginasExcluidas[st.paginaAtual][tipo] = excluida;
+
+    const chip = document.getElementById(`chip-excluir-${tipo}-pagina`);
+    if (chip) chip.classList.toggle('chip-ativo-perigo', excluida);
+
+    // 👇 Visibilidade final na tela: escondido se o "Usar assinatura/carimbo" geral
+    // estiver desmarcado OU se foi excluído nesta página específica.
+    const wrap = document.getElementById(`wrap-${tipo}-doc`);
+    const chkUsar = document.getElementById(`chk-usar-${tipo}-doc`);
+    if (wrap && chkUsar) wrap.classList.toggle('hidden', !chkUsar.checked || excluida);
+};
+
+// 👇 Ao trocar de página, reflete no chip vermelho e na visibilidade do overlay se ESSA
+// página específica já tinha sido marcada como "sem assinatura/carimbo aqui" antes.
+window._restaurarExclusaoDaPagina = function(numPagina) {
+    const st = window.__assinarDoc;
+    const excl = (st.paginasExcluidas || {})[numPagina] || {};
+    ['assinatura', 'carimbo'].forEach(tipo => {
+        const marcado = !!excl[tipo];
+        const chkExcl = document.getElementById(`chk-excluir-${tipo}-pagina`);
+        const chipExcl = document.getElementById(`chip-excluir-${tipo}-pagina`);
+        const wrap = document.getElementById(`wrap-${tipo}-doc`);
+        const chkUsar = document.getElementById(`chk-usar-${tipo}-doc`);
+        if (chkExcl) chkExcl.checked = marcado;
+        if (chipExcl) chipExcl.classList.toggle('chip-ativo-perigo', marcado);
+        if (wrap && chkUsar) wrap.classList.toggle('hidden', !chkUsar.checked || marcado);
+    });
 };
 
 // 👇 Mostra o bloco pra cadastrar (ou trocar) a assinatura pessoal do Admin.
@@ -50202,6 +50312,8 @@ window.selecionarArquivoAssinar = async function(files) {
     }
 
     window.__assinarDoc.nomeArquivoOriginal = arquivo.name;
+    window.__assinarDoc.posicoesPorPagina = {}; // 👇 novo documento: zera as posições por página do anterior
+    window.__assinarDoc.paginasExcluidas = {}; // 👇 novo documento: zera quais páginas tinham assinatura/carimbo excluído
 
     // 👇 Reaproveita o "usar assinatura"/"usar carimbo" do último documento assinado nesta
     // sessão, em vez de sempre voltar pro padrão — assim, quem assina vários documentos
@@ -50259,10 +50371,23 @@ window.selecionarArquivoAssinar = async function(files) {
             chkTodasPag.checked = true;
             chipTodasPag.classList.add('chip-ativo');
 
+            // 👇 Os chips de "sem assinatura/sem carimbo aqui" (exclusão por página) só
+            // aparecem quando o PDF tem mais de uma página, e começam desmarcados —
+            // documento novo começa sem nenhuma página excluída.
+            document.getElementById('bloco-excluir-pagina-assinar').classList.toggle('hidden', pdfDoc.numPages <= 1);
+            ['assinatura', 'carimbo'].forEach(tipo => {
+                const chkExcl = document.getElementById(`chk-excluir-${tipo}-pagina`);
+                const chipExcl = document.getElementById(`chip-excluir-${tipo}-pagina`);
+                chipExcl.classList.toggle('hidden', pdfDoc.numPages <= 1);
+                chkExcl.checked = false;
+                chipExcl.classList.remove('chip-ativo-perigo');
+            });
+
             await window._renderizarPaginaAssinarPdf();
         } else {
             window.__assinarDoc.tipoArquivo = 'imagem';
             document.getElementById('nav-paginas-assinar').classList.add('hidden');
+            document.getElementById('bloco-excluir-pagina-assinar').classList.add('hidden');
 
             const dataUrl = await new Promise((resolve, reject) => {
                 const fr = new FileReader();
@@ -50318,8 +50443,14 @@ window.mudarPaginaAssinar = async function(delta) {
     const st = window.__assinarDoc;
     const nova = st.paginaAtual + delta;
     if (nova < 1 || nova > st.totalPaginas) return;
+    // 👇 Antes de sair da página atual, guarda a posição dela — senão a próxima página
+    // reaproveita os mesmos elementos na tela e, ao voltar, essa página apareceria com a
+    // posição que ficou (da outra página), não com a que tinha antes.
+    window._salvarPosicaoPaginaAtual();
     st.paginaAtual = nova;
     await window._renderizarPaginaAssinarPdf();
+    window._restaurarPosicaoDaPagina(nova);
+    window._restaurarExclusaoDaPagina(nova);
 };
 
 // Coloca a assinatura/carimbo na posição/tamanho/rotação lembrados do último documento
@@ -50391,11 +50522,16 @@ window.togglePreviewAssinar = function() {
 };
 
 window.toggleElementoAssinar = function(tipo) {
+    const st = window.__assinarDoc;
     const chk = document.getElementById(`chk-usar-${tipo}-doc`);
     const wrap = document.getElementById(`wrap-${tipo}-doc`);
     const chip = document.getElementById(`chip-usar-${tipo}-doc`);
-    window.__assinarDoc[tipo === 'assinatura' ? 'usarAssinatura' : 'usarCarimbo'] = chk.checked;
-    wrap.classList.toggle('hidden', !chk.checked);
+    st[tipo === 'assinatura' ? 'usarAssinatura' : 'usarCarimbo'] = chk.checked;
+    // 👇 Se essa página específica está marcada como "sem assinatura/carimbo aqui", religar
+    // o "Usar assinatura/carimbo" geral não deve reaparecer o elemento SÓ nesta página —
+    // a exclusão da página continua valendo até a pessoa desmarcar ela também.
+    const excluidaNestaPagina = !!((st.paginasExcluidas || {})[st.paginaAtual] || {})[tipo];
+    wrap.classList.toggle('hidden', !chk.checked || excluidaNestaPagina);
     if (chip) chip.classList.toggle('chip-ativo', chk.checked);
     window._salvarConfigAssinarAtual();
 };
@@ -50505,7 +50641,7 @@ window._tornarRotacionavel = function(idWrap) {
 };
 
 window.limparAssinarDocumento = function() {
-    window.__assinarDoc = { tipoArquivo: null, nomeArquivoOriginal: '', pdfBytesOriginais: null, pdfJsDoc: null, paginaAtual: 1, totalPaginas: 1, imagemOriginalEl: null, usarAssinatura: true, usarCarimbo: false, empresaCarimbo: null };
+    window.__assinarDoc = { tipoArquivo: null, nomeArquivoOriginal: '', pdfBytesOriginais: null, pdfJsDoc: null, paginaAtual: 1, totalPaginas: 1, imagemOriginalEl: null, usarAssinatura: true, usarCarimbo: false, empresaCarimbo: null, posicoesPorPagina: {} };
     document.getElementById('editor-assinar-documento').classList.add('hidden');
     document.getElementById('area-resultado-assinar').innerHTML = '';
     document.getElementById('input-arquivo-assinar').value = '';
@@ -50591,53 +50727,63 @@ window.gerarDocumentoAssinado = async function() {
             // assinatura/carimbo desenhados por cima).
             const pdfDoc = await PDFLib.PDFDocument.load(st.pdfBytesOriginais.slice(0));
 
+            // 👇 Garante que a posição da página que está aberta agora já está salva —
+            // ela serve de "padrão" pras páginas que a pessoa ainda não ajustou à parte.
+            window._salvarPosicaoPaginaAtual();
+
             // 👇 Se o PDF tem mais de uma página e a caixinha "Assinar todas as páginas"
-            // está marcada, repete a MESMA assinatura/carimbo (mesma posição relativa) em
-            // todas elas — antes só ia na página que estava aberta no editor, o que não
-            // serve pra contrato/termo de várias páginas que precisa de assinatura em cada uma.
+            // está marcada, repete a assinatura/carimbo em todas elas — cada página usa a
+            // posição que foi salva especificamente PRA ELA (se a pessoa já tiver mexido
+            // nela), ou a posição da página atual como padrão pras que não foram mexidas.
             const marcarTodasPaginas = st.totalPaginas > 1 && !!document.getElementById('chk-todas-paginas-assinar')?.checked;
             const indicesPaginasAlvo = marcarTodasPaginas
                 ? pdfDoc.getPages().map((_, i) => i)
                 : [st.paginaAtual - 1];
 
-            // 👇 Embute cada imagem (assinatura/carimbo) só UMA vez, e guarda a posição/
-            // tamanho como FRAÇÃO do canvas da página que estava sendo editada — assim dá
-            // pra aplicar a mesma posição relativa em cada página alvo, mesmo que alguma
-            // tenha um tamanho de página levemente diferente.
-            const posicoesPreparadas = [];
+            // Proporção altura/largura de cada tipo de overlay (fixa, ver
+            // window._posicionarOverlaysAssinarPadrao e window._gerarImagemCarimboPadrao) —
+            // com ela dá pra recalcular a altura em pontos de PDF sem depender do tamanho
+            // em pixels de nenhuma página específica.
+            const proporcaoPorTipo = { assinatura: 0.4, carimbo: 190 / 480 };
+
+            const configPadrao = (st.posicoesPorPagina && st.posicoesPorPagina[st.paginaAtual]) || {};
+
+            // 👇 Embute cada imagem (assinatura/carimbo) só UMA vez — reaproveitada em
+            // quantas páginas precisar.
+            const imagensEmbutidasPorTipo = {};
             for (const p of posicoes) {
                 const bytesImg = await window._baixarImagemComoBytes(p.url);
                 // 👇 O carimbo chega como "data:image/png;base64,..." (gerado na hora, sem
                 // ".png" no nome) — por isso checa o prefixo data:image/png além da extensão.
                 const ehPng = p.url.toLowerCase().startsWith('data:image/png') || p.url.toLowerCase().includes('.png');
-                const imgEmbutida = ehPng ? await pdfDoc.embedPng(bytesImg) : await pdfDoc.embedJpg(bytesImg);
-
-                const wPx = p.wrap.offsetWidth * fatorX;
-                const hPx = p.wrap.offsetHeight * fatorY;
-                const cxPx = (p.wrap.offsetLeft + p.wrap.offsetWidth / 2) * fatorX;
-                const cyPx = (p.wrap.offsetTop + p.wrap.offsetHeight / 2) * fatorY;
-
-                posicoesPreparadas.push({
-                    imgEmbutida,
-                    wFrac: wPx / canvas.width,
-                    hFrac: hPx / canvas.height,
-                    cxFrac: cxPx / canvas.width,
-                    cyFracTopo: cyPx / canvas.height, // fração medida a partir do TOPO, igual na tela
-                    anguloDeg: parseFloat(p.wrap.dataset.rotacao || '0')
-                });
+                imagensEmbutidasPorTipo[p.tipo] = ehPng ? await pdfDoc.embedPng(bytesImg) : await pdfDoc.embedJpg(bytesImg);
             }
 
             for (const idxPagina of indicesPaginasAlvo) {
+                const numPagina = idxPagina + 1;
                 const pagina = pdfDoc.getPage(idxPagina);
                 const { width: largPdfPt, height: altPdfPt } = pagina.getSize();
+                const excluidasNaPagina = (st.paginasExcluidas && st.paginasExcluidas[numPagina]) || {};
 
-                for (const pp of posicoesPreparadas) {
-                    // Fração do canvas de prévia → pontos do PDF dessa página específica.
-                    // O eixo Y do PDF cresce de baixo pra cima, por isso o cálculo inverte a altura.
-                    const wPt = pp.wFrac * largPdfPt;
-                    const hPt = pp.hFrac * altPdfPt;
-                    const cxPt = pp.cxFrac * largPdfPt;
-                    const cyPt = altPdfPt - pp.cyFracTopo * altPdfPt;
+                for (const p of posicoes) {
+                    // 👇 Se marcou "sem assinatura/carimbo aqui" nessa página específica,
+                    // pula só ela — as outras páginas continuam normalmente.
+                    if (excluidasNaPagina[p.tipo]) continue;
+
+                    const cfgPagina = (st.posicoesPorPagina && st.posicoesPorPagina[numPagina] && st.posicoesPorPagina[numPagina][p.tipo])
+                        || configPadrao[p.tipo];
+                    if (!cfgPagina) continue;
+
+                    // 👇 Tudo calculado a partir de FRAÇÕES (0 a 1) da página, não de pixels
+                    // de nenhum canvas — funciona igual pra qualquer página, mesmo que o
+                    // tamanho dela seja diferente da que estava sendo editada. A altura é
+                    // travada na largura vezes a proporção fixa do tipo (mesma lógica da
+                    // prévia na tela), não numa fração separada de altura.
+                    const wPt = cfgPagina.largPct * largPdfPt;
+                    const hPt = wPt * (proporcaoPorTipo[p.tipo] || 0.4);
+                    const cxPt = (cfgPagina.leftPct + cfgPagina.largPct / 2) * largPdfPt;
+                    const topPt = cfgPagina.topPct * altPdfPt;
+                    const cyPt = altPdfPt - (topPt + hPt / 2);
 
                     // 👇 O pdf-lib gira em sentido anti-horário (matemática padrão, eixo Y pra
                     // cima) e a rotação acontece em torno do canto (x,y) informado — não do
@@ -50646,14 +50792,15 @@ window.gerarDocumentoAssinado = async function() {
                     // girar em torno dele, o centro da imagem caia exatamente onde a prévia
                     // mostrou (cxPt, cyPt) — assim o resultado final bate com o que foi
                     // arrastado/girado na tela.
-                    const thetaDeg = -pp.anguloDeg;
+                    const anguloDeg = cfgPagina.rotacao || 0;
+                    const thetaDeg = -anguloDeg;
                     const thetaRad = thetaDeg * Math.PI / 180;
                     const rx = (wPt / 2) * Math.cos(thetaRad) - (hPt / 2) * Math.sin(thetaRad);
                     const ry = (wPt / 2) * Math.sin(thetaRad) + (hPt / 2) * Math.cos(thetaRad);
                     const xPt = cxPt - rx;
                     const yPt = cyPt - ry;
 
-                    pagina.drawImage(pp.imgEmbutida, { x: xPt, y: yPt, width: wPt, height: hPt, rotate: PDFLib.degrees(thetaDeg) });
+                    pagina.drawImage(imagensEmbutidasPorTipo[p.tipo], { x: xPt, y: yPt, width: wPt, height: hPt, rotate: PDFLib.degrees(thetaDeg) });
                 }
             }
 
