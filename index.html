@@ -83445,6 +83445,47 @@ window.buscarColabsEmprestimoPrevista = async function() {
     selectColab.disabled = false;
 };
 
+// 👇 Monta uma descrição da jornada COMPLETA da semana toda (não só o primeiro dia de
+// trabalho que achar) — pra quem tem horário diferente em algum dia (ex.: 44h com sexta
+// mais curta) o OBSA sair mostrando a semana inteira, e não só um horário genérico que
+// só bate com alguns dias. Agrupa dias seguidos com o mesmo horário (ex.: "SEG A QUI").
+window._descreverJornadaCompleta = function(jornada) {
+    if (!jornada) return '';
+    const tipo = (jornada.tipo || '').toUpperCase();
+    if (tipo.includes('12X36')) return tipo + (jornada.horario ? ` (${jornada.horario})` : '');
+    if (!jornada.escala || Object.keys(jornada.escala).length === 0) return tipo;
+
+    const diasOrdem = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo'];
+    const abrev = { 'Segunda-feira': 'SEG', 'Terça-feira': 'TER', 'Quarta-feira': 'QUA', 'Quinta-feira': 'QUI', 'Sexta-feira': 'SEX', 'Sábado': 'SÁB', 'Domingo': 'DOM' };
+
+    const itens = diasOrdem.map(d => {
+        const cfg = jornada.escala[d];
+        if (!cfg) return null;
+        let chave;
+        if (cfg.status === 'Folga') chave = 'FOLGA';
+        else if (cfg.status === 'Alternado') chave = `ALTERNADO (${cfg.padrao || ''})`;
+        else chave = cfg.horario || '';
+        return { abrev: abrev[d], chave };
+    }).filter(Boolean);
+
+    if (itens.length === 0) return tipo;
+
+    // Agrupa dias seguidos que têm exatamente o mesmo horário/status.
+    const grupos = [];
+    itens.forEach(it => {
+        const ultimo = grupos[grupos.length - 1];
+        if (ultimo && ultimo.chave === it.chave) ultimo.dias.push(it.abrev);
+        else grupos.push({ chave: it.chave, dias: [it.abrev] });
+    });
+
+    const partes = grupos.map(g => {
+        const rotuloDias = g.dias.length > 2 ? `${g.dias[0]} A ${g.dias[g.dias.length - 1]}` : g.dias.join(' E ');
+        return `${rotuloDias}: ${g.chave.toUpperCase()}`;
+    });
+
+    return `${tipo}${partes.length ? ' - ' + partes.join(' | ') : ''}`;
+};
+
 window.abrirModalEnviarOBSA = async function(idColab) {
     const colab = todasAdmissoesAprovadas.find(c => c.id === idColab);
     if (!colab) return mostrarAlerta("Colaborador não encontrado.", "erro");
@@ -83554,12 +83595,19 @@ window.abrirModalEnviarOBSA = async function(idColab) {
         ? `<option value="" disabled>Selecione...</option><option value="N">Não</option><option value="S">Sim (${percentualPericulosidadeCargo}%)</option>`
         : `<option value="" disabled selected>Selecione...</option><option value="N">Não</option><option value="S">Sim</option>`;
 
-   let horarioBase = adm.jornada?.horario || ''; 
+   let horarioBase = adm.jornada?.horario || '';
     let tipoJorStr = adm.jornada?.tipo || '12x36';
     if (tipoJorStr !== '12x36' && adm.jornada?.escala) {
         for (let diaConfig of Object.values(adm.jornada.escala)) {
             if (diaConfig.status === 'Trabalho' && diaConfig.horario) { horarioBase = diaConfig.horario; break; }
         }
+    }
+    // 👇 O "Tipo de Escala" sugerido já vem com a semana INTEIRA descrita (não só o
+    // primeiro dia de trabalho encontrado) — assim quem tem, por exemplo, sexta mais
+    // curta na jornada de 44h vê isso refletido antes de gerar o OBSA, e pode ajustar
+    // o texto se quiser.
+    if (adm.jornada?.escala && Object.keys(adm.jornada.escala).length > 0) {
+        tipoJorStr = window._descreverJornadaCompleta(adm.jornada);
     }
 
     // 👇 1. MÁGICA: CÁLCULO AUTOMÁTICO DO ADICIONAL NOTURNO (BLINDADO COM MINUTOS) 👇
@@ -84485,6 +84533,12 @@ window.gerarExcelOBSASeguro = async function(idColab, unidade, nomeColaborador) 
         sheet.getCell(`E${row}`).value = possuiEscalaInput.toUpperCase(); styleCell(sheet.getCell(`E${row}`));
         sheet.getCell(`F${row}`).value = '*Descreva escala:'; styleCell(sheet.getCell(`F${row}`), 'label');
         sheet.getCell(`G${row}`).value = tipoJorStr.toUpperCase(); styleCell(sheet.getCell(`G${row}`));
+        // 👇 Quando a jornada varia de dia pra dia (ex.: 44h com sexta mais curta), o texto
+        // que descreve a semana inteira fica bem mais longo — aumenta a altura da linha
+        // pra dar espaço pro texto quebrado (wrapText) aparecer inteiro, sem cortar.
+        if (String(tipoJorStr).length > 30) {
+            sheet.getRow(row).height = Math.min(90, 15 + Math.ceil(String(tipoJorStr).length / 28) * 12);
+        }
 
         row += 2;
         sheet.mergeCells(`B${row}:G${row}`); sheet.getCell(`B${row}`).value = 'INFORMAÇÕES ADICIONAIS E DESCONTOS'; styleCell(sheet.getCell(`B${row}`), 'header');
