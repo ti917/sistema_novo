@@ -6017,6 +6017,10 @@ div[id^="modal-"] button[style*="position: absolute"]:hover,
                                         Página <span id="pagina-atual-assinar">1</span>/<span id="total-paginas-assinar">1</span>
                                         <button type="button" class="btn-secondary" style="padding:4px 10px;" onclick="window.mudarPaginaAssinar(1)"><i class="fa-solid fa-chevron-right"></i></button>
                                     </span>
+                                    <label id="chip-todas-paginas-assinar" class="chip-toggle-assinar chip-ativo hidden" title="Coloca a assinatura/carimbo (na mesma posição) em TODAS as páginas do PDF, não só na que está sendo editada agora">
+                                        <input type="checkbox" id="chk-todas-paginas-assinar" checked onchange="document.getElementById('chip-todas-paginas-assinar').classList.toggle('chip-ativo', this.checked)">
+                                        <i class="fa-solid fa-copy"></i> Assinar todas as páginas
+                                    </label>
                                     <button type="button" id="btn-preview-assinar" class="btn-secondary" style="padding:8px 14px; font-size:0.8rem;" onclick="window.togglePreviewAssinar()">
                                         <i class="fa-solid fa-eye"></i> Ver sem bordas
                                     </button>
@@ -50246,6 +50250,15 @@ window.selecionarArquivoAssinar = async function(files) {
             document.getElementById('nav-paginas-assinar').classList.toggle('hidden', pdfDoc.numPages <= 1);
             document.getElementById('total-paginas-assinar').innerText = pdfDoc.numPages;
 
+            // 👇 Só faz sentido perguntar "assinar todas as páginas?" quando o PDF TEM mais
+            // de uma página — e, quando aparece, já vem marcado por padrão, porque o normal
+            // num contrato/documento de várias páginas é precisar da assinatura em todas elas.
+            const chkTodasPag = document.getElementById('chk-todas-paginas-assinar');
+            const chipTodasPag = document.getElementById('chip-todas-paginas-assinar');
+            chipTodasPag.classList.toggle('hidden', pdfDoc.numPages <= 1);
+            chkTodasPag.checked = true;
+            chipTodasPag.classList.add('chip-ativo');
+
             await window._renderizarPaginaAssinarPdf();
         } else {
             window.__assinarDoc.tipoArquivo = 'imagem';
@@ -50575,11 +50588,23 @@ window.gerarDocumentoAssinado = async function() {
         } else {
             // PDF: usa pdf-lib pra embutir as imagens de verdade dentro do arquivo (não é
             // print/screenshot — o PDF final continua com texto pesquisável, só ganha a
-            // assinatura/carimbo desenhados por cima na página escolhida).
+            // assinatura/carimbo desenhados por cima).
             const pdfDoc = await PDFLib.PDFDocument.load(st.pdfBytesOriginais.slice(0));
-            const pagina = pdfDoc.getPage(st.paginaAtual - 1);
-            const { width: largPdfPt, height: altPdfPt } = pagina.getSize();
 
+            // 👇 Se o PDF tem mais de uma página e a caixinha "Assinar todas as páginas"
+            // está marcada, repete a MESMA assinatura/carimbo (mesma posição relativa) em
+            // todas elas — antes só ia na página que estava aberta no editor, o que não
+            // serve pra contrato/termo de várias páginas que precisa de assinatura em cada uma.
+            const marcarTodasPaginas = st.totalPaginas > 1 && !!document.getElementById('chk-todas-paginas-assinar')?.checked;
+            const indicesPaginasAlvo = marcarTodasPaginas
+                ? pdfDoc.getPages().map((_, i) => i)
+                : [st.paginaAtual - 1];
+
+            // 👇 Embute cada imagem (assinatura/carimbo) só UMA vez, e guarda a posição/
+            // tamanho como FRAÇÃO do canvas da página que estava sendo editada — assim dá
+            // pra aplicar a mesma posição relativa em cada página alvo, mesmo que alguma
+            // tenha um tamanho de página levemente diferente.
+            const posicoesPreparadas = [];
             for (const p of posicoes) {
                 const bytesImg = await window._baixarImagemComoBytes(p.url);
                 // 👇 O carimbo chega como "data:image/png;base64,..." (gerado na hora, sem
@@ -50587,34 +50612,49 @@ window.gerarDocumentoAssinado = async function() {
                 const ehPng = p.url.toLowerCase().startsWith('data:image/png') || p.url.toLowerCase().includes('.png');
                 const imgEmbutida = ehPng ? await pdfDoc.embedPng(bytesImg) : await pdfDoc.embedJpg(bytesImg);
 
-                // Posição/tamanho em pixels do canvas de prévia → convertido pra pontos do PDF.
-                // O eixo Y do PDF cresce de baixo pra cima, por isso o cálculo inverte a altura.
                 const wPx = p.wrap.offsetWidth * fatorX;
                 const hPx = p.wrap.offsetHeight * fatorY;
                 const cxPx = (p.wrap.offsetLeft + p.wrap.offsetWidth / 2) * fatorX;
                 const cyPx = (p.wrap.offsetTop + p.wrap.offsetHeight / 2) * fatorY;
 
-                const wPt = (wPx / canvas.width) * largPdfPt;
-                const hPt = (hPx / canvas.height) * altPdfPt;
-                const cxPt = (cxPx / canvas.width) * largPdfPt;
-                const cyPt = altPdfPt - (cyPx / canvas.height) * altPdfPt;
+                posicoesPreparadas.push({
+                    imgEmbutida,
+                    wFrac: wPx / canvas.width,
+                    hFrac: hPx / canvas.height,
+                    cxFrac: cxPx / canvas.width,
+                    cyFracTopo: cyPx / canvas.height, // fração medida a partir do TOPO, igual na tela
+                    anguloDeg: parseFloat(p.wrap.dataset.rotacao || '0')
+                });
+            }
 
-                // 👇 O pdf-lib gira em sentido anti-horário (matemática padrão, eixo Y pra
-                // cima) e a rotação acontece em torno do canto (x,y) informado — não do
-                // centro, como no CSS. Por isso: 1) inverte o sinal do ângulo (CSS é
-                // horário) e 2) calcula o canto inferior-esquerdo de forma que, DEPOIS de
-                // girar em torno dele, o centro da imagem caia exatamente onde a prévia
-                // mostrou (cxPt, cyPt) — assim o resultado final bate com o que foi
-                // arrastado/girado na tela.
-                const anguloDeg = parseFloat(p.wrap.dataset.rotacao || '0');
-                const thetaDeg = -anguloDeg;
-                const thetaRad = thetaDeg * Math.PI / 180;
-                const rx = (wPt / 2) * Math.cos(thetaRad) - (hPt / 2) * Math.sin(thetaRad);
-                const ry = (wPt / 2) * Math.sin(thetaRad) + (hPt / 2) * Math.cos(thetaRad);
-                const xPt = cxPt - rx;
-                const yPt = cyPt - ry;
+            for (const idxPagina of indicesPaginasAlvo) {
+                const pagina = pdfDoc.getPage(idxPagina);
+                const { width: largPdfPt, height: altPdfPt } = pagina.getSize();
 
-                pagina.drawImage(imgEmbutida, { x: xPt, y: yPt, width: wPt, height: hPt, rotate: PDFLib.degrees(thetaDeg) });
+                for (const pp of posicoesPreparadas) {
+                    // Fração do canvas de prévia → pontos do PDF dessa página específica.
+                    // O eixo Y do PDF cresce de baixo pra cima, por isso o cálculo inverte a altura.
+                    const wPt = pp.wFrac * largPdfPt;
+                    const hPt = pp.hFrac * altPdfPt;
+                    const cxPt = pp.cxFrac * largPdfPt;
+                    const cyPt = altPdfPt - pp.cyFracTopo * altPdfPt;
+
+                    // 👇 O pdf-lib gira em sentido anti-horário (matemática padrão, eixo Y pra
+                    // cima) e a rotação acontece em torno do canto (x,y) informado — não do
+                    // centro, como no CSS. Por isso: 1) inverte o sinal do ângulo (CSS é
+                    // horário) e 2) calcula o canto inferior-esquerdo de forma que, DEPOIS de
+                    // girar em torno dele, o centro da imagem caia exatamente onde a prévia
+                    // mostrou (cxPt, cyPt) — assim o resultado final bate com o que foi
+                    // arrastado/girado na tela.
+                    const thetaDeg = -pp.anguloDeg;
+                    const thetaRad = thetaDeg * Math.PI / 180;
+                    const rx = (wPt / 2) * Math.cos(thetaRad) - (hPt / 2) * Math.sin(thetaRad);
+                    const ry = (wPt / 2) * Math.sin(thetaRad) + (hPt / 2) * Math.cos(thetaRad);
+                    const xPt = cxPt - rx;
+                    const yPt = cyPt - ry;
+
+                    pagina.drawImage(pp.imgEmbutida, { x: xPt, y: yPt, width: wPt, height: hPt, rotate: PDFLib.degrees(thetaDeg) });
+                }
             }
 
             const bytesFinais = await pdfDoc.save();
