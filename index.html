@@ -49925,6 +49925,50 @@ window.__assinarDoc = {
     empresaCarimbo: null     // qual carimbo (de qual empresa) usar — ver window.CARIMBO_EMPRESAS
 };
 
+// 👇 Guarda o último jeito que a assinatura/carimbo ficaram (marcado ou não, posição,
+// tamanho, rotação) pra já vir assim de novo no PRÓXIMO documento — sem precisar marcar
+// "usar carimbo" e reposicionar tudo de novo toda vez que troca de arquivo. Só volta pro
+// padrão de fábrica na primeira vez que a aba é usada (quando ainda é null).
+window.__ultimaConfigAssinar = null;
+
+// Lê a posição/tamanho/rotação atuais de um elemento (em % do palco, pra funcionar
+// mesmo se o próximo documento tiver um tamanho diferente) e devolve pronto pra salvar.
+window._lerConfigOverlayAssinar = function(idWrap) {
+    const wrap = document.getElementById(idWrap);
+    const palco = document.getElementById('palco-assinar-doc');
+    if (!wrap || !palco || !palco.clientWidth || !palco.clientHeight) return null;
+    // 👇 Se o elemento estiver escondido (.hidden = display:none), offsetLeft/Top/Width
+    // vêm todos zerados — isso NÃO é a posição real, é só porque tá com display:none.
+    // Nesse caso não lê nada: mantém guardado o último valor bom que já tínhamos,
+    // em vez de sobrescrever com um monte de zero e perder a posição de quando
+    // a pessoa tinha usado esse elemento pela última vez.
+    if (wrap.offsetParent === null) {
+        const anterior = window.__ultimaConfigAssinar;
+        if (anterior) {
+            if (idWrap === 'wrap-assinatura-doc' && anterior.assinatura) return anterior.assinatura;
+            if (idWrap === 'wrap-carimbo-doc' && anterior.carimbo) return anterior.carimbo;
+        }
+        return null;
+    }
+    return {
+        leftPct: wrap.offsetLeft / palco.clientWidth,
+        topPct: wrap.offsetTop / palco.clientHeight,
+        largPct: wrap.offsetWidth / palco.clientWidth,
+        rotacao: parseFloat(wrap.dataset.rotacao || '0')
+    };
+};
+
+// Salva o estado atual (chamado sempre que a pessoa move, redimensiona, gira ou
+// marca/desmarca assinatura e carimbo) pra reaproveitar no próximo documento.
+window._salvarConfigAssinarAtual = function() {
+    window.__ultimaConfigAssinar = {
+        usarAssinatura: !!(document.getElementById('chk-usar-assinatura-doc') || {}).checked,
+        usarCarimbo: !!(document.getElementById('chk-usar-carimbo-doc') || {}).checked,
+        assinatura: window._lerConfigOverlayAssinar('wrap-assinatura-doc'),
+        carimbo: window._lerConfigOverlayAssinar('wrap-carimbo-doc')
+    };
+};
+
 // 👇 Mostra o bloco pra cadastrar (ou trocar) a assinatura pessoal do Admin.
 // O carimbo NÃO precisa ser cadastrado — já vem pronto no sistema (ver
 // window.CARIMBO_EMPRESAS logo abaixo), gerado automaticamente com o nome
@@ -50019,18 +50063,30 @@ window.salvarAssinaturaAdmin = async function() {
 // Pra adicionar outra empresa no futuro, é só acrescentar uma linha aqui.
 // =========================================================================
 window.CARIMBO_EMPRESAS = {
-    "SOUL GESTÃO": { razaoSocial: "GRUPO SOUL SEGURANÇA E FACILITIES", cnpj: "48.052.632/0001-25" }
+    "SOUL GESTÃO": { razaoSocial: "SOUL SEGURANÇA E FACILITIES", cnpj: "48.052.632/0001-25" }
 };
 
 window._cacheCarimboDataUrl = {};
 
+// 👇 Pega só o primeiro e o segundo nome (ex.: "Italo Ferreira de Souza" → "Italo Ferreira"),
+// pra não lotar o carimbo com um nome completo de 4-5 palavras.
+window._primeiroESegundoNome = function(nomeCompleto) {
+    const partes = String(nomeCompleto || '').trim().split(/\s+/).filter(Boolean);
+    return partes.slice(0, 2).join(' ');
+};
+
+// O carimbo leva: razão social da empresa, CNPJ, e o nome (1º e 2º) do Admin logado que
+// está assinando — assim fica registrado quem carimbou, não só a empresa.
 window._gerarImagemCarimboPadrao = function(empresaKey) {
     const dados = window.CARIMBO_EMPRESAS[empresaKey];
     if (!dados) return null;
-    if (window._cacheCarimboDataUrl[empresaKey]) return window._cacheCarimboDataUrl[empresaKey];
+
+    const nomeAdmin = window._primeiroESegundoNome(usuarioAtual && usuarioAtual.nome);
+    const chaveCache = `${empresaKey}::${nomeAdmin}`;
+    if (window._cacheCarimboDataUrl[chaveCache]) return window._cacheCarimboDataUrl[chaveCache];
 
     const ESCALA = 3; // desenha em alta resolução pra não ficar borrado ao redimensionar
-    const LARG = 480 * ESCALA, ALT = 170 * ESCALA;
+    const LARG = 480 * ESCALA, ALT = 190 * ESCALA;
     const canvas = document.createElement('canvas');
     canvas.width = LARG; canvas.height = ALT;
     const ctx = canvas.getContext('2d');
@@ -50041,7 +50097,7 @@ window._gerarImagemCarimboPadrao = function(empresaKey) {
     ctx.fillStyle = corTinta;
 
     // 👇 Sem moldura de propósito (pedido do cliente) — existe carimbo real sem
-    // borda nenhuma, só com o texto do nome da empresa e o CNPJ.
+    // borda nenhuma, só com o texto do nome da empresa, CNPJ e quem assinou.
     const M = 8 * ESCALA;
 
     ctx.textAlign = 'center';
@@ -50055,21 +50111,27 @@ window._gerarImagemCarimboPadrao = function(empresaKey) {
         tamanhoFonte -= 1 * ESCALA;
         ctx.font = `bold ${tamanhoFonte}px Arial`;
     }
-    ctx.fillText(dados.razaoSocial, LARG / 2, ALT / 2 - 14 * ESCALA);
+    ctx.fillText(dados.razaoSocial, LARG / 2, ALT * 0.26);
 
     // Linha divisória
     ctx.beginPath();
-    ctx.moveTo(LARG / 2 - 90 * ESCALA, ALT / 2 + 6 * ESCALA);
-    ctx.lineTo(LARG / 2 + 90 * ESCALA, ALT / 2 + 6 * ESCALA);
+    ctx.moveTo(LARG / 2 - 90 * ESCALA, ALT * 0.45);
+    ctx.lineTo(LARG / 2 + 90 * ESCALA, ALT * 0.45);
     ctx.lineWidth = 1 * ESCALA;
     ctx.stroke();
 
     // Linha 2: CNPJ
     ctx.font = `${15 * ESCALA}px Arial`;
-    ctx.fillText(`CNPJ: ${dados.cnpj}`, LARG / 2, ALT / 2 + 26 * ESCALA);
+    ctx.fillText(`CNPJ: ${dados.cnpj}`, LARG / 2, ALT * 0.62);
+
+    // Linha 3: nome de quem assinou (Admin logado)
+    if (nomeAdmin) {
+        ctx.font = `${13 * ESCALA}px Arial`;
+        ctx.fillText(nomeAdmin.toUpperCase(), LARG / 2, ALT * 0.82);
+    }
 
     const dataUrl = canvas.toDataURL('image/png');
-    window._cacheCarimboDataUrl[empresaKey] = dataUrl;
+    window._cacheCarimboDataUrl[chaveCache] = dataUrl;
     return dataUrl;
 };
 
@@ -50098,20 +50160,28 @@ window.selecionarArquivoAssinar = async function(files) {
     }
 
     window.__assinarDoc.nomeArquivoOriginal = arquivo.name;
-    window.__assinarDoc.usarAssinatura = true;
-    window.__assinarDoc.usarCarimbo = false;
-    document.getElementById('chk-usar-assinatura-doc').checked = true;
-    document.getElementById('chip-usar-assinatura-doc').classList.add('chip-ativo');
+
+    // 👇 Reaproveita o "usar assinatura"/"usar carimbo" do último documento assinado nesta
+    // sessão, em vez de sempre voltar pro padrão — assim, quem assina vários documentos
+    // seguidos não precisa marcar a caixinha de novo toda hora. Só na primeira vez (ainda
+    // sem nada salvo) é que usa o padrão de fábrica (assinatura ligada, carimbo desligado).
+    const lembrado = window.__ultimaConfigAssinar;
+    const usarAssinaturaInicial = lembrado ? lembrado.usarAssinatura : true;
+    window.__assinarDoc.usarAssinatura = usarAssinaturaInicial;
+    document.getElementById('chk-usar-assinatura-doc').checked = usarAssinaturaInicial;
+    document.getElementById('chip-usar-assinatura-doc').classList.toggle('chip-ativo', usarAssinaturaInicial);
 
     // 👇 Carimbo já vem pronto no sistema — só desabilita a opção se, por algum
     // motivo, não existir carimbo cadastrado pra nenhuma empresa (não deveria acontecer).
     const empresaCarimbo = window._empresaCarimboPadrao();
+    const usarCarimboInicial = !!empresaCarimbo && (lembrado ? lembrado.usarCarimbo : false);
     const chkCarimbo = document.getElementById('chk-usar-carimbo-doc');
     const chipCarimbo = document.getElementById('chip-usar-carimbo-doc');
-    chkCarimbo.checked = false;
+    chkCarimbo.checked = usarCarimboInicial;
     chkCarimbo.disabled = !empresaCarimbo;
-    chipCarimbo.classList.remove('chip-ativo');
+    chipCarimbo.classList.toggle('chip-ativo', usarCarimboInicial);
     chipCarimbo.classList.toggle('chip-desabilitado', !empresaCarimbo);
+    window.__assinarDoc.usarCarimbo = usarCarimboInicial;
     window.__assinarDoc.empresaCarimbo = empresaCarimbo;
 
     const canvas = document.getElementById('canvas-base-assinar');
@@ -50196,25 +50266,31 @@ window.mudarPaginaAssinar = async function(delta) {
     await window._renderizarPaginaAssinarPdf();
 };
 
-// Coloca a assinatura/carimbo numa posição inicial razoável (canto inferior direito,
-// empilhados) assim que um documento novo é aberto.
+// Coloca a assinatura/carimbo na posição/tamanho/rotação lembrados do último documento
+// assinado nesta sessão — ou, na primeira vez (nada salvo ainda), numa posição padrão
+// razoável (canto inferior direito, empilhados).
 window._posicionarOverlaysAssinarPadrao = function() {
     const canvas = document.getElementById('canvas-base-assinar');
     const cfg = (usuarioAtual && usuarioAtual.assinatura_admin) || {};
     const larguraPalco = canvas.clientWidth || canvas.width;
     const alturaPalco = canvas.clientHeight || canvas.height;
+    const lembrado = window.__ultimaConfigAssinar;
 
     const wrapAssin = document.getElementById('wrap-assinatura-doc');
     const imgAssin = document.getElementById('overlay-assinatura-doc');
     imgAssin.src = cfg.assinatura_url || '';
-    const largAssin = Math.round(larguraPalco * 0.28);
+    const posAssin = (lembrado && lembrado.assinatura) || null;
+    const largAssin = Math.round(larguraPalco * (posAssin ? posAssin.largPct : 0.28));
     wrapAssin.style.width = largAssin + 'px';
     wrapAssin.style.height = Math.round(largAssin * 0.4) + 'px';
-    wrapAssin.style.left = Math.round(larguraPalco * 0.60) + 'px';
-    wrapAssin.style.top = Math.round(alturaPalco * 0.82) + 'px';
-    wrapAssin.style.transform = 'rotate(0deg)';
-    wrapAssin.dataset.rotacao = '0';
-    wrapAssin.classList.remove('hidden');
+    wrapAssin.style.left = Math.round(larguraPalco * (posAssin ? posAssin.leftPct : 0.60)) + 'px';
+    wrapAssin.style.top = Math.round(alturaPalco * (posAssin ? posAssin.topPct : 0.82)) + 'px';
+    const rotAssin = posAssin ? posAssin.rotacao : 0;
+    wrapAssin.style.transform = `rotate(${rotAssin}deg)`;
+    wrapAssin.dataset.rotacao = String(rotAssin);
+    // 👇 A visibilidade segue o checkbox "Usar assinatura", que já foi ajustado (padrão ou
+    // lembrado) em window.selecionarArquivoAssinar antes desta função ser chamada.
+    wrapAssin.classList.toggle('hidden', !document.getElementById('chk-usar-assinatura-doc').checked);
 
     // 👇 Carimbo oficial: já vem pronto no sistema (gerado na hora, com o nome e o
     // CNPJ da empresa) — não depende de nenhum upload.
@@ -50222,23 +50298,29 @@ window._posicionarOverlaysAssinarPadrao = function() {
     const imgCarimbo = document.getElementById('overlay-carimbo-doc');
     const empresaCarimbo = window.__assinarDoc.empresaCarimbo || window._empresaCarimboPadrao();
     const carimboDataUrl = empresaCarimbo ? window._gerarImagemCarimboPadrao(empresaCarimbo) : null;
+    const posCarimbo = (lembrado && lembrado.carimbo) || null;
     if (carimboDataUrl) {
         imgCarimbo.src = carimboDataUrl;
-        const PROPORCAO_CARIMBO = 170 / 480; // altura/largura do carimbo gerado (ver _gerarImagemCarimboPadrao)
-        const largCarimbo = Math.round(larguraPalco * 0.32);
+        const PROPORCAO_CARIMBO = 190 / 480; // altura/largura do carimbo gerado (ver _gerarImagemCarimboPadrao)
+        const largCarimbo = Math.round(larguraPalco * (posCarimbo ? posCarimbo.largPct : 0.32));
         wrapCarimbo.style.width = largCarimbo + 'px';
         wrapCarimbo.style.height = Math.round(largCarimbo * PROPORCAO_CARIMBO) + 'px';
-        wrapCarimbo.style.left = Math.round(larguraPalco * 0.06) + 'px';
-        wrapCarimbo.style.top = Math.round(alturaPalco * 0.80) + 'px';
+        wrapCarimbo.style.left = Math.round(larguraPalco * (posCarimbo ? posCarimbo.leftPct : 0.06)) + 'px';
+        wrapCarimbo.style.top = Math.round(alturaPalco * (posCarimbo ? posCarimbo.topPct : 0.80)) + 'px';
     }
-    wrapCarimbo.style.transform = 'rotate(0deg)';
-    wrapCarimbo.dataset.rotacao = '0';
-    wrapCarimbo.classList.add('hidden'); // só aparece se o checkbox "Usar carimbo" for marcado
+    const rotCarimbo = posCarimbo ? posCarimbo.rotacao : 0;
+    wrapCarimbo.style.transform = `rotate(${rotCarimbo}deg)`;
+    wrapCarimbo.dataset.rotacao = String(rotCarimbo);
+    wrapCarimbo.classList.toggle('hidden', !document.getElementById('chk-usar-carimbo-doc').checked);
 
     window._tornarArrastavelRedimensionavel('wrap-assinatura-doc');
     window._tornarArrastavelRedimensionavel('wrap-carimbo-doc');
     window._tornarRotacionavel('wrap-assinatura-doc');
     window._tornarRotacionavel('wrap-carimbo-doc');
+
+    // 👇 Se ainda não existia nada salvo (primeiro documento da sessão), guarda esse
+    // estado inicial como referência, pra já vir assim de novo no próximo documento.
+    if (!lembrado) window._salvarConfigAssinarAtual();
 };
 
 // 👇 Esconde temporariamente a bordinha tracejada e as bolinhas de arrastar/redimensionar/
@@ -50259,6 +50341,7 @@ window.toggleElementoAssinar = function(tipo) {
     window.__assinarDoc[tipo === 'assinatura' ? 'usarAssinatura' : 'usarCarimbo'] = chk.checked;
     wrap.classList.toggle('hidden', !chk.checked);
     if (chip) chip.classList.toggle('chip-ativo', chk.checked);
+    window._salvarConfigAssinarAtual();
 };
 
 // 👇 Arrastar (mover) e redimensionar (pela bolinha do canto) via Pointer Events —
@@ -50311,7 +50394,10 @@ window._tornarArrastavelRedimensionavel = function(idWrap) {
         }
     });
 
-    const finalizar = (e) => { modo = null; };
+    const finalizar = (e) => {
+        if (modo) window._salvarConfigAssinarAtual(); // salva só se realmente moveu/redimensionou algo
+        modo = null;
+    };
     wrap.addEventListener('pointerup', finalizar);
     wrap.addEventListener('pointercancel', finalizar);
 };
@@ -50354,7 +50440,10 @@ window._tornarRotacionavel = function(idWrap) {
         wrap.style.transform = `rotate(${novoAngulo}deg)`;
     });
 
-    const finalizarRotacao = () => { girando = false; };
+    const finalizarRotacao = () => {
+        if (girando) window._salvarConfigAssinarAtual();
+        girando = false;
+    };
     handleRotacao.addEventListener('pointerup', finalizarRotacao);
     handleRotacao.addEventListener('pointercancel', finalizarRotacao);
 };
