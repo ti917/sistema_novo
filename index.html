@@ -39563,29 +39563,12 @@ window.carregarFTsParaAdmin = async function(silencioso = false) {
     }
 };
 
-window.renderizarPaginacaoFTsAdmin = function() {
-    const container = document.getElementById('lista-ft-admin-container');
-    const paginacao = document.getElementById('paginacao-ft-admin');
-    const notifsBanco = notificacoesGlobais; 
-    
-    if (!container || !paginacao) return;
-
-    container.innerHTML = ''; 
-    paginacao.innerHTML = '';
-
-    if (ftsAdminFiltradas.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum registro encontrado para estes filtros.</p>';
-        return;
-    }
-
-    const limiteItens = 20; 
-    const inicio = (paginaAtualFTsAdmin - 1) * limiteItens;
-    const itensDestaPagina = ftsAdminFiltradas.slice(inicio, inicio + limiteItens);
-
-    let html = '';
-
-    itensDestaPagina.forEach(ft => {
-        let corStatus = '#ff9800'; 
+// 👇 NOVO: card de um único lançamento, isolado numa função própria pra poder
+// ser reaproveitado na visão em pastas (Unidade > Colaborador) abaixo -- é
+// exatamente o mesmo HTML que já existia aqui, só que devolvido (return) em
+// vez de acumulado direto numa variável "html" do loop antigo.
+function construirCardFTAdmin(ft, notifsBanco) {
+        let corStatus = '#ff9800';
         if(ft.status === 'Aprovado') corStatus = 'var(--cor-sucesso)';
         if(ft.status === 'Reprovado') corStatus = 'var(--cor-perigo)';
 
@@ -39716,7 +39699,7 @@ window.renderizarPaginacaoFTsAdmin = function() {
             tituloCard = ft.sigla === 'FT' ? 'Registro de Folga Trabalhada' : (ft.sigla === 'FP' ? 'Abatimento de Banco' : 'Registro de Horas Extras');
         }
 
-        html += `
+        return `
             <div class="admissao-card" id="card-ft-${ft.id}" style="width: 100%; border-left: 5px solid ${corStatus}; padding: 0; overflow: hidden; display: flex; flex-direction: column; align-items: stretch; text-align: left; margin-bottom: 20px; background: rgba(0,0,0,0.15); box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
                 
                 <div style="padding: 20px 25px; display: flex; flex-direction: column; align-items: stretch; gap: 15px; width: 100%;">
@@ -39777,15 +39760,148 @@ window.renderizarPaginacaoFTsAdmin = function() {
                 </div>
 
             </div>`;
+}
+
+// 👇 NOVO: guarda quais pastas (unidade/colaborador) estão abertas entre uma
+// renderização e outra -- assim, marcar "Lido" ou trocar de filtro não fecha
+// tudo de novo. Vive fora da função pra sobreviver a re-renderizações.
+window._ftPastasAbertas = window._ftPastasAbertas || new Set();
+
+// 👇 NOVO: abre/fecha uma pasta (unidade ou colaborador) e lembra o estado.
+window.toggleFTPasta = function(chave, idContainer, elHeader) {
+    const el = document.getElementById(idContainer);
+    if (!el) return;
+    const vaiAbrir = el.classList.contains('hidden');
+    el.classList.toggle('hidden', !vaiAbrir);
+    if (vaiAbrir) window._ftPastasAbertas.add(chave); else window._ftPastasAbertas.delete(chave);
+
+    const icone = elHeader.querySelector('.fa-folder, .fa-folder-open');
+    if (icone) { icone.classList.toggle('fa-folder', !vaiAbrir); icone.classList.toggle('fa-folder-open', vaiAbrir); }
+    const chevron = elHeader.querySelector('.fa-chevron-down');
+    if (chevron) chevron.style.transform = vaiAbrir ? 'rotate(180deg)' : '';
+};
+
+// 👇 REFEITO A PEDIDO: em vez de uma lista corrida com paginação numérica, agora
+// organiza em pastas -- Unidade > Colaborador -- e dentro da pasta do colaborador
+// ficam os lançamentos dele, com o botão de "Marcar como Lido" normal. Cada pasta
+// mostra quantos lançamentos tem, quantos estão Pendentes e quantos ainda não
+// foram lidos, pra dar pra achar rápido o que precisa de atenção sem abrir tudo.
+window.renderizarPaginacaoFTsAdmin = function() {
+    const container = document.getElementById('lista-ft-admin-container');
+    const paginacao = document.getElementById('paginacao-ft-admin');
+    const notifsBanco = notificacoesGlobais;
+
+    if (!container) return;
+    if (paginacao) paginacao.innerHTML = ''; // a visão em pastas não usa paginação numérica
+
+    if (ftsAdminFiltradas.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum registro encontrado para estes filtros.</p>';
+        return;
+    }
+
+    const tipoNotifBuscaFT = usuarioAtual.perfil === 'Admin' ? 'FT_Admin' : 'FT';
+    const naoLidaFT = (ft) => {
+        const notifDestaFT = notifsBanco.find(n => String(n.referencia_id) === String(ft.id) && n.tipo === tipoNotifBuscaFT);
+        return notifDestaFT ? !notifDestaFT.lida : !ft.lida_por;
+    };
+
+    // Agrupa: Unidade -> Colaborador -> [lançamentos]
+    const mapaUnidades = new Map();
+    ftsAdminFiltradas.forEach(ft => {
+        const unidKey = ft.unidade || 'Sem Unidade';
+        if (!mapaUnidades.has(unidKey)) mapaUnidades.set(unidKey, new Map());
+        const mapaColabs = mapaUnidades.get(unidKey);
+        const colabKey = ft.colaborador_id || ft.nome || 'sem-id';
+        if (!mapaColabs.has(colabKey)) mapaColabs.set(colabKey, { nome: ft.nome || 'Sem nome', itens: [] });
+        mapaColabs.get(colabKey).itens.push(ft);
     });
+
+    // 👇 NOVO: na primeiríssima vez que a tela é montada nesta sessão, já abre
+    // sozinha as pastas que têm algo pendente ou não lido -- senão a pessoa
+    // entraria na tela e não veria nada, tudo escondido dentro de pastas
+    // fechadas. Da segunda vez em diante, respeita só o que a pessoa abriu/
+    // fechou manualmente (não fica reabrindo por cima toda vez que filtra).
+    const primeiraRenderizacao = !window._ftJaAutoAbriuPastas;
+    window._ftJaAutoAbriuPastas = true;
+
+    let html = '';
+    let idxUnidade = 0;
+
+    for (const [unidade, mapaColabs] of mapaUnidades) {
+        const idU = idxUnidade++;
+        let totalUnid = 0, pendentesUnid = 0, naoLidasUnid = 0;
+        let htmlColabs = '';
+        let idxColab = 0;
+
+        for (const [colabKey, grupo] of mapaColabs) {
+            const idC = idxColab++;
+            let pendentesColab = 0, naoLidasColab = 0;
+
+            const htmlItens = grupo.itens
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+                .map(ft => {
+                    if (ft.status === 'Pendente') pendentesColab++;
+                    if (naoLidaFT(ft)) naoLidasColab++;
+                    return construirCardFTAdmin(ft, notifsBanco);
+                }).join('');
+
+            totalUnid += grupo.itens.length;
+            pendentesUnid += pendentesColab;
+            naoLidasUnid += naoLidasColab;
+
+            const chaveColabAberta = `colab_${unidade}::${colabKey}`;
+            if (primeiraRenderizacao && (pendentesColab > 0 || naoLidasColab > 0)) {
+                window._ftPastasAbertas.add(chaveColabAberta);
+            }
+            const abertaColab = window._ftPastasAbertas.has(chaveColabAberta);
+            const idContainerColab = `pasta-ft-colab-${idU}-${idC}`;
+
+            let badgesColab = '';
+            if (pendentesColab > 0) badgesColab += `<span style="background:#ff9800; color:#000; font-size:0.7rem; font-weight:bold; padding:2px 8px; border-radius:10px; margin-left:8px; white-space:nowrap;">${pendentesColab} pendente${pendentesColab > 1 ? 's' : ''}</span>`;
+            if (naoLidasColab > 0) badgesColab += `<span style="background:#4fc3f7; color:#000; font-size:0.7rem; font-weight:bold; padding:2px 8px; border-radius:10px; margin-left:6px; white-space:nowrap;">${naoLidasColab} não lida${naoLidasColab > 1 ? 's' : ''}</span>`;
+
+            htmlColabs += `
+                <div style="margin-left: 22px; margin-bottom: 8px;">
+                    <div onclick="window.toggleFTPasta(${JSON.stringify(chaveColabAberta)}, '${idContainerColab}', this)" style="cursor:pointer; display:flex; align-items:center; gap:10px; padding:10px 15px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; flex-wrap: wrap;">
+                        <i class="fa-solid ${abertaColab ? 'fa-folder-open' : 'fa-folder'}" style="color:#4fc3f7;"></i>
+                        <strong style="color:#fff; font-size:0.95rem;">${grupo.nome}</strong>
+                        <span style="color:var(--cor-texto-secundario); font-size:0.8rem;">(${grupo.itens.length} lançamento${grupo.itens.length > 1 ? 's' : ''})</span>
+                        ${badgesColab}
+                        <i class="fa-solid fa-chevron-down" style="margin-left:auto; transition:0.2s; ${abertaColab ? 'transform:rotate(180deg);' : ''}"></i>
+                    </div>
+                    <div id="${idContainerColab}" class="${abertaColab ? '' : 'hidden'}" style="padding: 15px 0 0 15px;">
+                        ${htmlItens}
+                    </div>
+                </div>`;
+        }
+
+        const chaveUnidAberta = `uni_${unidade}`;
+        if (primeiraRenderizacao && (pendentesUnid > 0 || naoLidasUnid > 0)) {
+            window._ftPastasAbertas.add(chaveUnidAberta);
+        }
+        const abertaUnid = window._ftPastasAbertas.has(chaveUnidAberta);
+        const idContainerUnid = `pasta-ft-uni-${idU}`;
+
+        let badgesUnid = '';
+        if (pendentesUnid > 0) badgesUnid += `<span style="background:#ff9800; color:#000; font-size:0.75rem; font-weight:bold; padding:3px 10px; border-radius:10px; margin-left:10px; white-space:nowrap;">${pendentesUnid} pendente${pendentesUnid > 1 ? 's' : ''}</span>`;
+        if (naoLidasUnid > 0) badgesUnid += `<span style="background:#4fc3f7; color:#000; font-size:0.75rem; font-weight:bold; padding:3px 10px; border-radius:10px; margin-left:8px; white-space:nowrap;">${naoLidasUnid} não lida${naoLidasUnid > 1 ? 's' : ''}</span>`;
+
+        html += `
+            <div style="margin-bottom: 15px;">
+                <div onclick="window.toggleFTPasta(${JSON.stringify(chaveUnidAberta)}, '${idContainerUnid}', this)" style="cursor:pointer; display:flex; align-items:center; gap:12px; padding:14px 18px; background: rgba(79,195,247,0.06); border: 1px solid rgba(79,195,247,0.25); border-radius: 10px; flex-wrap: wrap;">
+                    <i class="fa-solid ${abertaUnid ? 'fa-folder-open' : 'fa-folder'} fa-lg" style="color:#4fc3f7;"></i>
+                    <strong style="color:#4fc3f7; font-size:1.05rem;"><i class="fa-solid fa-building"></i> ${unidade}</strong>
+                    <span style="color:var(--cor-texto-secundario); font-size:0.85rem;">(${totalUnid} lançamento${totalUnid > 1 ? 's' : ''})</span>
+                    ${badgesUnid}
+                    <i class="fa-solid fa-chevron-down" style="margin-left:auto; transition:0.2s; ${abertaUnid ? 'transform:rotate(180deg);' : ''}"></i>
+                </div>
+                <div id="${idContainerUnid}" class="${abertaUnid ? '' : 'hidden'}" style="margin-top: 10px;">
+                    ${htmlColabs}
+                </div>
+            </div>`;
+    }
 
     container.innerHTML = html;
-
-    const totalPaginas = Math.ceil(ftsAdminFiltradas.length / limiteItens);
-    renderizarBotoesPaginacaoInteligente(paginacao, totalPaginas, paginaAtualFTsAdmin, (novaPag) => {
-        paginaAtualFTsAdmin = novaPag;
-        window.renderizarPaginacaoFTsAdmin();
-    });
 };
 
 window.aprovarFTAdmin = async function(idFT, idColab, nomeColab, unidadeColab) {
@@ -40179,7 +40295,7 @@ window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeCola
         document.querySelector('[data-aba="aba-controle-ft-admin"]')?.click();
 
         // 👇 MÁGICA: Descobre de que mês é essa FT e muda o filtro sozinho!
-        const { data: rec } = await supabaseClient.from('horas_extras_ft').select('data_inicio').eq('id', idReferencia).maybeSingle();
+        const { data: rec } = await supabaseClient.from('horas_extras_ft').select('data_inicio, unidade, colaborador_id, nome').eq('id', idReferencia).maybeSingle();
         if (rec && rec.data_inicio) {
             document.getElementById('filtro-mes-ft-admin').value = rec.data_inicio.substring(0, 7);
         }
@@ -40187,13 +40303,21 @@ window.aprovarFTPeloModal = async function(idFT, idColab, nomeColab, unidadeCola
         await carregarFTsParaAdmin();
         document.getElementById('busca-ft-admin').value = '';
         document.getElementById('filtro-status-ft').value = 'Todos';
-        filtrarFTsAdmin(); 
+
+        // 👇 NOVO: já deixa a pasta da unidade e a do colaborador abertas, senão o
+        // card ficaria escondido dentro de duas pastas fechadas.
+        if (rec) {
+            const unidKey = rec.unidade || 'Sem Unidade';
+            const colabKey = rec.colaborador_id || rec.nome || 'sem-id';
+            window._ftPastasAbertas = window._ftPastasAbertas || new Set();
+            window._ftPastasAbertas.add(`uni_${unidKey}`);
+            window._ftPastasAbertas.add(`colab_${unidKey}::${colabKey}`);
+        }
+
+        filtrarFTsAdmin();
 
         const indexNoArray = ftsAdminFiltradas.findIndex(f => f.id === idReferencia);
         if(indexNoArray !== -1) {
-            paginaAtualFTsAdmin = Math.floor(indexNoArray / 20) + 1; // 20 é o limite de itens da paginação
-            renderizarPaginacaoFTsAdmin(); 
-            
             setTimeout(() => {
                 const card = document.getElementById(`card-ft-${idReferencia}`);
                 if(card) {
