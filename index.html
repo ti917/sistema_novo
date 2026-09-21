@@ -83739,22 +83739,38 @@ window.filtrarTabelaEscalaPrevista = function() {
 // =========================================================================
 
 // Verifica silenciosamente se o sistema está em período de perdão (desbloqueado)
+// 🐛 CORRIGIDO (performance): checarTravaExperiencia e checarPendenciasDesempenho
+// (ambas Gestor-only, disparadas juntas no login) chamavam cada uma a sua própria
+// verificarDesbloqueioGlobal(), duplicando a mesma consulta em config_sistema.
+// Agora reaproveita a mesma promessa por 15 segundos (tempo de sobra pra cobrir
+// todas as checagens do login, mas curto o bastante pra não atrasar quem o RH
+// destravar/travar de novo enquanto a pessoa já está com a tela aberta).
+window._cacheDesbloqueioGlobal = null;
+window._cacheDesbloqueioGlobalEm = 0;
 window.verificarDesbloqueioGlobal = async function() {
-    try {
-        const { data } = await supabaseClient.from('config_sistema').select('valor').eq('chave', 'override_travas').maybeSingle();
-        if (data && data.valor) {
-            const config = JSON.parse(data.valor);
-            if (config.expiracao) {
-                const dataExpiracao = new Date(config.expiracao);
-                const agora = new Date();
-                if (agora <= dataExpiracao) {
-                    // MÁGICA: Agora devolvemos o objeto completo informando que tá liberado E até quando!
-                    return { liberado: true, expiracao: dataExpiracao }; 
+    const agora = Date.now();
+    if (window._cacheDesbloqueioGlobal && (agora - window._cacheDesbloqueioGlobalEm) < 15000) {
+        return window._cacheDesbloqueioGlobal;
+    }
+    window._cacheDesbloqueioGlobal = (async () => {
+        try {
+            const { data } = await supabaseClient.from('config_sistema').select('valor').eq('chave', 'override_travas').maybeSingle();
+            if (data && data.valor) {
+                const config = JSON.parse(data.valor);
+                if (config.expiracao) {
+                    const dataExpiracao = new Date(config.expiracao);
+                    const agoraCheck = new Date();
+                    if (agoraCheck <= dataExpiracao) {
+                        // MÁGICA: Agora devolvemos o objeto completo informando que tá liberado E até quando!
+                        return { liberado: true, expiracao: dataExpiracao };
+                    }
                 }
             }
-        }
-    } catch(e) { console.error("Erro ao ler trava global:", e); }
-    return { liberado: false, expiracao: null };
+        } catch(e) { console.error("Erro ao ler trava global:", e); }
+        return { liberado: false, expiracao: null };
+    })();
+    window._cacheDesbloqueioGlobalEm = agora;
+    return window._cacheDesbloqueioGlobal;
 };
 
   window.iniciarContagemDesbloqueio = function(dataExpiracaoStr) {
