@@ -33461,11 +33461,47 @@ window.atualizarRegrasRescisao = function() {
             if (typeof window.tocarSomLembreteAgenda === 'function') window.tocarSomLembreteAgenda();
         };
 
+        // 🐛 CORREÇÃO: antes criava um AudioContext NOVO toda vez que um lembrete tocava —
+        // se ainda não tivesse rolado nenhum clique/toque na página (ex: lembrete disparando
+        // logo após o login, antes da pessoa mexer em qualquer coisa), o navegador bloqueia o
+        // autoplay e loga o aviso "AudioContext was not allowed to start" no console — o som
+        // simplesmente não tocava dessa vez (inofensivo, mas sujava o console).
+        //
+        // Agora existe UM ÚNICO AudioContext compartilhado (window._audioCtxLembretesAgenda),
+        // criado/retomado assim que a pessoa interage com a página pela PRIMEIRA vez (clique,
+        // toque ou tecla — ver listener logo abaixo). Esse contexto fica pronto e é reaproveitado
+        // por todos os lembretes daí em diante — nada de ficar criando um novo a cada disparo.
+        // Se um lembrete tentar tocar ANTES de qualquer interação ainda ter acontecido, a função
+        // simplesmente não faz nada (mesmo comportamento silencioso de antes, só que sem gerar
+        // o aviso no console) — assim que a pessoa clicar em qualquer lugar da tela, os lembretes
+        // seguintes tocam som normalmente, sem diferença nenhuma de comportamento pro usuário.
+        window._audioCtxLembretesAgenda = null;
+        window._prepararAudioContextLembretesAgenda = function() {
+            if (window._audioCtxLembretesAgenda) {
+                // Já existe — só garante que não ficou suspenso (ex: aba voltou de segundo plano)
+                if (window._audioCtxLembretesAgenda.state === 'suspended') {
+                    window._audioCtxLembretesAgenda.resume().catch(() => {});
+                }
+                return;
+            }
+            try {
+                window._audioCtxLembretesAgenda = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) { /* navegador sem suporte a Web Audio — sem som, sem problema */ }
+        };
+        ['click', 'keydown', 'touchstart'].forEach(evento => {
+            document.addEventListener(evento, window._prepararAudioContextLembretesAgenda, { passive: true });
+        });
+
         // 🔔 Som do lembrete: duas notas em sino (envelope suave), sem precisar de
         // nenhum arquivo de áudio externo — tudo gerado na hora via Web Audio.
         window.tocarSomLembreteAgenda = function() {
             try {
-                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const audioCtx = window._audioCtxLembretesAgenda;
+                // Ainda não teve nenhuma interação na página, ou o navegador não suporta —
+                // fica quieto de boa, igual antes, só que sem tentar criar um contexto novo
+                // (que é o que gerava o aviso no console).
+                if (!audioCtx || audioCtx.state !== 'running') return;
+
                 const tocarNota = (freq, inicioSeg, duracaoSeg, volume) => {
                     const osc = audioCtx.createOscillator();
                     const gain = audioCtx.createGain();
