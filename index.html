@@ -29409,11 +29409,63 @@ window.visualizarArquivoDocAdmissao = function(id, index) {
     setTimeout(() => URL.revokeObjectURL(urlTemporaria), 60000);
 };
 
+// 👇 NOVO: compara o CONTEÚDO (bytes) de dois arquivos, não só nome/tamanho — porque
+// o RG frente e verso (ou duas fotos separadas pela Clara IA) frequentemente viram
+// dois arquivos com o MESMO nome gerado (ex: "RG (Frente e Verso) - Separado por
+// Clara IA.pdf" pras duas fotos) e às vezes até o mesmo tamanho por coincidência.
+// Comparar só nome ou só tamanho dava falso positivo (bloquearia frente/verso de
+// verdade) OU falso negativo (deixava passar o mesmo arquivo duas vezes com nome
+// igual). Bytes iguais = com certeza é o mesmo arquivo escaneado duas vezes.
+window.arquivosSaoIdenticos = async function(a, b) {
+    if (!a || !b || a.size !== b.size) return false;
+    try {
+        const [bufA, bufB] = await Promise.all([a.arrayBuffer(), b.arrayBuffer()]);
+        if (bufA.byteLength !== bufB.byteLength) return false;
+        const va = new Uint8Array(bufA);
+        const vb = new Uint8Array(bufB);
+        for (let i = 0; i < va.length; i++) {
+            if (va[i] !== vb[i]) return false;
+        }
+        return true;
+    } catch (e) {
+        console.warn('Não consegui comparar dois arquivos pra checar duplicidade (seguindo sem bloquear):', e);
+        return false; // na dúvida, não bloqueia — não é aceitável travar o anexo por causa de uma checagem
+    }
+};
+
+// 👇 Filtra de `candidatos` os arquivos que já são IDÊNTICOS (mesmo conteúdo) a algum
+// arquivo já presente em `jaExistentes` — usado tanto no anexo manual quanto na
+// separação automática da Clara IA, pra nunca duplicar o mesmo documento na mesma
+// caixinha (ex: reprocessar o mesmo PDF pela IA duas vezes, ou o Gestor selecionar o
+// mesmo arquivo sem perceber). Retorna { unicos, duplicados } — duplicados é só pra
+// avisar, nunca é adicionado à lista.
+window.filtrarArquivosDuplicados = async function(candidatos, jaExistentes) {
+    const unicos = [];
+    const duplicados = [];
+    // acumula também os já aprovados NESTE lote, pra pegar duplicidade dentro do
+    // próprio grupo de arquivos novos (ex: selecionou o mesmo arquivo 2x de uma vez).
+    const baseComparacao = [...(jaExistentes || [])];
+    for (const candidato of candidatos) {
+        let ehDuplicado = false;
+        for (const existente of baseComparacao) {
+            if (await window.arquivosSaoIdenticos(candidato, existente)) { ehDuplicado = true; break; }
+        }
+        if (ehDuplicado) {
+            duplicados.push(candidato);
+        } else {
+            unicos.push(candidato);
+            baseComparacao.push(candidato);
+        }
+    }
+    return { unicos, duplicados };
+};
+
 // 👇 Chamado no onchange do input escondido: valida cada arquivo novo (PDF ou
-// imagem, conforme o campo) e só então ACRESCENTA na lista — nunca substitui
-// sozinho, exceto nos poucos campos que continuam sendo de um arquivo só
-// (cfg.multiplo === false), onde faz sentido a nova escolha trocar a antiga.
-window.acumularArquivosDocAdmissao = function(id, inputEl) {
+// imagem, conforme o campo), DESCARTA quem já está anexado de novo (mesmo conteúdo)
+// e só então ACRESCENTA na lista — nunca substitui sozinho, exceto nos poucos campos
+// que continuam sendo de um arquivo só (cfg.multiplo === false), onde faz sentido a
+// nova escolha trocar a antiga.
+window.acumularArquivosDocAdmissao = async function(id, inputEl) {
     const cfg = (window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === id);
     if (!cfg) return;
     const novos = Array.from(inputEl.files || []);
@@ -29440,7 +29492,14 @@ window.acumularArquivosDocAdmissao = function(id, inputEl) {
 
     if (!window.arquivosAcumuladosAdmissao[id]) window.arquivosAcumuladosAdmissao[id] = [];
     if (cfg.multiplo) {
-        window.arquivosAcumuladosAdmissao[id].push(...novos);
+        const { unicos, duplicados } = await window.filtrarArquivosDuplicados(novos, window.arquivosAcumuladosAdmissao[id]);
+        window.arquivosAcumuladosAdmissao[id].push(...unicos);
+        if (duplicados.length > 0) {
+            window.mostrarAlerta(
+                `${duplicados.length === 1 ? 'Esse arquivo já estava' : `${duplicados.length} desses arquivos já estavam`} anexado(s) aqui em <b>${cfg.label.replace(' (Opcional)', '')}</b> — não anexei de novo pra não duplicar o mesmo documento.`,
+                'aviso',
+            );
+        }
     } else {
         window.arquivosAcumuladosAdmissao[id] = [novos[0]];
     }
@@ -29632,8 +29691,23 @@ window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, cl
             const arquivoFinal = new File([bytesFinais], `${nomeTipoLabel} - Separado por Clara IA.pdf`, { type: 'application/pdf' });
 
             if (!window.arquivosAcumuladosAdmissao[grupo.tipo]) window.arquivosAcumuladosAdmissao[grupo.tipo] = [];
-            window.arquivosAcumuladosAdmissao[grupo.tipo].push(arquivoFinal);
-            resumo.push({ tipo: grupo.tipo, paginas: grupo.paginas.length || 1 });
+            // 👇 CORREÇÃO: antes empurrava direto — se o Gestor reprocessasse o mesmo PDF
+            // pela Clara IA (ex: rodou de novo depois de corrigir outra coisa) ou o mesmo
+            // documento caísse em dois grupos, o mesmo arquivo entrava duplicado na
+            // caixinha (ex: RG virando 6 anexos em vez de 2). Compara por CONTEÚDO (não só
+            // nome, já que o nome gerado é sempre igual pro mesmo tipo) e só adiciona se
+            // realmente for um documento novo — RG frente e verso de verdade (conteúdos
+            // diferentes) continuam entrando os dois normalmente.
+            const { unicos: novosUnicos, duplicados: novosDuplicados } = await window.filtrarArquivosDuplicados(
+                [arquivoFinal],
+                window.arquivosAcumuladosAdmissao[grupo.tipo],
+            );
+            if (novosUnicos.length > 0) {
+                window.arquivosAcumuladosAdmissao[grupo.tipo].push(...novosUnicos);
+                resumo.push({ tipo: grupo.tipo, paginas: grupo.paginas.length || 1 });
+            } else if (novosDuplicados.length > 0) {
+                console.log(`ℹ️ Clara IA ignorou 1 página/arquivo de "${grupo.tipo}" por já estar anexado (mesmo conteúdo).`);
+            }
         } catch (e) {
             console.warn('Não foi possível separar automaticamente um grupo de páginas:', e);
             ignorados++;
