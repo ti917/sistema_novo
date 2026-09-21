@@ -30820,8 +30820,15 @@ window.listarUsuarios = async function(silencioso = false) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando lista...</td></tr>';
     }
     
+    // 👇 OTIMIZAÇÃO: antes buscava a linha INTEIRA (select '*') de cada usuário, incluindo
+    // o dados_admissao completo (endereço, banco, dependentes, RG, histórico de
+    // transferências etc.) só pra mostrar o cargo embaixo do nome nessa lista. Agora pede só
+    // as colunas que essa tela realmente usa, mais o cargo/data-do-último-dia extraídos
+    // direto do JSON (dados_admissao->cargo e dados_rescisao->>ultimo_dia, sintaxe do
+    // PostgREST) — o resultado já chega achatado como `u.cargo` / `u.ultimo_dia_rescisao`,
+    // sem precisar trazer o JSON inteiro pela rede nem pro Postgres montar ele.
     let query = supabaseClient.from('perfis')
-        .select('*')
+        .select('id, nome, perfil, status, status_aprovacao, empresa, unidade, permissoes, cargo:dados_admissao->>cargo, ultimo_dia_rescisao:dados_rescisao->>ultimo_dia')
         .in('perfil', ['Colaborador', 'Admin', 'Gestor'])
         .order('nome');
         
@@ -31000,9 +31007,9 @@ window.filtrarUsuariosCadastrados = function() {
             const hoje = new Date();
             hoje.setHours(0,0,0,0);
             
-            if (u.dados_rescisao && u.dados_rescisao.ultimo_dia) {
-                const udRegex = u.dados_rescisao.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-                let udLimpo = udRegex ? `${udRegex[1]}/${udRegex[2]}/${udRegex[3]}` : u.dados_rescisao.ultimo_dia.split(' ')[0];
+            if (u.ultimo_dia_rescisao) {
+                const udRegex = u.ultimo_dia_rescisao.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                let udLimpo = udRegex ? `${udRegex[1]}/${udRegex[2]}/${udRegex[3]}` : u.ultimo_dia_rescisao.split(' ')[0];
 
                 if (udRegex) {
                     const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
@@ -31126,7 +31133,7 @@ window.filtrarUsuariosCadastrados = function() {
             `;
         }
 
-        const cargoDisplay = u.dados_admissao?.cargo ? `<span style="font-size: 0.75rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">${u.dados_admissao.cargo}</span>` : '';
+        const cargoDisplay = u.cargo ? `<span style="font-size: 0.75rem; color: var(--cor-texto-secundario); display: block; margin-top: 3px;">${u.cargo}</span>` : '';
         const unidadesFormatadas = u.unidade ? u.unidade.replace(/,/g, '<br>') : 'Todas (Admin)';
 
         // 👇 A MÁGICA VISUAL DA COLUNA DE AÇÃO (VERTICAL MIDDLE + FLEX NO-WRAP) 👇
@@ -32138,7 +32145,19 @@ window.verHistoricoTransferencias = async function(idColab) {
     const user = todosUsuariosCadastrados.find(u => u.id === idColab);
     if (!user) return mostrarAlerta("Usuário não encontrado.", "erro");
 
-    let historico = user.dados_admissao?.historico_transferencias || [];
+    // 👇 A lista de Usuários Cadastrados agora só traz um resumo de cada pessoa (não o
+    // dados_admissao inteiro — ver otimização em carregarUsuariosCadastrados), então aqui
+    // busca o histórico de transferências fresquinho, só desse colaborador, na hora que o
+    // modal é aberto — é exatamente o tipo de dado "pesado" que só vale a pena buscar quando
+    // precisa dele de verdade, não pra todo mundo da lista de uma vez.
+    const { data: colabHistorico, error: erroHistorico } = await supabaseClient
+        .from('perfis')
+        .select('dados_admissao')
+        .eq('id', idColab)
+        .maybeSingle();
+    if (erroHistorico) return mostrarAlerta("Não consegui buscar o histórico deste colaborador: " + erroHistorico.message, "erro");
+
+    let historico = colabHistorico?.dados_admissao?.historico_transferencias || [];
     let timelineHtml = '';
 
     if (historico.length === 0) {
