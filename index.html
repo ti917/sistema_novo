@@ -56539,10 +56539,14 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
     const hojeIso = new Date().toISOString().split('T')[0];
     
+    // 🐛 CORRIGIDO (performance): essas duas buscavam ausência/férias da EMPRESA
+    // INTEIRA (todas as unidades) só pra depois usar apenas os colaborador_id que
+    // batiam com a unidade do Gestor (via setAfastados, abaixo). Como perfis já
+    // filtra por unids, aqui também filtra — mesmo resultado, bem menos dado.
     const [resColabs, resAusencias, resFerias] = await Promise.all([
         supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
-        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso),
-        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso)
+        supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).in('unidade', unids),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso).in('unidade', unids)
     ]);
 
     if (resColabs.error) return;
@@ -62016,12 +62020,16 @@ window.carregarDashboardInicio = async function() {
 
         // 👇 Gestor de Visão Global e Regional: quantas rescisões de Colaborador Vinculado
         // estão represadas aguardando a aprovação dele (card de alerta no Dashboard).
-        let countAguardandoAprovGlobalResc = 0;
+        // 🐛 CORRIGIDO (performance): essa consulta era feita sozinha, com await,
+        // ANTES do Promise.all lá embaixo — ficava esperando ela terminar pra só
+        // depois disparar as outras 5. Agora só monta a query aqui (não dispara
+        // ainda) e ela entra no MESMO Promise.all, rodando em paralelo com o
+        // resto. Só monta de fato quando é Gestor com Visão Global; pros demais
+        // nem entra na lista de consultas.
+        let qAprovGlobalDash = null;
         if (souGestorGlobalDash) {
-            let qAprovGlobalDash = supabaseClient.from('perfis').select('id', { count: 'exact', head: true }).eq('status_aprovacao', 'Aguardando Aprovação Global');
+            qAprovGlobalDash = supabaseClient.from('perfis').select('id', { count: 'exact', head: true }).eq('status_aprovacao', 'Aguardando Aprovação Global');
             if (usuarioAtual.empresa) qAprovGlobalDash = qAprovGlobalDash.in('empresa', usuarioAtual.empresa.split(',').map(e => e.trim()));
-            const { count: countAprovGlobalDash } = await qAprovGlobalDash;
-            countAguardandoAprovGlobalResc = countAprovGlobalDash || 0;
         }
 
         // Buscas Originais
@@ -62029,7 +62037,7 @@ window.carregarDashboardInicio = async function() {
         let qFaltas = supabaseClient.from('ausencias').select('id, nome, unidade, data_inicio').eq('sigla', 'FA').eq('status', 'Aprovado').gte('data_inicio', dataISOInicioMes).lte('data_inicio', dataISOFimMes);
         let qFerias = supabaseClient.from('solicitacoes_ferias').select('colaborador_id, id, nome, unidade, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', hojeIso);
         let qAdvs = supabaseClient.from('advertencias').select('nome, unidade, gravidade, status, empresa').neq('status', 'Reprovado');
-        
+
         // 👇 BUSCA NOVA: Procura quem está com Atestado/Licença EXATAMENTE HOJE 👇
         let qAfastadosHoje = supabaseClient.from('ausencias').select('colaborador_id, sigla').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', hojeIso).neq('sigla', 'FA');
 
@@ -62045,7 +62053,8 @@ window.carregarDashboardInicio = async function() {
             qAfastadosHoje = qAfastadosHoje.in('unidade', unidsFiltro);
         }
 
-        const [resPerfis, resFaltas, resFerias, resAdvs, resAfastadosHoje] = await Promise.all([qPerfis, qFaltas, qFerias, qAdvs, qAfastadosHoje]);
+        const [resPerfis, resFaltas, resFerias, resAdvs, resAfastadosHoje, resAprovGlobalDash] = await Promise.all([qPerfis, qFaltas, qFerias, qAdvs, qAfastadosHoje, qAprovGlobalDash]);
+        let countAguardandoAprovGlobalResc = (resAprovGlobalDash && resAprovGlobalDash.count) || 0;
 
         window.dadosDetalhesDash = { ativos: [], admissoes: [], rescisoes: [], faltas: [], ferias: [] };
 
@@ -72866,11 +72875,14 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
             return count;
         }
 
+        // 🐛 CORRIGIDO (performance): ausencias/solicitacoes_ferias buscavam a
+        // empresa inteira; igual ao mesmo ajuste feito em checarTravaExperiencia,
+        // já filtra por unids direto na consulta (mesmo resultado final).
         const [resColabs, resAndamento, resAusencias, resFerias] = await Promise.all([
             supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unids),
             supabaseClient.from('avaliacoes_desempenho').select('colaborador_id, status').in('unidade', unids).in('status', ['Aguardando Assinatura', 'Aguardando Feedback']),
-            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', dataLimiteGraciaIso),
-            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataLimiteGraciaIso)
+            supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIso).gte('data_fim', dataLimiteGraciaIso).in('unidade', unids),
+            supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataLimiteGraciaIso).in('unidade', unids)
         ]);
 
         if (resColabs.error) throw resColabs.error; 
