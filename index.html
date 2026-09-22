@@ -18093,6 +18093,7 @@ async function carregarPerfil(id) {
         window.checarPendenciasDesempenho();
         window.checarLembretesProrrogacaoAoLogar();
         window.checarLembreteFichaSusRescisao();
+        window.checarMudancasPendentesDeUnidade();
         window.carregarDashboardInicio();
         window.checarTravaContrato();
         window.checarAvisosAsoAoLogar();
@@ -26101,7 +26102,10 @@ window.buscarColaboradoresParaFerias = async function() {
     selectColab.disabled = true;
 
     const { data } = await supabaseClient.from('perfis').select('id, nome, empresa, dados_admissao, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
-    colabsFeriasAtivos = window.filtrarAtivosE_AvisoPrevio(data || []);
+    // 🆕 Inclui também quem mudou de unidade recentemente e ainda está na
+    // janela de 3 dias úteis de graça pro Gestor antigo continuar lançando.
+    const emTransicaoFerias = await window.buscarColaboradoresEmTransicaoDaUnidade(unidade);
+    colabsFeriasAtivos = window.filtrarAtivosE_AvisoPrevio(window.mesclarComColaboradoresEmTransicao(data, emTransicaoFerias));
 
     if (colabsFeriasAtivos.length === 0) {
         selectColab.innerHTML = '<option value="">Nenhum colaborador válido.</option>';
@@ -35085,7 +35089,10 @@ window.desarquivarRescisaoAdmin = async function(idColab) {
         return;
     }
 
-    const filtrados = window.filtrarAtivosE_AvisoPrevio(data);
+    // 🆕 Inclui também quem mudou de unidade recentemente e ainda está na
+    // janela de 3 dias úteis de graça pro Gestor antigo continuar lançando.
+    const emTransicao = await window.buscarColaboradoresEmTransicaoDaUnidade(unidade);
+    const filtrados = window.filtrarAtivosE_AvisoPrevio(window.mesclarComColaboradoresEmTransicao(data, emTransicao));
 
     if (filtrados.length === 0) {
         selectColab.innerHTML = '<option value="">Nenhum colaborador válido encontrado.</option>';
@@ -39666,9 +39673,12 @@ window.buscarColaboradoresParaFT = async function() {
         .eq('perfil', 'Colaborador')
         .eq('unidade', unidade) // Filtro cravado na unidade atual
         .order('nome');
-    
+
+    // 🆕 Inclui também quem mudou de unidade recentemente e ainda está na
+    // janela de 3 dias úteis de graça pro Gestor antigo continuar lançando.
+    const emTransicao = await window.buscarColaboradoresEmTransicaoDaUnidade(unidade);
     // Passa pelo nosso filtro inteligente de aviso prévio
-    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(window.mesclarComColaboradoresEmTransicao(data, emTransicao));
 
     selectColab.innerHTML = '<option value="">Selecione o colaborador...</option>';
     if(ativosReais) ativosReais.forEach(c => selectColab.innerHTML += `<option value="${c.id}">${c.nome}</option>`);
@@ -42480,8 +42490,11 @@ async function buscarColaboradoresParaAdv() {
 
     selectColab.innerHTML = '<option value="">Carregando...</option>';
     const { data } = await supabaseClient.from('perfis').select('id, nome, empresa, status, dados_rescisao').eq('perfil', 'Colaborador').eq('unidade', unidade).order('nome');
-    
-    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+
+    // 🆕 Inclui também quem mudou de unidade recentemente e ainda está na
+    // janela de 3 dias úteis de graça pro Gestor antigo continuar lançando.
+    const emTransicao = await window.buscarColaboradoresEmTransicaoDaUnidade(unidade);
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(window.mesclarComColaboradoresEmTransicao(data, emTransicao));
 
     selectColab.innerHTML = '<option value="">Selecione o infrator...</option>';
     if(ativosReais) ativosReais.forEach(c => selectColab.innerHTML += `<option value="${c.id}" data-empresa="${c.empresa}">${c.nome}</option>`);
@@ -44812,6 +44825,16 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         const insalubridade = document.getElementById('aplic-alt-insalubridade').value;
         const dataVigencia = document.getElementById('aplic-alt-data-vigencia').value;
 
+        // 🐛 CORRIGIDO: quando a Data de Vigência é no FUTURO (ex: RH aprova
+        // dia 01/07 com vigência 07/07), a unidade/cargo NOVOS não podem ir
+        // pra tabela perfis ainda — senão o colaborador já "sai" da unidade
+        // do Gestor antigo na hora, 6 dias antes da vigência de verdade,
+        // travando o Gestor de continuar cuidando dele nesse meio-tempo. A
+        // mudança real só acontece quando essa data chegar (ver
+        // window.checarMudancasPendentesDeUnidade, chamada no login).
+        const hojeIsoAplic = new Date().toISOString().split('T')[0];
+        const vigenciaEhFutura = !!(dataVigencia && dataVigencia > hojeIsoAplic);
+
         const salarioLimpo = salarioStr ? parseFloat(salarioStr.replace('R$ ', '').replace(/\./g, '').replace(',', '.')) : 0;
 
         const confirmado = await mostrarConfirmacao(`Atenção: Você vai modificar permanentemente o cadastro de <b>${colab.nome}</b>.<br><br>Deseja aplicar as mudanças e fechar o chamado?`, "Aplicar Alteração");
@@ -45095,23 +45118,46 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
             }
 
             // 5. Atualiza o JSON bruto
-            adm.cargo = cargo;
+            // 🐛 CORRIGIDO: se a vigência é futura, unidade/cargo NOVOS ainda não
+            // entram em vigor — o colaborador continua na unidade/cargo atuais
+            // (unidadeParaGravar/cargoParaGravar) até aquele dia chegar. A troca
+            // de verdade fica guardada em adm.mudanca_pendente e é aplicada
+            // depois por window.checarMudancasPendentesDeUnidade (no login).
+            const segurarMudancaLocalOuFuncao = mudouLocalOuFuncao && vigenciaEhFutura;
+            const unidadeParaGravar = segurarMudancaLocalOuFuncao ? unidadeAntiga : unidade;
+            const cargoParaGravar = segurarMudancaLocalOuFuncao ? cargoAntigo : cargo;
+
+            adm.cargo = cargoParaGravar;
             adm.salario = salarioLimpo;
             adm.insalubridade = insalubridade;
 
+            if (segurarMudancaLocalOuFuncao) {
+                adm.mudanca_pendente = {
+                    unidade_nova: unidade,
+                    cargo_novo: cargo,
+                    unidade_antiga: unidadeAntiga,
+                    cargo_antigo: cargoAntigo,
+                    data_vigencia: dataVigencia,
+                    id_chamado: idChamado,
+                    criado_por: usuarioAtual.nome,
+                    criado_em: new Date().toISOString()
+                };
+            }
+
             // 6. Salva os dados de volta na tabela Perfis
-            const { error: errUpdate } = await supabaseClient.from('perfis').update({ 
-                unidade: unidade, 
-                dados_admissao: adm 
+            const { error: errUpdate } = await supabaseClient.from('perfis').update({
+                unidade: unidadeParaGravar,
+                dados_admissao: adm
             }).eq('id', idColab);
 
             if (errUpdate) throw errUpdate;
 
-            // 7. Se mudou a unidade, atualiza as tabelas do passado
-            if (unidade !== unidadeAntiga) {
+            // 7. Se mudou a unidade (e ela já entrou em vigor agora, não fica pendente),
+            // atualiza as tabelas do passado
+            if (unidadeParaGravar !== unidadeAntiga) {
                 const tabelasSimples = ['ausencias', 'horas_extras_ft', 'advertencias', 'ocorrencias_plantao', 'ocorrencias_ponto', 'notificacoes', 'documentos_mensais'];
                 for (let tab of tabelasSimples) {
-                    await supabaseClient.from(tab).update({ unidade: unidade }).eq('colaborador_id', idColab);
+                    await supabaseClient.from(tab).update({ unidade: unidadeParaGravar }).eq('colaborador_id', idColab);
                 }
             }
 
@@ -45161,6 +45207,110 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         }
     });
        };
+
+// =========================================================
+// 🆕 APLICA MUDANÇAS DE UNIDADE/CARGO QUE FICARAM "PENDENTES" ESPERANDO A
+// DATA DE VIGÊNCIA CHEGAR (ver bloco "5. Atualiza o JSON bruto" acima, onde
+// a mudança é guardada em adm.mudanca_pendente em vez de ir direto pra
+// perfis.unidade quando a vigência é futura). Chamada no LOGIN (dentro de
+// carregarPerfil) — assim que alguém loga em uma data >= data_vigencia, a
+// troca de verdade acontece automaticamente, sem precisar de ação manual.
+// =========================================================
+window.checarMudancasPendentesDeUnidade = async function() {
+    try {
+        const { data: colaboradores, error } = await supabaseClient
+            .from('perfis')
+            .select('id, nome, unidade, dados_admissao')
+            .not('dados_admissao->mudanca_pendente', 'is', null);
+
+        if (error) throw error;
+        if (!colaboradores || colaboradores.length === 0) return;
+
+        const hojeIso = new Date().toISOString().split('T')[0];
+
+        for (const colab of colaboradores) {
+            const adm = colab.dados_admissao || {};
+            const pendente = adm.mudanca_pendente;
+            if (!pendente || !pendente.data_vigencia) continue;
+            if (pendente.data_vigencia > hojeIso) continue; // vigência ainda não chegou
+
+            // Chegou o dia da vigência: aplica de verdade a unidade/cargo novos —
+            // o Gestor NOVO já assume o colaborador a partir de HOJE (ele passa a
+            // aparecer nas telas do Gestor novo normalmente, pela unidade atual).
+            //
+            // 🆕 JANELA DE TRANSIÇÃO PRO GESTOR ANTIGO: além disso, guardamos em
+            // adm.transferencia_recente a unidade antiga + até quando (3 dias
+            // ÚTEIS após a vigência) o Gestor ANTIGO ainda pode lançar coisas
+            // desse colaborador (Ausência, Horas Extras, Advertência, Ocorrência,
+            // Férias) — ver window.buscarColaboradoresEmTransicaoDaUnidade, usada
+            // nas telas de lançamento do Gestor pra ele continuar aparecendo lá
+            // por mais esses dias.
+            const unidadeAntiga = pendente.unidade_antiga;
+            const unidadeNova = pendente.unidade_nova;
+
+            const [ay, am, ad] = pendente.data_vigencia.split('-');
+            const vigenciaObj = new Date(ay, am - 1, ad, 12, 0, 0);
+            const liberadoAte = window.somarDiasUteis(vigenciaObj, 3).toISOString().split('T')[0];
+
+            adm.cargo = pendente.cargo_novo;
+            delete adm.mudanca_pendente;
+            if (unidadeNova !== unidadeAntiga) {
+                adm.transferencia_recente = { unidade_antiga: unidadeAntiga, liberado_ate: liberadoAte };
+            }
+
+            const { error: errUpdate } = await supabaseClient
+                .from('perfis')
+                .update({ unidade: unidadeNova, dados_admissao: adm })
+                .eq('id', colab.id);
+
+            if (errUpdate) { console.error("Erro ao aplicar mudança pendente de unidade:", errUpdate); continue; }
+
+            if (unidadeNova !== unidadeAntiga) {
+                const tabelasSimples = ['ausencias', 'horas_extras_ft', 'advertencias', 'ocorrencias_plantao', 'ocorrencias_ponto', 'notificacoes', 'documentos_mensais'];
+                for (let tab of tabelasSimples) {
+                    await supabaseClient.from(tab).update({ unidade: unidadeNova }).eq('colaborador_id', colab.id);
+                }
+            }
+
+            console.log(`✅ Mudança pendente aplicada: ${colab.nome} agora está em "${unidadeNova}" (vigência ${pendente.data_vigencia}). Gestor antigo liberado até ${liberadoAte}.`);
+        }
+    } catch (e) {
+        console.error("Erro ao checar mudanças pendentes de unidade:", e);
+    }
+};
+
+// =========================================================
+// 🆕 COLABORADORES "EM TRANSIÇÃO" DE UMA UNIDADE — usada nas telas de
+// lançamento do Gestor (Ausência, Horas Extras, Advertência, Ocorrência,
+// Férias) pra, além dos colaboradores que já estão na unidade selecionada,
+// também trazer quem ACABOU de sair dela (adm.transferencia_recente) e ainda
+// está dentro da janela de 3 dias úteis de graça pro Gestor antigo.
+// =========================================================
+window.buscarColaboradoresEmTransicaoDaUnidade = async function(unidadeAntiga) {
+    if (!unidadeAntiga) return [];
+    try {
+        const hojeIso = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabaseClient.from('perfis')
+            .select('id, nome, empresa, status, dados_rescisao, dados_admissao, unidade')
+            .eq('perfil', 'Colaborador')
+            .eq('dados_admissao->transferencia_recente->>unidade_antiga', unidadeAntiga)
+            .gte('dados_admissao->transferencia_recente->>liberado_ate', hojeIso);
+
+        if (error || !data) return [];
+        return data;
+    } catch (e) {
+        console.error("Erro ao buscar colaboradores em transição:", e);
+        return [];
+    }
+};
+
+// 🆕 Mescla a lista normal (já filtrada pela unidade selecionada) com quem
+// está em transição dessa mesma unidade, sem duplicar por id.
+window.mesclarComColaboradoresEmTransicao = function(listaBase, listaTransicao) {
+    const base = listaBase || [];
+    const extra = (listaTransicao || []).filter(t => !base.some(b => b.id === t.id));
+    return base.concat(extra);
+};
 
 // =========================================================
 // 📧 FUNÇÃO PARA DISPARAR O E-MAIL DA ALTERAÇÃO (EDGE FUNCTION EXCLUSIVA)
@@ -47419,9 +47569,12 @@ window.buscarColaboradoresParaOcorrencia = async function() {
         .eq('perfil', 'Colaborador')
         .eq('unidade', unidade)
         .order('nome');
-    
+
+    // 🆕 Inclui também quem mudou de unidade recentemente e ainda está na
+    // janela de 3 dias úteis de graça pro Gestor antigo continuar lançando.
+    const emTransicao = await window.buscarColaboradoresEmTransicaoDaUnidade(unidade);
     // Filtra quem tá ativo + quem tá cumprindo aviso
-    const ativosReais = window.filtrarAtivosE_AvisoPrevio(data || []);
+    const ativosReais = window.filtrarAtivosE_AvisoPrevio(window.mesclarComColaboradoresEmTransicao(data, emTransicao));
 
     if (!ativosReais || ativosReais.length === 0) {
         selectColab.innerHTML = '<option value="">Nenhum colaborador válido encontrado.</option>';
@@ -86848,6 +87001,23 @@ window.subtrairDiasUteis = function(dataBase, diasParaSubtrair) {
         data.setDate(data.getDate() - 1);
         if (!ehFeriadoOuFDS(data)) {
             diasSubtraidos++;
+        }
+    }
+    return data;
+};
+
+// 🆕 Função para SOMAR dias úteis (pula FDS e feriados fixos). Usada na janela
+// de transição de unidade/cargo (ver window.checarMudancasPendentesDeUnidade):
+// dá uns dias úteis extras de folga depois da Data de Vigência antes de
+// travar de vez o Gestor antigo, pra dar tempo dele terminar de lançar o que
+// ficou pendente daquele colaborador.
+window.somarDiasUteis = function(dataBase, diasParaSomar) {
+    let data = new Date(dataBase);
+    let diasSomados = 0;
+    while (diasSomados < diasParaSomar) {
+        data.setDate(data.getDate() + 1);
+        if (!ehFeriadoOuFDS(data)) {
+            diasSomados++;
         }
     }
     return data;
