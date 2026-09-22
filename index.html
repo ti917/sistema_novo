@@ -43395,22 +43395,51 @@ window.abrirAbaAlteracaoCadastral = async function() {
             await window.carregarEscopoAtivo();
         }
 
-        let query = supabaseClient.from('unidades_oficiais').select('nome, empresa').eq('ativo', true).order('nome');
+        // 🆕 Agora também busca "endereco" (não só nome/empresa) — precisamos dele
+        // pra descobrir a CIDADE de cada unidade (ver window.detectarCidade), já
+        // que um Gestor pode passar a ver unidade de OUTRA empresa/cliente aqui
+        // embaixo, e isso só dá pra decidir sabendo a cidade de cada uma.
+        let query = supabaseClient.from('unidades_oficiais').select('nome, empresa, endereco').eq('ativo', true).order('nome');
 
-        // Se for Gestor, puxa as unidades da mesma Empresa que ele
-        if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.empresa) {
-            const empGestor = usuarioAtual.empresa.split(',')[0].trim();
-            query = query.eq('empresa', empGestor);
-        }
         // Se for Admin com filtro ligado lá no topo do site
-        else if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+        if (usuarioAtual.perfil === 'Admin' && typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
             query = query.eq('empresa', empresaSelecionadaFiltro);
         }
+        // 👇 CORREÇÃO: pro Gestor, deixamos de filtrar por empresa aqui na consulta
+        // (isso mudou pra baixo, no filtro em JS) — precisamos ver TODAS as unidades
+        // ativas do sistema pra conseguir comparar cidade com cidade, mesmo entre
+        // empresas diferentes.
 
         const { data: todasUnidades } = await query;
 
-        if (todasUnidades && todasUnidades.length > 0) {
-            const todasFiltradas = todasUnidades.filter(u => !(typeof window.unidadeDesativada === 'function' && window.unidadeDesativada(u.nome, u.empresa)));
+        let todasFiltradas = (todasUnidades || []).filter(u => !(typeof window.unidadeDesativada === 'function' && window.unidadeDesativada(u.nome, u.empresa)));
+
+        // 🆕 PEDIDO: Gestor de uma empresa/cliente passa a ver aqui (só nesse
+        // dropdown, só na Alteração Cadastral) as unidades de OUTRAS empresas/
+        // clientes que fiquem na MESMA CIDADE de alguma unidade dele — pra
+        // facilitar transferir um colaborador pra outro cliente atendido na
+        // mesma cidade. Fora daqui nada muda: continua tudo restrito à própria
+        // empresa, como sempre foi.
+        if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.empresa) {
+            const empGestor = usuarioAtual.empresa.split(',')[0].trim();
+            const minhasUnidades = (usuarioAtual.unidade || '').split(',').map(u => u.trim().toUpperCase()).filter(Boolean);
+
+            const minhasCidades = new Set();
+            todasFiltradas.forEach(u => {
+                if (minhasUnidades.includes((u.nome || '').trim().toUpperCase())) {
+                    const cid = window.detectarCidade(u.endereco);
+                    if (cid) minhasCidades.add(cid);
+                }
+            });
+
+            todasFiltradas = todasFiltradas.filter(u => {
+                if ((u.empresa || '').trim() === empGestor) return true; // própria empresa, como já era
+                const cid = window.detectarCidade(u.endereco);
+                return !!(cid && minhasCidades.has(cid)); // outra empresa, mas mesma cidade
+            });
+        }
+
+        if (todasFiltradas.length > 0) {
             const uSetGlobal = [...new Set(todasFiltradas.map(u => u.nome.trim()))].filter(Boolean);
             uSetGlobal.forEach(u => optionsNovas += `<option value="${u}">${u}</option>`);
         } else {
@@ -89877,6 +89906,20 @@ window.detectarUF = function(endereco) {
     }
 
     return null;
+};
+
+// 🆕 Devolve a CIDADE de uma unidade a partir do endereço salvo. Reaproveita o
+// mesmo formato usado ao salvar/editar unidade em salvarUnidadeOficial()/
+// abrirEdicaoUnidade() ("Rua, Nº Num - Bairro, Cidade - CEP: Cep") — mesma regex
+// já usada em abrirEdicaoUnidade para pré-preencher o campo Cidade na edição.
+// Usada hoje só pra liberar, na Alteração Cadastral, unidades de OUTRAS
+// empresas/clientes que fiquem na mesma cidade das unidades do Gestor.
+window.detectarCidade = function(endereco) {
+    if (!endereco) return null;
+    const match = String(endereco).match(/(.*), Nº (.*) - (.*), (.*) - CEP: (.*)/);
+    if (!match) return null;
+    const cidade = match[4].trim().toUpperCase();
+    return cidade || null;
 };
 
 window.verificarSeUnidadeEhSP = function(nomeUnidade) {
