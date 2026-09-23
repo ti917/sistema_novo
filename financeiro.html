@@ -10684,6 +10684,11 @@ window.precarregarListasFinanceiro = async function () {
                     statusHtml = `<span style="padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; color: #2ecc71; background: rgba(46,204,113,0.2);">Concluída</span>`;
                 } else if (os.status === 'aguardando_aprovacao') {
                     statusHtml = `<span style="padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; color: #e67e22; background: rgba(230,126,34,0.2);">Aguardando aprovação</span>`;
+                } else if (os.status === 'recusada') {
+                    // 🆕 Cancelada já na abertura (antes da manutenção lançar custo) — diferente
+                    // do aviso "Recusada: motivo" que aparece embaixo do nome quando voltou pra
+                    // 'aberta' pra correção; essa aqui já não conta mais como pendência.
+                    statusHtml = `<span style="padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; color: var(--cor-perigo); background: rgba(231,76,60,0.2);">Recusada</span>`;
                 } else {
                     statusHtml = `<span style="padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; color: #f1c40f; background: rgba(241,196,15,0.2);">Aberta</span>`;
                 }
@@ -10706,13 +10711,23 @@ window.precarregarListasFinanceiro = async function () {
                 // real e fechar direto por aqui.
                 const btnExcluirOs = `<button type="button" onclick="excluirOrdemServico('${os.id}')" style="background: rgba(231,76,60,0.1); border: 1px solid rgba(231,76,60,0.4); color: var(--cor-perigo); cursor: pointer; padding: 6px 9px; border-radius: 6px; margin-left: 6px;" title="Excluir esta Ordem de Serviço permanentemente"><i class="fa-solid fa-trash"></i></button>`;
 
+                // 🆕 Recusar também na abertura ('aberta') — antes só existia depois que a
+                // manutenção já tinha lançado o custo real ('aguardando_aprovacao'). Cobre o
+                // caso de errar algo já na abertura (unidade errada, serviço errado etc):
+                // cancela essa OS e avisa a manutenção pelo WhatsApp com o motivo, pra abrir
+                // uma nova se for o caso — abrirModalRecusarOrdemServico decide qual rota da
+                // função chamar de acordo com o status atual.
+                const btnRecusarAberturaOs = `<button type="button" onclick="abrirModalRecusarOrdemServico('${os.id}')" style="background: rgba(231,76,60,0.15); border: 1px solid rgba(231,76,60,0.5); color: var(--cor-perigo); cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: bold; margin-left: 6px;" title="Recusar/cancelar esta OS (ex.: unidade ou serviço errado na abertura)"><i class="fa-solid fa-xmark"></i> Recusar</button>`;
+
                 let acoesHtml;
                 if (os.status === 'aberta') {
-                    acoesHtml = `<button type="button" onclick="pedirFechamentoOrdemServico('${os.id}')" style="background: rgba(52,152,219,0.15); border: 1px solid rgba(52,152,219,0.5); color: #3498db; cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: bold;" title="Manda de novo pro colaborador da manutenção o link do WhatsApp pra ele fechar a OS (custo real + entrega)"><i class="fa-brands fa-whatsapp"></i> Pedir Fechamento</button>${btnExcluirOs}`;
+                    acoesHtml = `<button type="button" onclick="pedirFechamentoOrdemServico('${os.id}')" style="background: rgba(52,152,219,0.15); border: 1px solid rgba(52,152,219,0.5); color: #3498db; cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: bold;" title="Manda de novo pro colaborador da manutenção o link do WhatsApp pra ele fechar a OS (custo real + entrega)"><i class="fa-brands fa-whatsapp"></i> Pedir Fechamento</button>${btnRecusarAberturaOs}${btnExcluirOs}`;
                 } else if (os.status === 'aguardando_aprovacao') {
                     acoesHtml = `
                         <button type="button" onclick="aprovarOrdemServico('${os.id}')" style="background: rgba(46,204,113,0.15); border: 1px solid rgba(46,204,113,0.5); color: #2ecc71; cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: bold; margin-right: 6px;" title="Aprovar"><i class="fa-solid fa-check"></i> Aprovar</button>
                         <button type="button" onclick="abrirModalRecusarOrdemServico('${os.id}')" style="background: rgba(231,76,60,0.15); border: 1px solid rgba(231,76,60,0.5); color: var(--cor-perigo); cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: bold;" title="Recusar"><i class="fa-solid fa-xmark"></i> Recusar</button>${btnExcluirOs}`;
+                } else if (os.status === 'recusada') {
+                    acoesHtml = `<span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Recusada${os.recusado_por ? ' por ' + os.recusado_por : ''}</span>${btnExcluirOs}`;
                 } else {
                     acoesHtml = `<span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">Aprovada${os.aprovado_por ? ' por ' + os.aprovado_por : ''}</span>${btnExcluirOs}`;
                 }
@@ -10829,23 +10844,40 @@ window.precarregarListasFinanceiro = async function () {
             }
         };
 
-        /** Abre o modal pra recusar a OS 'aguardando_aprovacao' — pede o motivo, igual à recusa de comprovante. */
+        /**
+         * Abre o modal pra recusar uma OS — pede o motivo, igual à recusa de comprovante.
+         * 🆕 Agora serve pros dois estados possíveis, com texto e rota da função diferentes
+         * pra cada um (decide pelo status atual, lido de ordensServicoEmMemoria):
+         *  - 'aberta' (ainda não foi fechada pela manutenção): cancela a OS de vez
+         *    (vira 'recusada') — usa a ação 'recusar_abertura_os'. Cobre errar algo já na
+         *    abertura (unidade errada, serviço errado etc.).
+         *  - 'aguardando_aprovacao' (manutenção já lançou custo real): comportamento de
+         *    sempre — volta pra 'aberta' com o motivo, pro mesmo colaborador corrigir e
+         *    fechar de novo — usa 'revisar_ordem_servico'.
+         */
         window.abrirModalRecusarOrdemServico = function(id) {
+            const os = (window.ordensServicoEmMemoria || []).find(o => o.id === id);
+            const ehAbertura = !os || os.status === 'aberta';
+
             const modalAntigo = document.getElementById('modal-recusar-os');
             if (modalAntigo) modalAntigo.remove();
+
+            const textoExplicacao = ehAbertura
+                ? 'O colaborador da manutenção vai receber esse motivo pelo WhatsApp e essa Ordem de Serviço será cancelada (ele precisa abrir uma nova se for o caso).'
+                : 'O colaborador da manutenção vai receber esse motivo pelo WhatsApp e a OS volta pra "aberta" pra ele corrigir e fechar de novo.';
 
             const modalHtml = `
             <div id="modal-recusar-os" class="modal-overlay" style="z-index: 100050;">
                 <div class="glass-card" style="width: 100%; max-width: 420px; border: 1px solid var(--cor-perigo); position: relative;">
                     <button onclick="document.getElementById('modal-recusar-os').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-principal); cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
 
-                    <h3 style="color: var(--cor-perigo); margin-bottom: 10px; margin-top:0;"><i class="fa-solid fa-triangle-exclamation"></i> Recusar Ordem de Serviço</h3>
-                    <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">O colaborador da manutenção vai receber esse motivo pelo WhatsApp e a OS volta pra "aberta" pra ele corrigir e fechar de novo.</p>
+                    <h3 style="color: var(--cor-perigo); margin-bottom: 10px; margin-top:0;"><i class="fa-solid fa-triangle-exclamation"></i> ${ehAbertura ? 'Recusar / Cancelar Ordem de Serviço' : 'Recusar Ordem de Serviço'}</h3>
+                    <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">${textoExplicacao}</p>
 
                     <form id="form-recusar-os">
                         <div style="margin-bottom: 15px;">
                             <label style="color: var(--cor-texto-secundario); font-weight: bold; display: block; margin-bottom: 5px;">Motivo da recusa <span style="color: var(--cor-perigo);">*</span></label>
-                            <textarea id="motivo-recusa-os-input" class="modern-input" required rows="4" placeholder="Ex: custo real muito acima do estimado sem justificativa, data de entrega errada, etc." style="resize: vertical;"></textarea>
+                            <textarea id="motivo-recusa-os-input" class="modern-input" required rows="4" placeholder="${ehAbertura ? 'Ex: unidade errada, serviço/setor errado, OS duplicada, etc.' : 'Ex: custo real muito acima do estimado sem justificativa, data de entrega errada, etc.'}" style="resize: vertical;"></textarea>
                         </div>
 
                         <button type="submit" id="btn-confirmar-recusa-os" class="btn-success" style="width: 100%; height: 50px; background-color: var(--cor-perigo); color: #fff; border: none; font-weight: bold; margin-top: 10px;">
@@ -10866,13 +10898,16 @@ window.precarregarListasFinanceiro = async function () {
                 btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Enviando...';
 
                 try {
-                    const { data, error } = await supabaseClient.functions.invoke('smooth-service', {
-                        body: { action: 'revisar_ordem_servico', osId: id, acao: 'rejeitar', motivo: motivo, revisadoPor: (usuarioAtual && usuarioAtual.nome) || 'Financeiro' },
-                    });
+                    const action = ehAbertura ? 'recusar_abertura_os' : 'revisar_ordem_servico';
+                    const body = ehAbertura
+                        ? { action, osId: id, motivo: motivo, revisadoPor: (usuarioAtual && usuarioAtual.nome) || 'Financeiro' }
+                        : { action, osId: id, acao: 'rejeitar', motivo: motivo, revisadoPor: (usuarioAtual && usuarioAtual.nome) || 'Financeiro' };
+
+                    const { data, error } = await supabaseClient.functions.invoke('smooth-service', { body });
                     if (error) throw error;
                     if (!data || data.success !== true) throw new Error((data && data.error) || 'Falha ao recusar.');
 
-                    mostrarAlerta("Ordem de Serviço recusada. O colaborador foi avisado.", "sucesso");
+                    mostrarAlerta(ehAbertura ? "Ordem de Serviço recusada/cancelada. O colaborador foi avisado." : "Ordem de Serviço recusada. O colaborador foi avisado.", "sucesso");
                     document.getElementById('modal-recusar-os').remove();
                     renderizarOrdensServico();
                 } catch (err) {
