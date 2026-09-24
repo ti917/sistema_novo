@@ -63522,26 +63522,56 @@ window.carregarContratosAdmissao = async function() {
         query = query.in('unidade', unidsGestor);
     }
 
-    // 👇 NOVO: colaboradora(o) afastada(o) por Licença Maternidade (LDM) ou Paternidade
-    // (LDP) não deve aparecer na lista do GESTOR pra cobrar Contrato de Trabalho — ela(e)
-    // não tem como resolver isso estando afastada(o). Só se aplica à visão do Gestor; o
-    // Admin/RH continua vendo todo mundo, pra manter o controle completo.
+    // 👇 colaboradora(o) afastada(o) por Licença Maternidade (LDM) ou Paternidade (LDP) não
+    // deve aparecer na lista do GESTOR pra cobrar Contrato de Trabalho — ela(e) não tem como
+    // resolver isso estando afastada(o). Só se aplica à visão do Gestor; o Admin/RH continua
+    // vendo todo mundo, pra manter o controle completo.
+    //
+    // 👇 NOVO: além disso, busca TODAS as ausências/férias ativas hoje (não só LDM/LDP) pra
+    // colocar uma tag "AFASTADO"/"DE FÉRIAS" do lado do nome no card — tanto pro Admin quanto
+    // pro Gestor. Pedido porque um contrato "Aguardando Assinatura" de alguém que está de
+    // atestado, INSS ou férias parecia só uma pendência esquecida, quando na real a pessoa
+    // nem está trabalhando agora pra resolver isso (ver window.tagAfastamentoContratoHtml).
     const hojeIsoContratos = new Date().toISOString().split('T')[0];
-    const queryAfastadosLdmLdp = !isAdmin
-        ? supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Aprovado').in('sigla', ['LDM', 'LDP']).lte('data_inicio', hojeIsoContratos).gte('data_fim', hojeIsoContratos)
-        : Promise.resolve({ data: [] });
+    const queryAusenciasAtivasContratos = supabaseClient.from('ausencias').select('colaborador_id, sigla').eq('status', 'Aprovado').lte('data_inicio', hojeIsoContratos).gte('data_fim', hojeIsoContratos);
+    const queryFeriasAtivasContratos = supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIsoContratos).gte('data_fim_ferias', hojeIsoContratos);
 
-    const [resultQuery, , resultAfastados] = await Promise.all([query, window.carregarMapaUnidadesFichaSus(), queryAfastadosLdmLdp]);
+    const [resultQuery, , resultAusenciasContratos, resultFeriasContratos] = await Promise.all([query, window.carregarMapaUnidadesFichaSus(), queryAusenciasAtivasContratos, queryFeriasAtivasContratos]);
     const { data, error } = resultQuery;
     if (error) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro de conexão ao buscar contratos.</p>';
         return;
     }
 
-    window.colabsAfastadosLdmLdpGlobais = new Set((resultAfastados?.data || []).map(a => String(a.colaborador_id)));
+    window.colabsAfastadosLdmLdpGlobais = new Set(
+        (resultAusenciasContratos?.data || []).filter(a => ['LDM', 'LDP'].includes(a.sigla)).map(a => String(a.colaborador_id))
+    );
 
-    todosContratosGlobais = data || [];
+    const mapaAfastamentosContratos = {};
+    (resultAusenciasContratos?.data || []).forEach(a => { mapaAfastamentosContratos[a.colaborador_id] = { tipo: a.sigla }; });
+    (resultFeriasContratos?.data || []).forEach(f => { if (!mapaAfastamentosContratos[f.colaborador_id]) mapaAfastamentosContratos[f.colaborador_id] = { tipo: 'FER' }; });
+
+    todosContratosGlobais = (data || []).map(c => {
+        if (mapaAfastamentosContratos[c.id]) c.ausencia_atual = mapaAfastamentosContratos[c.id];
+        return c;
+    });
     filtrarContratos();
+};
+
+// 👇 NOVO: tag "AFASTADO"/"DE FÉRIAS" ao lado do nome nas telas de Contrato de Trabalho —
+// reaproveita a mesma lógica de "ausência ativa hoje" já usada em outras telas (Usuários
+// Cadastrados, Ficha do Colaborador), só que aplicada aos cards de contrato.
+window.LABELS_AFASTAMENTO_TAG = {
+    'AF': 'Afastado (INSS)', 'ATM': 'Atestado Médico', 'ATC': 'Atestado de Acompanhante',
+    'ATOB': 'Atestado de Óbito', 'LDM': 'Licença Maternidade', 'LDP': 'Licença Paternidade',
+    'LG': 'Licença Gala/Casamento', 'FE': 'Folga Extra', 'DECL': 'Declaração de Horas',
+    'FER': 'De Férias'
+};
+
+window.tagAfastamentoContratoHtml = function(c) {
+    if (!c || !c.ausencia_atual) return '';
+    const label = window.LABELS_AFASTAMENTO_TAG[c.ausencia_atual.tipo] || `Afastado (${c.ausencia_atual.tipo})`;
+    return `<span style="background: rgba(255,152,0,0.15); color: #ff9800; border: 1px solid #ff9800; font-size: 0.65rem; font-weight: bold; padding: 2px 9px; border-radius: 20px; margin-left: 8px; white-space: nowrap; vertical-align: middle;"><i class="fa-solid fa-user-clock"></i> ${label.toUpperCase()}</span>`;
 };
 
 let contratosFiltrados = [];
@@ -64313,7 +64343,7 @@ window.renderizarPaginacaoContratos = function() {
                             <i class="fa-solid fa-file-contract" style="color: ${corStatus}; font-size: 1.2rem;"></i>
                         </div>
                         <div>
-                            <strong style="font-size: 1.15rem; color: var(--cor-texto-principal);">${c.nome}</strong>
+                            <strong style="font-size: 1.15rem; color: var(--cor-texto-principal);">${c.nome}</strong>${window.tagAfastamentoContratoHtml(c)}
                             <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 3px;">
                                 <i class="fa-solid fa-id-card" style="color: #a6b0cf;"></i> CPF: <b>${cpfFormatado}</b>
                             </span>
@@ -77333,15 +77363,29 @@ window.carregarContratosAcaoGestor = async function() {
         query = query.eq('empresa', empresaSelecionadaFiltro);
     }
 
-    const [resultQuery] = await Promise.all([query, window.carregarMapaUnidadesFichaSus()]);
+    // 👇 NOVO: mesma tag "AFASTADO"/"DE FÉRIAS" da tela de Contratos do Admin (ver
+    // carregarContratosAdmissao/window.tagAfastamentoContratoHtml) — essa tela é o espelho
+    // "Ação do Admin", usa o mesmo card, então precisa da mesma informação.
+    const hojeIsoCtrAcao = new Date().toISOString().split('T')[0];
+    const queryAusenciasAtivasCtrAcao = supabaseClient.from('ausencias').select('colaborador_id, sigla').eq('status', 'Aprovado').lte('data_inicio', hojeIsoCtrAcao).gte('data_fim', hojeIsoCtrAcao);
+    const queryFeriasAtivasCtrAcao = supabaseClient.from('solicitacoes_ferias').select('colaborador_id').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIsoCtrAcao).gte('data_fim_ferias', hojeIsoCtrAcao);
+
+    const [resultQuery, , resultAusenciasCtrAcao, resultFeriasCtrAcao] = await Promise.all([query, window.carregarMapaUnidadesFichaSus(), queryAusenciasAtivasCtrAcao, queryFeriasAtivasCtrAcao]);
     const { data, error } = resultQuery;
     if (error) {
         container.innerHTML = '<p style="text-align: center; color: var(--cor-perigo);">Erro de conexão ao buscar contratos.</p>';
         return;
     }
 
+    const mapaAfastamentosCtrAcao = {};
+    (resultAusenciasCtrAcao?.data || []).forEach(a => { mapaAfastamentosCtrAcao[a.colaborador_id] = { tipo: a.sigla }; });
+    (resultFeriasCtrAcao?.data || []).forEach(f => { if (!mapaAfastamentosCtrAcao[f.colaborador_id]) mapaAfastamentosCtrAcao[f.colaborador_id] = { tipo: 'FER' }; });
+
     // Retiramos o "window." daqui para respeitar o escopo da variável let
-    todosContratosGlobais = data || [];
+    todosContratosGlobais = (data || []).map(c => {
+        if (mapaAfastamentosCtrAcao[c.id]) c.ausencia_atual = mapaAfastamentosCtrAcao[c.id];
+        return c;
+    });
     filtrarContratosAcaoGestor();
 };
 
@@ -77638,7 +77682,7 @@ window.renderizarPaginacaoContratosAcaoGestor = function() {
                             <i class="fa-solid fa-file-contract" style="color: ${corStatus}; font-size: 1.2rem;"></i>
                         </div>
                         <div>
-                            <strong style="font-size: 1.15rem; color: var(--cor-texto-principal);">${c.nome}</strong>
+                            <strong style="font-size: 1.15rem; color: var(--cor-texto-principal);">${c.nome}</strong>${window.tagAfastamentoContratoHtml(c)}
                             <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 3px;">
                                 <i class="fa-solid fa-id-card" style="color: #a6b0cf;"></i> CPF: <b>${cpfFormatado}</b>
                             </span>
