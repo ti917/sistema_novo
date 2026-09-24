@@ -66568,16 +66568,32 @@ window.carregarStatusImagem = async function() {
 
     const { data } = await query;
 
-    // 👇 NOVO: cruza com o status atual do colaborador em `perfis` — o termo de
-    // imagem pendente de alguém que já foi DESLIGADO não deve mais aparecer/contar
-    // como pendência (não faz sentido cobrar assinatura de quem já saiu). Quem já
-    // ASSINOU continua aparecendo normalmente mesmo se desligado depois (é só
-    // histórico, não é uma cobrança pendente).
+    // 👇 NOVO (corrigido): cruza com o status atual do colaborador em `perfis` —
+    // o termo de imagem pendente de alguém que já foi DESLIGADO não deve mais
+    // aparecer/contar como pendência (não faz sentido cobrar assinatura de quem
+    // já saiu). Quem já ASSINOU continua aparecendo normalmente mesmo se
+    // desligado depois (é só histórico, não é uma cobrança pendente).
+    // 🐛 BUG achado (a 1ª versão disso não funcionava com "TODAS AS UNIDADES"):
+    // com centenas de disparos (ex.: 428), um único `.in('id', idsColabs)` com
+    // todos os IDs de uma vez gera uma URL gigante que o Supabase recusa —
+    // a busca falhava CALADA (sem erro tratado), `statusPorColab` ficava vazio
+    // pra TODO MUNDO, e então ninguém era filtrado (desligado continuava
+    // aparecendo e sendo cobrado). Corrigido: busca em lotes de 150 IDs por vez.
     const idsColabs = (data || []).map(r => r.colaborador_id).filter(Boolean);
     let statusPorColab = {};
     if (idsColabs.length > 0) {
-        const { data: perfisStatus } = await supabaseClient.from('perfis').select('id, status').in('id', idsColabs);
-        (perfisStatus || []).forEach(p => { statusPorColab[p.id] = p.status; });
+        const TAMANHO_LOTE_STATUS = 150;
+        const lotesIds = [];
+        for (let i = 0; i < idsColabs.length; i += TAMANHO_LOTE_STATUS) {
+            lotesIds.push(idsColabs.slice(i, i + TAMANHO_LOTE_STATUS));
+        }
+        const resultadosLotes = await Promise.all(
+            lotesIds.map(lote => supabaseClient.from('perfis').select('id, status').in('id', lote))
+        );
+        resultadosLotes.forEach(({ data: perfisStatus, error: erroLote }) => {
+            if (erroLote) { console.error('Erro ao buscar status de colaboradores (Autorização de Imagem):', erroLote); return; }
+            (perfisStatus || []).forEach(p => { statusPorColab[p.id] = p.status; });
+        });
     }
 
     window.dadosImagemAtuais = (data || []).map(r => ({ ...r, statusColaboradorAtual: statusPorColab[r.colaborador_id] || null }));
