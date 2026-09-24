@@ -19827,9 +19827,27 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
 
         // Atualiza a notificação real no banco de dados
         if (idRealNotificacao && idRealNotificacao !== 'null') {
-            await supabaseClient.from('notificacoes')
+            const { data: notifAtualizada, error: erroUpdateNotif } = await supabaseClient.from('notificacoes')
                 .update({ lida: statusLida, lida_por: nomeQuemLeu })
-                .eq('id', idRealNotificacao);
+                .eq('id', idRealNotificacao)
+                .select('id');
+
+            if (erroUpdateNotif) throw erroUpdateNotif;
+
+            // 🛡️ MESMO PROBLEMA QUE JÁ PEGAMOS ANTES NAS ORDENS DE SERVIÇO: sem uma
+            // política de RLS de UPDATE liberada pra esse perfil na tabela
+            // notificacoes, o Supabase não devolve erro nenhum — só não atualiza
+            // NADA (0 linhas). O botão "Marcar como Lido" mudava na tela porque a
+            // memória local (notificacoesGlobais) era atualizada de qualquer jeito
+            // logo abaixo, mas o banco continuava com lida=false; então, ao voltar
+            // pra essa página (que recarrega os dados do banco via
+            // carregarFTsParaAdmin -> atualizarContador), o item "ressuscitava"
+            // como não lido de novo, porque na verdade nunca tinha sido salvo.
+            // Checando se voltou alguma linha aqui pra avisar em vez de fingir
+            // que deu certo.
+            if (!notifAtualizada || notifAtualizada.length === 0) {
+                throw new Error('A leitura não foi salva no banco (0 linhas afetadas ao atualizar). Provavelmente falta uma política de RLS de UPDATE na tabela notificacoes para o seu perfil — avise o TI/RH pra checar isso no Supabase.');
+            }
         }
 
         // ATUALIZA A MEMÓRIA LOCAL PARA EVITAR O EFEITO FANTASMA NAS ABAS
@@ -19880,6 +19898,20 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
             btnTela.disabled = false;
         }
 
+        // 👇 NOVO: reflete a leitura NA HORA também nas listas "de fundo" que têm
+        // seus próprios badges de "Não lida" fora do botão clicado — ex: a árvore
+        // Unidade > Colaborador da tela de Aprovações de Horas Extras (Admin).
+        // Antes só o botão em si (e o "Visto por" ao lado dele) era corrigido no
+        // DOM; a linha/pasta que ficava atrás do modal continuava mostrando
+        // "Não lida" e as contagens ("X não lidas") ficavam desatualizadas até
+        // a página inteira recarregar (F5 ou trocar de aba) — reportado pelo
+        // usuário. `window._ftPastasAbertas` já existe pra manter as pastas que
+        // estavam abertas abertas depois desse re-render, então é seguro chamar
+        // aqui sem fechar nada que o usuário tinha aberto.
+        if ((tipo === 'FT_Admin' || tipo === 'FT') && typeof window.renderizarPaginacaoFTsAdmin === 'function' && document.getElementById('lista-ft-admin-container')) {
+            window.renderizarPaginacaoFTsAdmin();
+        }
+
         // Atualiza a bolinha vermelha do Sino
         if (typeof atualizarContador === 'function') atualizarContador();
 
@@ -19889,7 +19921,11 @@ window.alternarLeituraNotificacaoDinamica = async function(idNotif, statusLida, 
             btnTela.innerHTML = htmlAntigo;
             btnTela.disabled = false;
         }
-        mostrarAlerta("Falha de conexão ao salvar leitura. Tente novamente.", "erro");
+        // 👇 Mostra a mensagem real do erro quando tiver uma (ex: aviso de RLS
+        // acima) em vez de sempre um genérico "falha de conexão" — isso é o que
+        // vai deixar claro, da próxima vez que isso quebrar, o que exatamente
+        // falhou (permissão vs. conexão de fato).
+        mostrarAlerta(err && err.message ? `Não foi possível salvar a leitura: ${err.message}` : "Falha de conexão ao salvar leitura. Tente novamente.", "erro");
     }
 };
 
@@ -84105,8 +84141,19 @@ window.sincronizarLeituraTabelaBase = async function(tipoNotif, referenciaId, co
 
     try {
         if (tabela && referenciaId) {
-            await supabaseClient.from(tabela).update({ lida_por: nomeQuemLeu }).eq('id', referenciaId);
-        } 
+            // 👇 MESMO CUIDADO do fix na notificacoes: sem `.select()` pra conferir,
+            // um UPDATE bloqueado por RLS não dá erro nenhum aqui, só não muda
+            // nada — e o catch abaixo só loga no console, sem avisar ninguém.
+            // Checando se voltou alguma linha, pra pelo menos aparecer no log
+            // quando isso acontecer (esse campo é só o registro espelhado
+            // "lida_por" na tabela de origem — quem decide o badge "Não lida" é
+            // a tabela notificacoes, corrigida acima; isso aqui é sincronização
+            // auxiliar, por isso não interrompe o fluxo principal com alerta).
+            const { data: linhaAtualizada, error: erroUpdateBase } = await supabaseClient
+                .from(tabela).update({ lida_por: nomeQuemLeu }).eq('id', referenciaId).select('id');
+            if (erroUpdateBase) console.error(`Erro ao sincronizar lida_por em ${tabela}:`, erroUpdateBase);
+            else if (!linhaAtualizada || linhaAtualizada.length === 0) console.warn(`sincronizarLeituraTabelaBase: 0 linhas atualizadas em ${tabela} (id ${referenciaId}) — possível falta de política RLS de UPDATE para este perfil.`);
+        }
         else if (tipoNotif.includes('Admissão') || tipoNotif.includes('Contrato') || tipoNotif.includes('Rescisão')) {
             const { data: perfil } = await supabaseClient.from('perfis').select('dados_admissao, dados_rescisao').eq('id', targetId).single();
             if (perfil) {
