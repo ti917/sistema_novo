@@ -30287,29 +30287,71 @@ window.filtrarArquivosDuplicados = async function(candidatos, jaExistentes) {
     return { unicos, duplicados };
 };
 
+// 👇 NOVO: converte uma foto (JPG/PNG) numa única página de PDF — mesma técnica que a
+// Clara IA já usa pra embrulhar imagem em PDF na separação automática (ver
+// window.separarDocumentosAdmissaoPorTipo, mais abaixo). Usada quando o Gestor anexa
+// manualmente uma foto num campo que no fim das contas precisa virar PDF (tudo que não
+// for o campo de Foto do Crachá) — assim ele não precisa converter a foto na mão antes.
+window.converterImagemParaPdfDocAdmissao = async function(arquivoImagem, labelCampo) {
+    if (typeof PDFLib === 'undefined') throw new Error('PDFLib não carregou a tempo.');
+    const bytesImg = new Uint8Array(await arquivoImagem.arrayBuffer());
+    const pdfFinal = await PDFLib.PDFDocument.create();
+    const nomeMin = (arquivoImagem.name || '').toLowerCase();
+    const ehPng = arquivoImagem.type.includes('png') || nomeMin.endsWith('.png');
+    const imgEmbutida = ehPng ? await pdfFinal.embedPng(bytesImg) : await pdfFinal.embedJpg(bytesImg);
+    const pagina = pdfFinal.addPage([imgEmbutida.width, imgEmbutida.height]);
+    pagina.drawImage(imgEmbutida, { x: 0, y: 0, width: imgEmbutida.width, height: imgEmbutida.height });
+    const bytesFinais = await pdfFinal.save();
+    const nomeBase = (labelCampo || 'Documento').replace(' (Opcional)', '').replace(/[\/\\?*:|"<>]/g, '');
+    const nomeOriginalSemExt = (arquivoImagem.name || 'foto').replace(/\.[^.]+$/, '');
+    return new File([bytesFinais], `${nomeBase} - Foto Convertida (${nomeOriginalSemExt}).pdf`, { type: 'application/pdf' });
+};
+
 // 👇 Chamado no onchange do input escondido: valida cada arquivo novo (PDF ou
 // imagem, conforme o campo), DESCARTA quem já está anexado de novo (mesmo conteúdo)
 // e só então ACRESCENTA na lista — nunca substitui sozinho, exceto nos poucos campos
 // que continuam sendo de um arquivo só (cfg.multiplo === false), onde faz sentido a
 // nova escolha trocar a antiga.
+// 👇 NOVO: nos campos que exigem PDF, agora também aceita foto (JPG/PNG) — o RH às vezes
+// devolve a ficha pedindo só UM documento específico (ex: comprovante de endereço,
+// carteira de vacinação), e obrigar o Gestor a converter a foto em PDF na mão antes de
+// anexar só dava trabalho e confusão à toa. A foto é convertida automaticamente pra PDF
+// aqui mesmo (window.converterImagemParaPdfDocAdmissao) antes de entrar no acumulador —
+// pro resto do sistema (upload, mesclagem, "Solicitações do RH") nada muda, continua
+// recebendo só PDF como sempre recebeu.
 window.acumularArquivosDocAdmissao = async function(id, inputEl) {
     const cfg = (window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === id);
     if (!cfg) return;
-    const novos = Array.from(inputEl.files || []);
-    if (novos.length === 0) return;
+    const brutos = Array.from(inputEl.files || []);
+    if (brutos.length === 0) return;
 
-    for (const arquivo of novos) {
+    const novos = [];
+    for (const arquivo of brutos) {
         if (cfg.tipoImagem) {
             if (!arquivo.type.startsWith('image/')) {
                 window.abrirAvisoArquivoNaoImagem(arquivo.name);
                 window.sincronizarInputComAcumuladorAdmissao(id);
                 return;
             }
+            novos.push(arquivo);
         } else {
             const nomeMin = (arquivo.name || '').toLowerCase();
             const ehPdfExtensao = nomeMin.endsWith('.pdf');
             const ehPdfMime = arquivo.type === 'application/pdf' || arquivo.type === '';
-            if (!ehPdfExtensao || !ehPdfMime) {
+            const ehImagem = arquivo.type.startsWith('image/') || /\.(jpe?g|png)$/i.test(nomeMin);
+
+            if (ehPdfExtensao || ehPdfMime) {
+                novos.push(arquivo);
+            } else if (ehImagem) {
+                try {
+                    novos.push(await window.converterImagemParaPdfDocAdmissao(arquivo, cfg.label));
+                } catch (eConv) {
+                    console.warn('Não consegui converter a foto em PDF automaticamente:', eConv);
+                    window.abrirAvisoArquivoNaoPdf(arquivo.name);
+                    window.sincronizarInputComAcumuladorAdmissao(id);
+                    return;
+                }
+            } else {
                 window.abrirAvisoArquivoNaoPdf(arquivo.name);
                 window.sincronizarInputComAcumuladorAdmissao(id);
                 return;
@@ -30360,7 +30402,11 @@ window.renderizarAnexosAdmissaoTipados = function() {
             div.id = idBox;
             div.className = 'form-group';
             div.style.cssText = 'margin-bottom: 0; background: rgba(0,0,0,0.15); padding: 12px 15px; border-radius: 8px; border: 1px solid var(--cor-borda);';
-            const acceptAttr = cfg.tipoImagem ? 'image/*' : 'application/pdf,.pdf';
+            // 👇 NOVO: campos que não são a foto do crachá agora também aceitam JPG/PNG no
+            // seletor de arquivos do sistema operacional — antes o accept="application/pdf,.pdf"
+            // sozinho já escondia as fotos da lista antes mesmo da nossa validação em JS rodar.
+            // A conversão automática pra PDF acontece em window.acumularArquivosDocAdmissao.
+            const acceptAttr = cfg.tipoImagem ? 'image/*' : 'application/pdf,.pdf,image/*,.jpg,.jpeg,.png';
             div.innerHTML = `
                 <label style="display:flex; align-items:center; gap:6px;"><i class="fa-solid ${cfg.icone}"></i> ${cfg.label} <span class="span-obrigatorio-doc-${cfg.id}" style="color: var(--cor-perigo); display:none;">*</span></label>
                 <input type="file" id="doc-${cfg.id}" accept="${acceptAttr}" multiple style="display:none;" onchange="window.acumularArquivosDocAdmissao('${cfg.id}', this)">
@@ -30368,7 +30414,7 @@ window.renderizarAnexosAdmissaoTipados = function() {
                     <i class="fa-solid fa-paperclip"></i> ${cfg.multiplo ? 'Anexar arquivo(s)' : 'Anexar arquivo'}
                 </button>
                 <div id="lista-arquivos-doc-${cfg.id}" style="margin-top: 6px;"></div>
-                ${cfg.tipoImagem ? '<small style="color: var(--cor-texto-secundario); font-size: 0.72rem; display:block; margin-top:4px;"><i class="fa-solid fa-circle-info"></i> Aceita JPG/PNG — essa é a foto que vai virar o crachá e o perfil do colaborador no sistema.</small>' : ''}
+                ${cfg.tipoImagem ? '<small style="color: var(--cor-texto-secundario); font-size: 0.72rem; display:block; margin-top:4px;"><i class="fa-solid fa-circle-info"></i> Aceita JPG/PNG — essa é a foto que vai virar o crachá e o perfil do colaborador no sistema.</small>' : '<small style="color: var(--cor-texto-secundario); font-size: 0.72rem; display:block; margin-top:4px;"><i class="fa-solid fa-circle-info"></i> Aceita PDF ou foto (JPG/PNG) — se anexar uma foto, o sistema converte pra PDF automaticamente.</small>'}
                 ${cfg.multiplo ? '<small style="color: var(--cor-texto-secundario); font-size: 0.72rem; display:block; margin-top:4px;"><i class="fa-solid fa-circle-info"></i> Pode anexar quantos arquivos precisar, um de cada vez ou vários juntos (ex: frente e verso do RG) — cada um fica com um ✕ pra remover individualmente.</small>' : ''}
                 <div id="status-doc-antigo-${cfg.id}" style="display:none; margin-top:8px;"></div>
             `;
@@ -30675,10 +30721,10 @@ window.abrirAvisoArquivoNaoPdf = function(nomeArquivo) {
             <button onclick="document.getElementById('modal-arquivo-nao-pdf').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
 
             <i class="fa-solid fa-triangle-exclamation" style="color: #ff9800; font-size: 2.5rem; margin-bottom: 15px;"></i>
-            <h3 style="color: #ff9800; margin-bottom: 10px;">Esse arquivo não é um PDF</h3>
+            <h3 style="color: #ff9800; margin-bottom: 10px;">Esse arquivo não foi aceito</h3>
             <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">
-                O arquivo <b style="color:#fff;">${(nomeArquivo || '').replace(/</g, '&lt;')}</b> não foi aceito porque o sistema só permite anexos em <b>PDF</b> nesses campos.<br><br>
-                Se você tem uma foto ou print do documento, converta pra PDF primeiro (é rápido e gratuito) e depois anexe aqui de novo.
+                O arquivo <b style="color:#fff;">${(nomeArquivo || '').replace(/</g, '&lt;')}</b> não foi aceito porque o sistema só permite anexos em <b>PDF</b> ou <b>foto (JPG/PNG)</b> nesses campos — se for uma foto, ela é convertida em PDF automaticamente.<br><br>
+                Verifique se o arquivo é mesmo um PDF ou uma foto e anexe aqui de novo. Se for outro tipo de arquivo (Word, print de tela salvo em outro formato, etc.), converta pra PDF ou tire uma foto do documento primeiro.
             </p>
             <a href="https://www.ilovepdf.com/pt/jpg_para_pdf" target="_blank" rel="noopener" class="btn-primary" style="display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding: 12px 20px;">
                 <i class="fa-solid fa-arrow-up-right-from-square"></i> Converter Imagem para PDF
