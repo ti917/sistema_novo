@@ -37743,26 +37743,60 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
                             const dInicioAviso = new Date(aAv, mAv - 1, dAv);
                             dataUltimoDiaAtualStr = resc.ultimo_dia.split(' ')[0];
 
-                            // Trecho AF (INSS): do 16º dia do afastamento até o fim dele
-                            const [anoI2, mesI2, diaI2] = aus.data_inicio.split('-');
-                            const dIni2 = new Date(anoI2, mesI2 - 1, diaI2);
-                            const d16 = new Date(dIni2); d16.setDate(d16.getDate() + 15);
+                            // 🩹 CORREÇÃO (v67 cont. 4): o início real do trecho AF (INSS) não é
+                            // sempre o 16º dia DESTE atestado isolado — os 15 dias "grátis" da
+                            // empresa somam de forma ACUMULADA entre atestados do MESMO CID (reset
+                            // só se o hiato entre eles passar de 60 dias), exatamente a mesma regra
+                            // já usada na Escala (mapaInssCID). Se ela já tinha um atestado anterior
+                            // do mesmo CID que consumiu parte dos 15 dias, o AF deste aqui pode
+                            // começar bem antes do 16º dia dele mesmo.
+                            let dataInicioAF = null; // 1º dia (Date) em que esse CID vira AF
+                            if (aus.cid) {
+                                const { data: atestadosMesmoCid } = await supabaseClient.from('ausencias')
+                                    .select('data_inicio, data_fim')
+                                    .eq('colaborador_id', aus.colaborador_id)
+                                    .eq('sigla', 'ATM')
+                                    .eq('cid', aus.cid)
+                                    .order('data_inicio', { ascending: true });
+
+                                let diasAcumulados = 0;
+                                let ultimaDataFim = null;
+                                (atestadosMesmoCid || []).forEach(atestado => {
+                                    const dIniA = new Date(atestado.data_inicio + 'T00:00:00');
+                                    const dFimA = new Date(atestado.data_fim + 'T00:00:00');
+                                    if (ultimaDataFim) {
+                                        const diffParaUltimo = Math.floor((dIniA - ultimaDataFim) / (1000 * 3600 * 24));
+                                        if (diffParaUltimo > 60) diasAcumulados = 0;
+                                    }
+                                    let tempD = new Date(dIniA);
+                                    while (tempD <= dFimA) {
+                                        diasAcumulados++;
+                                        if (diasAcumulados > 15 && dataInicioAF === null) dataInicioAF = new Date(tempD);
+                                        tempD.setDate(tempD.getDate() + 1);
+                                    }
+                                    ultimaDataFim = new Date(dFimA);
+                                });
+                            } else {
+                                // Sem CID cadastrado: cada atestado conta isolado (mesma regra que o
+                                // mapaInssCID usa pra atestados sem CID).
+                                const [anoIsol, mesIsol, diaIsol] = aus.data_inicio.split('-');
+                                dataInicioAF = new Date(anoIsol, mesIsol - 1, diaIsol);
+                                dataInicioAF.setDate(dataInicioAF.getDate() + 15);
+                            }
+
                             const [anoF2, mesF2, diaF2] = aus.data_fim.split('-');
                             const dFim2 = new Date(anoF2, mesF2 - 1, diaF2);
 
-                            // 🩹 CORREÇÃO (v67 cont.): o trecho AF conta INTEIRO a partir de onde
-                            // sobrepõe o início do aviso — sem limitar pelo Último Dia atual.
-                            // Esse Último Dia é justamente a data ANTIGA (antes de saber que esse
-                            // afastamento ia se estender); se o trecho AF continuar depois dela
-                            // (ela ainda tava afastada quando a data antiga chegou), esses dias
-                            // TAMBÉM não contam pro aviso e têm que ser somados — é exatamente
-                            // esse afastamento que está prorrogando a saída dela, então limitar
-                            // pelo Último Dia antigo zerava o cálculo por engano.
-                            const inicioInterv = d16 > dInicioAviso ? d16 : dInicioAviso;
-                            const fimInterv = dFim2;
+                            // Y = só os dias de AF que caem DENTRO da janela do aviso ORIGINAL (entre
+                            // o início real do AF e o Último Dia ANTIGO) — são esses dias que não
+                            // contaram pro aviso e por isso ela precisa "repor" depois que voltar.
+                            // Não são todos os dias do afastamento inteiro (isso estouraria o débito
+                            // muito além do próprio aviso prévio original, que só tinha ~30 dias).
+                            const inicioInterv = (dataInicioAF && dataInicioAF > dInicioAviso) ? dataInicioAF : dInicioAviso;
+                            const fimInterv = dFim2 < dUltimoDiaAtual ? dFim2 : dUltimoDiaAtual;
 
                             const diffMs = fimInterv - inicioInterv;
-                            const diasY = diffMs >= 0 ? Math.floor(diffMs / (1000 * 3600 * 24)) + 1 : 0;
+                            const diasY = (dataInicioAF && diffMs >= 0) ? Math.floor(diffMs / (1000 * 3600 * 24)) + 1 : 0;
 
                             if (diasY > 0) {
                                 const dRetorno = new Date(dataRetorno + 'T00:00:00');
