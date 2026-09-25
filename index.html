@@ -36706,11 +36706,11 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     }
 };
 
-       window.renderizarPaginacaoAusenciasAdmin = function() {
+       window.renderizarPaginacaoAusenciasAdmin = async function() {
     const container = document.getElementById('lista-ausencias-admin-container');
     const paginacao = document.getElementById('paginacao-ausencias-admin');
-    const notifsBanco = notificacoesGlobais; 
-    
+    const notifsBanco = notificacoesGlobais;
+
     container.innerHTML = ''; paginacao.innerHTML = '';
 
     if (ausenciasAdminFiltradas.length === 0) {
@@ -36721,8 +36721,81 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     const inicio = (paginaAtualAusenciasAdmin - 1) * itensPorPaginaAdmissoes;
     const itensDestaPagina = ausenciasAdminFiltradas.slice(inicio, inicio + itensPorPaginaAdmissoes);
 
+    // 👇 NOVO (v67 cont. 8): pra saber se um atestado ATM é o MAIS RECENTE da sua cadeia (mesmo
+    // colaborador + mesmo CID, mesma regra de 60 dias de hiato do mapaInssCID) precisamos olhar
+    // TODOS os atestados daquele CID — não só os que aparecem na página filtrada por mês. Busca
+    // 1x, só pelos CIDs/colaboradores realmente presentes nesta página.
+    const mapaCadeiaPorAusenciaId = new Map();
+    try {
+        const paresColabCid = [...new Set(itensDestaPagina.filter(a => a.sigla === 'ATM' && a.cid).map(a => `${a.colaborador_id}|${a.cid}`))];
+        if (paresColabCid.length > 0) {
+            const colabIdsUnicos = [...new Set(paresColabCid.map(p => p.split('|')[0]))];
+            const { data: todosDaCadeia } = await supabaseClient.from('ausencias')
+                .select('id, colaborador_id, cid, data_inicio, data_fim')
+                .eq('sigla', 'ATM').eq('status', 'Aprovado')
+                .in('colaborador_id', colabIdsUnicos)
+                .not('cid', 'is', null);
+
+            const porChaveCadeia = new Map();
+            (todosDaCadeia || []).forEach(at => {
+                const chave = `${at.colaborador_id}|${at.cid}`;
+                if (!paresColabCid.includes(chave)) return; // só monta cadeia dos CIDs que interessam
+                if (!porChaveCadeia.has(chave)) porChaveCadeia.set(chave, []);
+                porChaveCadeia.get(chave).push(at);
+            });
+
+            const isoStrCad = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+            porChaveCadeia.forEach(lista => {
+                lista.sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+                let subcadeia = [];
+                let ultimaDataFim = null;
+                const fechar = () => {
+                    if (subcadeia.length === 0) return;
+                    let diasAcumulados = 0, dataFecha15 = null, dataCruzou16 = null;
+                    subcadeia.forEach(at => {
+                        let d = new Date(at.data_inicio + 'T00:00:00');
+                        const dFimAt = new Date(at.data_fim + 'T00:00:00');
+                        while (d <= dFimAt) {
+                            diasAcumulados++;
+                            if (diasAcumulados === 15) dataFecha15 = new Date(d);
+                            if (diasAcumulados === 16 && !dataCruzou16) dataCruzou16 = new Date(d);
+                            d.setDate(d.getDate() + 1);
+                        }
+                    });
+                    const idUltimo = subcadeia[subcadeia.length - 1].id;
+                    subcadeia.forEach(at => {
+                        mapaCadeiaPorAusenciaId.set(at.id, {
+                            ehUltimoDaCadeia: at.id === idUltimo,
+                            totalDiasCadeia: diasAcumulados,
+                            qualificaCadeia: diasAcumulados > 15,
+                            dataFecha15Str: dataFecha15 ? isoStrCad(dataFecha15) : null,
+                            dataCruzou16Str: dataCruzou16 ? isoStrCad(dataCruzou16) : null,
+                            numeroAtestadosNaCadeia: subcadeia.length,
+                            dataInicioCadeia: subcadeia[0].data_inicio,
+                        });
+                    });
+                    subcadeia = [];
+                };
+                lista.forEach(at => {
+                    const dIni = new Date(at.data_inicio + 'T00:00:00');
+                    if (ultimaDataFim) {
+                        const diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                        if (diffParaUltimo > 60) fechar();
+                    }
+                    subcadeia.push(at);
+                    ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
+                });
+                fechar();
+            });
+        }
+    } catch (eCadeiaAus) {
+        console.error("Erro ao montar cadeias de CID p/ Ausências Admin:", eCadeiaAus);
+    }
+
     // O ForEach varre cada item da página (É AQUI DENTRO QUE A MÁGICA TEM QUE ACONTECER)
     itensDestaPagina.forEach(aus => {
+        const infoCadeia = mapaCadeiaPorAusenciaId.get(aus.id) || null;
         
         // 👇 A MÁGICA: O DECODIFICADOR RODA INDIVIDUALMENTE PARA CADA REGISTRO AQUI 👇
         let txtObsCard = aus.observacao || '';
@@ -36843,17 +36916,37 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
 
         let alertaINSS = '';
         let blocoRetornoTrabalho = '';
-        if (aus.sigla === 'ATM' && totalDias > 15) {
-            const d15 = new Date(dIni); d15.setDate(d15.getDate() + 14);
-            const d16 = new Date(d15); d16.setDate(d16.getDate() + 1);
-            const fBR = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+        const fBR = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+
+        // 👇 CORREÇÃO (v67 cont. 8): quando o atestado tem CID e faz parte de uma cadeia (mesmo
+        // colaborador+CID, dentro de 60 dias) que já foi qualificada em outro atestado da MESMA
+        // cadeia, este aqui não é mais tratado isolado — ou vira uma nota discreta (se não for o
+        // mais recente da cadeia, sem botão de retorno próprio) ou usa as datas ACUMULADAS da
+        // cadeia inteira (se for o mais recente).
+        if (infoCadeia && infoCadeia.qualificaCadeia && !infoCadeia.ehUltimoDaCadeia) {
+            alertaINSS = `
+                <div style="margin-top: 10px; padding: 8px 10px; background: rgba(139,92,246,0.08); border-left: 4px solid #8b5cf6; border-radius: 6px; font-size: 0.78rem; color: #c4b5fd;">
+                    <i class="fa-solid fa-link"></i> Atestado do mesmo CID de um caso maior — continua em atestado(s) posterior(es) da colaboradora. O retorno ao trabalho é confirmado no atestado mais recente da cadeia, não neste.
+                </div>
+            `;
+        } else if ((aus.sigla === 'ATM' && totalDias > 15 && !infoCadeia) || (infoCadeia && infoCadeia.qualificaCadeia && infoCadeia.ehUltimoDaCadeia)) {
+            // Datas "empresa até 15 / INSS a partir de": usa o ACUMULADO da cadeia quando existir
+            // CID (bate com a Escala), ou o cálculo isolado de sempre quando não tem CID.
+            const dataInicioExibida = infoCadeia ? infoCadeia.dataInicioCadeia : aus.data_inicio;
+            const totalDiasExibido = infoCadeia ? infoCadeia.totalDiasCadeia : totalDias;
+            const dFecha15Str = infoCadeia ? infoCadeia.dataFecha15Str : (() => { const d = new Date(dIni); d.setDate(d.getDate() + 14); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+            const dCruzou16Str = infoCadeia ? infoCadeia.dataCruzou16Str : (() => { const d = new Date(dIni); d.setDate(d.getDate() + 15); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+
+            const seloCadeiaAus = (infoCadeia && infoCadeia.numeroAtestadosNaCadeia > 1)
+                ? `<br><span style="font-size: 0.72rem; color: #c4b5fd;"><i class="fa-solid fa-link"></i> ${infoCadeia.numeroAtestadosNaCadeia} atestados do mesmo CID agrupados como 1 caso, desde ${formatarDataBR(dataInicioExibida)}</span>`
+                : '';
 
             alertaINSS = `
                 <div style="margin-top: 10px; padding: 10px; background: rgba(220,53,69,0.1); border-left: 4px solid var(--cor-perigo); border-radius: 6px; font-size: 0.8rem; color: var(--cor-texto-principal);">
-                    <i class="fa-solid fa-triangle-exclamation" style="color: var(--cor-perigo);"></i> <b style="color: var(--cor-perigo);">Atenção: Atestado > 15 dias (Regra INSS)</b><br>
+                    <i class="fa-solid fa-triangle-exclamation" style="color: var(--cor-perigo);"></i> <b style="color: var(--cor-perigo);">Atenção: Atestado > 15 dias (Regra INSS)</b>${seloCadeiaAus}<br>
                     <div style="margin-top: 5px; margin-left: 18px;">
-                        • <b>ATM (Empresa):</b> ${formatarDataBR(aus.data_inicio)} até ${fBR(d15)} (15 dias)<br>
-                        • <b>AF (INSS):</b> ${fBR(d16)} até ${formatarDataBR(aus.data_fim)} (${totalDias - 15} dias)
+                        • <b>ATM (Empresa):</b> ${formatarDataBR(dataInicioExibida)} até ${dFecha15Str ? formatarDataBR(dFecha15Str) : '-'} (15 dias)<br>
+                        • <b>AF (INSS):</b> ${dCruzou16Str ? formatarDataBR(dCruzou16Str) : '-'} até ${formatarDataBR(aus.data_fim)} (${totalDiasExibido - 15} dias)
                     </div>
                 </div>
             `;
@@ -36869,7 +36962,8 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                 `;
             }
 
-            // 👇 NOVO: botão/badge de "Retorno ao Trabalho" (só Admin/Gestor)
+            // 👇 NOVO: botão/badge de "Retorno ao Trabalho" (só Admin/Gestor) — sempre no atestado
+            // mais recente da cadeia (ou isolado, se não tiver CID), nunca nos anteriores.
             if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
                 if (aus.retorno_trabalho_data) {
                     blocoRetornoTrabalho = `
@@ -57840,13 +57934,13 @@ window.carregarTabelaINSS = async function() {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;"><i class="fa-solid fa-circle-notch fa-spin"></i> Buscando atestados extensos...</td></tr>';
 
     // Puxa as ausências aprovadas que são Atestado Médico (ATM)
-    let query = supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').eq('sigla', 'ATM').order('data_inicio', { ascending: false });
+    let query = supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').eq('sigla', 'ATM').order('data_inicio', { ascending: true });
 
     // Aplica o filtro de empresa se o Admin tiver selecionado alguma lá no topo
     if (usuarioAtual.perfil === 'Admin' && empresaSelecionadaFiltro !== 'Todas') {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
         if (unidsFiltro) query = query.in('unidade', unidsFiltro);
-    } 
+    }
     // Se for Gestor, puxa só da unidade dele
     else if (usuarioAtual.perfil === 'Gestor' && usuarioAtual.unidade) {
         const unids = usuarioAtual.unidade.split(',').map(u => u.trim());
@@ -57854,22 +57948,84 @@ window.carregarTabelaINSS = async function() {
     }
 
     const { data, error } = await query;
-    
+
     if (error) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-perigo);">Erro ao carregar dados.</td></tr>';
         return;
     }
 
-    // Filtra no JS apenas os atestados MAIORES que 15 dias
-    todosAfastamentosINSS = data.filter(a => {
-        if (!a.data_inicio || !a.data_fim) return false;
-        const d1 = new Date(a.data_inicio + 'T00:00:00');
-        const d2 = new Date(a.data_fim + 'T00:00:00');
-        const diffTime = d2 - d1;
-        const totalDias = Math.floor(diffTime / (1000 * 3600 * 24)) + 1;
-        a.totalDias = totalDias; // Guarda pra usar depois
-        return totalDias > 15;
+    // 👇 NOVO (v67 cont. 8): agrupa os atestados por CADEIA (mesmo colaborador + mesmo CID,
+    // com reset se o hiato entre um atestado e o próximo passar de 60 dias — mesma regra já
+    // usada no mapaInssCID da Escala) — atestados que são continuação do mesmo caso deixam de
+    // virar linhas/botões de retorno separados. Cada cadeia vira 1 "caso" só, representado pelo
+    // atestado MAIS RECENTE (é o que guarda o retorno_trabalho_data que realmente importa; os
+    // anteriores da mesma cadeia nunca tiveram um retorno de verdade entre eles). Atestados sem
+    // CID continuam isolados (o sistema não tem como saber se são continuação de nada).
+    const porChave = new Map();
+    (data || []).forEach(a => {
+        const chave = a.cid ? `${a.colaborador_id}|${a.cid}` : `${a.colaborador_id}|__solo__${a.id}`;
+        if (!porChave.has(chave)) porChave.set(chave, []);
+        porChave.get(chave).push(a);
     });
+
+    const isoStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const casos = [];
+    porChave.forEach(lista => {
+        lista.sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+
+        let subcadeia = [];
+        let ultimaDataFim = null;
+
+        const fecharSubcadeia = () => {
+            if (subcadeia.length === 0) return;
+            let diasAcumulados = 0;
+            let dataFecha15 = null;   // último dia que ainda é o 15º (ou antes) acumulado
+            let dataCruzou16 = null;  // primeiro dia que já é o 16º acumulado em diante (AF)
+            subcadeia.forEach(at => {
+                let d = new Date(at.data_inicio + 'T00:00:00');
+                const dFimAt = new Date(at.data_fim + 'T00:00:00');
+                while (d <= dFimAt) {
+                    diasAcumulados++;
+                    if (diasAcumulados === 15) dataFecha15 = new Date(d);
+                    if (diasAcumulados === 16 && !dataCruzou16) dataCruzou16 = new Date(d);
+                    d.setDate(d.getDate() + 1);
+                }
+            });
+            if (diasAcumulados > 15) {
+                const representante = subcadeia[subcadeia.length - 1];
+                casos.push({
+                    id: representante.id,
+                    colaborador_id: representante.colaborador_id,
+                    nome: representante.nome,
+                    unidade: representante.unidade,
+                    documento: representante.documento,
+                    retorno_trabalho_data: representante.retorno_trabalho_data,
+                    data_inicio: subcadeia[0].data_inicio,     // início real da cadeia (1º atestado)
+                    data_fim: representante.data_fim,          // fim do atestado mais recente (em aberto ou não)
+                    totalDias: diasAcumulados,                  // acumulado da cadeia inteira
+                    dataFecha15Str: dataFecha15 ? isoStr(dataFecha15) : null,
+                    dataCruzou16Str: dataCruzou16 ? isoStr(dataCruzou16) : null,
+                    numeroAtestadosNaCadeia: subcadeia.length,
+                });
+            }
+            subcadeia = [];
+        };
+
+        lista.forEach(at => {
+            const dIni = new Date(at.data_inicio + 'T00:00:00');
+            if (ultimaDataFim) {
+                const diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                if (diffParaUltimo > 60) fecharSubcadeia();
+            }
+            subcadeia.push(at);
+            ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
+        });
+        fecharSubcadeia();
+    });
+
+    casos.sort((a, b) => new Date(b.data_inicio) - new Date(a.data_inicio));
+    todosAfastamentosINSS = casos;
 
     filtrarINSS();
 };
@@ -57892,15 +58048,15 @@ window.filtrarINSS = function() {
     filtrados.forEach(a => {
         const diasINSS = a.totalDias - 15;
 
-        const dataIni = new Date(a.data_inicio + 'T00:00:00');
-        
-        // Fim da responsabilidade da Empresa (15º dia)
-        const dFimEmp = new Date(dataIni);
-        dFimEmp.setDate(dFimEmp.getDate() + 14);
+        // 👇 CORREÇÃO (v67 cont. 8): datas do "empresa até 15 / INSS a partir de" agora vêm do
+        // acumulado da CADEIA (mesmo CID), calculado em carregarTabelaINSS — não mais do 15º/16º
+        // dia deste atestado isolado. Bate com a Escala e com o cálculo de dias devidos.
+        const dFimEmp = a.dataFecha15Str ? new Date(a.dataFecha15Str + 'T00:00:00') : null;
+        const dIniINSS = a.dataCruzou16Str ? new Date(a.dataCruzou16Str + 'T00:00:00') : null;
 
-        // Início do INSS (16º dia)
-        const dIniINSS = new Date(dFimEmp);
-        dIniINSS.setDate(dIniINSS.getDate() + 1);
+        const seloCadeia = a.numeroAtestadosNaCadeia > 1
+            ? `<br><span style="font-size: 0.7rem; color: #c4b5fd;"><i class="fa-solid fa-link"></i> ${a.numeroAtestadosNaCadeia} atestados do mesmo CID agrupados como 1 caso (de ${formatarDataBR(a.data_inicio)} até ${formatarDataBR(a.data_fim)})</span>`
+            : '';
 
         // 👇 A MÁGICA: Botão de anexo dinâmico
         const linkAnexo = a.documento
@@ -57929,6 +58085,7 @@ window.filtrarINSS = function() {
             <td style="text-align: left; padding: 12px; vertical-align: top;">
                 <strong style="color: #ff9800; font-size: 1.05rem;">${a.nome}</strong><br>
                 ${linkAnexo}
+                ${seloCadeia}
             </td>
             <td style="color: var(--cor-texto-principal); vertical-align: middle;">${a.unidade}</td>
             <td style="vertical-align: middle;">
@@ -57937,11 +58094,11 @@ window.filtrarINSS = function() {
             <td style="vertical-align: middle;"><span class="badge admin" style="font-size: 0.85rem;">${a.totalDias} dias</span></td>
             <td style="vertical-align: middle;">
                 <span style="color: #4fc3f7; font-weight: bold;">15 dias (ATM)</span><br>
-                <small style="color: var(--cor-texto-secundario);">Até ${formatarDataBR(dFimEmp.toISOString().split('T')[0])}</small>
+                <small style="color: var(--cor-texto-secundario);">${dFimEmp ? 'Até ' + formatarDataBR(dFimEmp.toISOString().split('T')[0]) : '-'}</small>
             </td>
             <td style="vertical-align: middle;">
                 <span style="color: var(--cor-perigo); font-weight: bold;">${diasINSS} dias (AF)</span><br>
-                <small style="color: var(--cor-texto-secundario);">A partir de ${formatarDataBR(dIniINSS.toISOString().split('T')[0])}</small>
+                <small style="color: var(--cor-texto-secundario);">${dIniINSS ? 'A partir de ' + formatarDataBR(dIniINSS.toISOString().split('T')[0]) : '-'}</small>
             </td>
             <td style="vertical-align: middle; text-align: center;">
                 ${colRetorno}
