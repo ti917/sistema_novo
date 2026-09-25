@@ -13808,33 +13808,74 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         // 👇 FUNÇÃO ATUALIZADA COM 30 DIAS DE CARÊNCIA E BLINDAGEM DE JSON 👇
+// 👇 NOVO (v67 cont. 7): cache global (Map colaborador_id -> ausência) dos afastamentos
+// ATM > 15 dias (regra INSS) ainda SEM retorno ao trabalho confirmado. Populado 1x no
+// login (e atualizado assim que um retorno é anexado) por window.atualizarCacheAfastamentosAbertosAviso.
+// filtrarAtivosE_AvisoPrevio usa esse cache (sem precisar virar async — ela é chamada de
+// ~30 telas diferentes, de forma síncrona, então não dava pra fazer ela mesma buscar do
+// banco) pra não deixar a pessoa sumir de NENHUMA lista de "colaboradores ativos" (inclusive
+// a lista de funcionários do Gestor) só porque o Último Dia antigo + 30 dias de carência já
+// passou, enquanto o aviso dela na real ainda está prorrogado por um afastamento em aberto.
+window._mapaAfastamentosAbertosAvisoGlobal = null;
+
+window.atualizarCacheAfastamentosAbertosAviso = async function() {
+    try {
+        const { data: ausenciasAbertas } = await supabaseClient.from('ausencias')
+            .select('id, colaborador_id, data_inicio, data_fim')
+            .eq('sigla', 'ATM').eq('status', 'Aprovado').is('retorno_trabalho_data', null);
+
+        const mapa = new Map();
+        (ausenciasAbertas || []).forEach(au => {
+            if (mapa.has(au.colaborador_id)) return;
+            const [aI, mI, dI] = au.data_inicio.split('-');
+            const [aF, mF, dF] = au.data_fim.split('-');
+            const dIniA = new Date(aI, mI - 1, dI);
+            const dFimA = new Date(aF, mF - 1, dF);
+            const totalDiasA = Math.floor((dFimA - dIniA) / (1000 * 3600 * 24)) + 1;
+            if (totalDiasA > 15) mapa.set(au.colaborador_id, au);
+        });
+        window._mapaAfastamentosAbertosAvisoGlobal = mapa;
+    } catch (eCacheAfast) {
+        console.error("Erro ao atualizar cache de afastamentos em aberto (aviso prévio):", eCacheAfast);
+    }
+};
+
 window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
     const hoje = new Date();
     hoje.setHours(0,0,0,0);
 
     return colaboradores.filter(c => {
         if (c.status === 'Ativo') return true;
-        
+
         // Se estiver Desligado, checa se o último dia + carência ainda não passou
         if (c.status === 'Desligado' && c.dados_rescisao) {
-            
+
             // MÁGICA: Converte para Objeto caso o banco tenha devolvido como Texto
             let dr = c.dados_rescisao;
             if (typeof dr === 'string') {
                 try { dr = JSON.parse(dr); } catch(e) {}
             }
-            
+
             if (dr && dr.ultimo_dia) {
                 const udRegex = dr.ultimo_dia.match(/(\d{2})\/(\d{2})\/(\d{4})/);
                 if (udRegex) {
                     const ud = new Date(parseInt(udRegex[3]), parseInt(udRegex[2]) - 1, parseInt(udRegex[1]));
                     ud.setHours(0,0,0,0);
-                    
+
                     // 👇 A MÁGICA AQUI: Mudamos para + 30 dias de carência! 👇
                     const udComCarencia = new Date(ud);
                     udComCarencia.setDate(udComCarencia.getDate() + 30);
 
                     if (hoje <= udComCarencia) return true; // Ainda tá no período de carência!
+
+                    // 👇 NOVO (v67 cont. 7): mesmo já tendo passado da carência, se ainda existe
+                    // um afastamento ATM>15d em aberto (sem retorno confirmado) pra esse
+                    // colaborador, o Último Dia gravado é a data ANTIGA (pré-afastamento) — ela
+                    // continua "ativa" na prática, com o aviso prorrogado, então não pode sumir
+                    // de nenhuma lista ainda.
+                    if (window._mapaAfastamentosAbertosAvisoGlobal && window._mapaAfastamentosAbertosAvisoGlobal.get(c.id)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -18702,6 +18743,11 @@ async function carregarPerfil(id) {
         window.checarTravaContrato();
         window.checarAvisosAsoAoLogar();
         window.verificarAvisosRetornoAfastamentoPendente();
+        // 👇 NOVO (v67 cont. 7): popula o cache global de afastamentos em aberto ANTES de
+        // qualquer tela usar window.filtrarAtivosE_AvisoPrevio (usada em ~30 telas, inclusive
+        // a lista de colaboradores do Gestor) — sem isso, quem tem aviso prorrogado por
+        // afastamento pode sumir de listas de "ativos" cedo demais, usando o Último Dia antigo.
+        window.atualizarCacheAfastamentosAbertosAviso();
         window.checarAvisoAsoPendenteAdmin();
         window.checarTravaAsoAdmissional();
     }
@@ -37878,6 +37924,10 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
                 mostrarAlerta("Retorno ao trabalho registrado com sucesso!", "sucesso");
                 if (typeof carregarAusenciasParaAdmin === 'function') carregarAusenciasParaAdmin();
                 if (typeof window.carregarTabelaINSS === 'function' && document.getElementById('lista-inss-body')) window.carregarTabelaINSS();
+                // 👇 NOVO (v67 cont. 7): atualiza na hora o cache global de afastamentos em
+                // aberto — sem isso, quem confirma o retorno só veria as telas de "ativos"
+                // refletirem a mudança depois de um novo login.
+                if (typeof window.atualizarCacheAfastamentosAbertosAviso === 'function') window.atualizarCacheAfastamentosAbertosAviso();
 
             } catch (e) {
                 mostrarAlerta("Erro ao salvar o retorno ao trabalho: " + e.message, "erro");
