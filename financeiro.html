@@ -4122,6 +4122,68 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             // "RESCISÃO" salvo no banco e o item nunca saía da lista mesmo já lançado/pago.
             const { data: lancamentos } = await supabaseClient.from('financeiro_lancamentos').select('descricao, valor_total, status').ilike('descricao', '%Rescisão%');
 
+            // 👇 NOVO (v67 fin.1): o RH pode ter um afastamento (ATM/AF) ainda em aberto (sem
+            // retorno ao trabalho confirmado) que PRORROGA o aviso prévio de um desligado — nesse
+            // caso o campo "ultimo_dia" salvo em dados_rescisao ainda é o valor ANTIGO (só é
+            // sobrescrito quando o RH confirma o retorno lá no index.html, window.salvarRetornoTrabalho).
+            // Sem isso, o Financeiro contava os dias pra pagar a partir de uma data que ainda vai
+            // mudar — dando falso "Vence HOJE"/"Venceu". Aqui a gente busca esses afastamentos em
+            // aberto (mesma regra de cadeia por CID/60 dias já usada no index.html) e, se a cadeia
+            // cruzar o Último Dia atual, mostra um aviso em vez do prazo de pagamento calculado.
+            const idsDesligados = (desligados || []).map(d => d.id);
+            const mapaAfastamentoPendenteFin = new Map(); // colaborador_id -> { dataFimAtual, diasAcumulados, dataInicioCadeia }
+            if (idsDesligados.length > 0) {
+                try {
+                    const { data: atmAbertos } = await supabaseClient.from('ausencias')
+                        .select('colaborador_id, cid, data_inicio, data_fim')
+                        .eq('sigla', 'ATM').eq('status', 'Aprovado')
+                        .is('retorno_trabalho_data', null)
+                        .in('colaborador_id', idsDesligados)
+                        .order('data_inicio', { ascending: true });
+
+                    const porChaveFin = new Map();
+                    (atmAbertos || []).forEach(a => {
+                        const chave = a.cid ? `${a.colaborador_id}|${a.cid}` : `${a.colaborador_id}|__solo__${a.data_inicio}`;
+                        if (!porChaveFin.has(chave)) porChaveFin.set(chave, []);
+                        porChaveFin.get(chave).push(a);
+                    });
+
+                    porChaveFin.forEach(lista => {
+                        lista.sort((x, y) => new Date(x.data_inicio) - new Date(y.data_inicio));
+                        let subcadeia = [];
+                        let ultimaDataFim = null;
+                        const fecharSubcadeiaFin = () => {
+                            if (subcadeia.length === 0) return;
+                            let diasAcumulados = 0;
+                            subcadeia.forEach(at => {
+                                let d = new Date(at.data_inicio + 'T00:00:00');
+                                const dFimAt = new Date(at.data_fim + 'T00:00:00');
+                                while (d <= dFimAt) { diasAcumulados++; d.setDate(d.getDate() + 1); }
+                            });
+                            if (diasAcumulados > 15) {
+                                const maisRecente = subcadeia[subcadeia.length - 1];
+                                mapaAfastamentoPendenteFin.set(maisRecente.colaborador_id, {
+                                    dataFimAtual: maisRecente.data_fim,
+                                    diasAcumulados,
+                                    dataInicioCadeia: subcadeia[0].data_inicio
+                                });
+                            }
+                            subcadeia = [];
+                        };
+                        lista.forEach(at => {
+                            const dIni = new Date(at.data_inicio + 'T00:00:00');
+                            if (ultimaDataFim) {
+                                const diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                                if (diffParaUltimo > 60) fecharSubcadeiaFin();
+                            }
+                            subcadeia.push(at);
+                            ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
+                        });
+                        fecharSubcadeiaFin();
+                    });
+                } catch (eAfastFin) { console.error('Erro ao checar afastamentos em aberto (Financeiro):', eAfastFin); }
+            }
+
             const mesesExistentes = new Set();
             const hoje = new Date();
             const mesAtualMascara = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
@@ -4178,8 +4240,20 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
                         dataOrdenacao = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}-${String(dataObj.getDate()).padStart(2,'0')}`;
                         mesAnoReferencia = `${dataObj.getFullYear()}-${String(dataObj.getMonth()+1).padStart(2,'0')}`;
                         mesesExistentes.add(mesAnoReferencia);
-                        
+
                         dataPrazoPura = `${String(dataObj.getDate()).padStart(2,'0')}/${String(dataObj.getMonth()+1).padStart(2,'0')}/${dataObj.getFullYear()}`;
+
+                        // 👇 NOVO (v67 fin.1): se essa colaboradora tem um afastamento (ATM/AF) ainda
+                        // em aberto cuja cadeia começou antes (ou no dia) do Último Dia atual, esse
+                        // Último Dia ainda pode mudar quando o RH confirmar o retorno — então o prazo
+                        // de pagamento calculado acima NÃO é confiável ainda. Troca o aviso.
+                        const dUltimoDiaAtualFin = new Date(ano, parseInt(mes) - 1, dia);
+                        const afastPendenteFin = mapaAfastamentoPendenteFin.get(colab.id);
+                        if (afastPendenteFin && new Date(afastPendenteFin.dataInicioCadeia + 'T00:00:00') <= dUltimoDiaAtualFin) {
+                            colab._afastamentoPendenteFin = afastPendenteFin;
+                            htmlPrazoFormatado = `<span style="display: block; font-size: 0.8rem; margin-top: 5px; color: #8b5cf6; font-weight: bold;"><i class="fa-solid fa-triangle-exclamation"></i> Data ainda não definida</span><span style="display: block; font-size: 0.72rem; margin-top: 2px; color: #c4b5fd;">Aguardando RH confirmar retorno de afastamento (atestado até ${afastPendenteFin.dataFimAtual.split('-').reverse().join('/')}) — o Último Dia pode mudar.</span>`;
+                            prazoEstourado = false;
+                        }
                     }
                 }
 
@@ -4244,6 +4318,13 @@ window.rescisoesEmMemoria = rescisoesSeguras;
                     const bgBadge = colab._lancamentoFeito.status === 'Pago' ? 'rgba(46,204,113,0.2)' : 'rgba(241,196,15,0.2)';
                     statusBadge = `<span style="background: ${bgBadge}; color: ${corBadge}; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">Lançado / ${colab._lancamentoFeito.status}</span><div style="font-size: 0.75rem; margin-top: 5px; color: ${corBadge};">R$ ${colab._lancamentoFeito.valor_total.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</div>`;
                     botoesAcao = `<button class="btn-secondary" style="border-color: var(--cor-acento); color: var(--cor-acento); opacity: 0.5; cursor: not-allowed; width: 100%;" disabled><i class="fa-solid fa-check"></i> Finalizado</button>`;
+                } else if (colab._afastamentoPendenteFin) {
+                    // 👇 NOVO (v67 fin.1): status próprio pra deixar bem claro no Financeiro que
+                    // essa data ainda não é definitiva — some sozinho assim que o RH confirmar o
+                    // retorno ao trabalho (o Último Dia vira oficial e essa colaboradora some daqui
+                    // e volta a cair no fluxo normal "A Lançar Valor").
+                    statusBadge = `<span style="background: rgba(139,92,246,0.2); color: #8b5cf6; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;"><i class="fa-solid fa-hourglass-half"></i> Aguardando RH (Afastamento)</span>`;
+                    botoesAcao = `<button class="btn-secondary" style="border-color: #8b5cf6; color: #8b5cf6; width: 100%;" onclick="prepararLancamentoSistema('${colab.id}', '${colab.nome}', '${colab.unidade}', '${colab._dataPrazoPura}', 'Rescisão')" title="A data do Último Dia ainda pode mudar — confira com o RH antes de considerar o prazo definitivo."><i class="fa-solid fa-triangle-exclamation"></i> Lançar mesmo assim</button>`;
                 } else {
                     statusBadge = `<span style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 4px 10px; border-radius: 6px; font-weight: bold; font-size: 0.8rem;">A Lançar Valor</span>`;
                     botoesAcao = `<button class="btn-success" style="background: #3498db; width: 100%;" onclick="prepararLancamentoSistema('${colab.id}', '${colab.nome}', '${colab.unidade}', '${colab._dataPrazoPura}', 'Rescisão')"><i class="fa-solid fa-hand-holding-dollar"></i> Pagar / Lançar</button>`;
