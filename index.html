@@ -36092,13 +36092,77 @@ if (boxListaResc) observerRenderRescisoes.observe(boxListaResc, { childList: tru
 
 // Ação de Arquivar
 window.arquivarRescisaoAdmin = async function(idColab) {
+    try {
+        const { data: colabCheck } = await supabaseClient.from('perfis').select('dados_rescisao').eq('id', idColab).single();
+        const rescCheck = colabCheck?.dados_rescisao || {};
+        // 👇 NOVO (v67 cont. 14): trava de segurança — o Financeiro passou a CONFIAR em
+        // "arquivado_rh" pra saber que uma rescisão está mesmo encerrada (não mostra mais o aviso
+        // de "data ainda não definida" pra quem já foi arquivado). Então, se o RH tentar arquivar
+        // um caso que ainda tem um afastamento (ATM>15 dias) em aberto sobrepondo o aviso — sem
+        // retorno ao trabalho confirmado — o Último Dia ainda pode mudar, e arquivar aqui deixaria
+        // o Financeiro "cego" pra isso. Bloqueia com um erro claro em vez de deixar arquivar.
+        const tiposSemAvisoCheck = ['Justa Causa', 'Rescisão Indireta', 'Falecimento', 'Pedido da Empresa (Antecipação Experiência)'];
+        const udMatchCheck = (rescCheck.ultimo_dia || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+        if (udMatchCheck && rescCheck.data_comunicado && !tiposSemAvisoCheck.includes(rescCheck.tipo)) {
+            const dUltimoDiaCheck = new Date(parseInt(udMatchCheck[3]), parseInt(udMatchCheck[2]) - 1, parseInt(udMatchCheck[1]));
+            const { data: atmAbertosCheck } = await supabaseClient.from('ausencias')
+                .select('cid, data_inicio, data_fim')
+                .eq('colaborador_id', idColab).eq('sigla', 'ATM').eq('status', 'Aprovado')
+                .is('retorno_trabalho_data', null)
+                .order('data_inicio', { ascending: true });
+
+            const porChaveCheck = new Map();
+            (atmAbertosCheck || []).forEach(a => {
+                const chave = a.cid ? a.cid : `__solo__${a.data_inicio}`;
+                if (!porChaveCheck.has(chave)) porChaveCheck.set(chave, []);
+                porChaveCheck.get(chave).push(a);
+            });
+
+            let temAfastamentoAbertoCheck = false;
+            porChaveCheck.forEach(lista => {
+                lista.sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+                let subcadeia = [], ultimaDataFim = null;
+                const fechar = () => {
+                    if (subcadeia.length === 0) return;
+                    let diasAcumulados = 0;
+                    subcadeia.forEach(at => {
+                        let d = new Date(at.data_inicio + 'T00:00:00');
+                        const dFimAt = new Date(at.data_fim + 'T00:00:00');
+                        while (d <= dFimAt) { diasAcumulados++; d.setDate(d.getDate() + 1); }
+                    });
+                    if (diasAcumulados > 15 && new Date(subcadeia[0].data_inicio + 'T00:00:00') <= dUltimoDiaCheck) {
+                        temAfastamentoAbertoCheck = true;
+                    }
+                    subcadeia = [];
+                };
+                lista.forEach(at => {
+                    const dIni = new Date(at.data_inicio + 'T00:00:00');
+                    if (ultimaDataFim) {
+                        const diff = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                        if (diff > 60) fechar();
+                    }
+                    subcadeia.push(at);
+                    ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
+                });
+                fechar();
+            });
+
+            if (temAfastamentoAbertoCheck) {
+                return mostrarAlerta("Não é possível arquivar: esta rescisão ainda tem um afastamento (atestado) em aberto sem retorno ao trabalho confirmado, que pode prorrogar o aviso prévio. Anexe o retorno ao trabalho primeiro (na ausência correspondente) antes de arquivar.", "erro");
+            }
+        }
+    } catch (eCheckArquivar) {
+        console.error('Erro ao checar afastamento aberto antes de arquivar:', eCheckArquivar);
+        // Se a checagem falhar por algum motivo, deixa seguir o fluxo normal em vez de travar o RH.
+    }
+
     const confirmado = await mostrarConfirmacao("Deseja marcar esta rescisão como <b>TOTALMENTE CONCLUÍDA</b>?<br><br>Ela sairá das pendências e irá para a aba de Arquivadas.", "Arquivar Rescisão");
     if (!confirmado) return;
 
     try {
         const { data: colab } = await supabaseClient.from('perfis').select('nome, dados_rescisao').eq('id', idColab).single();
         let resc = colab.dados_rescisao || {};
-        
+
         resc.arquivado_rh = true;
         resc.arquivado_em = new Date().toISOString();
         resc.arquivado_por = usuarioAtual.nome;
