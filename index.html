@@ -18427,6 +18427,72 @@ window.checarAvisosAsoAoLogar = async function() {
     }
 };
 
+     // 👇 NOVO: Avisa Admins + Gestor da unidade 2 dias antes do fim previsto de um
+     // afastamento ATM que já ultrapassou a regra INSS (>15 dias) e ainda não teve o
+     // retorno ao trabalho anexado — mesmo padrão (checagem no login/dashboard) do
+     // checarAvisosAsoAoLogar logo acima.
+window.verificarAvisosRetornoAfastamentoPendente = async function() {
+    if (!usuarioAtual || usuarioAtual.perfil === 'Colaborador') return; // Só interessa a Admin/Gestor
+
+    try {
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
+        const dataAlvo = new Date(hoje);
+        dataAlvo.setDate(dataAlvo.getDate() + 2);
+        const dataAlvoStr = `${dataAlvo.getFullYear()}-${String(dataAlvo.getMonth() + 1).padStart(2, '0')}-${String(dataAlvo.getDate()).padStart(2, '0')}`;
+
+        // 1. Busca ausências ATM aprovadas, ainda sem retorno confirmado, que terminam daqui a 2 dias
+        const { data: candidatas } = await supabaseClient.from('ausencias')
+            .select('id, colaborador_id, nome, unidade, sigla, status, data_inicio, data_fim, retorno_trabalho_data')
+            .eq('sigla', 'ATM')
+            .eq('status', 'Aprovado')
+            .is('retorno_trabalho_data', null)
+            .eq('data_fim', dataAlvoStr);
+
+        if (!candidatas || candidatas.length === 0) return;
+
+        // 2. Só interessa quem já se enquadra na regra INSS (> 15 dias de afastamento)
+        const elegiveis = candidatas.filter(a => {
+            const [aI, mI, dI] = a.data_inicio.split('-');
+            const [aF, mF, dF] = a.data_fim.split('-');
+            const dIniA = new Date(aI, mI - 1, dI);
+            const dFimA = new Date(aF, mF - 1, dF);
+            const totalDiasA = Math.floor((dFimA - dIniA) / (1000 * 3600 * 24)) + 1;
+            return totalDiasA > 15;
+        });
+
+        if (elegiveis.length === 0) return;
+
+        // 3. 🛡️ ESCUDO ANTI-DUPLICATA: confere quem já tem notificação criada pra essa ausência
+        const idsElegiveis = elegiveis.map(a => a.id);
+        const { data: notifsExistentes } = await supabaseClient.from('notificacoes')
+            .select('referencia_id, tipo')
+            .in('tipo', ['Afastamento_Retorno_2Dias_Admin', 'Afastamento_Retorno_2Dias_Gestor'])
+            .in('referencia_id', idsElegiveis);
+
+        const setJaNotificado = new Set((notifsExistentes || []).map(n => `${n.referencia_id}|${n.tipo}`));
+
+        const novasNotificacoes = [];
+        elegiveis.forEach(a => {
+            if (!setJaNotificado.has(`${a.id}|Afastamento_Retorno_2Dias_Admin`)) {
+                novasNotificacoes.push({ colaborador_id: a.colaborador_id, nome: a.nome, unidade: a.unidade, lida: false, tipo: 'Afastamento_Retorno_2Dias_Admin', referencia_id: a.id });
+            }
+            if (!setJaNotificado.has(`${a.id}|Afastamento_Retorno_2Dias_Gestor`)) {
+                novasNotificacoes.push({ colaborador_id: a.colaborador_id, nome: a.nome, unidade: a.unidade, lida: false, tipo: 'Afastamento_Retorno_2Dias_Gestor', referencia_id: a.id });
+            }
+        });
+
+        // 4. Se sobrou alguma nova, faz 1 único insert
+        if (novasNotificacoes.length > 0) {
+            await supabaseClient.from('notificacoes').insert(novasNotificacoes);
+            if (typeof atualizarContador === 'function') atualizarContador();
+        }
+
+    } catch (e) {
+        console.error("Erro ao verificar avisos de retorno de afastamento pendente:", e);
+    }
+};
+
 async function carregarPerfil(id) {
     const { data, error } = await supabaseClient.from('perfis').select('*').eq('id', id).single();
     if (error) return false;
@@ -18634,6 +18700,7 @@ async function carregarPerfil(id) {
         window.carregarDashboardInicio();
         window.checarTravaContrato();
         window.checarAvisosAsoAoLogar();
+        window.verificarAvisosRetornoAfastamentoPendente();
         window.checarAvisoAsoPendenteAdmin();
         window.checarTravaAsoAdmissional();
     }
@@ -19504,7 +19571,7 @@ window.atualizarContador = async function() {
     if (!isAdmin) {
         if (p.includes('Admissao')) tiposPermitidos.push('Admissão', 'Contrato_Gestor', 'Admissão_Devolvida', 'Lembrete_Prorrogacao', 'PreCadastro_Preenchido');
         if (p.includes('Rescisao')) tiposPermitidos.push('Rescisão', 'Rescisão_Para_Assinar', 'TRCT_Gestor', 'Ficha_Sus_Rescisao_Pendente', 'Rescisão_Rejeitada');
-        if (p.includes('Ausencia')) tiposPermitidos.push('Ausência');
+        if (p.includes('Ausencia')) tiposPermitidos.push('Ausência', 'Afastamento_Retorno_2Dias_Gestor');
         if (p.includes('FT')) tiposPermitidos.push('FT');
         if (p.includes('Troca')) tiposPermitidos.push('Troca');
         if (p.includes('Advertencia')) tiposPermitidos.push('Advertência_Gestor', 'Advertência_Concluída');
@@ -19527,7 +19594,7 @@ if (isAdmin || podeAprovar) {
 
         if(p.includes('Admissao')) tiposPermitidos.push('Admissão_Admin', 'Contrato_Admin');
         if(p.includes('Rescisao')) tiposPermitidos.push('Rescisão_Admin', 'TRCT_Admin');
-        if(p.includes('Ausencia')) tiposPermitidos.push('Ausência_Admin');
+        if(p.includes('Ausencia')) tiposPermitidos.push('Ausência_Admin', 'Afastamento_Retorno_2Dias_Admin');
         if(p.includes('FT')) tiposPermitidos.push('FT_Admin');
         if(p.includes('Troca')) tiposPermitidos.push('Troca_Admin');
         if(p.includes('Advertencia')) tiposPermitidos.push('Advertência_Admin', 'Advertência_Concluída');
@@ -19729,7 +19796,8 @@ if (isAdmin || podeAprovar) {
                 else if (item.tipo.includes('Rescisão')) { textoTitulo = 'Desligamento Concluído!'; textoAcao = 'foi desligado(a) oficialmente.'; corTema = 'var(--cor-perigo)'; bgCor = 'rgba(220,53,69,0.05)'; icone = 'fa-user-slash'; }
                 else if (item.tipo === 'Admissão_Devolvida') { textoTitulo = 'Ficha Devolvida!'; textoAcao = 'voltou para correção do cadastro.'; corTema = 'var(--cor-perigo)'; bgCor = 'rgba(220,53,69,0.05)'; icone = 'fa-user-xmark'; }
                 else if (item.tipo === 'PreCadastro_Preenchido') { textoTitulo = 'Pré-Cadastro Preenchido!'; textoAcao = 'terminou de preencher a ficha pelo WhatsApp e já está pronto(a) para autopreencher.'; corTema = '#25D366'; bgCor = 'rgba(37,211,102,0.07)'; icone = 'fa-clipboard-check'; }
-                else if (item.tipo.includes('Ausência')) { textoTitulo = 'Ausência Aprovada!'; textoAcao = 'teve o atestado/falta validado pelo RH.'; corTema = '#ff9800'; bgCor = 'rgba(255,152,0,0.05)'; icone = 'fa-notes-medical'; } 
+                else if (item.tipo === 'Afastamento_Retorno_2Dias_Admin' || item.tipo === 'Afastamento_Retorno_2Dias_Gestor') { textoTitulo = 'Retorno de Afastamento em 2 dias!'; textoAcao = 'está com afastamento (INSS) previsto para terminar em 2 dias — anexe o retorno ao trabalho no Monitoramento de Afastamentos.'; corTema = '#ff9800'; bgCor = 'rgba(255,152,0,0.1)'; icone = 'fa-hourglass-half'; }
+                else if (item.tipo.includes('Ausência')) { textoTitulo = 'Ausência Aprovada!'; textoAcao = 'teve o atestado/falta validado pelo RH.'; corTema = '#ff9800'; bgCor = 'rgba(255,152,0,0.05)'; icone = 'fa-notes-medical'; }
                 else if (item.tipo === 'Ocorrencia_Plantao_Admin') { textoTitulo = 'Ocorrência Homologada!'; textoAcao = 'teve a ciência registrada pelo RH e foi arquivada.'; corTema = '#e91e63'; bgCor = 'rgba(233, 30, 99, 0.05)'; icone = 'fa-clipboard-list'; }
                 else if (item.tipo === 'Contrato_Gestor') { textoTitulo = 'Contrato Liberado!'; textoAcao = 'tem um contrato de trabalho aguardando assinatura.'; corTema = '#4fc3f7'; bgCor = 'rgba(79,195,247,0.05)'; icone = 'fa-file-signature'; } 
                 else if (item.tipo === 'Contrato_Admin') { textoTitulo = 'Contrato Assinado!'; textoAcao = 'teve o contrato assinado e arquivado.'; corTema = 'var(--cor-sucesso)'; bgCor = 'rgba(40,167,69,0.05)'; icone = 'fa-file-contract'; } 
@@ -25828,9 +25896,33 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             const limparStringSafe = (txt) => txt ? String(txt).trim().toUpperCase() : '';
             const unidadeAlvoLimpa = limparStringSafe(unidade);
 
-            const ATIVAR_TRAVA_ASO_ADMISSIONAL = false; 
-            const ATIVAR_TRAVA_CONTRATO = false;        
-            const ATIVAR_TRAVA_ASO_PERIODICO = false;   
+            const ATIVAR_TRAVA_ASO_ADMISSIONAL = false;
+            const ATIVAR_TRAVA_CONTRATO = false;
+            const ATIVAR_TRAVA_ASO_PERIODICO = false;
+
+            // 👇 NOVO: Mapa de afastamentos (ATM > 15 dias, regra INSS) ainda sem retorno ao
+            // trabalho confirmado — usado só para ACRESCENTAR um aviso visual a quem está em
+            // Aviso Prévio, nunca para bloquear (decisão do produto: aqui é só alerta).
+            const mapAfastamentosSemRetorno = new Map();
+            try {
+                const { data: ausenciasAbertasAviso } = await supabaseClient.from('ausencias')
+                    .select('id, colaborador_id, data_inicio, data_fim')
+                    .eq('sigla', 'ATM')
+                    .eq('status', 'Aprovado')
+                    .is('retorno_trabalho_data', null);
+
+                (ausenciasAbertasAviso || []).forEach(a => {
+                    if (mapAfastamentosSemRetorno.has(a.colaborador_id)) return;
+                    const [aI, mI, dI] = a.data_inicio.split('-');
+                    const [aF, mF, dF] = a.data_fim.split('-');
+                    const dIniA = new Date(aI, mI - 1, dI);
+                    const dFimA = new Date(aF, mF - 1, dF);
+                    const totalDiasA = Math.floor((dFimA - dIniA) / (1000 * 3600 * 24)) + 1;
+                    if (totalDiasA > 15) mapAfastamentosSemRetorno.set(a.colaborador_id, a);
+                });
+            } catch (eAfastAviso) {
+                console.error("Erro ao checar afastamentos sem retorno para o aviso da escala:", eAfastAviso);
+            }
 
             (todosColaboradores || []).forEach(c => {
                 let motivosBloqueio = []; 
@@ -25920,10 +26012,18 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                     }
 
                     if (isEmAviso) {
-                        bloqueadosELogs.push({ 
-                            nome: c.nome, 
-                            motivo: `Em processo de Desligamento / Aviso Prévio (Último dia: ${dataUltimoDiaAviso})`, 
-                            tipo: 'aviso' 
+                        let motivoAviso = `Em processo de Desligamento / Aviso Prévio (Último dia: ${dataUltimoDiaAviso})`;
+
+                        // 👇 NOVO: só ACRESCENTA texto de aviso — nunca bloqueia nem muda o 'tipo'
+                        const afastamentoAbertoAviso = mapAfastamentosSemRetorno.get(c.id);
+                        if (afastamentoAbertoAviso) {
+                            motivoAviso += `<br><i class="fa-solid fa-triangle-exclamation" style="color:#ff9800;"></i> Afastada (INSS) desde ${formatarDataBR(afastamentoAbertoAviso.data_inicio)} — aguardando RH anexar o retorno ao trabalho no Monitoramento de Afastamentos para recalcular os dias restantes do aviso.`;
+                        }
+
+                        bloqueadosELogs.push({
+                            nome: c.nome,
+                            motivo: motivoAviso,
+                            tipo: 'aviso'
                         });
                     }
                 }
@@ -35142,6 +35242,8 @@ window.rotearNotificacao = async function(idColab, tipoNotificacao, referenciaId
         document.querySelector('[data-aba="aba-processo-rescisoes"]')?.click();
     } else if (tipoNotificacao === 'TRCT_Admin') {
         abrirProcessoRescisorioDestacado(idColab);
+    } else if (tipoNotificacao === 'Afastamento_Retorno_2Dias_Admin' || tipoNotificacao === 'Afastamento_Retorno_2Dias_Gestor') {
+        abrirAusenciaDestacada(referenciaId);
     } else if (tipoNotificacao.includes('Ausência')) {
         abrirAusenciaDestacada(referenciaId);
       } else if (tipoNotificacao === 'Avaliacao_Alerta_Ruim') {
@@ -36601,6 +36703,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         const totalDias = Math.floor((dFim - dIni) / (1000 * 3600 * 24)) + 1;
 
         let alertaINSS = '';
+        let blocoRetornoTrabalho = '';
         if (aus.sigla === 'ATM' && totalDias > 15) {
             const d15 = new Date(dIni); d15.setDate(d15.getDate() + 14);
             const d16 = new Date(d15); d16.setDate(d16.getDate() + 1);
@@ -36615,6 +36718,37 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     </div>
                 </div>
             `;
+
+            // 👇 NOVO: indicador "em aberto" — só leitura, nunca grava nada novo, calcula na hora
+            const hojeEmAberto = new Date(); hojeEmAberto.setHours(0, 0, 0, 0);
+            if (hojeEmAberto > dFim && !aus.retorno_trabalho_data) {
+                const diasEmAberto = Math.floor((hojeEmAberto - dFim) / (1000 * 3600 * 24));
+                alertaINSS += `
+                    <div style="margin-top: 8px; padding: 8px 10px; background: rgba(255,152,0,0.12); border-left: 4px solid #ff9800; border-radius: 6px; font-size: 0.78rem; color: #ff9800;">
+                        <i class="fa-solid fa-hourglass-half"></i> Afastamento em aberto — já são <b>${diasEmAberto} dia(s)</b> além do previsto sem confirmação de retorno.
+                    </div>
+                `;
+            }
+
+            // 👇 NOVO: botão/badge de "Retorno ao Trabalho" (só Admin/Gestor)
+            if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
+                if (aus.retorno_trabalho_data) {
+                    blocoRetornoTrabalho = `
+                        <div style="margin-top: 8px; display: inline-flex; align-items: center; gap: 8px; background: rgba(40,167,69,0.12); border: 1px solid rgba(40,167,69,0.4); color: var(--cor-sucesso); padding: 6px 10px; border-radius: 6px; font-size: 0.78rem; font-weight: bold;">
+                            <i class="fa-solid fa-circle-check"></i> Retorno confirmado em ${formatarDataBR(aus.retorno_trabalho_data)}
+                            <button type="button" onclick="window.abrirModalRetornoTrabalho('${aus.id}')" title="Corrigir retorno ao trabalho" style="background: none; border: none; color: var(--cor-sucesso); cursor: pointer; font-size: 0.85rem;"><i class="fa-solid fa-pen"></i></button>
+                        </div>
+                    `;
+                } else {
+                    blocoRetornoTrabalho = `
+                        <div style="margin-top: 8px;">
+                            <button type="button" class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800;" onclick="window.abrirModalRetornoTrabalho('${aus.id}')">
+                                <i class="fa-solid fa-map-pin"></i> Anexar Retorno ao Trabalho
+                            </button>
+                        </div>
+                    `;
+                }
+            }
         }
 
         // 👇 A INJEÇÃO: Observa como `tagTextoCoberturaCard` e `txtObsCard` entram no layout HTML abaixo 👇
@@ -36632,7 +36766,9 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     </div>
                     
                     ${alertaINSS}
-                    
+
+                    ${blocoRetornoTrabalho}
+
                     <div>${tagTextoCoberturaCard}</div>
 
                     <div style="font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 8px; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; max-height: 80px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05);">
@@ -37418,6 +37554,201 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
 
             await mostrarAlerta("Ausência rejeitada.", "sucesso");
             carregarAusenciasParaAdmin();
+        };
+
+        // ==========================================
+        // 👇 NOVO: RETORNO AO TRABALHO (afastamento INSS > 15 dias)
+        // ==========================================
+        window.abrirModalRetornoTrabalho = async function(idAusencia) {
+            const { data: aus, error } = await supabaseClient.from('ausencias').select('*').eq('id', idAusencia).single();
+            if (error || !aus) return mostrarAlerta("Erro ao carregar a ausência.", "erro");
+
+            const modalHtml = `
+            <div id="modal-retorno-trabalho" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10006; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid #ff9800; max-height: 90vh; overflow-y: auto; position: relative;">
+                    <button type="button" onclick="document.getElementById('modal-retorno-trabalho').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+                    <h3 style="color: #ff9800; margin-bottom: 20px;"><i class="fa-solid fa-map-pin"></i> Retorno ao Trabalho: ${aus.nome}</h3>
+
+                    <form id="form-retorno-trabalho" onsubmit="return false;">
+                        <div class="form-group">
+                            <label>Data do retorno ao trabalho <span style="color: var(--cor-perigo);">*</span></label>
+                            <input type="date" id="retorno-data" value="${aus.retorno_trabalho_data || ''}" min="${aus.data_inicio}" required onclick="this.showPicker()">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Anexo / Comprovante (opcional)</label>
+                            <input type="file" id="retorno-anexo" accept="image/*,.pdf">
+                            ${aus.retorno_trabalho_anexo ? `<small style="display:block; margin-top:5px;"><a href="${aus.retorno_trabalho_anexo}" target="_blank" style="color:#4fc3f7;"><i class="fa-solid fa-file-pdf"></i> Ver anexo atual</a></small>` : ''}
+                        </div>
+
+                        <button type="submit" id="btn-salvar-retorno-trabalho" class="btn-success" style="width: 100%; height: 50px; background-color: #ff9800; color: #000; border: none; font-size: 1.05rem; margin-top: 10px; font-weight: bold;">
+                            <i class="fa-solid fa-floppy-disk"></i> Salvar Retorno ao Trabalho
+                        </button>
+                    </form>
+                </div>
+            </div>`;
+
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            document.getElementById('form-retorno-trabalho').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await window.salvarRetornoTrabalho(aus);
+            });
+        };
+
+        // 👇 NOVO: modal de confirmação (com data editável) do ajuste do Último Dia do
+        // aviso prévio, quando o retorno ao trabalho detecta dias de AF (INSS) que caíram
+        // dentro da janela do aviso prévio ativo do colaborador.
+        window.confirmarAjusteAvisoPorAfastamento = function(nomeColab, dataAtualBR, dataSugeridaBR, diasY) {
+            return new Promise((resolve) => {
+                const modalHtml = `
+                <div id="modal-ajuste-aviso-previo" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10007; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <div class="glass-card" style="width: 100%; max-width: 480px; border: 1px solid var(--cor-perigo);">
+                        <h3 style="color: var(--cor-perigo); margin-bottom: 15px;"><i class="fa-solid fa-triangle-exclamation"></i> Ajuste no Aviso Prévio</h3>
+                        <p style="font-size: 0.9rem; color: var(--cor-texto-principal); margin-bottom: 15px;">
+                            Esse afastamento tirou <b>${diasY} dia(s)</b> do período de aviso prévio de <b>${nomeColab}</b>.<br><br>
+                            Sugestão: mover o <b>Último Dia</b> da rescisão de <b>${dataAtualBR}</b> para a data abaixo (${diasY} dia(s) a cumprir após o retorno). Confirmar esse ajuste?
+                        </p>
+                        <div class="form-group">
+                            <label>Nova data do Último Dia</label>
+                            <input type="text" id="input-nova-ultima-data-aviso" value="${dataSugeridaBR}" placeholder="dd/mm/aaaa" style="text-align: center; font-weight: bold; color: var(--cor-perigo); border: 1px dashed var(--cor-perigo); background: transparent;">
+                        </div>
+                        <div style="display: flex; gap: 10px; margin-top: 15px;">
+                            <button type="button" class="btn-success" style="flex: 1; height: 45px;" id="btn-confirmar-ajuste-aviso"><i class="fa-solid fa-check"></i> Confirmar Ajuste</button>
+                            <button type="button" class="btn-secondary" style="flex: 1; height: 45px;" id="btn-pular-ajuste-aviso">Não ajustar agora</button>
+                        </div>
+                    </div>
+                </div>`;
+
+                document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+                document.getElementById('btn-confirmar-ajuste-aviso').onclick = () => {
+                    const valor = document.getElementById('input-nova-ultima-data-aviso').value.trim();
+                    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(valor)) {
+                        mostrarAlerta("Informe a data no formato dd/mm/aaaa.", "aviso");
+                        return;
+                    }
+                    document.getElementById('modal-ajuste-aviso-previo').remove();
+                    resolve({ confirmou: true, novaData: valor });
+                };
+                document.getElementById('btn-pular-ajuste-aviso').onclick = () => {
+                    document.getElementById('modal-ajuste-aviso-previo').remove();
+                    resolve({ confirmou: false });
+                };
+            });
+        };
+
+        window.salvarRetornoTrabalho = async function(aus) {
+            const btn = document.getElementById('btn-salvar-retorno-trabalho');
+            const dataRetorno = document.getElementById('retorno-data').value;
+            const fileInput = document.getElementById('retorno-anexo');
+
+            if (!dataRetorno) return mostrarAlerta("Informe a data do retorno ao trabalho.", "aviso");
+            if (dataRetorno < aus.data_inicio) return mostrarAlerta("A data do retorno não pode ser antes do início do afastamento.", "aviso");
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Salvando...';
+
+            try {
+                // 1. Sobe o anexo (se houver) reaproveitando o mesmo motor de upload das Ausências
+                let urlAnexo = aus.retorno_trabalho_anexo || null;
+                if (fileInput.files.length > 0) {
+                    const { data: perfilColabAnexo } = await supabaseClient.from('perfis').select('empresa').eq('id', aus.colaborador_id).single();
+                    const empresaColab = perfilColabAnexo && perfilColabAnexo.empresa ? perfilColabAnexo.empresa : 'Sem_Empresa';
+                    const caminhoBase = `${formatarNomePasta(empresaColab)}/${formatarNomePasta(aus.unidade)}/${formatarNomePasta(aus.nome)}/Ausencias`;
+                    const urls = await subirDocumentos(caminhoBase, fileInput.files, `Retorno_Trabalho_${aus.id}`);
+                    urlAnexo = urls[0];
+                }
+
+                // 2. Verifica se o afastamento sobrepõe uma janela de aviso prévio ATIVA e,
+                // se sim, sugere o ajuste do Último Dia da rescisão.
+                const { data: colab } = await supabaseClient.from('perfis').select('nome, status, status_aprovacao, dados_rescisao').eq('id', aus.colaborador_id).single();
+
+                let seguirComAjuste = false;
+                let novaUltimoDiaStr = '';
+                let resc = null;
+                let dataUltimoDiaAtualStr = '';
+
+                if (colab && (colab.status === 'Desligado' || colab.status_aprovacao === 'Rescisão Pendente' || colab.status_aprovacao === 'Aguardando Assinatura')) {
+                    resc = colab.dados_rescisao || {};
+                    const udMatch = (resc.ultimo_dia || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+
+                    if (udMatch && resc.data_comunicado) {
+                        const dUltimoDiaAtual = new Date(parseInt(udMatch[3]), parseInt(udMatch[2]) - 1, parseInt(udMatch[1]));
+
+                        if (dUltimoDiaAtual >= new Date(aus.data_inicio + 'T00:00:00')) {
+                            // A janela do aviso prévio se sobrepõe ao período do afastamento
+                            const [aAv, mAv, dAv] = resc.data_comunicado.split('-');
+                            const dInicioAviso = new Date(aAv, mAv - 1, dAv);
+                            dataUltimoDiaAtualStr = resc.ultimo_dia.split(' ')[0];
+
+                            // Trecho AF (INSS): do 16º dia do afastamento até o fim dele
+                            const [anoI2, mesI2, diaI2] = aus.data_inicio.split('-');
+                            const dIni2 = new Date(anoI2, mesI2 - 1, diaI2);
+                            const d16 = new Date(dIni2); d16.setDate(d16.getDate() + 15);
+                            const [anoF2, mesF2, diaF2] = aus.data_fim.split('-');
+                            const dFim2 = new Date(anoF2, mesF2 - 1, diaF2);
+
+                            // Interseção entre o trecho AF e a janela original do aviso prévio
+                            const inicioInterv = d16 > dInicioAviso ? d16 : dInicioAviso;
+                            const fimInterv = dFim2 < dUltimoDiaAtual ? dFim2 : dUltimoDiaAtual;
+
+                            const diffMs = fimInterv - inicioInterv;
+                            const diasY = diffMs >= 0 ? Math.floor(diffMs / (1000 * 3600 * 24)) + 1 : 0;
+
+                            if (diasY > 0) {
+                                const dRetorno = new Date(dataRetorno + 'T00:00:00');
+                                const baseData = dRetorno > dUltimoDiaAtual ? dRetorno : dUltimoDiaAtual;
+                                const dSugerida = new Date(baseData);
+                                dSugerida.setDate(dSugerida.getDate() + diasY);
+
+                                const fBR2 = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+                                const sugeridaBR = fBR2(dSugerida);
+
+                                const resultado = await window.confirmarAjusteAvisoPorAfastamento(colab.nome, dataUltimoDiaAtualStr, sugeridaBR, diasY);
+                                if (resultado && resultado.confirmou) {
+                                    novaUltimoDiaStr = resultado.novaData;
+                                    seguirComAjuste = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Se confirmado, atualiza o dados_rescisao do colaborador (Último Dia + histórico)
+                if (seguirComAjuste && novaUltimoDiaStr) {
+                    const historico = Array.isArray(resc.historico_ajustes) ? resc.historico_ajustes : [];
+                    historico.push({
+                        data: new Date().toLocaleDateString('pt-BR'),
+                        texto: `Ajuste do Último Dia de ${dataUltimoDiaAtualStr} para ${novaUltimoDiaStr} devido a afastamento (ATM/AF) — ausência #${aus.id}.`,
+                        por: usuarioAtual.nome
+                    });
+
+                    const novoResc = { ...resc, ultimo_dia: novaUltimoDiaStr, historico_ajustes: historico };
+
+                    const { error: errResc } = await supabaseClient.from('perfis').update({ dados_rescisao: novoResc }).eq('id', aus.colaborador_id);
+                    if (errResc) throw errResc;
+                }
+
+                // 4. Salva o retorno ao trabalho na própria ausência
+                const { error: errAus } = await supabaseClient.from('ausencias').update({
+                    retorno_trabalho_data: dataRetorno,
+                    retorno_trabalho_anexo: urlAnexo,
+                    retorno_trabalho_confirmado_por: usuarioAtual.nome,
+                    retorno_trabalho_confirmado_em: new Date().toISOString()
+                }).eq('id', aus.id);
+
+                if (errAus) throw errAus;
+
+                document.getElementById('modal-retorno-trabalho')?.remove();
+                mostrarAlerta("Retorno ao trabalho registrado com sucesso!", "sucesso");
+                carregarAusenciasParaAdmin();
+
+            } catch (e) {
+                mostrarAlerta("Erro ao salvar o retorno ao trabalho: " + e.message, "erro");
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Retorno ao Trabalho';
+            }
         };
 
      window.abrirAusenciaDestacada = async function(idReferencia) {
