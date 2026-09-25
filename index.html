@@ -26216,8 +26216,40 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
             }
         }
         
+        // 👇 NOVO (v67 cont.): se ela tem um afastamento (ATM) > 15 dias (regra INSS) que
+        // começou dentro do período do aviso prévio e AINDA NÃO teve o retorno ao trabalho
+        // confirmado pelo RH, o "Último Dia" gravado na rescisão não é confiável — os dias
+        // do INSS (AF, a partir do 16º dia) não contam pro aviso, então ela só sai de
+        // verdade depois de cumprir esse restante, depois que voltar. Enquanto o RH não
+        // anexar o retorno, a Escala não marca ela como Desligada (DES)/Antecipação (AD)
+        // nesses dias — mostra o afastamento de verdade (ATM/AF, mesma regra dos 15 dias já
+        // usada em outras telas) e prorroga o aviso até a confirmação.
+        let afastamentoAbertoParaAviso = null;
+        let dInicioAfastamentoAberto = null;
+        let dFimAfastamentoAberto = null;
+        if (dataUltimoDiaObj && ausenciasDoColab && ausenciasDoColab.length) {
+            afastamentoAbertoParaAviso = ausenciasDoColab.find(a => {
+                if (a.retorno_trabalho_data) return false;
+                if (!a.data_inicio || !a.data_fim) return false;
+                const [aI, mI, dI] = a.data_inicio.split('-');
+                const [aF, mF, dF] = a.data_fim.split('-');
+                const dIniA = new Date(parseInt(aI), parseInt(mI) - 1, parseInt(dI), 0, 0, 0);
+                const dFimA = new Date(parseInt(aF), parseInt(mF) - 1, parseInt(dF), 23, 59, 59);
+                const totalDiasA = Math.floor((dFimA - dIniA) / (1000 * 3600 * 24)) + 1;
+                if (totalDiasA <= 15) return false;
+                return dIniA <= dataUltimoDiaObj; // começou dentro (ou antes) do período do aviso
+            }) || null;
+
+            if (afastamentoAbertoParaAviso) {
+                const [aI2, mI2, dI2] = afastamentoAbertoParaAviso.data_inicio.split('-');
+                const [aF2, mF2, dF2] = afastamentoAbertoParaAviso.data_fim.split('-');
+                dInicioAfastamentoAberto = new Date(parseInt(aI2), parseInt(mI2) - 1, parseInt(dI2), 0, 0, 0);
+                dFimAfastamentoAberto = new Date(parseInt(aF2), parseInt(mF2) - 1, parseInt(dF2), 23, 59, 59);
+            }
+        }
+
         const primeiroDiaDoMesEscala = new Date(ano, mes, 1, 0, 0, 0, 0);
-        if (dataUltimoDiaObj && primeiroDiaDoMesEscala > dataUltimoDiaObj) return; 
+        if (dataUltimoDiaObj && !afastamentoAbertoParaAviso && primeiroDiaDoMesEscala > dataUltimoDiaObj) return;
 
         let cargoNestaUnidade = adm.cargo || '-';
         let dataEntradaNestaUnidade = new Date('1970-01-01');
@@ -26286,10 +26318,18 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
             
             teveUmDiaNestaEscala = true;
 
-            if (dataUltimoDiaObj && dataAtual > dataUltimoDiaObj) {
+            const dentroAfastamentoAbertoHoje = !!(afastamentoAbertoParaAviso && dataAtual >= dInicioAfastamentoAberto);
+
+            if (dataUltimoDiaObj && dataAtual > dataUltimoDiaObj && dentroAfastamentoAbertoHoje && dataAtual > dFimAfastamentoAberto) {
+                // Atestado já encerrado no papel, mas o RH ainda não confirmou o retorno ao
+                // trabalho — continua prorrogando o aviso, mostrando como INSS (AF) em aberto.
+                sigla = 'AF'; cssTipo = 'celula-af';
+                hora = `Atestado (INSS) encerrado em ${formatarDataBR(afastamentoAbertoParaAviso.data_fim)} — RH ainda não confirmou o retorno ao trabalho no Monitoramento de Afastamentos, então o aviso prévio segue prorrogado.`;
+            }
+            else if (dataUltimoDiaObj && dataAtual > dataUltimoDiaObj && !dentroAfastamentoAbertoHoje) {
                 sigla = 'DES'; cssTipo = 'celula-desligado'; hora = 'Desligado / Rescisão';
-            } 
-            else if (dataSaidaPraticaObj && dataAtual > dataSaidaPraticaObj && resc.opcao_aviso === 'Redução de 7 Dias') {
+            }
+            else if (dataSaidaPraticaObj && dataAtual > dataSaidaPraticaObj && resc.opcao_aviso === 'Redução de 7 Dias' && !dentroAfastamentoAbertoHoje) {
                 sigla = 'AD'; cssTipo = 'celula-desligado'; hora = 'Antecipação de Demissão (Folga dos 7 dias)';
             }
             else if (dataInicioObj && dataAtual < dataInicioObj) {
@@ -37690,9 +37730,16 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
                             const [anoF2, mesF2, diaF2] = aus.data_fim.split('-');
                             const dFim2 = new Date(anoF2, mesF2 - 1, diaF2);
 
-                            // Interseção entre o trecho AF e a janela original do aviso prévio
+                            // 🩹 CORREÇÃO (v67 cont.): o trecho AF conta INTEIRO a partir de onde
+                            // sobrepõe o início do aviso — sem limitar pelo Último Dia atual.
+                            // Esse Último Dia é justamente a data ANTIGA (antes de saber que esse
+                            // afastamento ia se estender); se o trecho AF continuar depois dela
+                            // (ela ainda tava afastada quando a data antiga chegou), esses dias
+                            // TAMBÉM não contam pro aviso e têm que ser somados — é exatamente
+                            // esse afastamento que está prorrogando a saída dela, então limitar
+                            // pelo Último Dia antigo zerava o cálculo por engano.
                             const inicioInterv = d16 > dInicioAviso ? d16 : dInicioAviso;
-                            const fimInterv = dFim2 < dUltimoDiaAtual ? dFim2 : dUltimoDiaAtual;
+                            const fimInterv = dFim2;
 
                             const diffMs = fimInterv - inicioInterv;
                             const diasY = diffMs >= 0 ? Math.floor(diffMs / (1000 * 3600 * 24)) + 1 : 0;
