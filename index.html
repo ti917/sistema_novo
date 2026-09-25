@@ -35580,7 +35580,7 @@ window.abrirAdvertenciaDestacadaGestor = async function() {
     // aberto. Nunca muda o Último Dia sozinho (isso só acontece quando o RH anexa o retorno).
     try {
         const { data: ausenciasAbertasRescisao } = await supabaseClient.from('ausencias')
-            .select('id, colaborador_id, data_inicio, data_fim')
+            .select('id, colaborador_id, cid, data_inicio, data_fim')
             .eq('sigla', 'ATM').eq('status', 'Aprovado').is('retorno_trabalho_data', null);
 
         const mapAfastamentosAbertosResc = new Map();
@@ -35593,9 +35593,91 @@ window.abrirAdvertenciaDestacadaGestor = async function() {
             const totalDiasA = Math.floor((dFimA - dIniA) / (1000 * 3600 * 24)) + 1;
             if (totalDiasA > 15) mapAfastamentosAbertosResc.set(au.colaborador_id, au);
         });
-        data.forEach(c => { c._afastamentoAbertoResc = mapAfastamentosAbertosResc.get(c.id) || null; });
+
+        // 👇 NOVO (v67 cont. 9): pra quem tem afastamento em aberto, calcula de uma vez uma
+        // PREVISÃO do Último Dia real ("se ela voltar assim que este atestado acabar, e não
+        // surgir nenhum atestado novo") — mesma lógica CID-aware/clipada pela janela do aviso
+        // original já usada em salvarRetornoTrabalho, só que aqui é só leitura/estimativa: nunca
+        // grava nada, e deixa claro no texto que é "por enquanto".
+        const colabsComAfastamento = [...mapAfastamentosAbertosResc.keys()];
+        if (colabsComAfastamento.length > 0) {
+            const { data: todosAtmDosColabs } = await supabaseClient.from('ausencias')
+                .select('colaborador_id, cid, data_inicio, data_fim')
+                .eq('sigla', 'ATM').eq('status', 'Aprovado')
+                .in('colaborador_id', colabsComAfastamento);
+
+            const isoStrPrev = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const fBRPrev = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+
+            data.forEach(c => {
+                const afAberto = mapAfastamentosAbertosResc.get(c.id);
+                if (!afAberto) return;
+
+                const resc = c.dados_rescisao || {};
+                const udMatch = (resc.ultimo_dia || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                if (!udMatch || !resc.data_comunicado) { c._afastamentoAbertoResc = afAberto; return; }
+
+                const dUltimoDiaAtual = new Date(parseInt(udMatch[3]), parseInt(udMatch[2]) - 1, parseInt(udMatch[1]));
+                const [aAv, mAv, dAv] = resc.data_comunicado.split('-');
+                const dInicioAviso = new Date(aAv, mAv - 1, dAv);
+
+                // Início real do AF (INSS), acumulado por CID (mesma regra do mapaInssCID/Escala)
+                let dataInicioAF = null;
+                if (afAberto.cid) {
+                    const mesmoCid = (todosAtmDosColabs || [])
+                        .filter(at => at.colaborador_id === c.id && at.cid === afAberto.cid)
+                        .sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+                    let diasAcumulados = 0, ultimaDataFim = null;
+                    mesmoCid.forEach(at => {
+                        const dIniA = new Date(at.data_inicio + 'T00:00:00');
+                        const dFimA = new Date(at.data_fim + 'T00:00:00');
+                        if (ultimaDataFim) {
+                            const diffParaUltimo = Math.floor((dIniA - ultimaDataFim) / (1000 * 3600 * 24));
+                            if (diffParaUltimo > 60) diasAcumulados = 0;
+                        }
+                        let tempD = new Date(dIniA);
+                        while (tempD <= dFimA) {
+                            diasAcumulados++;
+                            if (diasAcumulados > 15 && dataInicioAF === null) dataInicioAF = new Date(tempD);
+                            tempD.setDate(tempD.getDate() + 1);
+                        }
+                        ultimaDataFim = new Date(dFimA);
+                    });
+                } else {
+                    const [anoIsol, mesIsol, diaIsol] = afAberto.data_inicio.split('-');
+                    dataInicioAF = new Date(anoIsol, mesIsol - 1, diaIsol);
+                    dataInicioAF.setDate(dataInicioAF.getDate() + 15);
+                }
+
+                const [anoF2, mesF2, diaF2] = afAberto.data_fim.split('-');
+                const dFimAtestado = new Date(anoF2, mesF2 - 1, diaF2);
+
+                const inicioInterv = (dataInicioAF && dataInicioAF > dInicioAviso) ? dataInicioAF : dInicioAviso;
+                const fimInterv = dFimAtestado < dUltimoDiaAtual ? dFimAtestado : dUltimoDiaAtual;
+                const diffMs = fimInterv - inicioInterv;
+                const diasY = (dataInicioAF && diffMs >= 0) ? Math.floor(diffMs / (1000 * 3600 * 24)) + 1 : 0;
+
+                // Retorno hipotético: dia seguinte ao fim do atestado atual (é o mais cedo que ela
+                // poderia voltar, SE não surgir nenhum atestado novo depois deste).
+                const dRetornoHipotetico = new Date(dFimAtestado);
+                dRetornoHipotetico.setDate(dRetornoHipotetico.getDate() + 1);
+                const baseData = dRetornoHipotetico > dUltimoDiaAtual ? dRetornoHipotetico : dUltimoDiaAtual;
+                const dUltimoDiaPrevisto = new Date(baseData);
+                dUltimoDiaPrevisto.setDate(dUltimoDiaPrevisto.getDate() + diasY);
+
+                c._afastamentoAbertoResc = {
+                    ...afAberto,
+                    diasDevidosPrevistos: diasY,
+                    dataRetornoHipoteticaStr: fBRPrev(dRetornoHipotetico),
+                    ultimoDiaPrevistoStr: fBRPrev(dUltimoDiaPrevisto),
+                };
+            });
+        } else {
+            data.forEach(c => { c._afastamentoAbertoResc = null; });
+        }
     } catch (eAfastResc) {
         console.error("Erro ao buscar afastamentos em aberto p/ Histórico de Desligamentos:", eAfastResc);
+        data.forEach(c => { if (c._afastamentoAbertoResc === undefined) c._afastamentoAbertoResc = null; });
     }
 
     todasRescisoesAprovadas = data;
@@ -35791,7 +35873,12 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
                     ${a._afastamentoAbertoResc ? `
                     <div style="background: rgba(255, 152, 0, 0.12); border: 1px dashed #ff9800; padding: 8px 12px; border-radius: 8px; color: #ff9800; font-size: 0.72rem; text-align: center; line-height: 1.4;">
                         <i class="fa-solid fa-triangle-exclamation"></i> <b>Aviso pode estar prorrogado</b><br>
-                        Atestado (INSS) em aberto até <b>${formatarDataBR(a._afastamentoAbertoResc.data_fim)}</b>, RH ainda não confirmou o retorno ao trabalho. O Último Dia real só é recalculado quando o retorno for anexado.
+                        Atestado (INSS) em aberto até <b>${formatarDataBR(a._afastamentoAbertoResc.data_fim)}</b>, RH ainda não confirmou o retorno ao trabalho.
+                        ${a._afastamentoAbertoResc.ultimoDiaPrevistoStr ? `
+                        <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,152,0,0.4);">
+                            <i class="fa-regular fa-clock"></i> <b>Último Dia previsto (por enquanto): ${a._afastamentoAbertoResc.ultimoDiaPrevistoStr}</b><br>
+                            <span style="font-size: 0.68rem; opacity: 0.85;">Estimativa SE ela voltar em ${a._afastamentoAbertoResc.dataRetornoHipoteticaStr} (dia seguinte ao fim do atestado atual) e não surgir nenhum atestado novo. Só vira oficial quando o RH anexar o retorno.</span>
+                        </div>` : ''}
                         <br><button class="btn-secondary" style="margin-top: 6px; padding: 5px 10px; font-size: 0.7rem; border-radius: 6px; border-color: #ff9800; color: #ff9800; width: 100%;" onclick="window.abrirAusenciaDestacada('${a._afastamentoAbertoResc.id}')"><i class="fa-solid fa-location-crosshairs"></i> Anexar Retorno ao Trabalho</button>
                     </div>` : ''}
 
