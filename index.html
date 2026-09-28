@@ -49352,55 +49352,91 @@ window.devolverJustificativa = async function(idOcorrencia, nomeColab, idColab, 
 
         const primeiroNome = nomeColab.split(' ')[0];
         const dataFormatada = formatarDataBR(dataFalha);
-        
+
         // Puxa a ocorrência da memória pra montar o payload
         const oco = todasJustificativasZap.find(j => j.id === idOcorrencia);
 
-        // 👇 A MÁGICA DO PAYLOAD AQUI PARA O BOTÃO DE DEVOLVER 👇
-        const payloadObj = {
-            oc: idOcorrencia,
-            n: nomeColab,
-            u: oco ? oco.unidade : '-',
-            d: dataFalha,
-            m: motivoRecusa, // O motivo da recusa vai pra tela dele!
-            doc: oco ? (oco.doc_rh || '') : '',
-            cid: idColab
-        };
-        
-        // Criptografa o link pro iPhone ler na hora sem internet
-        const payloadCodificado = btoa(encodeURIComponent(JSON.stringify(payloadObj)));
-        const parametrosDaURL = "?p=" + payloadCodificado;
+        // 🆕 DISTINÇÃO IMPORTANTE: um registro criado pelo RH (cobrança de verdade, tem
+        // 'criado_por' preenchido — ver objPrevia na fila de cobrança) representa uma
+        // inconsistência REAL apontada pelo RH naquele dia — devolver aqui deve manter o
+        // mesmo card (mesma data) esperando ele corrigir, porque o problema daquele dia
+        // continua existindo. Já um registro que o PRÓPRIO colaborador lançou por conta
+        // própria (via "Justificar ponto" no menu da Clara, sem 'criado_por') não tem
+        // nenhuma inconsistência real apontada pelo RH — se o RH recusa dizendo "dia
+        // errado" ou similar, não existe mais nada pendente de verdade pra cobrar nesse
+        // dia. Se a gente só resetasse pra 'Aguardando Colaborador' igual ao outro caso,
+        // esse card ficaria fantasma pra sempre na fila e a Clara (ou o botão de Cobrança
+        // em Massa) ia ficar cobrando o colaborador por algo que o próprio RH já disse que
+        // estava errado/não precisa mais — então aqui a gente EXCLUI o registro em vez de
+        // devolver, e avisa ele por texto puro (sem link de card nenhum) pra abrir de novo
+        // o "Justificar ponto" caso ainda precise justificar outro dia.
+        const foiCriadoPeloRH = !!(oco && oco.criado_por);
 
-        // A MÁGICA: Passamos NULL no 4º parâmetro (Link do Anexo) para que a GraphAPI mande como TEXTO PURO.
-        const sucessoZap = await enviarMensagemGraphAPI(
-            fone, 
-            'ocorrencia_recusada', 
-            [primeiroNome, dataFormatada, motivoRecusa], 
-            null, 
-            parametrosDaURL
-        );
+        let sucessoZap;
+        if (foiCriadoPeloRH) {
+            // 👇 A MÁGICA DO PAYLOAD AQUI PARA O BOTÃO DE DEVOLVER (mesmo card, mesma data) 👇
+            const payloadObj = {
+                oc: idOcorrencia,
+                n: nomeColab,
+                u: oco ? oco.unidade : '-',
+                d: dataFalha,
+                m: motivoRecusa, // O motivo da recusa vai pra tela dele!
+                doc: oco ? (oco.doc_rh || '') : '',
+                cid: idColab
+            };
+
+            // Criptografa o link pro iPhone ler na hora sem internet
+            const payloadCodificado = btoa(encodeURIComponent(JSON.stringify(payloadObj)));
+            const parametrosDaURL = "?p=" + payloadCodificado;
+
+            // A MÁGICA: Passamos NULL no 4º parâmetro (Link do Anexo) para que a GraphAPI mande como TEXTO PURO.
+            sucessoZap = await enviarMensagemGraphAPI(
+                fone,
+                'ocorrencia_recusada',
+                [primeiroNome, dataFormatada, motivoRecusa],
+                null,
+                parametrosDaURL
+            );
+        } else {
+            // Lançamento voluntário do colaborador, sem inconsistência real do RH por trás —
+            // manda só o texto avisando o motivo, sem link de card (o card vai ser apagado).
+            sucessoZap = await enviarMensagemGraphAPI(
+                fone,
+                'ocorrencia_recusada',
+                [primeiroNome, dataFormatada, motivoRecusa],
+                null,
+                null
+            );
+        }
 
         if (sucessoZap) {
-            // 🐛 CAUSA RAIZ ENCONTRADA E CORRIGIDA: ao devolver, o status voltava pra
-            // 'Aguardando Colaborador' mas a resposta ANTIGA (justificativa/doc_colaborador)
-            // ficava intacta no banco — o card então mostrava ao mesmo tempo "Aguardando
-            // Colaborador" (badge cinza) E a "RESPOSTA DO COLABORADOR" antiga preenchida,
-            // dando a falsa impressão de que ele já tinha respondido de novo e o sistema
-            // travou. Agora zera justificativa e doc_colaborador junto, deixando o card
-            // corretamente como "Aguardando retorno do funcionário..." até ele reenviar.
-            const { error: errUpdate } = await supabaseClient.from('ocorrencias_ponto')
-                .update({
-                    status: 'Aguardando Colaborador',
-                    motivo_rh: motivoRecusa,
-                    justificativa: null,
-                    doc_colaborador: null
-                }).eq('id', idOcorrencia);
+            if (foiCriadoPeloRH) {
+                // 🐛 CAUSA RAIZ ENCONTRADA E CORRIGIDA: ao devolver, o status voltava pra
+                // 'Aguardando Colaborador' mas a resposta ANTIGA (justificativa/doc_colaborador)
+                // ficava intacta no banco — o card então mostrava ao mesmo tempo "Aguardando
+                // Colaborador" (badge cinza) E a "RESPOSTA DO COLABORADOR" antiga preenchida,
+                // dando a falsa impressão de que ele já tinha respondido de novo e o sistema
+                // travou. Agora zera justificativa e doc_colaborador junto, deixando o card
+                // corretamente como "Aguardando retorno do funcionário..." até ele reenviar.
+                const { error: errUpdate } = await supabaseClient.from('ocorrencias_ponto')
+                    .update({
+                        status: 'Aguardando Colaborador',
+                        motivo_rh: motivoRecusa,
+                        justificativa: null,
+                        doc_colaborador: null
+                    }).eq('id', idOcorrencia);
 
-            if (errUpdate) throw errUpdate;
+                if (errUpdate) throw errUpdate;
+            } else {
+                // Sem inconsistência real do RH por trás — apaga o registro de vez, pra não
+                // ficar um card fantasma "Aguardando Colaborador" sendo cobrado depois.
+                const { error: errDelete } = await supabaseClient.from('ocorrencias_ponto').delete().eq('id', idOcorrencia);
+                if (errDelete) throw errDelete;
+            }
 
             await supabaseClient.from('notificacoes').delete().eq('referencia_id', idOcorrencia).in('tipo', ['Ocorrencia_Ponto', 'Ocorrencia_Ponto_Admin']);
 
-            mostrarAlerta("Justificativa devolvida com sucesso! O colaborador foi notificado.", "sucesso");
+            mostrarAlerta(foiCriadoPeloRH ? "Justificativa devolvida com sucesso! O colaborador foi notificado." : "Lançamento recusado e removido da fila. O colaborador foi avisado do motivo e pode justificar de novo pelo menu.", "sucesso");
             carregarJustificativasZap(true); 
             atualizarContador();
         } else {
