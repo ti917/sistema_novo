@@ -37028,100 +37028,14 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
     }
 };
 
-       window.renderizarPaginacaoAusenciasAdmin = async function() {
-    const container = document.getElementById('lista-ausencias-admin-container');
-    const paginacao = document.getElementById('paginacao-ausencias-admin');
-    const notifsBanco = notificacoesGlobais;
-
-    container.innerHTML = ''; paginacao.innerHTML = '';
-
-    if (ausenciasAdminFiltradas.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma ausência encontrada.</p>';
-        return;
-    }
-
-    const inicio = (paginaAtualAusenciasAdmin - 1) * itensPorPaginaAdmissoes;
-    const itensDestaPagina = ausenciasAdminFiltradas.slice(inicio, inicio + itensPorPaginaAdmissoes);
-
-    // 👇 NOVO (v67 cont. 8): pra saber se um atestado ATM é o MAIS RECENTE da sua cadeia (mesmo
-    // colaborador + mesmo CID, mesma regra de 60 dias de hiato do mapaInssCID) precisamos olhar
-    // TODOS os atestados daquele CID — não só os que aparecem na página filtrada por mês. Busca
-    // 1x, só pelos CIDs/colaboradores realmente presentes nesta página.
-    const mapaCadeiaPorAusenciaId = new Map();
-    try {
-        const paresColabCid = [...new Set(itensDestaPagina.filter(a => a.sigla === 'ATM' && a.cid).map(a => `${a.colaborador_id}|${a.cid}`))];
-        if (paresColabCid.length > 0) {
-            const colabIdsUnicos = [...new Set(paresColabCid.map(p => p.split('|')[0]))];
-            const { data: todosDaCadeia } = await supabaseClient.from('ausencias')
-                .select('id, colaborador_id, cid, data_inicio, data_fim, documento')
-                .eq('sigla', 'ATM').eq('status', 'Aprovado')
-                .in('colaborador_id', colabIdsUnicos)
-                .not('cid', 'is', null);
-
-            const porChaveCadeia = new Map();
-            (todosDaCadeia || []).forEach(at => {
-                const chave = `${at.colaborador_id}|${at.cid}`;
-                if (!paresColabCid.includes(chave)) return; // só monta cadeia dos CIDs que interessam
-                if (!porChaveCadeia.has(chave)) porChaveCadeia.set(chave, []);
-                porChaveCadeia.get(chave).push(at);
-            });
-
-            const isoStrCad = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
-            porChaveCadeia.forEach(lista => {
-                lista.sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
-                let subcadeia = [];
-                let ultimaDataFim = null;
-                const fechar = () => {
-                    if (subcadeia.length === 0) return;
-                    let diasAcumulados = 0, dataFecha15 = null, dataCruzou16 = null;
-                    subcadeia.forEach(at => {
-                        let d = new Date(at.data_inicio + 'T00:00:00');
-                        const dFimAt = new Date(at.data_fim + 'T00:00:00');
-                        while (d <= dFimAt) {
-                            diasAcumulados++;
-                            if (diasAcumulados === 15) dataFecha15 = new Date(d);
-                            if (diasAcumulados === 16 && !dataCruzou16) dataCruzou16 = new Date(d);
-                            d.setDate(d.getDate() + 1);
-                        }
-                    });
-                    const idUltimo = subcadeia[subcadeia.length - 1].id;
-                    subcadeia.forEach(at => {
-                        mapaCadeiaPorAusenciaId.set(at.id, {
-                            ehUltimoDaCadeia: at.id === idUltimo,
-                            totalDiasCadeia: diasAcumulados,
-                            qualificaCadeia: diasAcumulados > 15,
-                            dataFecha15Str: dataFecha15 ? isoStrCad(dataFecha15) : null,
-                            dataCruzou16Str: dataCruzou16 ? isoStrCad(dataCruzou16) : null,
-                            numeroAtestadosNaCadeia: subcadeia.length,
-                            dataInicioCadeia: subcadeia[0].data_inicio,
-                            // 👇 NOVO (v67 cont. 10): anexos de TODOS os atestados da cadeia, pra
-                            // não precisar caçar mês por mês pra achar o atestado anterior.
-                            documentosCadeia: subcadeia.map(x => ({ data_inicio: x.data_inicio, data_fim: x.data_fim, documento: x.documento })),
-                        });
-                    });
-                    subcadeia = [];
-                };
-                lista.forEach(at => {
-                    const dIni = new Date(at.data_inicio + 'T00:00:00');
-                    if (ultimaDataFim) {
-                        const diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
-                        if (diffParaUltimo > 60) fechar();
-                    }
-                    subcadeia.push(at);
-                    ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
-                });
-                fechar();
-            });
-        }
-    } catch (eCadeiaAus) {
-        console.error("Erro ao montar cadeias de CID p/ Ausências Admin:", eCadeiaAus);
-    }
-
-    // O ForEach varre cada item da página (É AQUI DENTRO QUE A MÁGICA TEM QUE ACONTECER)
-    itensDestaPagina.forEach(aus => {
-        const infoCadeia = mapaCadeiaPorAusenciaId.get(aus.id) || null;
-        
+       // 👇 NOVO: card completo de uma única ausência, isolado numa função própria (mesmo
+// esquema do construirCardFTAdmin em Aprovações de Horas Extras) pra poder ser
+// reaproveitado dentro do modal de detalhe da visão em pastas abaixo. `infoCadeia`
+// (cadeia de atestados do mesmo CID/colaborador) agora é calculada SOB DEMANDA, só
+// quando esse card específico é aberto (ver buscarInfoCadeiaAtestadoAusencia) — antes
+// era recalculada pra TODOS os atestados de uma página inteira a cada render, o que
+// deixou de fazer sentido (e de ser necessário) com a lista virando pastas fechadas.
+function construirCardAusenciaAdmin(aus, notifsBanco, infoCadeia) {
         // 👇 A MÁGICA: O DECODIFICADOR RODA INDIVIDUALMENTE PARA CADA REGISTRO AQUI 👇
         let txtObsCard = aus.observacao || '';
         let tagTextoCoberturaCard = '';
@@ -37138,7 +37052,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         }
         // 👆 FIM DA MÁGICA 👆
 
-        let corStatus = '#ff9800'; 
+        let corStatus = '#ff9800';
         if(aus.status === 'Aprovado') corStatus = 'var(--cor-sucesso)';
         if(aus.status === 'Reprovado') corStatus = 'var(--cor-perigo)';
 
@@ -37149,12 +37063,12 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         let corTextoDiasPill = '#000000';
 
         if (aus.sigla === 'FA') {
-            corTemaSigla = 'var(--cor-perigo)'; 
+            corTemaSigla = 'var(--cor-perigo)';
             bgTemaSigla = 'rgba(220, 53, 69, 0.1)';
             bordaTemaSigla = 'rgba(220, 53, 69, 0.3)';
             corTextoDiasPill = '#ffffff';
         } else if (aus.sigla === 'FE') {
-            corTemaSigla = 'var(--cor-sucesso)'; 
+            corTemaSigla = 'var(--cor-sucesso)';
             bgTemaSigla = 'rgba(40, 167, 69, 0.1)';
             bordaTemaSigla = 'rgba(40, 167, 69, 0.3)';
             corTextoDiasPill = '#ffffff';
@@ -37166,19 +37080,9 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
        const tipoNotifBuscaAus = usuarioAtual.perfil === 'Admin' ? 'Ausência_Admin' : 'Ausência';
         let btnNotifHtml = '';
 
-        // 🐛 CORREÇÃO (28/09/2026): antes esse bloco tinha dois caminhos — se achasse
-        // um registro correspondente no sininho (tabela "notificacoes"), decidia se
-        // estava "Lido" e por quem A PARTIR DO SININHO; só caía pro aus.lida_por
-        // (a coluna certa, gravada direto na própria ausência por
-        // sincronizarLeituraTabelaBase sempre que um Admin marca como lido) quando
-        // não achava nada lá. Só que a consulta que carrega o sininho (notifsBanco)
-        // só traz notificações não lidas + as criadas recentemente — de propósito,
-        // pra não pesar o banco — então ela não tem retenção suficiente pra isso, e
-        // o caminho errado (sininho) acabava prevalecendo, mostrando "Visto por RH"
-        // genérico mesmo quando o nome certo já estava salvo na própria ausência.
-        // Agora lê direto de aus.lida_por/aus.status, sem depender do sininho — só
-        // aproveita o id da notificação (se existir uma) pra não precisar de uma
-        // consulta extra ao clicar em "Marcar como Lido".
+        // Lê direto de aus.lida_por/aus.status (fonte de verdade, sem depender do sininho —
+        // ver correção anterior) — só aproveita o id da notificação (se existir) pra não
+        // precisar de uma consulta extra ao clicar em "Marcar como Lido".
         const notifDestaAusencia = notifsBanco.find(n => String(n.referencia_id) === String(aus.id) && n.tipo === tipoNotifBuscaAus);
         const idNotifExistenteAus = notifDestaAusencia ? notifDestaAusencia.id : null;
         const itemLoteIdAus = idNotifExistenteAus || `fallback_${aus.id}`;
@@ -37188,11 +37092,8 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         const iconeAus = isLidaAus ? 'fa-check-double' : 'fa-envelope';
         const textoAus = isLidaAus ? 'Lido' : 'Marcar como Lido';
         const opacidadeAus = isLidaAus ? 'opacity: 0.6;' : '';
-        // 🐛 CORREÇÃO: quando ninguém clicou em "Marcar como Lido" explicitamente,
-        // mas a ausência já foi Aprovada/Reprovada, aus.lida_por fica vazio mesmo
-        // assim (isLidaAus vira true só pelo status) — nesse caso cai pro nome de
-        // quem ANALISOU (aus.aprovado_por, o mesmo nome do "Analisado por:" logo
-        // acima) em vez de não mostrar nada ou mostrar "RH" genérico.
+        // Quando ninguém clicou em "Marcar como Lido" explicitamente, mas a ausência já
+        // foi Aprovada/Reprovada, cai pro nome de quem ANALISOU (aus.aprovado_por).
         const nomeQuemLeuAus = aus.lida_por || aus.aprovado_por || null;
         const quemLeuAus = (isLidaAus && nomeQuemLeuAus) ? `<span class="leitura-nome" style="font-size: 0.7rem; color: var(--cor-texto-secundario); display: block; text-align: center; margin-top: 5px; font-style: italic;"><i class="fa-solid fa-eye"></i> Visto por <b>${nomeQuemLeuAus.split(' ')[0]}</b></span>` : '';
 
@@ -37205,7 +37106,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                 ${quemLeuAus}
             </div>
         `;
-        
+
         let btnAdminAcoesExtras = '';
         if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
             btnAdminAcoesExtras = `
@@ -37214,8 +37115,8 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
             `;
         }
 
-        let anexoHtml = aus.documento 
-            ? `<a href="${aus.documento}" target="_blank" style="color: #4fc3f7; text-decoration: none; font-size: 0.85rem; border: 1px solid rgba(79,195,247,0.3); padding: 5px 10px; border-radius: 6px; background: rgba(79,195,247,0.1);"><i class="fa-solid fa-file-pdf"></i> Ver Anexo</a>` 
+        let anexoHtml = aus.documento
+            ? `<a href="${aus.documento}" target="_blank" style="color: #4fc3f7; text-decoration: none; font-size: 0.85rem; border: 1px solid rgba(79,195,247,0.3); padding: 5px 10px; border-radius: 6px; background: rgba(79,195,247,0.1);"><i class="fa-solid fa-file-pdf"></i> Ver Anexo</a>`
             : '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;"><i class="fa-solid fa-ban"></i> Sem anexo</span>';
 
         // 👇 NOVO: selo para afastamento que começou antes / termina depois do mês filtrado
@@ -37241,7 +37142,6 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
 
         let alertaINSS = '';
         let blocoRetornoTrabalho = '';
-        const fBR = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
 
         // 👇 CORREÇÃO (v67 cont. 8): quando o atestado tem CID e faz parte de uma cadeia (mesmo
         // colaborador+CID, dentro de 60 dias) que já foi qualificada em outro atestado da MESMA
@@ -37320,19 +37220,19 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
         }
 
         // 👇 A INJEÇÃO: Observa como `tagTextoCoberturaCard` e `txtObsCard` entram no layout HTML abaixo 👇
-        container.innerHTML += `
+        return `
             <div class="admissao-card" id="card-aus-${aus.id}" style="border-left: 4px solid ${corStatus}; transition: all 0.3s ease;">
                 <div>
                     <strong style="font-size: 1.15rem; color: ${corTemaSigla};"><i class="fa-solid fa-user-clock" style="color: ${corTemaSigla};"></i> ${aus.nome}</strong><br>
                     <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
                         <i class="fa-solid fa-building"></i> <b>${aus.unidade}</b> | <b>${aus.motivo} (${aus.sigla})</b>
                     </span>
-                    
+
                     <div style="margin-top: 10px; background: ${bgTemaSigla}; border: 1px solid ${bordaTemaSigla}; padding: 8px 12px; border-radius: 6px; display: inline-flex; align-items: center; gap: 8px; color: ${corTemaSigla}; font-size: 0.85rem;">
-                        <i class="fa-regular fa-calendar-days" style="font-size: 1rem; color: ${corTemaSigla};"></i> 
+                        <i class="fa-regular fa-calendar-days" style="font-size: 1rem; color: ${corTemaSigla};"></i>
                         <span><b>${formatarDataBR(aus.data_inicio)}</b> até <b>${formatarDataBR(aus.data_fim)}</b> <span style="background: ${corTemaSigla}; color: ${corTextoDiasPill}; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; margin-left: 5px;">${totalDias} dias</span>${seloAtravessaMes}</span>
                     </div>
-                    
+
                     ${alertaINSS}
 
                     ${blocoRetornoTrabalho}
@@ -37342,7 +37242,7 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     <div style="font-size: 0.85rem; color: var(--cor-texto-principal); margin-top: 8px; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; max-height: 80px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05);">
                         <b style="color: var(--cor-texto-secundario);">Obs do Gestor:</b><br>${txtObsCard || 'Nenhuma.'}
                     </div>
-                    
+
                     <span style="font-size: 0.75rem; color: ${corTemaSigla}; display: block; margin-top: 8px; font-weight: bold;">
                         Enviado por ${aus.criado_por || 'Gestor'} em ${dataEnvio}
                     </span>
@@ -37357,13 +37257,302 @@ window.checarConflitoGlobal = async function(idColab, dataIniCheck, dataFimCheck
                     </div>
                 </div>
             </div>`;
+}
+
+// 👇 NOVO: linha compacta de uma única ausência -- data, sigla, dias e status -- usada
+// dentro da pasta do colaborador pra deixar a tela mais organizada (mesmo padrão da
+// construirLinhaFTAdmin em Aprovações de Horas Extras). Ao clicar, abre um modal com o
+// card completo (obs, alertas de INSS, "Marcar como Lido", aprovar/editar etc).
+function construirLinhaAusenciaAdmin(aus, notifsBanco) {
+    let corStatus = '#ff9800';
+    if (aus.status === 'Aprovado') corStatus = 'var(--cor-sucesso)';
+    if (aus.status === 'Reprovado') corStatus = 'var(--cor-perigo)';
+
+    const [anoI, mesI, diaI] = aus.data_inicio.split('-');
+    const dIni = new Date(anoI, mesI - 1, diaI);
+    const [anoF, mesF, diaF] = aus.data_fim.split('-');
+    const dFim = new Date(anoF, mesF - 1, diaF);
+    const totalDias = Math.floor((dFim - dIni) / (1000 * 3600 * 24)) + 1;
+
+    // Mesma regra de "não lida" usada no card (aus.lida_por/aus.status -- sem depender
+    // do sininho, ver correção anterior sobre o "Visto por RH" genérico).
+    const naoLida = !aus.lida_por && aus.status === 'Pendente';
+    const badgeNaoLida = naoLida
+        ? `<span style="background:#4fc3f7; color:#000; font-size:0.7rem; font-weight:bold; padding:3px 9px; border-radius:10px; white-space:nowrap;"><i class="fa-solid fa-envelope"></i> Não lida</span>`
+        : '';
+
+    return `
+        <div id="linha-aus-${aus.id}" onclick="window.abrirDetalheAusenciaAdmin('${aus.id}')" style="cursor:pointer; display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:10px 15px; margin-bottom:8px; border-radius:8px; border-left:4px solid ${corStatus}; background: rgba(255,255,255,0.03); transition: background 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='rgba(255,255,255,0.03)'">
+            <span style="color:#ff9800; font-size:0.85rem; font-weight:bold; min-width:190px;"><i class="fa-regular fa-calendar-days"></i> ${formatarDataBR(aus.data_inicio)} até ${formatarDataBR(aus.data_fim)}</span>
+            <span style="background:#ff9800; color:#000; font-size:0.7rem; font-weight:bold; padding:3px 9px; border-radius:10px; white-space:nowrap;">${totalDias} dia${totalDias > 1 ? 's' : ''}</span>
+            <span style="color:var(--cor-texto-secundario); font-size:0.85rem; flex:1; min-width:150px;"><i class="fa-solid fa-tag"></i> ${aus.motivo} (${aus.sigla})</span>
+            <span class="badge" style="background:${corStatus}22; color:${corStatus}; border:1px solid ${corStatus}; padding:3px 10px; font-size:0.75rem; font-weight:bold; text-transform:uppercase; margin:0;">${aus.status}</span>
+            ${badgeNaoLida}
+            <i class="fa-solid fa-chevron-right" style="color:var(--cor-texto-secundario); margin-left:auto;"></i>
+        </div>`;
+}
+
+// 👇 NOVO: busca a cadeia de atestados do mesmo CID/colaborador SOB DEMANDA, só pro
+// atestado que está sendo aberto no modal (não mais pra página inteira a cada render).
+// Mesmo algoritmo de sempre (hiato de 60 dias fecha a subcadeia), só que escopado a
+// UM colaborador + UM CID de cada vez -- bem mais leve pro banco.
+async function buscarInfoCadeiaAtestadoAusencia(aus) {
+    if (aus.sigla !== 'ATM' || !aus.cid) return null;
+    try {
+        const { data: todosDaCadeia } = await supabaseClient.from('ausencias')
+            .select('id, colaborador_id, cid, data_inicio, data_fim, documento')
+            .eq('sigla', 'ATM').eq('status', 'Aprovado')
+            .eq('colaborador_id', aus.colaborador_id)
+            .eq('cid', aus.cid);
+
+        if (!todosDaCadeia || todosDaCadeia.length === 0) return null;
+
+        const isoStrCad = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        const lista = [...todosDaCadeia].sort((a, b) => new Date(a.data_inicio) - new Date(b.data_inicio));
+
+        const mapaCadeiaPorAusenciaId = new Map();
+        let subcadeia = [];
+        let ultimaDataFim = null;
+        const fechar = () => {
+            if (subcadeia.length === 0) return;
+            let diasAcumulados = 0, dataFecha15 = null, dataCruzou16 = null;
+            subcadeia.forEach(at => {
+                let d = new Date(at.data_inicio + 'T00:00:00');
+                const dFimAt = new Date(at.data_fim + 'T00:00:00');
+                while (d <= dFimAt) {
+                    diasAcumulados++;
+                    if (diasAcumulados === 15) dataFecha15 = new Date(d);
+                    if (diasAcumulados === 16 && !dataCruzou16) dataCruzou16 = new Date(d);
+                    d.setDate(d.getDate() + 1);
+                }
+            });
+            const idUltimo = subcadeia[subcadeia.length - 1].id;
+            subcadeia.forEach(at => {
+                mapaCadeiaPorAusenciaId.set(at.id, {
+                    ehUltimoDaCadeia: at.id === idUltimo,
+                    totalDiasCadeia: diasAcumulados,
+                    qualificaCadeia: diasAcumulados > 15,
+                    dataFecha15Str: dataFecha15 ? isoStrCad(dataFecha15) : null,
+                    dataCruzou16Str: dataCruzou16 ? isoStrCad(dataCruzou16) : null,
+                    numeroAtestadosNaCadeia: subcadeia.length,
+                    dataInicioCadeia: subcadeia[0].data_inicio,
+                    documentosCadeia: subcadeia.map(x => ({ data_inicio: x.data_inicio, data_fim: x.data_fim, documento: x.documento })),
+                });
+            });
+            subcadeia = [];
+        };
+        lista.forEach(at => {
+            const dIni = new Date(at.data_inicio + 'T00:00:00');
+            if (ultimaDataFim) {
+                const diffParaUltimo = Math.floor((dIni - ultimaDataFim) / (1000 * 3600 * 24));
+                if (diffParaUltimo > 60) fechar();
+            }
+            subcadeia.push(at);
+            ultimaDataFim = new Date(at.data_fim + 'T00:00:00');
+        });
+        fechar();
+
+        return mapaCadeiaPorAusenciaId.get(aus.id) || null;
+    } catch (eCadeiaAus) {
+        console.error("Erro ao montar cadeia de CID (sob demanda) p/ Ausências Admin:", eCadeiaAus);
+        return null;
+    }
+}
+
+// 👇 NOVO: abre um modal com o card completo de uma única ausência (mesmo esquema do
+// abrirDetalheFTAdmin) -- chamado ao clicar numa linha compacta dentro da pasta do
+// colaborador. Busca a cadeia de CID (se for ATM) só nesse momento.
+window.abrirDetalheAusenciaAdmin = async function(idAus) {
+    const aus = (typeof ausenciasAdminFiltradas !== 'undefined' && ausenciasAdminFiltradas.find(a => a.id === idAus))
+        || (typeof todasAusenciasAdmin !== 'undefined' && todasAusenciasAdmin.find(a => a.id === idAus));
+    if (!aus) return;
+
+    document.getElementById('modal-detalhe-aus-admin')?.remove();
+
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-detalhe-aus-admin" class="modal-arquivo-overlay" style="z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 650px; max-height: 90vh; overflow-y: auto; position: relative; padding: 40px; text-align: center;">
+            <i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color: #ff9800;"></i>
+        </div>
+    </div>`);
+
+    const infoCadeia = await buscarInfoCadeiaAtestadoAusencia(aus);
+
+    const modalAtual = document.getElementById('modal-detalhe-aus-admin');
+    if (!modalAtual) return; // fechou antes da busca da cadeia terminar
+
+    modalAtual.innerHTML = `
+        <div class="glass-card" style="width: 100%; max-width: 650px; max-height: 90vh; overflow-y: auto; position: relative; padding: 0;">
+            <button type="button" onclick="document.getElementById('modal-detalhe-aus-admin').remove()" style="position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.5); border: none; color: #fff; cursor: pointer; font-size: 1.1rem; z-index: 10; width: 32px; height: 32px; border-radius: 50%;"><i class="fa-solid fa-xmark"></i></button>
+            ${construirCardAusenciaAdmin(aus, notificacoesGlobais, infoCadeia)}
+        </div>`;
+};
+
+// 👇 NOVO: guarda quais pastas (unidade/colaborador) estão abertas entre uma
+// renderização e outra -- assim, marcar "Lido" ou trocar de filtro não fecha tudo de
+// novo. Vive fora da função pra sobreviver a re-renderizações (mesmo esquema do
+// window._ftPastasAbertas em Aprovações de Horas Extras).
+window._ausPastasAbertas = window._ausPastasAbertas || new Set();
+
+// 👇 NOVO: abre/fecha uma pasta (unidade ou colaborador) e lembra o estado.
+window.toggleAusPasta = function(chave, idContainer, elHeader) {
+    const el = document.getElementById(idContainer);
+    if (!el) return;
+    const vaiAbrir = el.classList.contains('hidden');
+    el.classList.toggle('hidden', !vaiAbrir);
+    if (vaiAbrir) window._ausPastasAbertas.add(chave); else window._ausPastasAbertas.delete(chave);
+
+    const icone = elHeader.querySelector('.fa-folder, .fa-folder-open');
+    if (icone) { icone.classList.toggle('fa-folder', !vaiAbrir); icone.classList.toggle('fa-folder-open', vaiAbrir); }
+    const chevron = elHeader.querySelector('.fa-chevron-down');
+    if (chevron) chevron.style.transform = vaiAbrir ? 'rotate(180deg)' : '';
+};
+
+// 👇 REFEITO A PEDIDO (mesmo layout já usado em Aprovações de Horas Extras): em vez de
+// uma lista corrida com paginação numérica, agora organiza em pastas -- Unidade >
+// Colaborador -- e dentro da pasta do colaborador ficam as ausências dele, cada uma como
+// uma linha compacta (clique abre o card completo no modal). Cada pasta mostra quantas
+// ausências tem, quantas estão Pendentes e quantas ainda não foram lidas, pra dar pra
+// achar rápido o que precisa de atenção sem abrir tudo.
+window.renderizarPaginacaoAusenciasAdmin = function() {
+    const container = document.getElementById('lista-ausencias-admin-container');
+    const paginacao = document.getElementById('paginacao-ausencias-admin');
+    const notifsBanco = notificacoesGlobais;
+
+    if (!container) return;
+    if (paginacao) paginacao.innerHTML = ''; // a visão em pastas não usa paginação numérica
+
+    if (ausenciasAdminFiltradas.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhuma ausência encontrada.</p>';
+        return;
+    }
+
+    // Mesma regra usada no card/linha: "não lida" é quem nunca foi marcada como lida
+    // (aus.lida_por vazio) e ainda está Pendente -- sem depender do sininho.
+    const naoLidaAus = (aus) => !aus.lida_por && aus.status === 'Pendente';
+
+    // Agrupa: Unidade -> Colaborador -> [ausências]
+    const mapaUnidades = new Map();
+    ausenciasAdminFiltradas.forEach(aus => {
+        const unidKey = aus.unidade || 'Sem Unidade';
+        if (!mapaUnidades.has(unidKey)) mapaUnidades.set(unidKey, new Map());
+        const mapaColabs = mapaUnidades.get(unidKey);
+        const colabKey = aus.colaborador_id || aus.nome || 'sem-id';
+        if (!mapaColabs.has(colabKey)) mapaColabs.set(colabKey, { nome: aus.nome || 'Sem nome', itens: [] });
+        mapaColabs.get(colabKey).itens.push(aus);
     });
-    
-    const totalPaginas = Math.ceil(ausenciasAdminFiltradas.length / itensPorPaginaAdmissoes);
-    renderizarBotoesPaginacaoInteligente(paginacao, totalPaginas, paginaAtualAusenciasAdmin, (novaPag) => {
-        paginaAtualAusenciasAdmin = novaPag;
-        window.renderizarPaginacaoAusenciasAdmin(); 
+
+    // Pendência/não-lida sempre em cima, nos dois níveis (Unidade e Colaborador) -- a
+    // ordem escolhida no seletor só desempata dentro de cada um desses 2 grupos.
+    const unidadesOrdenadas = [];
+    for (const [unidade, mapaColabs] of mapaUnidades) {
+        let totalUnid = 0, pendentesUnid = 0, naoLidasUnid = 0, maisRecenteUnid = 0;
+        const colabsOrdenados = [];
+
+        for (const [colabKey, grupo] of mapaColabs) {
+            let pendentesColab = 0, naoLidasColab = 0, maisRecenteColab = 0;
+            grupo.itens.forEach(aus => {
+                if (aus.status === 'Pendente') pendentesColab++;
+                if (naoLidaAus(aus)) naoLidasColab++;
+                const t = new Date(aus.created_at).getTime();
+                if (t > maisRecenteColab) maisRecenteColab = t;
+            });
+            totalUnid += grupo.itens.length;
+            pendentesUnid += pendentesColab;
+            naoLidasUnid += naoLidasColab;
+            if (maisRecenteColab > maisRecenteUnid) maisRecenteUnid = maisRecenteColab;
+            colabsOrdenados.push({ colabKey, grupo, pendentesColab, naoLidasColab, maisRecenteColab });
+        }
+
+        colabsOrdenados.sort((a, b) => {
+            const temA = (a.pendentesColab > 0 || a.naoLidasColab > 0) ? 0 : 1;
+            const temB = (b.pendentesColab > 0 || b.naoLidasColab > 0) ? 0 : 1;
+            if (temA !== temB) return temA - temB;
+            return window.compararOrdemSecundariaLista('ausencias', a.grupo.nome, b.grupo.nome, a.maisRecenteColab, b.maisRecenteColab);
+        });
+
+        unidadesOrdenadas.push({ unidade, colabsOrdenados, totalUnid, pendentesUnid, naoLidasUnid, maisRecenteUnid });
+    }
+
+    unidadesOrdenadas.sort((a, b) => {
+        const temA = (a.pendentesUnid > 0 || a.naoLidasUnid > 0) ? 0 : 1;
+        const temB = (b.pendentesUnid > 0 || b.naoLidasUnid > 0) ? 0 : 1;
+        if (temA !== temB) return temA - temB;
+        return window.compararOrdemSecundariaLista('ausencias', a.unidade, b.unidade, a.maisRecenteUnid, b.maisRecenteUnid);
     });
+
+    let html = '';
+    let idxUnidade = 0;
+
+    for (const { unidade, colabsOrdenados, totalUnid, pendentesUnid, naoLidasUnid } of unidadesOrdenadas) {
+        const idU = idxUnidade++;
+        let htmlColabs = '';
+        let idxColab = 0;
+
+        for (const { colabKey, grupo } of colabsOrdenados) {
+            const idC = idxColab++;
+            let pendentesColab = 0, naoLidasColab = 0;
+
+            const htmlItens = grupo.itens
+                .sort((a, b) => {
+                    const naoLidaA = naoLidaAus(a);
+                    const naoLidaB = naoLidaAus(b);
+                    if (naoLidaA !== naoLidaB) return naoLidaA ? -1 : 1;
+                    return new Date(b.created_at) - new Date(a.created_at);
+                })
+                .map(aus => {
+                    if (aus.status === 'Pendente') pendentesColab++;
+                    if (naoLidaAus(aus)) naoLidasColab++;
+                    return construirLinhaAusenciaAdmin(aus, notifsBanco);
+                }).join('');
+
+            const chaveColabAberta = `colab_${unidade}::${colabKey}`;
+            const abertaColab = window._ausPastasAbertas.has(chaveColabAberta);
+            const idContainerColab = `pasta-aus-colab-${idU}-${idC}`;
+
+            let badgesColab = '';
+            if (pendentesColab > 0) badgesColab += `<span style="background:#ff9800; color:#000; font-size:0.7rem; font-weight:bold; padding:2px 8px; border-radius:10px; margin-left:8px; white-space:nowrap;">${pendentesColab} pendente${pendentesColab > 1 ? 's' : ''}</span>`;
+            if (naoLidasColab > 0) badgesColab += `<span style="background:#4fc3f7; color:#000; font-size:0.7rem; font-weight:bold; padding:2px 8px; border-radius:10px; margin-left:6px; white-space:nowrap;">${naoLidasColab} não lida${naoLidasColab > 1 ? 's' : ''}</span>`;
+
+            htmlColabs += `
+                <div style="margin-left: 22px; margin-bottom: 8px;">
+                    <div onclick="window.toggleAusPasta('${chaveColabAberta.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', '${idContainerColab}', this)" style="cursor:pointer; display:flex; align-items:center; gap:10px; padding:10px 15px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; flex-wrap: wrap;">
+                        <i class="fa-solid ${abertaColab ? 'fa-folder-open' : 'fa-folder'}" style="color:#ff9800;"></i>
+                        <strong style="color:#fff; font-size:0.95rem;">${grupo.nome}</strong>
+                        <span style="color:var(--cor-texto-secundario); font-size:0.8rem;">(${grupo.itens.length} ausência${grupo.itens.length > 1 ? 's' : ''})</span>
+                        ${badgesColab}
+                        <i class="fa-solid fa-chevron-down" style="margin-left:auto; transition:0.2s; ${abertaColab ? 'transform:rotate(180deg);' : ''}"></i>
+                    </div>
+                    <div id="${idContainerColab}" class="${abertaColab ? '' : 'hidden'}" style="padding: 15px 0 0 15px;">
+                        ${htmlItens}
+                    </div>
+                </div>`;
+        }
+
+        const chaveUnidAberta = `uni_${unidade}`;
+        const abertaUnid = window._ausPastasAbertas.has(chaveUnidAberta);
+        const idContainerUnid = `pasta-aus-uni-${idU}`;
+
+        let badgesUnid = '';
+        if (pendentesUnid > 0) badgesUnid += `<span style="background:#ff9800; color:#000; font-size:0.75rem; font-weight:bold; padding:3px 10px; border-radius:10px; margin-left:10px; white-space:nowrap;">${pendentesUnid} pendente${pendentesUnid > 1 ? 's' : ''}</span>`;
+        if (naoLidasUnid > 0) badgesUnid += `<span style="background:#4fc3f7; color:#000; font-size:0.75rem; font-weight:bold; padding:3px 10px; border-radius:10px; margin-left:8px; white-space:nowrap;">${naoLidasUnid} não lida${naoLidasUnid > 1 ? 's' : ''}</span>`;
+
+        html += `
+            <div style="margin-bottom: 15px;">
+                <div onclick="window.toggleAusPasta('${chaveUnidAberta.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}', '${idContainerUnid}', this)" style="cursor:pointer; display:flex; align-items:center; gap:12px; padding:14px 18px; background: rgba(255,152,0,0.06); border: 1px solid rgba(255,152,0,0.25); border-radius: 10px; flex-wrap: wrap;">
+                    <i class="fa-solid ${abertaUnid ? 'fa-folder-open' : 'fa-folder'} fa-lg" style="color:#ff9800;"></i>
+                    <strong style="color:#ff9800; font-size:1.05rem;"><i class="fa-solid fa-building"></i> ${unidade}</strong>
+                    <span style="color:var(--cor-texto-secundario); font-size:0.85rem;">(${totalUnid} ausência${totalUnid > 1 ? 's' : ''})</span>
+                    ${badgesUnid}
+                    <i class="fa-solid fa-chevron-down" style="margin-left:auto; transition:0.2s; ${abertaUnid ? 'transform:rotate(180deg);' : ''}"></i>
+                </div>
+                <div id="${idContainerUnid}" class="${abertaUnid ? '' : 'hidden'}" style="margin-top: 10px;">
+                    ${htmlColabs}
+                </div>
+            </div>`;
+    }
+
+    container.innerHTML = html;
 };
         
        // 2. CORREÇÃO DA APROVAÇÃO DE AUSÊNCIA (Tabela do Admin)
@@ -38379,39 +38568,54 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
     document.querySelector('[data-aba="aba-controle-aus-admin"]')?.click();
 
     // 👇 MÁGICA DO MÊS AUTOMÁTICO 👇
-    const { data: rec } = await supabaseClient.from('ausencias').select('data_inicio').eq('id', idReferencia).maybeSingle();
+    const { data: rec } = await supabaseClient.from('ausencias').select('data_inicio, unidade, colaborador_id, nome').eq('id', idReferencia).maybeSingle();
     if (rec && rec.data_inicio) {
         document.getElementById('filtro-mes-aus-admin').value = rec.data_inicio.substring(0, 7);
     }
 
     await carregarAusenciasParaAdmin();
     document.getElementById('busca-ausencias-admin').value = '';
-    document.getElementById('filtro-status-ausencias').value = 'Todos'; 
-    filtrarAusenciasAdmin(); 
+    document.getElementById('filtro-status-ausencias').value = 'Todos';
+
+    // 👇 já deixa a pasta da unidade e a do colaborador abertas, senão a linha
+    // ficaria escondida dentro de duas pastas fechadas (ver mesma correção em abrirFTDestacada).
+    if (rec) {
+        const unidKey = rec.unidade || 'Sem Unidade';
+        const colabKey = rec.colaborador_id || rec.nome || 'sem-id';
+        window._ausPastasAbertas = window._ausPastasAbertas || new Set();
+        window._ausPastasAbertas.add(`uni_${unidKey}`);
+        window._ausPastasAbertas.add(`colab_${unidKey}::${colabKey}`);
+    }
+
+    filtrarAusenciasAdmin();
 
     const indexNoArray = ausenciasAdminFiltradas.findIndex(a => a.id === idReferencia);
     if(indexNoArray !== -1) {
-        paginaAtualAusenciasAdmin = Math.floor(indexNoArray / 20) + 1;
-        renderizarPaginacaoAusenciasAdmin(); 
-        
+        renderizarPaginacaoAusenciasAdmin();
+
         setTimeout(() => {
-            const card = document.getElementById(`card-aus-${idReferencia}`);
-            if(card) {
-                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                card.classList.add('highlight-card');
-                card.style.borderColor = '#ff9800';
-                card.style.boxShadow = '0 0 20px rgba(255, 152, 0, 0.6)';
-                
+            // 🐛 CORRIGIDO: desde que a aba "Aprovações (Gestores)" virou pastas
+            // (Unidade > Colaborador), o card grandão com id "card-aus-${id}" só
+            // existe dentro do MODAL de detalhe (aberto ao clicar na linha) — na
+            // lista em si, cada ausência agora é uma linha compacta com id
+            // "linha-aus-${id}" (ver construirLinhaAusenciaAdmin). Agora destaca a linha certa.
+            const linha = document.getElementById(`linha-aus-${idReferencia}`);
+            if(linha) {
+                linha.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                linha.classList.add('highlight-card');
+                linha.style.borderLeftColor = '#ff9800';
+                linha.style.boxShadow = '0 0 20px rgba(255, 152, 0, 0.6)';
+
                 setTimeout(() => {
-                    card.classList.remove('highlight-card');
-                    card.style.boxShadow = 'none';
-                    const txtBadge = card.querySelector('.badge').innerText;
-                    if(txtBadge === 'Aprovado') card.style.borderColor = 'var(--cor-sucesso)';
-                    else if(txtBadge === 'Reprovado') card.style.borderColor = 'var(--cor-perigo)';
-                    else card.style.borderColor = '#ff9800';
+                    linha.classList.remove('highlight-card');
+                    linha.style.boxShadow = 'none';
+                    const txtBadge = linha.querySelector('.badge')?.innerText;
+                    if(txtBadge === 'Aprovado') linha.style.borderLeftColor = 'var(--cor-sucesso)';
+                    else if(txtBadge === 'Reprovado') linha.style.borderLeftColor = 'var(--cor-perigo)';
+                    else linha.style.borderLeftColor = '#ff9800';
                 }, 5000);
             }
-        }, 400); 
+        }, 400);
     }
 };
 
