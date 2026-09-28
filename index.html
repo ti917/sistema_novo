@@ -11475,7 +11475,7 @@ i.fa-circle-notch.fa-spin::before,
             <button type="button" class="btn-aba-patrimonio active" data-subaba="aba-patrimonio-categorias" style="background: #ff7043; color: #000; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="window.trocarSubAbaPatrimonio('aba-patrimonio-categorias')"><i class="fa-solid fa-tags"></i> Categorias</button>
             <button type="button" class="btn-aba-patrimonio" data-subaba="aba-patrimonio-itens" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="window.trocarSubAbaPatrimonio('aba-patrimonio-itens')"><i class="fa-solid fa-boxes-stacked"></i> Itens Cadastrados</button>
             <button type="button" class="btn-aba-patrimonio" data-subaba="aba-patrimonio-ajustes" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="window.trocarSubAbaPatrimonio('aba-patrimonio-ajustes')"><i class="fa-solid fa-triangle-exclamation"></i> Solicitações de Ajustes <span id="badge-subaba-ajustes" class="badge-notif hidden" style="position: static; display: inline-flex; margin-left: 6px;">0</span></button>
-            <button type="button" class="btn-aba-patrimonio" data-subaba="aba-patrimonio-vistorias" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="window.trocarSubAbaPatrimonio('aba-patrimonio-vistorias')"><i class="fa-solid fa-magnifying-glass"></i> Vistorias (Auditoria)</button>
+            <button type="button" class="btn-aba-patrimonio" data-subaba="aba-patrimonio-vistorias" style="background: rgba(255,255,255,0.05); color: #fff; border: 1px solid var(--cor-borda); padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap; transition: 0.2s;" onclick="window.trocarSubAbaPatrimonio('aba-patrimonio-vistorias')"><i class="fa-solid fa-magnifying-glass"></i> Vistorias (Auditoria) <span id="badge-subaba-vistorias" class="badge-notif hidden" style="position: static; display: inline-flex; margin-left: 6px;">0</span></button>
         </div>
 
         <!-- ===================== ABA: CATEGORIAS ===================== -->
@@ -21000,6 +21000,39 @@ async function escutarTempoReal() {
                         }
                         document.getElementById('banner-escala-desatualizada').classList.remove('hidden');
                     }
+                }
+            })
+            .subscribe();
+
+        // 🆕 PATRIMÔNIOS EM TEMPO REAL — assim que chega um Ajuste ou uma Vistoria
+        // pelo QR Code, atualiza os badges (menu lateral + sub-abas) e a lista na
+        // hora, sem precisar sair e voltar na tela.
+        supabaseClient
+            .channel('escuta-patrimonio-ajustes-admin')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'patrimonio_solicitacoes_ajuste' }, (payload) => {
+                if (typeof window.atualizarBadgePatrimonios === 'function') window.atualizarBadgePatrimonios();
+
+                const telaAberta = !document.getElementById('tela-patrimonios').classList.contains('hidden');
+                const abaAjustesAberta = telaAberta && !document.getElementById('aba-patrimonio-ajustes').classList.contains('hidden');
+                if (abaAjustesAberta && typeof window.carregarAjustesPatrimonio === 'function') window.carregarAjustesPatrimonio();
+
+                if (payload.eventType === 'INSERT' && payload.new) {
+                    mostrarAlerta(`Novo pedido de ajuste: <b>${payload.new.nome_solicitante || 'Colaborador'}</b>`, 'aviso', '⚠️ Ajuste de Patrimônio!');
+                }
+            })
+            .subscribe();
+
+        supabaseClient
+            .channel('escuta-patrimonio-vistorias-admin')
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'patrimonio_vistorias' }, (payload) => {
+                if (typeof window.atualizarBadgePatrimonios === 'function') window.atualizarBadgePatrimonios();
+
+                const telaAberta = !document.getElementById('tela-patrimonios').classList.contains('hidden');
+                const abaVistoriasAberta = telaAberta && !document.getElementById('aba-patrimonio-vistorias').classList.contains('hidden');
+                if (abaVistoriasAberta && typeof window.carregarVistoriasPatrimonio === 'function') window.carregarVistoriasPatrimonio();
+
+                if (payload.new) {
+                    mostrarAlerta(`Nova vistoria registrada por <b>${payload.new.nome_vistoriador || 'alguém'}</b>`, 'sucesso', '🔍 Vistoria de Patrimônio!');
                 }
             })
             .subscribe();
@@ -84308,7 +84341,12 @@ window.trocarSubAbaPatrimonio = function(subaba) {
 
     if (subaba === 'aba-patrimonio-itens') window.carregarItensPatrimonio();
     if (subaba === 'aba-patrimonio-ajustes') window.carregarAjustesPatrimonio();
-    if (subaba === 'aba-patrimonio-vistorias') window.carregarVistoriasPatrimonio();
+    if (subaba === 'aba-patrimonio-vistorias') {
+        window.carregarVistoriasPatrimonio();
+        // Entrou na aba de Vistorias — marca todas como "vistas" e zera o badge
+        // delas (o badge de Ajustes continua ligado ao status Pendente/Resolvido).
+        window.marcarVistoriasPatrimonioComoVistas();
+    }
 };
 
 // --- Inicialização ao entrar na aba "Patrimônios" ---
@@ -84317,18 +84355,47 @@ window.inicializarTelaPatrimonios = async function() {
     await window.atualizarBadgePatrimonios();
 };
 
-// --- Badge de pendentes (menu lateral + sub-aba) ---
+// --- Controle de "visto/não visto" das Vistorias (não têm status Pendente
+// como os Ajustes, então contamos como "novas" as vistorias registradas
+// depois da última vez que alguém abriu essa aba nesse navegador). ---
+window.CHAVE_ULTIMA_VISUALIZACAO_VISTORIAS = 'patrimonio_vistorias_ultima_visualizacao';
+window.obterUltimaVisualizacaoVistoriasPatrimonio = function() {
+    try {
+        return localStorage.getItem(window.CHAVE_ULTIMA_VISUALIZACAO_VISTORIAS) || '1970-01-01T00:00:00.000Z';
+    } catch (e) {
+        return '1970-01-01T00:00:00.000Z';
+    }
+};
+window.marcarVistoriasPatrimonioComoVistas = function() {
+    try {
+        localStorage.setItem(window.CHAVE_ULTIMA_VISUALIZACAO_VISTORIAS, new Date().toISOString());
+    } catch (e) { /* localStorage indisponível — só não zera o badge, sem quebrar nada */ }
+    window.atualizarBadgePatrimonios();
+};
+
+// --- Badge de pendentes/novas (menu lateral + cada sub-aba) ---
 window.atualizarBadgePatrimonios = async function() {
     try {
-        const { count, error } = await supabaseClient.from('patrimonio_solicitacoes_ajuste').select('id', { count: 'exact', head: true }).eq('status', 'Pendente');
-        if (error) throw error;
-        const n = count || 0;
-        ['badge-patrimonios-ajustes', 'badge-subaba-ajustes'].forEach(id => {
+        const [{ count: countAjustes, error: erroAjustes }, { count: countVistorias, error: erroVistorias }] = await Promise.all([
+            supabaseClient.from('patrimonio_solicitacoes_ajuste').select('id', { count: 'exact', head: true }).eq('status', 'Pendente'),
+            supabaseClient.from('patrimonio_vistorias').select('id', { count: 'exact', head: true }).gt('criado_em', window.obterUltimaVisualizacaoVistoriasPatrimonio())
+        ]);
+        if (erroAjustes) throw erroAjustes;
+        if (erroVistorias) throw erroVistorias;
+
+        const nAjustes = countAjustes || 0;
+        const nVistorias = countVistorias || 0;
+        const nTotal = nAjustes + nVistorias;
+
+        const aplicarBadge = (id, n) => {
             const el = document.getElementById(id);
             if (!el) return;
             el.textContent = n;
             el.classList.toggle('hidden', n === 0);
-        });
+        };
+        aplicarBadge('badge-patrimonios-ajustes', nTotal); // badge do menu lateral = soma dos dois
+        aplicarBadge('badge-subaba-ajustes', nAjustes);
+        aplicarBadge('badge-subaba-vistorias', nVistorias);
     } catch (e) {
         console.error('Erro ao atualizar badge de Patrimônios:', e);
     }
