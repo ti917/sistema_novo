@@ -62444,6 +62444,19 @@ window.abrirModalEditarArquivoCentral = function(idArquivo) {
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
+// 🆕 Extrai o "caminho" (path) de dentro de uma Public URL do Supabase Storage.
+// Ex: ".../object/public/documentos/Central_Downloads/SOUL/POPS/123_arquivo.pdf"
+// vira "Central_Downloads/SOUL/POPS/123_arquivo.pdf". Isso é o que a gente
+// precisa pra poder REGRAVAR por cima do mesmo arquivo (upsert), em vez de
+// criar um arquivo novo — assim a URL/QR Code NUNCA muda, nem pros crachás
+// antigos que já tinham o link direto do arquivo gravado neles.
+window.extrairCaminhoStorage = function(urlPublica) {
+    const marcador = '/object/public/documentos/';
+    const indice = (urlPublica || '').indexOf(marcador);
+    if (indice === -1) return null;
+    return decodeURIComponent(urlPublica.substring(indice + marcador.length));
+};
+
 window.salvarEdicaoArquivoCentral = async function(idArquivo, botao) {
     const arq = (window.arquivosCentralDownloadEmMemoria || []).find(a => a.id === idArquivo);
     const nome = document.getElementById('input-editar-download-nome').value.trim();
@@ -62456,16 +62469,33 @@ window.salvarEdicaoArquivoCentral = async function(idArquivo, botao) {
     try {
         const payload = { nome_arquivo: nome };
         if (arquivoNovo) {
-            const caminhoBase = `Central_Downloads/${formatarNomePasta(arq.empresa)}/${formatarNomePasta(arq.categoria)}`;
-            const [urlNova] = await window.subirDocumentos(caminhoBase, [arquivoNovo], nome);
-            payload.url_arquivo = urlNova;
+            // 🆕 Em vez de subir num caminho novo (window.subirDocumentos sempre
+            // cria um nome com timestamp), regravamos por cima do MESMO arquivo
+            // que já está no Storage — assim a URL pública continua sendo
+            // exatamente a mesma de antes, e QUALQUER QR Code/crachá já impresso
+            // (seja do jeito antigo, com o link direto, seja o novo) passa a
+            // entregar o arquivo novo automaticamente, sem precisar reimprimir.
+            const caminhoExistente = window.extrairCaminhoStorage(arq.url_arquivo);
+            if (caminhoExistente) {
+                const { error: erroUpload } = await supabaseClient.storage
+                    .from('documentos')
+                    .upload(caminhoExistente, arquivoNovo, { upsert: true, cacheControl: '0' });
+                if (erroUpload) throw erroUpload;
+                // url_arquivo não muda — continua apontando pro mesmo caminho.
+            } else {
+                // Fallback (não deveria acontecer): se por algum motivo não
+                // conseguir identificar o caminho antigo, sobe como arquivo novo.
+                const caminhoBase = `Central_Downloads/${formatarNomePasta(arq.empresa)}/${formatarNomePasta(arq.categoria)}`;
+                const [urlNova] = await window.subirDocumentos(caminhoBase, [arquivoNovo], nome);
+                payload.url_arquivo = urlNova;
+            }
         }
 
         const { error } = await supabaseClient.from('central_downloads').update(payload).eq('id', idArquivo);
         if (error) throw error;
 
         document.getElementById('modal-editar-download')?.remove();
-        mostrarAlerta(arquivoNovo ? 'Arquivo substituído! O QR Code/crachá já impresso continua funcionando.' : 'Nome atualizado!', 'sucesso');
+        mostrarAlerta(arquivoNovo ? 'Arquivo substituído! Qualquer QR Code/crachá já impresso (novo ou antigo) continua funcionando e já entrega a versão nova.' : 'Nome atualizado!', 'sucesso');
         window.carregarCentralDownloads();
     } catch (e) {
         console.error('Erro ao editar arquivo da Central de Downloads:', e);
