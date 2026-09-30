@@ -46644,8 +46644,11 @@ window.formatarResumoHorarioAlteracao = function(valorTexto) {
     const tipo = m[2].trim();
     const resto = m[3].trim();
 
+    // 🐛 CORREÇÃO: o rótulo "Início:" sozinho podia ser confundido com a DATA DE
+    // ADMISSÃO do colaborador — não era isso, é a data em que ESSA escala/jornada
+    // pedida passa a valer. Deixado explícito agora pra não confundir quem lê.
     const cabecalho = `<div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:8px; font-size:0.85rem; color: var(--cor-texto-secundario);">
-        <span><i class="fa-regular fa-calendar-check"></i> Início: <b style="color:#fff;">${dataInicio}</b></span>
+        <span><i class="fa-regular fa-calendar-check"></i> Nova escala vigora a partir de: <b style="color:#fff;">${dataInicio}</b></span>
         <span><i class="fa-regular fa-clock"></i> Tipo: <b style="color:#fff;">${tipo}</b></span>
     </div>`;
 
@@ -47350,13 +47353,31 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         if (chaveUnidade) {
             const unidadePedida = String(alt.alteracoes[chaveUnidade]).replace(/<[^>]*>?/gm, '').trim();
             const selectUnidade = document.getElementById('aplic-alt-unidade');
-            const existeOpcao = Array.from(selectUnidade.options).some(o => o.value === unidadePedida);
-            if (existeOpcao) {
-                selectUnidade.value = unidadePedida;
+            // 🐛 CORREÇÃO: a comparação exata (===) quebrava a pré-seleção com qualquer
+            // diferença mínima de acentuação/maiúsculas/espaços entre o texto salvo no
+            // pedido e o nome oficial da unidade nas opções — e quando isso acontecia,
+            // o problema era 100% SILENCIOSO (só um console.warn que ninguém vê): o
+            // campo ficava com a unidade ANTIGA marcada, e se o Admin não reparasse e
+            // trocasse na mão, a "Nova Unidade" pedida pelo gestor não era aplicada NEM
+            // aparecia no e-mail de auditoria (foi exatamente o que aconteceu com a
+            // Thaila — "teve Nova Unidade" no pedido, mas o e-mail não mandou ela).
+            const normalizarUnidade = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+            const opcaoEncontrada = Array.from(selectUnidade.options).find(o => normalizarUnidade(o.value) === normalizarUnidade(unidadePedida));
+            if (opcaoEncontrada) {
+                selectUnidade.value = opcaoEncontrada.value;
                 avisoPreselectNecessario = true;
                 selectUnidade.dispatchEvent(new Event('change'));
             } else {
                 console.warn('[Alteração Cadastral] Unidade pedida pelo gestor não encontrada nas opções ativas:', unidadePedida);
+                // 👇 Antes esse aviso só ia pro console (ninguém via) — agora aparece um
+                // banner vermelho bem visível no topo do formulário, pra ninguém aplicar
+                // a alteração sem reparar que a unidade pedida não foi encontrada e
+                // precisa ser escolhida manualmente.
+                const avisoUnidadeNaoEncontrada = document.createElement('div');
+                avisoUnidadeNaoEncontrada.style.cssText = 'background: rgba(220,53,69,0.15); border: 1px dashed #dc3545; color: #ff8a95; padding: 12px 15px; border-radius: 6px; margin-bottom: 18px; font-size: 0.85rem; font-weight: bold; line-height: 1.4;';
+                avisoUnidadeNaoEncontrada.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> O gestor pediu a unidade "<u>${unidadePedida}</u>", mas ela não foi encontrada nas opções ativas. Selecione a unidade correta manualmente abaixo antes de aplicar — senão a mudança de unidade NÃO será aplicada nem constará no e-mail de auditoria.`;
+                const wrapUnidadeAviso = document.getElementById('aplic-alt-wrap-unidade');
+                if (wrapUnidadeAviso) wrapUnidadeAviso.insertAdjacentElement('beforebegin', avisoUnidadeNaoEncontrada);
             }
         }
     }
@@ -47781,7 +47802,22 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
             if (unidade !== unidadeAntiga) mudancasRealizadas.push(`<b>Unidade:</b> De "${unidadeAntiga}" para "${unidade}"`);
             if (cargo !== cargoAntigo) mudancasRealizadas.push(`<b>Cargo:</b> De "${cargoAntigo}" para "${cargo}"`);
             if (salarioLimpo !== salarioAntigo) mudancasRealizadas.push(`<b>Salário Base:</b> De "R$ ${salarioAntigo.toFixed(2).replace('.', ',')}" para "R$ ${salarioLimpo.toFixed(2).replace('.', ',')}"`);
-            if (insalubridade !== insalubridadeAntiga) mudancasRealizadas.push(`<b>Insalubridade:</b> De "${insalubridadeAntiga}" para "${insalubridade}"`);
+            if (insalubridade !== insalubridadeAntiga) {
+                // 👇 Insalubridade não tem checkbox próprio no pedido do Gestor — ela é
+                // recalculada SOZINHA pela tabela salarial sempre que Unidade/Cargo mudam
+                // (ver window.buscarSalarioAplicacaoAlt). Antes disso o e-mail listava
+                // "Insalubridade: De X para Y" igual a qualquer outra mudança pedida de
+                // propósito, dando a entender pro RH que alguém pediu isso especificamente
+                // — o que gerava confusão ("o gestor só pediu Unidade/Horário, de onde
+                // saiu essa Insalubridade?"). Agora, quando o valor mudou junto de
+                // Unidade/Cargo, deixamos explícito no e-mail que foi um ajuste AUTOMÁTICO
+                // decorrente disso (e não um pedido à parte) — sem esconder a informação,
+                // já que ela pode ser real e necessária pro aditivo de contrato.
+                const motivoInsalubridadeAuto = mudouLocalOuFuncao
+                    ? ' <i style="font-weight: normal; font-style: italic; color: #718096;">(ajuste automático pela tabela salarial da nova Unidade/Cargo — não foi um pedido à parte do gestor)</i>'
+                    : '';
+                mudancasRealizadas.push(`<b>Insalubridade:</b> De "${insalubridadeAntiga}" para "${insalubridade}"${motivoInsalubridadeAuto}`);
+            }
 
             if (mudancasRealizadas.length > 0) deveMandarEmail = true;
 
