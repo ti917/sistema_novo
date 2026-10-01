@@ -31520,15 +31520,96 @@ window.separarDocumentosAdmissaoPorTipo = async function(paginasComMetadados, cl
     // JPG direto, porque a caixinha do crachá só aceita imagem).
     const TIPOS_VALIDOS = ['rg', 'carteira-trabalho', 'reservista', 'titulo-eleitor', 'cnh', 'vacinacao-colaborador', 'vacinacao-filhos', 'certidao-filhos', 'conjuge', 'comprovante-endereco', 'foto-cracha', 'outros'];
 
-    // Garante que as caixinhas (e a visibilidade de cada uma, já que os campos de texto acima
-    // já foram preenchidos pela Clara — ex: Sexo, Estado Civil, Possui PIS) estão atualizadas
-    // ANTES de decidir onde encaixar cada documento.
-    if (typeof window.renderizarAnexosAdmissaoTipados === 'function') window.renderizarAnexosAdmissaoTipados();
-
     const tipoEstaVisivel = (tipoId) => {
         const cfg = (window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === tipoId);
         return !!(cfg && cfg.visivel());
     };
+
+    // =====================================================================
+    // 🐛 CORREÇÃO (01/10/2026): "Título de Eleitor" (e outros documentos)
+    // sumindo pro RH, mesmo a Clara tendo classificado a página certinho.
+    //
+    // Causa raiz: a caixinha de cada tipo só fica VISÍVEL de acordo com outro
+    // campo do formulário (ex: "titulo-eleitor" só é visível se o select
+    // "Possui Título de Eleitor?" estiver em "Sim"; "reservista" só se "Sexo"
+    // = Masculino; "conjuge" só se Estado Civil = Casado(a)/União Estável).
+    // Esses selects, por sua vez, só viravam "Sim"/"Masculino"/"Casado(a)"
+    // quando a Clara conseguia LER E EXTRAIR o dado de texto correspondente
+    // (ex: o número do título, não só reconhecer visualmente o documento).
+    //
+    // Só que classificar a PÁGINA (classificacaoPaginas, "essa foto aqui é um
+    // Título de Eleitor") e extrair o NÚMERO escrito nela (data.titulo_eleitoral)
+    // são duas coisas separadas pra IA — uma pode funcionar sem a outra (ex:
+    // foto do título um pouco torta/borrada: dá pra reconhecer que É um título
+    // de eleitor, mas não dá pra ler o número com confiança). Quando isso
+    // acontecia, o select continuava em "Não"/vazio, a caixinha ficava
+    // invisível, e o código mais abaixo (tipoEstaVisivel) jogava a página pra
+    // dentro de "Outros" — o RH via "Outros" em vez de "Título de Eleitor",
+    // e só descobria que o documento existia numa correção de Ficha Devolvida
+    // (quando aparecia como "já anexado", porque foi salvo, só que na
+    // caixinha errada).
+    //
+    // Conserto: ANTES de checar visibilidade, se a Clara classificou alguma
+    // página como um desses tipos "condicionais", a gente confia na
+    // classificação visual (mais confiável que extrair texto) e ajusta o
+    // próprio select/campo relacionado pra abrir a caixinha certa — exatamente
+    // como já fazíamos quando a extração de texto dava certo (passo 3.1 lá em
+    // cima), só que agora isso também cobre o caso de a extração de texto
+    // falhar sozinha. Nunca sobrescreve um valor que já foi preenchido
+    // corretamente por outro lado (ex: Sexo já setado como Masculino não
+    // muda); só preenche o que estava vazio/no padrão.
+    // =====================================================================
+    const FORCAR_VISIBILIDADE_POR_TIPO = {
+        'titulo-eleitor': () => {
+            const sel = document.getElementById('adm-tem-titulo');
+            if (sel && sel.value !== 'Sim') {
+                sel.value = 'Sim';
+                sel.dispatchEvent(new Event('change'));
+                console.warn('Clara achou uma página de Título de Eleitor mas não leu o número com confiança — abriu a caixinha "Possui Título de Eleitor? = Sim" mesmo assim. Confira o número manualmente.');
+            }
+        },
+        'rg': () => {
+            const sel = document.getElementById('adm-tem-rg');
+            if (sel && sel.value !== 'Sim') {
+                sel.value = 'Sim';
+                sel.dispatchEvent(new Event('change'));
+                console.warn('Clara achou uma página de RG/CIN mas não leu o número com confiança — abriu a caixinha "Possui RG? = Sim" mesmo assim. Confira manualmente.');
+            }
+        },
+        'reservista': () => {
+            const sel = document.getElementById('adm-sexo');
+            if (sel && sel.value !== 'Masculino') {
+                sel.value = 'Masculino';
+                sel.dispatchEvent(new Event('change'));
+                console.warn('Clara achou um Certificado de Reservista — ajustou "Sexo" para Masculino automaticamente (reservista é só pra homens). Confira se está correto.');
+            }
+        },
+        'conjuge': () => {
+            const sel = document.getElementById('adm-estadocivil');
+            if (sel && !['Casado(a)', 'União Estável'].includes(sel.value)) {
+                sel.value = 'Casado(a)';
+                sel.dispatchEvent(new Event('change'));
+                console.warn('Clara achou um documento de Cônjuge — ajustou "Estado Civil" para Casado(a) automaticamente. Confira se está correto (pode ser União Estável).');
+            }
+        },
+    };
+
+    const tiposClassificadosPelaClara = new Set(
+        classificacaoPaginas
+            .map(t => (t || '').toString().trim().toLowerCase())
+            .filter(t => TIPOS_VALIDOS.includes(t) && t !== 'outros')
+    );
+    tiposClassificadosPelaClara.forEach(tipo => {
+        if (!tipoEstaVisivel(tipo) && FORCAR_VISIBILIDADE_POR_TIPO[tipo]) {
+            FORCAR_VISIBILIDADE_POR_TIPO[tipo]();
+        }
+    });
+
+    // Garante que as caixinhas (e a visibilidade de cada uma, já que os campos de texto acima
+    // já foram preenchidos pela Clara — ex: Sexo, Estado Civil, Possui PIS — e, com o conserto
+    // acima, também os campos que só o reconhecimento visual conseguiu preencher) estão
+    // atualizadas ANTES de decidir onde encaixar cada documento.
+    if (typeof window.renderizarAnexosAdmissaoTipados === 'function') window.renderizarAnexosAdmissaoTipados();
 
     // 1. Agrupa páginas consecutivas do mesmo arquivo + mesmo tipo
     const grupos = []; // { arquivo, tipo, paginas: [numeros de página 1-based] }
