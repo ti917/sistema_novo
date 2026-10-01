@@ -18432,6 +18432,201 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
             `;
         };
 
+        // =========================================================================
+        // SEGURANÇA DE LOGIN: dispositivo novo avisa por e-mail (não bloqueia);
+        // dispositivo que já passou de 30 dias sem confirmar pede um código por
+        // e-mail antes de liberar o painel. Usa o Resend (mesma Edge Function
+        // pattern já usada pros outros e-mails do sistema).
+        // =========================================================================
+        window.verificarSegurancaLoginDispositivo = async function(emailLogin, loginLoadingEl) {
+            try {
+                const CHAVE_DEVICE_ID = 'soul_device_id';
+                let deviceId = localStorage.getItem(CHAVE_DEVICE_ID);
+                if (!deviceId) {
+                    deviceId = (crypto.randomUUID ? crypto.randomUUID() : ('dev-' + Date.now() + '-' + Math.random().toString(36).slice(2)));
+                    localStorage.setItem(CHAVE_DEVICE_ID, deviceId);
+                }
+
+                const descricaoDispositivo = (() => {
+                    const ua = navigator.userAgent || '';
+                    const nav = (ua.match(/(Chrome|Firefox|Safari|Edg|OPR)\/[\d.]+/) || ['Navegador'])[0];
+                    return `${navigator.platform || 'Dispositivo'} • ${nav}`;
+                })();
+
+                const { data: dispositivoExistente, error: erroBusca } = await supabaseClient
+                    .from('dispositivos_login')
+                    .select('id, ultima_verificacao_codigo')
+                    .eq('colaborador_id', usuarioAtual.id)
+                    .eq('fingerprint', deviceId)
+                    .maybeSingle();
+
+                if (erroBusca) {
+                    console.error("Erro ao checar dispositivo conhecido (login segue normal, sem travar por causa disso):", erroBusca);
+                    return true;
+                }
+
+                if (!dispositivoExistente) {
+                    // Dispositivo nunca visto nessa conta: registra, avisa por e-mail
+                    // (NÃO bloqueia o login) e segue normalmente.
+                    await supabaseClient.from('dispositivos_login').insert([{
+                        colaborador_id: usuarioAtual.id,
+                        fingerprint: deviceId,
+                        descricao: descricaoDispositivo,
+                        ultima_verificacao_codigo: new Date().toISOString()
+                    }]);
+
+                    supabaseClient.functions.invoke('enviar-email-seguranca-login', {
+                        body: {
+                            tipo: 'novo_dispositivo',
+                            nome: usuarioAtual.nome,
+                            email: emailLogin,
+                            dispositivo: descricaoDispositivo,
+                            data_hora: new Date().toLocaleString('pt-BR')
+                        }
+                    }).catch(e => console.warn("Não consegui mandar o e-mail de aviso de novo dispositivo (login segue normal):", e));
+
+                    return true;
+                }
+
+                const TRINTA_DIAS_MS = 30 * 24 * 60 * 60 * 1000;
+                const ultimaVerificacaoMs = dispositivoExistente.ultima_verificacao_codigo
+                    ? new Date(dispositivoExistente.ultima_verificacao_codigo).getTime() : 0;
+
+                if ((Date.now() - ultimaVerificacaoMs) < TRINTA_DIAS_MS) {
+                    // Ainda dentro dos 30 dias — só atualiza "visto por último" e libera.
+                    supabaseClient.from('dispositivos_login')
+                        .update({ ultimo_acesso: new Date().toISOString() })
+                        .eq('id', dispositivoExistente.id)
+                        .then(() => {}, () => {});
+                    return true;
+                }
+
+                // Passou de 30 dias sem confirmar: exige código por e-mail antes de liberar.
+                if (loginLoadingEl) { loginLoadingEl.style.display = 'none'; loginLoadingEl.classList.add('hidden'); }
+                await window._exigirCodigoLoginPorEmail(dispositivoExistente.id, deviceId, emailLogin);
+                return false;
+            } catch (e) {
+                console.error("Erro na checagem de segurança de login (login segue normal, sem travar por causa disso):", e);
+                return true;
+            }
+        };
+
+        window._exigirCodigoLoginPorEmail = function(dispositivoId, deviceId, emailLogin) {
+            return new Promise((resolve) => {
+                const gerarEEnviarCodigo = async () => {
+                    const codigo = String(Math.floor(100000 + Math.random() * 900000));
+                    const expiraEm = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+                    const { error: erroInsert } = await supabaseClient.from('codigos_verificacao_login').insert([{
+                        colaborador_id: usuarioAtual.id, fingerprint: deviceId, codigo, expira_em: expiraEm
+                    }]);
+                    if (erroInsert) {
+                        console.error("Erro ao gerar código de verificação:", erroInsert);
+                        const erroEl = document.getElementById('cod-login-erro');
+                        if (erroEl) { erroEl.innerText = "Erro ao gerar o código. Tente novamente."; erroEl.style.display = 'block'; }
+                        return;
+                    }
+
+                    supabaseClient.functions.invoke('enviar-email-seguranca-login', {
+                        body: {
+                            tipo: 'codigo_verificacao', nome: usuarioAtual.nome, email: emailLogin,
+                            codigo, data_hora: new Date().toLocaleString('pt-BR')
+                        }
+                    }).catch(e => console.warn("Erro ao enviar e-mail do código de verificação:", e));
+                };
+
+                const modalHtml = `
+                <div id="modal-codigo-login" style="position: fixed; inset: 0; background: rgba(0,10,25,0.97); z-index: 999999; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <div class="glass-card" style="width: 100%; max-width: 420px; border: 1px solid #4fc3f7; border-radius: 16px; padding: 30px; text-align: center;">
+                        <i class="fa-solid fa-shield-halved" style="font-size: 2.2rem; color: #4fc3f7; margin-bottom: 12px;"></i>
+                        <h3 style="color: #fff; margin-bottom: 8px;">Confirme seu acesso</h3>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 20px;">
+                            Já faz mais de 30 dias desde a última confirmação neste navegador. Mandamos um código de 6 dígitos para <b style="color:#fff;">${emailLogin}</b>.
+                        </p>
+                        <input type="text" id="input-codigo-login" maxlength="6" placeholder="------" autocomplete="one-time-code" inputmode="numeric"
+                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 14px;">
+                        <div id="cod-login-erro" style="display:none; color: var(--cor-perigo); font-size: 0.85rem; margin-bottom: 14px;"></div>
+                        <button id="btn-confirmar-codigo-login" class="btn-success" style="width: 100%; margin-bottom: 10px;">
+                            <i class="fa-solid fa-check"></i> Confirmar
+                        </button>
+                        <button id="btn-reenviar-codigo-login" class="btn-secondary" style="width: 100%; margin-bottom: 10px;">
+                            <i class="fa-solid fa-rotate"></i> Reenviar código
+                        </button>
+                        <button id="btn-cancelar-codigo-login" style="background:none; border:none; color: var(--cor-texto-secundario); font-size: 0.8rem; cursor:pointer; text-decoration: underline;">
+                            Cancelar e sair
+                        </button>
+                    </div>
+                </div>`;
+
+                document.body.insertAdjacentHTML('beforeend', modalHtml);
+                gerarEEnviarCodigo();
+
+                const inputCodigo = document.getElementById('input-codigo-login');
+                const btnConfirmar = document.getElementById('btn-confirmar-codigo-login');
+                const btnReenviar = document.getElementById('btn-reenviar-codigo-login');
+                const btnCancelar = document.getElementById('btn-cancelar-codigo-login');
+                const errorEl = document.getElementById('cod-login-erro');
+
+                const confirmarCodigo = async () => {
+                    const codigoDigitado = (inputCodigo.value || '').trim();
+                    if (codigoDigitado.length !== 6) {
+                        errorEl.innerText = "Digite os 6 dígitos do código.";
+                        errorEl.style.display = 'block';
+                        return;
+                    }
+                    btnConfirmar.disabled = true;
+                    btnConfirmar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Confirmando...';
+
+                    const { data: codigoValido } = await supabaseClient
+                        .from('codigos_verificacao_login')
+                        .select('id, expira_em, verificado')
+                        .eq('colaborador_id', usuarioAtual.id)
+                        .eq('fingerprint', deviceId)
+                        .eq('codigo', codigoDigitado)
+                        .eq('verificado', false)
+                        .order('criado_em', { ascending: false })
+                        .limit(1)
+                        .maybeSingle();
+
+                    if (!codigoValido || new Date(codigoValido.expira_em) < new Date()) {
+                        errorEl.innerText = "Código inválido ou expirado. Peça um novo.";
+                        errorEl.style.display = 'block';
+                        btnConfirmar.disabled = false;
+                        btnConfirmar.innerHTML = '<i class="fa-solid fa-check"></i> Confirmar';
+                        return;
+                    }
+
+                    await supabaseClient.from('codigos_verificacao_login').update({ verificado: true }).eq('id', codigoValido.id);
+                    await supabaseClient.from('dispositivos_login').update({
+                        ultima_verificacao_codigo: new Date().toISOString(),
+                        ultimo_acesso: new Date().toISOString()
+                    }).eq('id', dispositivoId);
+
+                    document.getElementById('modal-codigo-login')?.remove();
+                    location.reload();
+                };
+
+                btnConfirmar.addEventListener('click', confirmarCodigo);
+                inputCodigo.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmarCodigo(); });
+                btnReenviar.addEventListener('click', () => {
+                    errorEl.style.display = 'none';
+                    btnReenviar.disabled = true;
+                    btnReenviar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reenviando...';
+                    gerarEEnviarCodigo().finally(() => {
+                        setTimeout(() => {
+                            btnReenviar.disabled = false;
+                            btnReenviar.innerHTML = '<i class="fa-solid fa-rotate"></i> Reenviar código';
+                        }, 15000);
+                    });
+                });
+                btnCancelar.addEventListener('click', async () => {
+                    document.getElementById('modal-codigo-login')?.remove();
+                    await supabaseClient.auth.signOut();
+                    location.reload();
+                });
+            });
+        };
+
         async function inicializar() {
     const loginLoading = document.getElementById('login-loading');
     
@@ -18489,8 +18684,18 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
 
             const sucesso = await carregarPerfil(session.user.id);
             if (sucesso) {
-                clearTimeout(window.watchdogManutencao); 
-                
+                clearTimeout(window.watchdogManutencao);
+
+                // 👇 NOVO: checagem de segurança de login. Dispositivo NUNCA visto antes só
+                // manda um e-mail de aviso (não trava); dispositivo que já passou de 30 dias
+                // sem confirmar pede um código por e-mail antes de liberar o painel. Se pedir
+                // código, o modal assume a tela e, quando confirmar, dá reload() sozinho —
+                // por isso é seguro simplesmente parar a inicialização aqui.
+                const liberadoPelaSeguranca = await window.verificarSegurancaLoginDispositivo(session.user.email, loginLoading);
+                if (!liberadoPelaSeguranca) {
+                    return;
+                }
+
                 // MÁGICA: Carrega os dados mais pesados AQUI, ANTES de mostrar a tela!
                 await Promise.all([
                     carregarTabelaSalarios(),
