@@ -4001,6 +4001,16 @@ i.fa-circle-notch.fa-spin::before,
 .clara-chat-shell { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 
 .clara-lista-col { flex: 1; min-width: 280px; max-width: 380px; }
+        .clara-aba-filtro { flex:1; border:none; background:transparent; color:var(--cor-texto-secundario); font-weight:700; font-size:0.74rem; padding:8px 6px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:5px; transition:0.2s; white-space:nowrap; }
+        .clara-aba-filtro:hover { color:#fff; background:rgba(255,255,255,0.06); }
+        .clara-aba-filtro.clara-aba-ativa { background:#25D366; color:#06301c; }
+        .clara-aba-cont { background:rgba(255,255,255,0.14); color:inherit; border-radius:10px; padding:1px 7px; font-size:0.68rem; font-weight:800; }
+        .clara-aba-ativa .clara-aba-cont { background:rgba(6,48,28,0.22); }
+        .clara-aba-cont-alerta:not(:empty):not([data-zero="1"]) { background:#f59e0b; color:#3b2400; }
+        .clara-pill-doc { display:inline-flex; align-items:center; gap:4px; margin-top:4px; font-size:0.66rem; font-weight:800; padding:2px 8px; border-radius:10px; width:fit-content; }
+        .clara-pill-doc.pendente { background:rgba(245,158,11,0.16); color:#f59e0b; }
+        .clara-pill-doc.falhou { background:rgba(239,68,68,0.16); color:#ef4444; }
+        .clara-pill-doc.lido { background:rgba(52,183,241,0.14); color:#34b7f1; }
 
 .clara-lista-item {
     cursor: pointer; display: flex; align-items: center; gap: 10px;
@@ -7918,6 +7928,13 @@ i.fa-circle-notch.fa-spin::before,
                     <div class="input-wrapper" style="margin-bottom: 12px;">
                         <i class="fa-solid fa-search" style="color: var(--cor-texto-secundario);"></i>
                         <input type="text" id="busca-chat-clara" placeholder="Buscar colaborador..." oninput="window.executarComAtraso(window.filtrarChatClaraLista)" style="padding: 10px 15px 10px 40px; border-radius: 8px; background: var(--cor-fundo-input); color: #fff; border: 1px solid rgba(37, 211, 102, 0.3); outline: none; width: 100%;">
+                    </div>
+                    <!-- Abas de filtro do Chat da Clara: Todas / Respostas novas (colaborador escreveu e o RH ainda não abriu)
+                         / Docs não lidos (termo, folha etc. enviados que o colaborador ainda não abriu no WhatsApp). -->
+                    <div id="clara-abas-filtro" style="display:flex; gap:6px; margin-bottom:12px; background:rgba(255,255,255,0.04); padding:4px; border-radius:10px;">
+                        <button type="button" data-filtro="todas" class="clara-aba-filtro clara-aba-ativa" onclick="window.claraTrocarFiltro('todas')">Todas <span class="clara-aba-cont" id="clara-cont-todas">0</span></button>
+                        <button type="button" data-filtro="respostas" class="clara-aba-filtro" onclick="window.claraTrocarFiltro('respostas')">Respostas <span class="clara-aba-cont" id="clara-cont-respostas">0</span></button>
+                        <button type="button" data-filtro="docs" class="clara-aba-filtro" onclick="window.claraTrocarFiltro('docs')">Docs não lidos <span class="clara-aba-cont clara-aba-cont-alerta" id="clara-cont-docs">0</span></button>
                     </div>
                     <div id="lista-chat-clara-colabs" style="display: flex; flex-direction: column; gap: 6px; max-height: 550px; overflow-y: auto; padding-right: 5px;">
                         <p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">Carregando...</p>
@@ -49003,8 +49020,16 @@ window.carregarChatClaraLista = async function(silencioso) {
 
     // Agrupa por colaborador_id (ou telefone, se não identificado), pegando a última mensagem de cada
     const mapaGrupos = {};
+    const limite30d = Date.now() - 30 * 86400000; // docs com mais de 30 dias sem leitura não poluem o filtro
+    const docsPorChave = {};
     window.todasConversasClaraLog.forEach(m => {
         const chave = m.colaborador_id || `tel_${m.telefone_normalizado}`;
+        if (m._wa && new Date(m.criado_em).getTime() >= limite30d) {
+            const d = docsPorChave[chave] = docsPorChave[chave] || { naoLidos: 0, falhou: 0, ultimoLido: false, ultimoStatus: null };
+            if (!d.ultimoStatus) { d.ultimoStatus = m._wa.status; }
+            if (m._wa.status === 'falhou') d.falhou++;
+            else if (m._wa.status !== 'lido') d.naoLidos++;
+        }
         if (!mapaGrupos[chave] || new Date(m.criado_em) > new Date(mapaGrupos[chave].ultimaData)) {
             mapaGrupos[chave] = {
                 chave,
@@ -49019,7 +49044,14 @@ window.carregarChatClaraLista = async function(silencioso) {
         }
     });
 
+    Object.values(mapaGrupos).forEach(g => { g.docs = docsPorChave[g.chave] || { naoLidos: 0, falhou: 0 }; });
     window.chatClaraColabsAgrupados = Object.values(mapaGrupos).sort((a, b) => new Date(b.ultimaData) - new Date(a.ultimaData));
+    window.filtrarChatClaraLista();
+};
+
+window.claraFiltroAtivo = 'todas';
+window.claraTrocarFiltro = function(f) {
+    window.claraFiltroAtivo = f;
     window.filtrarChatClaraLista();
 };
 
@@ -49028,12 +49060,25 @@ window.filtrarChatClaraLista = function() {
     const container = document.getElementById('lista-chat-clara-colabs');
     if (!container) return;
 
-    const filtrados = (window.chatClaraColabsAgrupados || []).filter(g =>
+    const filtro = window.claraFiltroAtivo || 'todas';
+    const porBusca = (window.chatClaraColabsAgrupados || []).filter(g =>
         !termo || window.removerAcentos(g.nome || '').includes(termo) || (g.telefone || '').includes(termo)
     );
+    const temResposta = g => (window.claraNaoLidasPorChave?.[g.chave] || 0) > 0;
+    const temDocPend = g => ((g.docs?.naoLidos || 0) + (g.docs?.falhou || 0)) > 0;
+
+    // Contadores das abas (respeitam a busca)
+    const setCont = (id, n) => { const el = document.getElementById(id); if (el) { el.textContent = n; el.dataset.zero = n === 0 ? '1' : '0'; } };
+    setCont('clara-cont-todas', porBusca.length);
+    setCont('clara-cont-respostas', porBusca.filter(temResposta).length);
+    setCont('clara-cont-docs', porBusca.filter(temDocPend).length);
+    document.querySelectorAll('.clara-aba-filtro').forEach(b => b.classList.toggle('clara-aba-ativa', b.dataset.filtro === filtro));
+
+    const filtrados = porBusca.filter(g => filtro === 'respostas' ? temResposta(g) : filtro === 'docs' ? temDocPend(g) : true);
 
     if (filtrados.length === 0) {
-        container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">Nenhuma conversa encontrada.</p>';
+        const msg = filtro === 'docs' ? '🎉 Nenhum documento pendente de leitura (últimos 30 dias).' : filtro === 'respostas' ? 'Nenhuma resposta nova por aqui.' : 'Nenhuma conversa encontrada.';
+        container.innerHTML = `<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">${msg}</p>`;
         return;
     }
 
@@ -49054,6 +49099,8 @@ window.filtrarChatClaraLista = function() {
                         <span class="clara-lista-item-hora">${horaFormatada}</span>
                     </div>
                     <span class="clara-lista-item-preview">${iconeDirecao}${(g.ultimaMensagem || '').substring(0, 60)}</span>
+                    ${g.docs?.falhou ? `<span class="clara-pill-doc falhou"><i class="fa-solid fa-triangle-exclamation"></i> ${g.docs.falhou} não entregue${g.docs.falhou > 1 ? 's' : ''}</span>` : ''}
+                    ${g.docs?.naoLidos ? `<span class="clara-pill-doc pendente"><i class="fa-solid fa-envelope"></i> ${g.docs.naoLidos} doc${g.docs.naoLidos > 1 ? 's' : ''} não lido${g.docs.naoLidos > 1 ? 's' : ''}</span>` : ''}
                 </div>
             </div>
         `;
