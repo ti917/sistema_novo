@@ -48840,13 +48840,104 @@ window.claraCorAvatar = function(chave) {
     return paleta[hash % paleta.length];
 };
 
+// =========================================================================
+// 📲 STATUS DE ENTREGA/LEITURA (✓ enviado, ✓✓ entregue, ✓✓ lido + data e hora) no Chat da Clara
+// -------------------------------------------------------------------------
+// Os documentos que o sistema manda por TEMPLATE (termos/contratos avulsos, recibo de EPI, aviso
+// de ASO...) saem direto pela API da Meta e ficavam só em `mensagens_whatsapp_log` (status +
+// `atualizado_em`, que o webhook da Meta atualiza a cada mudança — no "lido" é a hora da leitura).
+// Eles não entravam no `clara_conversas_log`, por isso não apareciam no Chat. Aqui juntamos os
+// dois na memória, como mensagens "de saída" com os tiques. Holerite/folha de ponto ficam de fora
+// de propósito (volume enorme); pra incluir mais algum template é só acrescentar abaixo.
+// =========================================================================
+window.CLARA_TEMPLATES_NO_CHAT = {
+    'aviso_assinatura_documento': '📄 Documento enviado para assinatura (termo / contrato)',
+    'doc_assinado_confirmacao': '✅ Confirmação de documento assinado',
+    'envio_recibo_epi': '🦺 Recibo de EPI enviado para assinatura',
+    'aviso_aso_periodico': '🩺 Aviso de ASO periódico',
+    'aso_periodico_comprovante': '🩺 Comprovante de ASO periódico',
+};
+
+window.claraLogZapParaMensagem = function(l) {
+    return {
+        id: 'wa_' + l.id,
+        colaborador_id: l.colaborador_id,
+        nome_colaborador: l.nome_colaborador,
+        telefone: l.telefone,
+        telefone_normalizado: l.telefone_normalizado,
+        direcao: 'saida',
+        tipo_conteudo: 'template_log',
+        mensagem: window.CLARA_TEMPLATES_NO_CHAT[l.template_name] || l.template_name,
+        enviado_por_admin: l.enviado_por || null,
+        criado_em: l.criado_em,
+        lida: true,
+        midia_url: null,
+        _wa: { wamid: l.wamid, status: l.status, atualizado_em: l.atualizado_em, erro_titulo: l.erro_titulo, erro_detalhe: l.erro_detalhe }
+    };
+};
+
+window.claraFormatarDataHoraZap = function(iso) {
+    if (!iso) return '';
+    return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).replace(', ', ' às ');
+};
+
+/** HTML da linha de status de uma mensagem de template (tiques + data e hora). */
+window.claraStatusEntregaHtml = function(wa, criadoEm) {
+    if (!wa) return '';
+    const f = window.claraFormatarDataHoraZap;
+    let icone, cor, texto;
+    if (wa.status === 'lido') { icone = 'fa-check-double'; cor = '#34b7f1'; texto = `Lido em ${f(wa.atualizado_em)}`; }
+    else if (wa.status === 'entregue') { icone = 'fa-check-double'; cor = '#8696a0'; texto = `Entregue em ${f(wa.atualizado_em)}`; }
+    else if (wa.status === 'falhou') { icone = 'fa-triangle-exclamation'; cor = '#ef4444'; texto = 'Não entregue' + (wa.erro_titulo ? ` — ${String(wa.erro_titulo).replace(/</g, '&lt;')}` : ''); }
+    else { icone = 'fa-check'; cor = '#8696a0'; texto = `Enviado em ${f(criadoEm)} (aguardando confirmação)`; }
+    return `<span style="display:block; margin-top:6px; font-size:0.72rem; color:${cor}; font-weight:600;"><i class="fa-solid ${icone}"></i> ${texto}</span>`;
+};
+
+/** Busca no banco os logs de template desse período e junta com o log do chat. */
+window.claraBuscarLogsZapParaChat = async function() {
+    const { data, error } = await supabaseClient
+        .from('mensagens_whatsapp_log')
+        .select('*')
+        .in('template_name', Object.keys(window.CLARA_TEMPLATES_NO_CHAT))
+        .order('criado_em', { ascending: false })
+        .limit(1500);
+    if (error) { console.warn('Não consegui carregar status de entrega pro Chat da Clara:', error); return []; }
+    return (data || []).map(window.claraLogZapParaMensagem);
+};
+
+/** Reavalia só os status (sem recarregar o chat inteiro) e redesenha se algo mudou. */
+window.claraAtualizarStatusZapAberto = async function() {
+    const g = window.chatClaraSelecionado;
+    const caixa = document.getElementById('chat-clara-mensagens');
+    if (!g || !caixa || caixa.offsetParent === null) return;
+    const novos = await window.claraBuscarLogsZapParaChat();
+    if (!novos.length) return;
+    const porId = {};
+    novos.forEach(n => { porId[n.id] = n; });
+    let mudou = false;
+    (window.todasConversasClaraLog || []).forEach(m => {
+        const n = m._wa && porId[m.id];
+        if (n && (n._wa.status !== m._wa.status || n._wa.atualizado_em !== m._wa.atualizado_em)) { m._wa = n._wa; mudou = true; }
+    });
+    if (mudou) window.abrirChatClaraColaborador(g);
+};
+
+// Enquanto a aba do Chat da Clara estiver visível, atualiza a lista a cada 30s (pega termos
+// enviados por outro RH e mudanças de status entregue/lido).
+setInterval(() => {
+    const lista = document.getElementById('lista-chat-clara-colabs');
+    if (lista && lista.offsetParent !== null && !document.hidden && typeof window.carregarChatClaraLista === 'function') {
+        window.carregarChatClaraLista(true);
+    }
+}, 30000);
+
 document.querySelector('[data-aba="aba-zap-chat-clara"]')?.addEventListener('click', () => {
     window.carregarChatClaraLista();
 });
 
-window.carregarChatClaraLista = async function() {
+window.carregarChatClaraLista = async function(silencioso) {
     const container = document.getElementById('lista-chat-clara-colabs');
-    if (container) container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando...</p>';
+    if (container && silencioso !== true) container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando...</p>';
 
     const { data, error } = await supabaseClient
         .from('clara_conversas_log')
@@ -48856,11 +48947,14 @@ window.carregarChatClaraLista = async function() {
 
     if (error) {
         console.error('Erro ao carregar clara_conversas_log:', error);
+        if (silencioso === true) return;
         if (container) container.innerHTML = `<p style="text-align:center; color: var(--cor-perigo); padding: 20px;">Não consegui carregar as conversas. Se essa é a primeira vez, confirme se a tabela <b>clara_conversas_log</b> já foi criada no Supabase.</p>`;
         return;
     }
 
-    window.todasConversasClaraLog = data || [];
+    // 📲 Junta as mensagens de template (termos avulsos etc.) com o status de entrega/leitura
+    const logsZapChat = await window.claraBuscarLogsZapParaChat();
+    window.todasConversasClaraLog = [...(data || []), ...logsZapChat].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
 
     // Agrupa por colaborador_id (ou telefone, se não identificado), pegando a última mensagem de cada
     const mapaGrupos = {};
@@ -49001,6 +49095,9 @@ window.abrirChatClaraColaborador = function(grupo) {
     window.atualizarStatusPausaClara(grupo);
     if (window.claraPausaTimerId) clearInterval(window.claraPausaTimerId);
     window.claraPausaTimerId = setInterval(() => window.atualizarStatusPausaClara(window.chatClaraSelecionado), 30000);
+    // 📲 Atualiza os tiques (entregue/lido) sozinho enquanto o chat estiver aberto
+    if (window.claraStatusZapTimerId) clearInterval(window.claraStatusZapTimerId);
+    window.claraStatusZapTimerId = setInterval(() => { window.claraAtualizarStatusZapAberto().catch(() => {}); }, 20000);
 
     const mensagens = (window.todasConversasClaraLog || [])
         .filter(m => (grupo.colaboradorId && m.colaborador_id === grupo.colaboradorId) || (!grupo.colaboradorId && m.telefone_normalizado === grupo.telefoneNormalizado))
@@ -49035,6 +49132,7 @@ window.abrirChatClaraColaborador = function(grupo) {
                 <div class="clara-bubble ${isEntrada ? 'clara-entrada' : 'clara-saida'}">
                     ${remetenteHtml}
                     ${conteudoHtml}
+                    ${m._wa ? window.claraStatusEntregaHtml(m._wa, m.criado_em) : ''}
                     <span class="clara-bubble-hora">${horaFormatada}</span>
                 </div>
             </div>
@@ -49796,6 +49894,17 @@ window.enviarMensagemGraphAPI = async function(telefoneBruto, templateName, vari
             }
             console.error("Erro no envio WhatsApp:", detalhe || error);
             return false;
+        }
+        // 📲 Termo/contrato avulso (e demais templates rastreados): faz a conversa já aparecer no
+        // Chat da Clara logo após o envio, pra o RH acompanhar entregue/lido. Espera ~2,5s porque
+        // a Edge Function grava o log (mensagens_whatsapp_log) um instante depois do envio.
+        if (window.CLARA_TEMPLATES_NO_CHAT && window.CLARA_TEMPLATES_NO_CHAT[templateName]) {
+            clearTimeout(window.claraRefreshPosEnvioId);
+            window.claraRefreshPosEnvioId = setTimeout(() => {
+                window.carregarChatClaraLista(true).then(() => {
+                    if (window.chatClaraSelecionado) window.claraAtualizarStatusZapAberto?.();
+                }).catch(() => {});
+            }, 2500);
         }
         return true;
     } catch (e) {
@@ -76478,10 +76587,61 @@ window.acionarBuscaAvulsos = async function() {
         dadosResultado = dadosResultado.filter(r => window.removerAcentos(r.nome_colaborador || '').includes(termoNormalizado));
     }
 
+    // 📲 Cruza com o status de entrega/leitura do WhatsApp (data e hora) antes de desenhar
+    try { await window.enriquecerAvulsosComStatusZap(dadosResultado); } catch (e) { console.warn('Status do WhatsApp dos avulsos indisponível:', e); }
+
     window.dadosAvulsosAtuais = dadosResultado;
     
     // Depois de puxar do banco a lista já mastigada, desenhamos ela na tela!
     filtrarStatusAvulsosVisualPuro();
+};
+
+// 📲 Liga cada documento avulso à mensagem de WhatsApp que o avisou (tabela mensagens_whatsapp_log).
+// Como o documento não guarda o id da mensagem (wamid), casa por colaborador (ou telefone) + template
+// "aviso_assinatura_documento" + mensagem enviada depois de o documento ser criado (e antes do
+// próximo documento avulso da mesma pessoa). Se houve reenvio/cobrança, vale o melhor status.
+window.enriquecerAvulsosComStatusZap = async function(docs) {
+    if (!docs || docs.length === 0) return;
+    const ids = [...new Set(docs.map(d => d.colaborador_id).filter(Boolean))];
+    const normTel = t => { let n = String(t || '').replace(/\D/g, ''); if (n && !n.startsWith('55')) n = '55' + n; return n; };
+    const tels = [...new Set(docs.map(d => normTel(d.telefone)).filter(Boolean))];
+    const logs = [];
+    for (let i = 0; i < ids.length; i += 150) {
+        const { data } = await supabaseClient.from('mensagens_whatsapp_log').select('colaborador_id, telefone_normalizado, status, criado_em, atualizado_em, erro_titulo').eq('template_name', 'aviso_assinatura_documento').in('colaborador_id', ids.slice(i, i + 150));
+        if (data) logs.push(...data);
+    }
+    for (let i = 0; i < tels.length; i += 150) {
+        const { data } = await supabaseClient.from('mensagens_whatsapp_log').select('colaborador_id, telefone_normalizado, status, criado_em, atualizado_em, erro_titulo').eq('template_name', 'aviso_assinatura_documento').in('telefone_normalizado', tels.slice(i, i + 150));
+        if (data) logs.push(...data);
+    }
+    const vistos = new Set();
+    const logsUnicos = logs.filter(l => { const k = l.criado_em + '|' + l.telefone_normalizado; if (vistos.has(k)) return false; vistos.add(k); return true; });
+    const rank = { lido: 4, entregue: 3, enviado: 2, falhou: 1 };
+
+    docs.forEach(d => {
+        const criado = new Date(d.created_at || d.criado_em).getTime();
+        const proximo = docs
+            .filter(o => o !== d && o.colaborador_id === d.colaborador_id && new Date(o.created_at || o.criado_em).getTime() > criado)
+            .map(o => new Date(o.created_at || o.criado_em).getTime())
+            .sort((a, b) => a - b)[0] || Infinity;
+        const tel = normTel(d.telefone);
+        const candidatos = logsUnicos.filter(l => {
+            const t = new Date(l.criado_em).getTime();
+            const ehDele = (l.colaborador_id && l.colaborador_id === d.colaborador_id) || (tel && l.telefone_normalizado === tel);
+            return ehDele && t >= criado - 60000 && t < proximo;
+        });
+        d._zap = candidatos.sort((a, b) => (rank[b.status] || 0) - (rank[a.status] || 0) || new Date(b.atualizado_em) - new Date(a.atualizado_em))[0] || null;
+    });
+};
+
+window.chipStatusZapAvulso = function(r) {
+    const z = r._zap;
+    if (!z) return '';
+    const f = window.claraFormatarDataHoraZap;
+    if (z.status === 'lido') return `<span style="font-size:0.72rem; font-weight:700; color:#34b7f1;"><i class="fa-solid fa-check-double"></i> Lido em ${f(z.atualizado_em)}</span>`;
+    if (z.status === 'entregue') return `<span style="font-size:0.72rem; font-weight:700; color:#8696a0;"><i class="fa-solid fa-check-double"></i> Entregue em ${f(z.atualizado_em)}</span>`;
+    if (z.status === 'falhou') return `<span style="font-size:0.72rem; font-weight:700; color:#ef4444;"><i class="fa-solid fa-triangle-exclamation"></i> WhatsApp não entregue</span>`;
+    return `<span style="font-size:0.72rem; font-weight:700; color:#8696a0;"><i class="fa-solid fa-check"></i> Enviado em ${f(z.criado_em)}</span>`;
 };
 
 window.filtrarStatusAvulsosVisualPuro = function() {
@@ -76547,6 +76707,7 @@ window.filtrarStatusAvulsosVisualPuro = function() {
                         <span style="color: var(--cor-texto-secundario); font-size: 0.75rem;">
                             Enviado dia: ${dataEnvio}
                         </span>
+                        ${window.chipStatusZapAvulso(r)}
                     </div>
                 </div>
                 
