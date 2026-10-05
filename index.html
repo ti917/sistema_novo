@@ -21005,7 +21005,7 @@ async function escutarTempoReal() {
                 // 👇 A cada 15s — bom equilíbrio entre avisar pertinho do horário certo e o
                 // consumo de egress no Supabase (confirmado que o gasto é irrelevante no
                 // plano Pro, mas 15s já garante o aviso bem preciso sem exagerar).
-                window._agendaIntervalCheck = setInterval(() => window.checarLembretesVencidosAgenda(), 15000);
+                window._agendaIntervalCheck = setInterval(() => window._agendaTick(), 15000);
             }
             // 👇 Se a aba ficou em segundo plano (navegador pausa o setInterval), assim que
             // ela volta a ficar visível a gente checa na hora — sem esperar o próximo tick.
@@ -35587,23 +35587,68 @@ window.atualizarRegrasRescisao = function() {
 
         // 👇 Roda a cada 30s (e também no login/realtime) — só olha os lembretes de HOJE
         // ainda 'Agendado', independente de qual tela/mês o usuário está vendo agora.
+        // 🚀 PERFORMANCE (05/10/2026): antes, a cada 15s CADA tela aberta ia no banco perguntar os
+        // lembretes de hoje. Agora a busca no banco acontece só quando precisa (abrir, voltar pra
+        // aba, mudança avisada pelo Realtime, virar o dia, ou a cada 5 min por segurança) e os
+        // lembretes de hoje ficam guardados na memória da tela. A cada 15s só compara o horário
+        // com o relógio do computador (sem rede) — o aviso continua saindo no horário certo.
+        // Se o servidor responder erro de queda (5xx/522/524), pausa as buscas por 90s.
+        window._agendaCache = null;
+        window._agendaPausaAte = 0;
+        const AGENDA_CACHE_MAX_MS = 5 * 60 * 1000;
+        const AGENDA_PAUSA_ERRO_MS = 90 * 1000;
+
+        window._agendaHojeBR = function() {
+            return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+        };
+
+        window._agendaAvisarVencidos = function(lista) {
+            const agora = new Date();
+            (lista || []).forEach(l => {
+                if (window._agendaLembretesJaAvisados.has(l.id)) return;
+                if (!l.lembrar_em) return;
+                if (new Date(l.lembrar_em) <= agora) {
+                    window._agendaLembretesJaAvisados.add(l.id);
+                    window.mostrarModalLembreteVencidoAgenda(l);
+                }
+            });
+        };
+
+        // Busca no banco (força atualizar o cache) e já avisa o que venceu.
         window.checarLembretesVencidosAgenda = async function() {
             try {
-                const hojeIso = new Date().toISOString().split('T')[0];
-                const { data, error } = await supabaseClient.from('agenda_lembretes')
-                    .select('*').eq('data', hojeIso).in('status', ['Agendado', 'Pendente']);
-                if (error || !data) return;
+                const hojeBR = window._agendaHojeBR();
+                const hojeUTC = new Date().toISOString().split('T')[0];
+                // 👇 Consulta o dia do Brasil e também o dia UTC (se forem diferentes, depois
+                // das 21h) pra não perder lembrete criado/guardado com qualquer um dos dois.
+                const dias = hojeBR === hojeUTC ? [hojeBR] : [hojeBR, hojeUTC];
+                const resp = await supabaseClient.from('agenda_lembretes')
+                    .select('*').in('data', dias).in('status', ['Agendado', 'Pendente']);
+                const { data, error } = resp;
+                if (error || !data) {
+                    const st = Number(resp.status || 0);
+                    if (st === 0 || st >= 500) window._agendaPausaAte = Date.now() + AGENDA_PAUSA_ERRO_MS;
+                    return;
+                }
+                window._agendaCache = { dia: hojeBR, itens: data, buscadoEm: Date.now() };
+                window._agendaPausaAte = 0;
+                window._agendaAvisarVencidos(data);
+            } catch (e) {
+                window._agendaPausaAte = Date.now() + AGENDA_PAUSA_ERRO_MS;
+                console.error('Erro ao checar lembretes vencidos da Agenda:', e);
+            }
+        };
 
-                const agora = new Date();
-                data.forEach(l => {
-                    if (window._agendaLembretesJaAvisados.has(l.id)) return;
-                    if (!l.lembrar_em) return;
-                    if (new Date(l.lembrar_em) <= agora) {
-                        window._agendaLembretesJaAvisados.add(l.id);
-                        window.mostrarModalLembreteVencidoAgenda(l);
-                    }
-                });
-            } catch (e) { console.error('Erro ao checar lembretes vencidos da Agenda:', e); }
+        // Chamado a cada 15s: só vai ao banco se o cache estiver velho/vazio e não estiver em pausa.
+        window._agendaTick = function() {
+            const c = window._agendaCache;
+            const agora = Date.now();
+            const velho = !c || c.dia !== window._agendaHojeBR() || (agora - c.buscadoEm) > AGENDA_CACHE_MAX_MS;
+            if (velho && agora >= (window._agendaPausaAte || 0)) {
+                window.checarLembretesVencidosAgenda();
+                return;
+            }
+            if (c) window._agendaAvisarVencidos(c.itens);
         };
 
         // =========================================================================
@@ -82170,9 +82215,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const INTERVALO_ESTAVEL_MS = 30000;
     const INTERVALO_QUANDO_SUSPEITO_MS = 3000;
 
+    // 🚀 PERFORMANCE: quando desconfia de queda, antes repetia o teste a cada 3s em TODAS as
+    // telas abertas, o que só soma tráfego quando o servidor já está ruim (incidente de
+    // 02/10/2026). Agora o intervalo cresce a cada falha seguida: 3s, 6s, 12s, 24s, 48s e
+    // trava em 60s. Voltou a responder = volta pro ritmo normal. E quando a internet do
+    // aparelho volta, o evento 'online' (mais abaixo) já dispara um teste na hora.
+    const INTERVALO_MAX_SUSPEITO_MS = 60000;
     function agendarProximoTeste() {
-        const rapido = instabilidadeAtiva || falhasSeguidasConexao > 0;
-        setTimeout(testarConexaoReal, rapido ? INTERVALO_QUANDO_SUSPEITO_MS : INTERVALO_ESTAVEL_MS);
+        let espera = INTERVALO_ESTAVEL_MS;
+        if (instabilidadeAtiva || falhasSeguidasConexao > 0) {
+            const potencia = Math.max(falhasSeguidasConexao - 1, 0);
+            espera = Math.min(INTERVALO_QUANDO_SUSPEITO_MS * Math.pow(2, potencia), INTERVALO_MAX_SUSPEITO_MS);
+        }
+        setTimeout(testarConexaoReal, espera);
     }
 
     async function testarConexaoReal() {
