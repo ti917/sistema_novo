@@ -4174,7 +4174,10 @@ i.fa-circle-notch.fa-spin::before,
 }
 .clara-btn-enviar:hover { background: #1fa855; transform: scale(1.06); }
 
-    </style>
+    
+/* Rescisões: esconde editar/excluir/desfazer de quem não tem a permissão (ver podeAlterarRescisao) */
+body.sem-perm-resc .resc-perm-alterar { display: none !important; }
+</style>
 </head>
 <body>
 
@@ -17985,7 +17988,7 @@ window.filtrarProcessosRescAdmin = function() {
                         ${resc.data_quitacao ? `<span class="badge" style="background: rgba(255,152,0,0.1); color: #ff9800; border: 1px solid #ff9800; padding: 6px 12px;"><i class="fa-solid fa-calendar-check"></i> Quitação: ${formatarDataBR(resc.data_quitacao)}</span>` : ''}
                         <a href="${resc.doc_trct_rh}" target="_blank" class="badge" style="background: rgba(79,195,247,0.1); color: #4fc3f7; border: 1px solid #4fc3f7; text-decoration: none; padding: 6px 12px;"><i class="fa-solid fa-file-pdf"></i> Ver Base</a>
                         ${ehAmericana ? `<button class="badge" style="background: rgba(156,39,176,0.1); color: #9c27b0; border: 1px solid #9c27b0; padding: 6px 12px; cursor: pointer;" onclick="imprimirDeclaracaoVerbasResc('${c.id}')" title="Imprimir a Declaração de Quitação de Verbas Rescisórias já preenchida"><i class="fa-solid fa-file-signature"></i> Declaração de Quitação</button>` : ''}
-                        <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="cancelarEnvioTRCT('${c.id}')" title="Cancelar este envio"><i class="fa-solid fa-trash"></i> Cancelar</button>
+                        <button class="resc-perm-alterar btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="cancelarEnvioTRCT('${c.id}')" title="Cancelar este envio"><i class="fa-solid fa-trash"></i> Cancelar</button>
                     </div>
                 </div>`;
         } else if (trctStatus === 'Concluído') {
@@ -20215,6 +20218,101 @@ if (!window._rtRedeLigada) {
 // em rajada (ex: um lote de notificações inseridas juntas), só dispara UMA
 // atualização, não uma pra cada evento — evita martelar o banco.
 window._timeoutAtualizarContadorDebounce = null;
+
+// =========================================================================
+// 🔐 PERMISSÃO DE RESCISÕES (editar / excluir) -- 05/10/2026
+// Só quem o Super Admin liberar (Usuários Cadastrados › Painel do Usuário › "Permissão de
+// Rescisões") consegue EDITAR/EXCLUIR/DESFAZER nas abas de Histórico Desligamentos
+// (Pendências RH, OBSA Gerada, Processo Rescisório Final, Arquivadas). O Super Admin sempre pode.
+// Guardado em perfis.permissoes.rescisoes_alterar (true/false). Sem a chave = SEM permissão.
+// A trava vale em dois níveis: os botões somem da tela E cada ação confere a permissão
+// (lida do banco na hora, então liberar/tirar vale sem precisar sair e entrar de novo).
+// =========================================================================
+window.podeAlterarRescisao = function() {
+    try {
+        if (typeof window.souSuperAdmin === 'function' && window.souSuperAdmin()) return true;
+        return !!(usuarioAtual && usuarioAtual.permissoes && usuarioAtual.permissoes.rescisoes_alterar === true);
+    } catch (e) { return false; }
+};
+window.aplicarPermissaoRescisaoUI = function() {
+    try {
+        if (typeof usuarioAtual === 'undefined' || !usuarioAtual) return;
+        document.body.classList.toggle('sem-perm-resc', !window.podeAlterarRescisao());
+    } catch (e) {}
+};
+window.exigirPermissaoRescisao = async function() {
+    if (typeof window.souSuperAdmin === 'function' && window.souSuperAdmin()) return true;
+    let ok = window.podeAlterarRescisao();
+    try {
+        const { data } = await supabaseClient.from('perfis').select('permissoes').eq('id', usuarioAtual.id).maybeSingle();
+        if (data) {
+            usuarioAtual.permissoes = data.permissoes || {};
+            ok = (data.permissoes && data.permissoes.rescisoes_alterar === true);
+        }
+    } catch (e) { /* sem rede: vale o que já estava carregado */ }
+    window.aplicarPermissaoRescisaoUI();
+    if (!ok) {
+        await mostrarAlerta('Você não tem permissão para <b>editar, excluir ou desfazer</b> rescisões.<br><br>Peça ao Administrador principal para liberar no seu usuário (Usuários Cadastrados › Painel do Usuário › Permissão de Rescisões).', 'aviso', '🔒 Sem permissão');
+    }
+    return ok;
+};
+window.instalarGuardasRescisao = function() {
+    ['editarRescisaoAdmin', 'excluirRescisaoAdmin', 'excluirSolicitacaoRescisaoAdmin',
+     'cancelarEnvioTRCT', 'desarquivarRescisaoAdmin', 'removerAssinaturaRescisaoAdmin'].forEach(nome => {
+        const orig = window[nome];
+        if (typeof orig !== 'function' || orig.__guardaResc) return;
+        const guardada = async function(...args) {
+            if (!(await window.exigirPermissaoRescisao())) return;
+            return orig.apply(this, args);
+        };
+        guardada.__guardaResc = true;
+        window[nome] = guardada;
+    });
+};
+
+window.abrirModalPermissaoRescisoes = async function(idUser) {
+    if (!(typeof window.souSuperAdmin === 'function' && window.souSuperAdmin())) {
+        return mostrarAlerta('Só o Administrador principal pode configurar essa permissão.', 'aviso');
+    }
+    const { data: u, error } = await supabaseClient.from('perfis').select('id, nome, perfil, permissoes').eq('id', idUser).single();
+    if (error || !u) return mostrarAlerta('Erro ao buscar o usuário.', 'erro');
+    const ativo = !!(u.permissoes && u.permissoes.rescisoes_alterar === true);
+    document.getElementById('modal-perm-rescisoes')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-perm-rescisoes" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10006; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 500px; border: 1px solid var(--cor-perigo); position: relative;">
+            <button type="button" onclick="document.getElementById('modal-perm-rescisoes').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: var(--cor-perigo); margin-bottom: 5px;"><i class="fa-solid fa-user-slash"></i> Permissão de Rescisões</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin-bottom: 20px;">Defina se <b>${window._escHtmlCob(u.nome)}</b> (${window._escHtmlCob(u.perfil)}) pode alterar rescisões em <b>Histórico Desligamentos</b>.</p>
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(220,53,69,0.06); padding: 15px; border-radius: 8px; border: 1px dashed var(--cor-perigo); margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <strong style="color: #fff; font-size: 0.95rem;"><i class="fa-solid fa-pen-to-square" style="color: var(--cor-perigo); margin-right: 5px;"></i> Pode editar, excluir e desfazer rescisões</strong>
+                    <span style="display: block; font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 4px; line-height: 1.4;">Vale para as abas Pendências (RH), OBSA Gerada, Processo Rescisório Final e Arquivadas: Editar, Excluir (rescisão e pedido), Cancelar envio do TRCT, Desarquivar e Recusar/Devolver assinatura. Sem isso, esses botões somem. As demais ações (gerar OBSA, aprovar, enviar para assinatura) continuam normais.</span>
+                </div>
+                <label style="display: flex; align-items: center; cursor: pointer; margin-left: 15px;">
+                    <input type="checkbox" id="chk-perm-rescisoes" style="width: 22px; height: 22px; accent-color: var(--cor-perigo);" ${ativo ? 'checked' : ''}>
+                </label>
+            </div>
+            <button type="button" id="btn-salvar-perm-rescisoes" class="btn-success" style="width: 100%; height: 50px; background-color: var(--cor-perigo); color: #fff; border: none; font-weight: bold;"><i class="fa-solid fa-floppy-disk"></i> Salvar Permissão</button>
+        </div>
+    </div>`);
+    document.getElementById('btn-salvar-perm-rescisoes').onclick = async function() {
+        const btn = this; btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Salvando...';
+        // lê de novo na hora de salvar, pra não sobrescrever outras permissões alteradas nesse meio tempo
+        const { data: fresco } = await supabaseClient.from('perfis').select('permissoes').eq('id', idUser).single();
+        const permissoes = { ...((fresco && fresco.permissoes) || {}), rescisoes_alterar: document.getElementById('chk-perm-rescisoes').checked };
+        const { error: errUp } = await supabaseClient.from('perfis').update({ permissoes }).eq('id', idUser);
+        if (errUp) {
+            mostrarAlerta('Erro ao salvar: ' + errUp.message, 'erro');
+            btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Salvar Permissão';
+            return;
+        }
+        document.getElementById('modal-perm-rescisoes')?.remove();
+        mostrarAlerta('Permissão de rescisões atualizada!', 'sucesso');
+        if (typeof listarUsuarios === 'function') listarUsuarios(true);
+    };
+};
+
 window.atualizarContadorDebounced = function() {
     if (window._timeoutAtualizarContadorDebounce) clearTimeout(window._timeoutAtualizarContadorDebounce);
     window._timeoutAtualizarContadorDebounce = setTimeout(() => {
@@ -20225,6 +20323,7 @@ window.atualizarContadorDebounced = function() {
 
 window.atualizarContador = async function() {
     const isAdmin = usuarioAtual.perfil === 'Admin';
+    try { window.aplicarPermissaoRescisaoUI(); window.instalarGuardasRescisao(); } catch (e) {}
     const badgeMenu = document.getElementById('badge-count');
     const badgeHeader = document.getElementById('badge-header-count');
     const listaDropdown = document.getElementById('lista-notificacoes-dropdown');
@@ -25311,13 +25410,13 @@ window.verFichaRescisaoPendente = function(idStr) {
             <div style="display: flex; gap: 10px; margin-top: 25px; flex-wrap: wrap;">
                 ${btnEnviarAssinatura}
                 
-                <button class="btn-secondary" style="flex: 1; min-width: 100px; height: 50px; color: #ff9800; border: 1px solid #ff9800;" onclick="document.getElementById('modal-ficha-rescisao').remove(); editarRescisaoAdmin('${colab.id}')">
+                <button class="resc-perm-alterar btn-secondary" style="flex: 1; min-width: 100px; height: 50px; color: #ff9800; border: 1px solid #ff9800;" onclick="document.getElementById('modal-ficha-rescisao').remove(); editarRescisaoAdmin('${colab.id}')">
                     <i class="fa-solid fa-pen"></i> EDITAR
                 </button>
                 <button class="btn-secondary" style="flex: 1; min-width: 100px; height: 50px; color: white; border: 1px solid var(--cor-borda);" onclick="reprovarRescisaoAdmin('${colab.id}', '${colab.nome.replace(/'/g, "\\'")}')" title="Devolve o colaborador para Ativo, pedindo o motivo e notificando o Gestor">
                     <i class="fa-solid fa-rotate-left"></i> REJEITAR
                 </button>
-                <button class="btn-danger-mini" style="flex: 1; min-width: 100px; height: 50px; background: rgba(220,53,69,0.15); border: 1px solid var(--cor-perigo); color: var(--cor-perigo);" onclick="excluirSolicitacaoRescisaoAdmin('${colab.id}', '${colab.nome.replace(/'/g, "\\'")}')" title="Apaga esse pedido de vez, sem motivo e sem notificar o Gestor">
+                <button class="resc-perm-alterar btn-danger-mini" style="flex: 1; min-width: 100px; height: 50px; background: rgba(220,53,69,0.15); border: 1px solid var(--cor-perigo); color: var(--cor-perigo);" onclick="excluirSolicitacaoRescisaoAdmin('${colab.id}', '${colab.nome.replace(/'/g, "\\'")}')" title="Apaga esse pedido de vez, sem motivo e sem notificar o Gestor">
                     <i class="fa-solid fa-trash"></i> EXCLUIR
                 </button>
             </div>
@@ -26611,7 +26710,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                     <i class="fa-solid fa-user-plus"></i> RECONTRATAR
                 </button>
                 
-                <button class="btn-danger-mini" style="flex: 2; min-width: 200px; height: 50px; background-color: rgba(220,53,69,0.1); color: var(--cor-perigo); border: 1px solid var(--cor-perigo); font-weight: bold;" 
+                <button class="resc-perm-alterar btn-danger-mini" style="flex: 2; min-width: 200px; height: 50px; background-color: rgba(220,53,69,0.1); color: var(--cor-perigo); border: 1px solid var(--cor-perigo); font-weight: bold;" 
     onclick="removerAssinaturaRescisaoAdmin('${colab.id}')">
     <i class="fa-solid fa-rotate-left"></i> RECUSAR E DEVOLVER ASSINATURA
 </button>
@@ -33460,6 +33559,10 @@ window.abrirModalHubUsuario = function(idUser) {
             <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #9b59b6; color: #9b59b6; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalColaboradorVinculado('${u.id}')">
                 <i class="fa-solid fa-user-tag" style="width: 30px;"></i> Colaborador Vinculado
             </button>` : ''}
+            ${(typeof window.souSuperAdmin === 'function' && window.souSuperAdmin()) ? `
+            <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; border-color: #dc3545; color: #dc3545; font-size: 1rem;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalPermissaoRescisoes('${u.id}')">
+                <i class="fa-solid fa-user-slash" style="width: 30px;"></i> Permissão de Rescisões (Editar/Excluir)
+            </button>` : ''}
         `;
     }
 
@@ -37059,8 +37162,8 @@ if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 
         ${btnVoltarSolicitacoes}
         ${btnGerarTermoAntecipado}
         <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ffc107; color: #ffc107; font-weight: bold; background: rgba(255, 193, 7, 0.1);" onclick="abrirModalObsaRescisao('${a.id}')" title="Gerar Requisição de Rescisão (OBSA)"><i class="fa-solid fa-file-invoice"></i> OBSA</button>
-        <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarRescisaoAdmin('${a.id}')" title="Editar Rescisão"><i class="fa-solid fa-pen"></i></button>
-        <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirRescisaoAdmin('${a.id}')" title="Excluir Rescisão"><i class="fa-solid fa-trash"></i></button>
+        <button class="resc-perm-alterar btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #4fc3f7; color: #4fc3f7;" onclick="editarRescisaoAdmin('${a.id}')" title="Editar Rescisão"><i class="fa-solid fa-pen"></i></button>
+        <button class="resc-perm-alterar btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="excluirRescisaoAdmin('${a.id}')" title="Excluir Rescisão"><i class="fa-solid fa-trash"></i></button>
     `;
 }
 
@@ -37468,7 +37571,7 @@ window.renderizarArquivadasRescAdmin = function() {
                     <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; border-color: var(--cor-acento); color: var(--cor-acento); margin-top: 5px;" onclick="verDetalhesRescisaoConcluida('${a.id}')">
                         <i class="fa-solid fa-eye"></i> Acessar Documentos
                     </button>
-                    <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.65rem; border-color: #ff9800; color: #ff9800; border-radius: 4px; margin-top: 5px;" onclick="desarquivarRescisaoAdmin('${a.id}')" title="Voltar para a aba de Histórico/Pendências">
+                    <button class="resc-perm-alterar btn-secondary" style="padding: 4px 8px; font-size: 0.65rem; border-color: #ff9800; color: #ff9800; border-radius: 4px; margin-top: 5px;" onclick="desarquivarRescisaoAdmin('${a.id}')" title="Voltar para a aba de Histórico/Pendências">
                         <i class="fa-solid fa-rotate-left"></i> Desarquivar
                     </button>
                 </div>
