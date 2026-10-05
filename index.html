@@ -36558,12 +36558,13 @@ if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo
             ...vinculoInfo
         };
 
-        const { error } = await supabaseClient.from('perfis').update({
+        const { data: gravou, error } = await supabaseClient.from('perfis').update({
             status_aprovacao: statusInicial,
             dados_rescisao: jsonRescisao
-        }).eq('id', idColab);
+        }).eq('id', idColab).select('id');
 
         if (error) throw error;
+        if (!gravou || gravou.length === 0) throw new Error('O sistema não gravou o pedido (sem permissão ou colaborador não encontrado). Nada foi enviado ao RH — tente novamente ou avise o suporte.');
 
         // REMOVIDA A INSERÇÃO DE NOTIFICAÇÃO AQUI PARA NÃO DUPLICAR NOS AVISOS RECENTES
 
@@ -61269,6 +61270,66 @@ window.reempilharTarjasTopo = function() {
 // =========================================================================
 // FUNÇÃO 1: CHECAR PENDÊNCIAS (COM TRAVA, RESPIRO E CATCH BLINDADO)
 // =========================================================================
+
+// ========================================================
+// DESLIGAMENTO VINDO DA AVALIAÇÃO DE EXPERIÊNCIA
+// ========================================================
+window.irParaRescisaoDaAvaliacao = async function(unidade, idColab, periodoKey) {
+    try {
+        document.querySelector('[data-target="tela-rescisao"]')?.click();
+        document.querySelector('[data-aba="aba-nova-rescisao"]')?.click();
+        const selU = document.getElementById('resc-unidade');
+        // espera abrirAbaRescisao() terminar de montar as unidades (antes isso era uma corrida)
+        for (let i = 0; i < 50; i++) {
+            if (selU && Array.from(selU.options).some(o => o.value === unidade)) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        if (!selU || !Array.from(selU.options).some(o => o.value === unidade)) throw new Error('unidade indisponivel');
+        selU.value = unidade;
+        // tipo ANTES de buscar (o filtro de colaboradores depende do tipo)
+        const tipo = (periodoKey === 'p2_done') ? 'Término de Contrato' : 'Pedido da Empresa (Antecipação Experiência)';
+        const selT = document.getElementById('resc-tipo');
+        selT.value = tipo;
+        selT.dispatchEvent(new Event('change'));
+        await window.buscarColaboradoresParaRescisao();
+        const selC = document.getElementById('resc-colaborador');
+        if (Array.from(selC.options).some(o => o.value === idColab)) selC.value = idColab;
+        else throw new Error('colaborador indisponivel');
+        mostrarAlerta(`A avaliação foi gerada, <b>mas o desligamento ainda NÃO foi enviado ao RH</b>.<br><br>Preencha a data, o motivo e clique em <b>enviar</b> na tela de rescisão. Enquanto não enviar, um aviso vermelho fica na tela.`, "aviso", "Falta enviar a rescisão");
+    } catch (e) {
+        console.warn('Pré-preenchimento da rescisão falhou:', e);
+        mostrarAlerta(`A avaliação foi gerada, mas <b>o desligamento ainda NÃO foi enviado ao RH</b>.<br><br>Vá em <b>Rescisões &gt; Nova Solicitação</b>, escolha a unidade e o colaborador e envie. Um aviso vermelho continua na tela até o envio.`, "aviso", "Falta enviar a rescisão");
+    }
+};
+
+window.atualizarAvisoDesligamentoPendente = function(lista) {
+    let el = document.getElementById('aviso-desligar-pendente');
+    if (!lista || !lista.length) { if (el) el.remove(); return; }
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'aviso-desligar-pendente';
+        el.style.cssText = 'position:fixed;right:16px;bottom:16px;max-width:360px;z-index:10002;background:#b71c1c;color:#fff;padding:14px 16px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.5);font-size:.85rem;';
+        document.body.appendChild(el);
+    }
+    el.innerHTML = '';
+    const t = document.createElement('div');
+    t.style.cssText = 'font-weight:bold;margin-bottom:8px;';
+    t.textContent = 'Desligamento NÃO enviado ao RH';
+    el.appendChild(t);
+    const p = document.createElement('div');
+    p.style.marginBottom = '8px';
+    p.textContent = 'Você decidiu desligar na avaliação de experiência, mas a rescisão ainda não foi enviada:';
+    el.appendChild(p);
+    lista.forEach(c => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.style.cssText = 'display:block;width:100%;text-align:left;margin-top:6px;padding:8px 10px;border:0;border-radius:6px;background:#fff;color:#b71c1c;font-weight:bold;cursor:pointer;';
+        b.textContent = 'Enviar rescisão de ' + c.nome;
+        b.onclick = () => window.irParaRescisaoDaAvaliacao(c.unidade, c.id, (c.dados_admissao?.avaliacoes_exp?.desligar_pendente?.key) || 'p1_done');
+        el.appendChild(b);
+    });
+};
+
 // Dentro do Módulo: PERÍODO DE EXPERIÊNCIA (TRAVA DO GESTOR)
 window.checarTravaExperiencia = async function(foiCliqueManual = false) {
     if (!usuarioAtual || usuarioAtual.perfil !== 'Gestor' || !usuarioAtual.unidade) return;
@@ -61299,6 +61360,13 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
         const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
         return !emRescisao && !setAfastados.has(c.id);
     });
+
+    // Desligamentos decididos na avaliação e ainda NÃO enviados (não entra em rescisão)
+    try {
+        window.atualizarAvisoDesligamentoPendente((resColabs.data || []).filter(c =>
+            c.dados_admissao?.avaliacoes_exp?.desligar_pendente &&
+            !['Rescisão Pendente', 'Aguardando Assinatura', 'Aguardando Aprovação Global'].includes(c.status_aprovacao)));
+    } catch (e) { console.warn(e); }
 
     avaliacoesPendentesCache = [];
     const hoje = new Date(); hoje.setHours(0,0,0,0);
@@ -61848,7 +61916,15 @@ document.getElementById('form-avaliacao-exp').addEventListener('submit', async (
         if (!admData.avaliacoes_exp) admData.avaliacoes_exp = { p1_done: false, p2_done: false };
         
         admData.avaliacoes_exp[periodoKey] = true; 
-        await supabaseClient.from('perfis').update({ dados_admissao: admData }).eq('id', idColab);
+        // 👇 Decisão "Desligar": guarda um marcador PERSISTENTE de que falta enviar a rescisão
+        // (antes só existia o pré-preenchimento na tela; se o gestor saísse, ninguém lembrava).
+        if (decisao === 'Desligar') {
+            admData.avaliacoes_exp.desligar_pendente = { periodo: periodoNome, key: periodoKey, data: new Date().toISOString(), avaliacao_id: avaliacaoCriada ? avaliacaoCriada.id : null, por: usuarioAtual.nome };
+        } else if (admData.avaliacoes_exp.desligar_pendente) {
+            delete admData.avaliacoes_exp.desligar_pendente;
+        }
+        const { error: errMarc } = await supabaseClient.from('perfis').update({ dados_admissao: admData }).eq('id', idColab);
+        if (errMarc) console.warn('Falha ao gravar marcador de experiência:', errMarc);
 
         document.getElementById('modal-avaliacao-exp').classList.add('hidden');
         
@@ -61857,23 +61933,8 @@ document.getElementById('form-avaliacao-exp').addEventListener('submit', async (
             // Volta a checar as travas para desbloquear o sistema do Gestor, se acabaram as pendências
             await checarTravaExperiencia();
             
-            // Força a navegação para a aba de Rescisão
-            document.querySelector('[data-target="tela-rescisao"]')?.click();
-            document.querySelector('[data-aba="aba-nova-rescisao"]')?.click();
-            
-            // Preenche o formulário automaticamente
-            const selectUnidResc = document.getElementById('resc-unidade');
-            selectUnidResc.value = unidade;
-            await buscarColaboradoresParaRescisao(); // Puxa os colabs
-            
-            setTimeout(() => {
-                document.getElementById('resc-colaborador').value = idColab;
-                document.getElementById('resc-tipo').value = 'Pedido da Empresa';
-                document.getElementById('resc-tipo').dispatchEvent(new Event('change'));
-                
-                // Manda uma notificação pra ele saber por que foi jogado pra essa tela
-                mostrarAlerta(`A avaliação foi gerada! Como você decidiu não manter o colaborador na equipe, por favor, conclua o <b>pedido de desligamento</b> abaixo.`, "aviso", "Preencha a Rescisão");
-            }, 800); // Delayzinho para o Select de colaboradores renderizar as options
+            // Leva para a Rescisão e pré-preenche (com espera real, sem chute de tempo)
+            window.irParaRescisaoDaAvaliacao(unidade, idColab, periodoKey);
 
         } else {
         mostrarAlerta(`Avaliação enviada com sucesso para aprovação do RH!<br><a href="${urlPdf}" target="_blank" style="color:white; font-weight:bold; text-decoration:underline;">Clique aqui para visualizar o PDF gerado</a>`, "sucesso", "⭐ Avaliação Concluída");
@@ -81145,6 +81206,7 @@ window.verFichaExperienciaPendente = function(idStr) {
                 <div style="flex: 1; min-width: 200px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda); text-align: center;">
                     <small style="color:var(--cor-texto-secundario)">DECISÃO DO GESTOR:</small><br>
                     <span style="font-size: 1.1rem; display: block; margin-top: 5px;">${decisaoStatus}</span>
+                    ${/DESLIGAR|DESLIGADO/.test((exp.desempenho||'').toUpperCase()) ? '<small style="display:block;margin-top:8px;color:#ffb74d;">A rescisão é um pedido separado do gestor. Confira em Solicitações se ela já chegou.</small>' : ''}
                 </div>
             </div>
 
