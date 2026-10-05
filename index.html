@@ -49900,9 +49900,55 @@ window.confirmarSelecaoColabs = function() {
 };
 
 // =====================================
-// FUNÇÃO NÚCLEO: DISPARO SEGURO VIA EDGE FUNCTION (BLINDADA CONTRA QUEBRA DE LINHA)
+// 🚦 FILA ANTI-SOBRECARGA DOS DISPAROS DE WHATSAPP (05/10/2026)
+//
+// Por que existe: em 02/10/2026 três disparos em massa (Termo de Imagem, Comunicado e
+// Holerite) rodaram ao mesmo tempo (~720 mensagens em 35 min, picos de 90/min). Cada
+// mensagem enviada grava uma linha em mensagens_whatsapp_log e, depois, a Meta devolve
+// 2-3 avisos de status (enviada/entregue/lida) que viram PATCH na mesma tabela via Edge
+// Function — mais de 2.000 gravações em poucos minutos num banco Micro (1 GB, já usando
+// swap). Resultado: erros 522/524 por ~30 min, sistema inteiro "reconectando".
+//
+// Como funciona: TODO disparo passa por aqui (os ~43 pontos de chamada continuam
+// chamando enviarMensagemGraphAPI como sempre). Cada envio reserva um "horário" na fila e
+// os envios largam com ESPAÇO mínimo entre si, mesmo quando o código de fora dispara 10
+// em paralelo (Promise.all do "Modo Turbo"). Envio avulso (fila vazia) sai na hora.
+//
+// Ajuste: window.ZAP_INTERVALO_MS (padrão 1200 ms ≈ 50 mensagens/min por navegador).
+// Backoff: se envios começam a falhar (banco/Edge Function lentos), o espaço aumenta até
+// 5x sozinho e volta ao normal no primeiro sucesso — assim o disparo desacelera em vez de
+// martelar um banco que já está sofrendo.
+// Limite: a fila vale por navegador; dois RHs disparando ao mesmo tempo somam as taxas.
 // =====================================
-window.enviarMensagemGraphAPI = async function(telefoneBruto, templateName, variaveisBody, linkDocumentoHeader, urlButtonParam, nomeArquivoDocumento, colaboradorId, flowToken) {
+window.ZAP_INTERVALO_MS = window.ZAP_INTERVALO_MS || 1200;
+window._zapFilaProximoSlot = 0;
+window._zapFalhasSeguidas = 0;
+
+window._reservarSlotEnvioZap = function() {
+    const agora = Date.now();
+    const fator = 1 + Math.min(window._zapFalhasSeguidas, 4); // backoff: até 5x mais devagar
+    const inicio = Math.max(agora, window._zapFilaProximoSlot);
+    window._zapFilaProximoSlot = inicio + window.ZAP_INTERVALO_MS * fator;
+    return inicio - agora; // quanto esperar antes de largar este envio
+};
+
+window.enviarMensagemGraphAPI = async function(telefoneBruto, ...resto) {
+    // Telefone vazio nem chega na rede: devolve false sem ocupar vaga na fila.
+    if (!telefoneBruto || !String(telefoneBruto).replace(/\D/g, '')) return false;
+
+    const espera = window._reservarSlotEnvioZap();
+    if (espera > 0) await new Promise(r => setTimeout(r, espera));
+
+    const ok = await window._enviarMensagemGraphAPIDireto(telefoneBruto, ...resto);
+    window._zapFalhasSeguidas = ok ? 0 : window._zapFalhasSeguidas + 1;
+    return ok;
+};
+
+// =====================================
+// FUNÇÃO NÚCLEO: DISPARO SEGURO VIA EDGE FUNCTION (BLINDADA CONTRA QUEBRA DE LINHA)
+// (agora chamada só pela fila acima — não chame direto)
+// =====================================
+window._enviarMensagemGraphAPIDireto = async function(telefoneBruto, templateName, variaveisBody, linkDocumentoHeader, urlButtonParam, nomeArquivoDocumento, colaboradorId, flowToken) {
     let telefone = telefoneBruto.replace(/\D/g, '');
     if (!telefone) return false;
     if (!telefone.startsWith('55')) telefone = '55' + telefone;
