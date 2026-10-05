@@ -468,17 +468,12 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
 
                 if (dbError) throw new Error("Erro ao validar assinatura no banco: " + dbError.message);
 
-                // 8. Envia WhatsApp
+                // 8. (O WhatsApp de confirmação agora sai DEPOIS da tela de sucesso, em segundo
+                //    plano e com novas tentativas — veja o passo 10 e enviarConfirmacaoComRetentativas.
+                //    Antes ele era esperado aqui: se a Edge Function/banco estivessem lentos
+                //    (como em 02/10/2026, 17:10-17:35), a pessoa ficava olhando o botão girando
+                //    e, se falhasse, a confirmação e o log simplesmente nunca existiam.)
                 const fone = dadosDoc.telefone;
-                if (fone) {
-                    await enviarMensagemConfirmacao(
-                        fone, 
-                        dadosDoc.nome, 
-                        dadosDoc.tipo_documento, 
-                        dadosDoc.mes_ano, 
-                        pUrl.publicUrl
-                    );
-                }
 
                 // 9. Sucesso (Design Premium)
                 document.getElementById('conteudo-principal').innerHTML = `
@@ -490,11 +485,23 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                     
                     <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; border: 1px dashed rgba(255,255,255,0.2);">
                         <p style="font-size: 0.9rem; color: var(--cor-texto-sec); margin: 0; line-height: 1.5;">
-                            Enviamos uma cópia do documento assinado diretamente para o seu WhatsApp para seus registros pessoais.<br><br>
-                            <b style="color: #fff;">Você já pode fechar esta tela.</b>
+                            <span id="status-envio-zap">${fone ? '<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando uma cópia do documento assinado para o seu WhatsApp... (aguarde alguns segundos antes de fechar)' : 'Sua assinatura foi registrada.'}</span><br><br>
+                            <b id="aviso-fechar-tela" style="color: #fff;">${fone ? '' : 'Você já pode fechar esta tela.'}</b>
                         </p>
                     </div>
                 `;
+
+                // 10. Confirmação no WhatsApp em segundo plano (a assinatura JÁ está salva acima;
+                //     se o envio falhar, isso não desfaz nem atrapalha a assinatura).
+                if (fone) {
+                    enviarConfirmacaoComRetentativas(
+                        fone,
+                        dadosDoc.nome,
+                        dadosDoc.tipo_documento,
+                        dadosDoc.mes_ano,
+                        pUrl.publicUrl
+                    );
+                }
 
             } catch (err) {
                 console.error("Erro geral:", err);
@@ -505,6 +512,35 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
         }
 
         window.onload = inicializar;
+
+        // 🔁 Confirmação no WhatsApp com NOVAS TENTATIVAS (05/10/2026).
+        // Contexto: em 02/10/2026 três assinaturas de Folha de Ponto (17:11, 17:13 e 17:36) ficaram
+        // salvas como "Assinado", mas a confirmação nunca saiu nem foi registrada em
+        // mensagens_whatsapp_log — o envio tinha UMA tentativa só e a falha era engolida em silêncio,
+        // enquanto o banco estava sobrecarregado. Agora: até 4 tentativas, esperando 3s, 8s e 20s
+        // entre elas (o que dá tempo do banco/Edge Function respirarem), e a pessoa vê o resultado.
+        // Só repete quando a chamada VOLTA com erro (não corre em paralelo), pra não duplicar a mensagem
+        // à toa — na pior hipótese (função enviou mas respondeu erro/timeout) pode chegar 2x, o que é
+        // bem melhor do que não chegar nenhuma.
+        async function enviarConfirmacaoComRetentativas(telefone, nome, tipo, mes, linkPdf) {
+            const esperasMs = [0, 3000, 8000, 20000];
+            let ok = false;
+            for (let tentativa = 0; tentativa < esperasMs.length && !ok; tentativa++) {
+                if (esperasMs[tentativa] > 0) await new Promise(r => setTimeout(r, esperasMs[tentativa]));
+                ok = await enviarMensagemConfirmacao(telefone, nome, tipo, mes, linkPdf);
+                if (!ok) console.warn(`Confirmação no WhatsApp falhou (tentativa ${tentativa + 1}/${esperasMs.length}).`);
+            }
+
+            const elStatus = document.getElementById('status-envio-zap');
+            const elAviso = document.getElementById('aviso-fechar-tela');
+            if (elStatus) {
+                elStatus.innerHTML = ok
+                    ? '<i class="fa-solid fa-check" style="color: var(--cor-sucesso);"></i> Enviamos uma cópia do documento assinado para o seu WhatsApp, para seus registros pessoais.'
+                    : 'Sua assinatura foi registrada com sucesso. Não conseguimos enviar a cópia no WhatsApp agora — se precisar dela, peça ao RH.';
+            }
+            if (elAviso) elAviso.innerText = 'Você já pode fechar esta tela.';
+            return ok;
+        }
 
         async function enviarMensagemConfirmacao(telefone, nome, tipo, mes, linkPdf) {
             const primeiroNome = nome.split(' ')[0];
@@ -519,10 +555,13 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                     body: {
                         telefone: foneLimpo,
                         templateName: "doc_assinado_confirmacao",
-                        variaveisBody: [primeiroNome, tipo, mes], 
-                        linkDocumentoHeader: linkPdf,             
+                        variaveisBody: [primeiroNome, tipo, mes],
+                        linkDocumentoHeader: linkPdf,
                         urlButtonParam: null,
-                        documentToken: tokenAtualDaUrl 
+                        documentToken: tokenAtualDaUrl,
+                        // 👇 Amarra a confirmação à pessoa certa no log (mensagens_whatsapp_log) sem
+                        // depender de "adivinhar pelo telefone" — o index.html já faz igual.
+                        colaboradorId: (typeof dadosDoc !== 'undefined' && dadosDoc) ? dadosDoc.colaborador_id : null
                     }
                 });
 
