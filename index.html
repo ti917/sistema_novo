@@ -49932,16 +49932,106 @@ window._reservarSlotEnvioZap = function() {
     return inicio - agora; // quanto esperar antes de largar este envio
 };
 
-window.enviarMensagemGraphAPI = async function(telefoneBruto, ...resto) {
-    // Telefone vazio nem chega na rede: devolve false sem ocupar vaga na fila.
-    if (!telefoneBruto || !String(telefoneBruto).replace(/\D/g, '')) return false;
+// Versão DETALHADA: devolve { ok: true } ou { ok: false, motivo: 'texto em português' }.
+// Usada pelos disparos em lote que precisam mostrar POR QUE cada envio falhou.
+window.enviarMensagemGraphAPIDetalhado = async function(telefoneBruto, ...resto) {
+    // Telefone vazio nem chega na rede: não ocupa vaga na fila.
+    if (!telefoneBruto || !String(telefoneBruto).replace(/\D/g, '')) {
+        return { ok: false, motivo: 'Sem telefone cadastrado' };
+    }
 
     const espera = window._reservarSlotEnvioZap();
     if (espera > 0) await new Promise(r => setTimeout(r, espera));
 
-    const ok = await window._enviarMensagemGraphAPIDireto(telefoneBruto, ...resto);
-    window._zapFalhasSeguidas = ok ? 0 : window._zapFalhasSeguidas + 1;
-    return ok;
+    const res = await window._enviarMensagemGraphAPIDireto(telefoneBruto, ...resto);
+    window._zapFalhasSeguidas = res.ok ? 0 : window._zapFalhasSeguidas + 1;
+    return res;
+};
+
+// Versão de sempre (devolve true/false): os ~43 pontos de chamada do sistema continuam iguais.
+window.enviarMensagemGraphAPI = async function(...args) {
+    return (await window.enviarMensagemGraphAPIDetalhado(...args)).ok;
+};
+
+// =====================================
+// 🧾 MOTIVO DA FALHA EM PORTUGUÊS + POPUP DE FALHAS DOS DISPAROS EM LOTE (05/10/2026)
+//
+// Regra pedida pelo RH: no fim de um lote, quem DEU CERTO continua só com a mensagem de
+// resumo de sempre (sem listar nomes); quem FALHOU aparece num popup com nome, unidade e o
+// motivo — pra o RH saber exatamente com quem agir (ex.: número sem WhatsApp).
+// =====================================
+window.traduzirErroEnvioZap = function(detalhe) {
+    const t = String(detalhe == null ? '' : detalhe);
+    const tl = t.toLowerCase();
+    if (/131026|undeliverable|not a valid whatsapp|not.*whatsapp (user|account)|sem whatsapp|incapaz de entregar/i.test(t))
+        return 'Número sem WhatsApp, inválido ou que não pode receber a mensagem';
+    if (/131047|re-?engagement|24 hours|24h/i.test(t))
+        return 'Fora da janela de 24h do WhatsApp (precisa responder primeiro)';
+    if (/131056|130429|rate.?limit|too many|spam|pair rate/i.test(t))
+        return 'Limite de envios do WhatsApp atingido — tente de novo mais tarde';
+    if (/131042|payment|billing/i.test(t))
+        return 'Problema de pagamento na conta do WhatsApp Business';
+    if (/132001|template.*(does not exist|not exist|not found|not approved)|n[aã]o existe|n[aã]o aprovad/i.test(t))
+        return 'Modelo de mensagem não encontrado ou não aprovado na Meta';
+    if (/132000|132005|132007|132012|132015|132016|parameter|variable|vari[aá]ve/i.test(t))
+        return 'Dados do modelo de mensagem inválidos (variáveis ou arquivo)';
+    if (/131053|media|arquivo|document.*(download|upload)|unsupported/i.test(t))
+        return 'Não foi possível anexar/baixar o arquivo da mensagem';
+    if (/invalid.*(phone|number)|telefone|phone number/i.test(t))
+        return 'Telefone inválido';
+    if (/failed to fetch|network|load failed|timeout|timed out|abort|\b5\d\d\b|gateway|sobrecarreg|conex/i.test(tl))
+        return 'Falha de conexão com o servidor — tente reenviar';
+    return t ? ('Erro no envio: ' + t.replace(/\s+/g, ' ').slice(0, 160)) : 'Erro desconhecido no envio';
+};
+
+/**
+ * Mostra o popup de falhas. `falhas` = [{ nome, unidade, motivo }]. Não faz nada se a lista for vazia
+ * (quando todo mundo recebeu, ninguém é listado).
+ * opcoes.dica = texto extra de orientação no rodapé do popup.
+ */
+window.mostrarFalhasEnvioZap = function(falhas, opcoes) {
+    if (!falhas || !falhas.length) return;
+    opcoes = opcoes || {};
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    const antigo = document.getElementById('modal-falhas-envio-zap');
+    if (antigo) antigo.remove();
+
+    const linhas = falhas.map(f => `
+        <div style="padding: 10px 12px; border-radius: 8px; background: rgba(220,53,69,0.08); border-left: 3px solid var(--cor-perigo); margin-bottom: 8px; text-align: left;">
+            <div style="color: var(--cor-texto-principal); font-weight: 600;">${esc(f.nome || 'Sem nome')}
+                <span style="color: var(--cor-texto-secundario); font-weight: 400;"> — ${esc(f.unidade || 'Unidade não informada')}</span>
+            </div>
+            <div style="color: #ff8a95; font-size: 0.85rem; margin-top: 3px;"><i class="fa-solid fa-circle-exclamation"></i> ${esc(f.motivo || 'Motivo não identificado')}</div>
+        </div>`).join('');
+
+    const overlay = document.createElement('div');
+    overlay.id = 'modal-falhas-envio-zap';
+    overlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2147483000; display: flex; align-items: center; justify-content: center; padding: 16px;';
+    overlay.innerHTML = `
+        <div style="background: var(--cor-secundaria, #003366); border: 1px solid var(--cor-borda); border-radius: 16px; width: 100%; max-width: 560px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 15px 40px rgba(0,0,0,0.6);">
+            <div style="padding: 20px 22px 10px 22px; text-align: center;">
+                <i class="fa-solid fa-triangle-exclamation" style="color: var(--cor-perigo); font-size: 2rem; margin-bottom: 8px;"></i>
+                <h3 style="color: var(--cor-texto-principal); margin: 0 0 4px 0;">${esc(opcoes.titulo || 'Alguns envios não deram certo')}</h3>
+                <p style="color: var(--cor-texto-secundario); font-size: 0.9rem; margin: 0;"><b style="color: var(--cor-perigo);">${falhas.length}</b> colaborador(es) não receberam a mensagem:</p>
+            </div>
+            <div style="padding: 10px 22px; overflow-y: auto; flex: 1;">${linhas}</div>
+            ${opcoes.dica ? `<div style="padding: 0 22px 10px 22px; color: var(--cor-texto-secundario); font-size: 0.82rem; text-align: left;"><i class="fa-solid fa-lightbulb" style="color: var(--cor-acento);"></i> ${esc(opcoes.dica)}</div>` : ''}
+            <div style="padding: 12px 22px 20px 22px; display: flex; gap: 10px;">
+                <button type="button" id="btn-copiar-falhas-zap" class="btn-secondary" style="flex: 1;"><i class="fa-solid fa-copy"></i> Copiar lista</button>
+                <button type="button" id="btn-fechar-falhas-zap" class="btn-primary" style="flex: 1;"><i class="fa-solid fa-check"></i> Entendi</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    document.getElementById('btn-fechar-falhas-zap').onclick = () => overlay.remove();
+    document.getElementById('btn-copiar-falhas-zap').onclick = () => {
+        const texto = falhas.map(f => `${f.nome || 'Sem nome'} — ${f.unidade || 'Unidade não informada'}: ${f.motivo || 'Motivo não identificado'}`).join('\n');
+        const btn = document.getElementById('btn-copiar-falhas-zap');
+        const ok = () => { if (btn) btn.innerHTML = '<i class="fa-solid fa-check"></i> Copiado!'; };
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(texto).then(ok).catch(() => {});
+        else ok();
+    };
 };
 
 // =====================================
@@ -49950,7 +50040,7 @@ window.enviarMensagemGraphAPI = async function(telefoneBruto, ...resto) {
 // =====================================
 window._enviarMensagemGraphAPIDireto = async function(telefoneBruto, templateName, variaveisBody, linkDocumentoHeader, urlButtonParam, nomeArquivoDocumento, colaboradorId, flowToken) {
     let telefone = telefoneBruto.replace(/\D/g, '');
-    if (!telefone) return false;
+    if (!telefone) return { ok: false, motivo: 'Sem telefone cadastrado' };
     if (!telefone.startsWith('55')) telefone = '55' + telefone;
 
     // 👇 A MÁGICA: Limpa todas as variáveis para impedir que quebras de linha (Enter) crashem a API da Meta
@@ -50019,7 +50109,7 @@ window._enviarMensagemGraphAPIDireto = async function(telefoneBruto, templateNam
                 }
             }
             console.error("Erro no envio WhatsApp:", detalhe || error);
-            return false;
+            return { ok: false, motivo: window.traduzirErroEnvioZap(detalhe || (error && error.message) || '') };
         }
         // 📲 Termo/contrato avulso (e demais templates rastreados): faz a conversa já aparecer no
         // Chat da Clara logo após o envio, pra o RH acompanhar entregue/lido. Espera ~2,5s porque
@@ -50032,10 +50122,10 @@ window._enviarMensagemGraphAPIDireto = async function(telefoneBruto, templateNam
                 }).catch(() => {});
             }, 2500);
         }
-        return true;
+        return { ok: true };
     } catch (e) {
         console.error("Erro de rede no disparo:", e);
-        return false;
+        return { ok: false, motivo: window.traduzirErroEnvioZap((e && e.message) || 'Falha de conexão') };
     }
 };
 
@@ -64961,6 +65051,7 @@ window.iniciarDisparoEmLote = async function() {
 
     let enviados = 0;
     let falhas = 0;
+    const listaFalhas = []; // 👈 quem NÃO recebeu: { nome, unidade, motivo } — vira o popup no final
     
     const formatarNomePastaLocal = (str) => {
         if (!str || str === 'undefined') return 'INFORMACAO_AUSENTE';
@@ -64974,7 +65065,7 @@ window.iniciarDisparoEmLote = async function() {
         const loteAtual = arquivosLoteValidados.slice(i, i + tamanhoLote);
         
         const promessasLote = loteAtual.map(async (item) => {
-            if (!item.valido) return false;
+            if (!item.valido) return { ok: false, nome: item.colab?.nome, unidade: item.colab?.unidade, motivo: 'Documento não validado no lote' };
             const c = item.colab;
 
             try {
@@ -65017,13 +65108,13 @@ window.iniciarDisparoEmLote = async function() {
                 if (errInsert) throw errInsert;
 
                 // 3. Dispara o WhatsApp (GraphAPI)
-                let enviadoOk = false;
+                let enviadoRes = { ok: false, motivo: 'Erro desconhecido no envio' };
 
                 // 👇 Nome de arquivo dinâmico — antes ia tudo com nome fixo de EPI
                 const nomeArquivoZap = `${tipoLimpo}_${tipo === 'Informe de Rendimentos' ? anoStr : (mesStr + '_' + anoStr)}.pdf`;
 
                 if (tipo === 'Informe de Rendimentos') {
-                    enviadoOk = await enviarMensagemGraphAPI(
+                    enviadoRes = await enviarMensagemGraphAPIDetalhado(
                         fone, 
                         'informe_rendimentos_entregue', 
                         [primeiroNome, anoStr], 
@@ -65032,7 +65123,7 @@ window.iniciarDisparoEmLote = async function() {
                         nomeArquivoZap
                     );
                 } else {
-                    enviadoOk = await enviarMensagemGraphAPI(
+                    enviadoRes = await enviarMensagemGraphAPIDetalhado(
                         fone, 
                         'envio_de_holerite_sistema_novo', 
                         [primeiroNome, tipo, mesNomeAno], 
@@ -65042,19 +65133,21 @@ window.iniciarDisparoEmLote = async function() {
                     );
                 }
                 
-                return enviadoOk;
+                return { ok: enviadoRes.ok, nome: c.nome, unidade: unidadeFinal, motivo: enviadoRes.motivo };
             } catch (e) {
                 console.error("Erro no processamento do colab:", c.nome, e);
-                return false;
+                // Falha ANTES do envio (subir PDF pro storage ou salvar no banco): mostra o motivo real.
+                const msgErro = (e && (e.message || e.details)) ? String(e.message || e.details) : 'erro desconhecido';
+                return { ok: false, nome: c.nome, unidade: c.unidade, motivo: 'Falha ao preparar o documento (' + window.traduzirErroEnvioZap(msgErro).replace(/^Erro no envio: /, '') + ')' };
             }
         });
 
         // Aguarda os 10 terminarem
         const resultados = await Promise.all(promessasLote);
         
-        resultados.forEach(ok => {
-            if (ok) enviados++;
-            else falhas++;
+        resultados.forEach(r => {
+            if (r && r.ok) enviados++;
+            else { falhas++; listaFalhas.push({ nome: r && r.nome, unidade: r && r.unidade, motivo: r && r.motivo }); }
         });
 
         // Descansa 1 segundo entre os lotes (Escudo Anti-Spam da Meta)
@@ -65063,7 +65156,12 @@ window.iniciarDisparoEmLote = async function() {
         }
     }
 
-    mostrarAlerta(`Disparo concluído!<br>Enviados com sucesso: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+    mostrarAlerta(`Disparo concluído!<br>Enviados com sucesso: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, falhas > 0 ? "aviso" : "sucesso");
+    // 👇 Só aparece popup se alguém falhou — quem recebeu fica só no resumo acima, sem listar nomes.
+    window.mostrarFalhasEnvioZap(listaFalhas, {
+        titulo: 'Alguns documentos não foram enviados',
+        dica: 'Os documentos que chegaram a ser salvos ficam na tela de Controle — corrija o telefone no cadastro e use "Reenviar" para esses colaboradores.'
+    });
     limparLoteDocs();
     btn.disabled = false;
     btn.innerHTML = '<i class="fa-brands fa-whatsapp fa-lg"></i> Iniciar Recorte e Disparo Automático (WhatsApp)';
@@ -65519,6 +65617,7 @@ window.filtrarTabelaDocs = function() {
 
     let enviados = 0;
     let falhas = 0;
+    const listaFalhas = []; // 👈 quem NÃO recebeu: { nome, unidade, motivo } — vira o popup no final
     const tamanhoLote = 10; // 👇 MOTOR TURBO: Processa de 10 em 10 simultaneamente
 
     try {
@@ -65537,14 +65636,14 @@ window.filtrarTabelaDocs = function() {
                     const perfil = perfis.find(x => x.id === doc.colaborador_id);
                     const fone = perfil?.dados_admissao?.telefone || doc.telefone;
 
-                    if (!fone) return false;
+                    if (!fone) return { ok: false, nome: doc.nome, unidade: doc.unidade, motivo: 'Sem telefone cadastrado' };
 
                     const primeiroNome = doc.nome.split(' ')[0];
-                    let sucesso = false;
+                    let sucesso = { ok: false, motivo: 'Erro desconhecido no envio' };
 
                     if (doc.tipo_documento === 'Informe de Rendimentos') {
                         const anoRef = doc.mes_ano.split('/')[1] || doc.mes_ano;
-                        sucesso = await enviarMensagemGraphAPI(
+                        sucesso = await enviarMensagemGraphAPIDetalhado(
                             fone, 
                             'informe_rendimentos_entregue', 
                             [primeiroNome, anoRef], 
@@ -65557,7 +65656,7 @@ window.filtrarTabelaDocs = function() {
                         const mesesExtenso = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'DEZEMBRO'];
                         const mesNomeAno = partes.length === 2 ? `${mesesExtenso[parseInt(partes[0]) - 1]} de ${partes[1]}` : doc.mes_ano;
 
-                        sucesso = await enviarMensagemGraphAPI(
+                        sucesso = await enviarMensagemGraphAPIDetalhado(
                             fone, 
                             'envio_de_holerite_sistema_novo', 
                             [primeiroNome, doc.tipo_documento, mesNomeAno], 
@@ -65565,15 +65664,18 @@ window.filtrarTabelaDocs = function() {
                             doc.token                        
                         );
                     }
-                    return sucesso;
+                    return { ok: sucesso.ok, nome: doc.nome, unidade: doc.unidade, motivo: sucesso.motivo };
                 } catch (e) {
-                    return false;
+                    return { ok: false, nome: doc && doc.nome, unidade: doc && doc.unidade, motivo: window.traduzirErroEnvioZap((e && e.message) || 'erro desconhecido') };
                 }
             });
 
             // Executa os 10 disparos do lote ao mesmo tempo!
             const resultados = await Promise.all(promessasLote);
-            resultados.forEach(ok => { if (ok) enviados++; else falhas++; });
+            resultados.forEach(r => {
+                if (r && r.ok) enviados++;
+                else { falhas++; listaFalhas.push({ nome: r && r.nome, unidade: r && r.unidade, motivo: r && r.motivo }); }
+            });
 
             // Descansa 1 segundo entre os lotes (Escudo Anti-Spam exigido pela Meta)
             if (i + tamanhoLote < pendentesAtuaisFiltro.length) {
@@ -65581,7 +65683,12 @@ window.filtrarTabelaDocs = function() {
             }
         }
 
-        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${enviados}</b> | Falhas: <b>${falhas}</b>`, falhas > 0 ? "aviso" : "sucesso");
+        // 👇 Só aparece popup se alguém falhou — quem recebeu fica só no resumo acima, sem listar nomes.
+        window.mostrarFalhasEnvioZap(listaFalhas, {
+            titulo: 'A cobrança não chegou para alguns colaboradores',
+            dica: 'Confira o telefone no cadastro do colaborador e tente "Reenviar" depois.'
+        });
         
         // Recarrega o status do dashboard
         if (typeof carregarStatusHolerites === 'function') carregarStatusHolerites();
@@ -68379,6 +68486,7 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
 
     let sucessos = 0;
     let falhas = 0;
+    const listaFalhas = []; // 👈 quem NÃO recebeu: { nome, unidade, motivo } — vira o popup no final
 
     try {
         // 1. Sobe a Imagem para o Storage
@@ -68398,26 +68506,27 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
             
             // Cria as tarefas de disparo ao mesmo tempo
             const promessasLote = loteAtual.map(async (c) => {
-                const fone = c.dados_admissao.telefone;
+                const fone = c.dados_admissao?.telefone;
                 const primeiroNome = c.nome.split(' ')[0];
 
                 // Template na Meta: envio_comunicado_clara
-                return await enviarMensagemGraphAPI(
+                const res = await enviarMensagemGraphAPIDetalhado(
                     fone, 
                     'envio_comunicado_clara', 
                     [primeiroNome, textoMensagem], 
                     linkImagem, 
                     null // Sem botão dinâmico
                 );
+                return { ok: res.ok, nome: c.nome, unidade: c.unidade || unidade, motivo: res.motivo };
             });
 
             // Executa os 10 disparos JUNTOS e aguarda eles finalizarem
             const resultados = await Promise.all(promessasLote);
 
             // Confere quem recebeu e quem falhou nesse lote
-            resultados.forEach(enviadoOk => {
-                if (enviadoOk) sucessos++; 
-                else falhas++;
+            resultados.forEach(r => {
+                if (r && r.ok) sucessos++; 
+                else { falhas++; listaFalhas.push({ nome: r && r.nome, unidade: r && r.unidade, motivo: r && r.motivo }); }
             });
 
             // Descansa 1 segundo entre os lotes (Escudo Anti-Spam da Meta)
@@ -68426,7 +68535,12 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
             }
         }
 
-        mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, falhas > 0 ? "aviso" : "sucesso");
+        // 👇 Só aparece popup se alguém falhou — quem recebeu fica só no resumo acima, sem listar nomes.
+        window.mostrarFalhasEnvioZap(listaFalhas, {
+            titulo: 'O comunicado não chegou para alguns colaboradores',
+            dica: 'Confira o telefone no cadastro do colaborador.'
+        });
         document.getElementById('form-zap-comunicado').reset();
         document.getElementById('zap-com-publico-qtd').innerText = '0';
         
