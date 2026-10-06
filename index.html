@@ -105437,6 +105437,54 @@ window.onMudarEscopoBeneficioExtra = function() {
     document.getElementById('bloco-colaborador-beneficio-extra').classList.toggle('hidden', escopo !== 'selecionar');
 };
 
+// 🗓️ Regra "quem ainda tem o que receber no período filtrado":
+//  - VR: início do período escolhido (vr-data-inicio) | VA: 1º dia do mês escolhido (va-mes)
+//  - sem período escolhido: 1º dia do mês atual
+//  - quem está CUMPRINDO AVISO (status 'Desligado' com último dia ainda não passado) aparece normalmente
+//  - só some quando o último dia dele caiu ANTES do período filtrado (aí não tem nada a receber)
+window._beInicioFiltro = function() {
+    const tipo = window.beneficiosExtrasTipoAtual;
+    let ini = null;
+    try {
+        if (tipo === 'vr') {
+            const v = (document.getElementById('vr-data-inicio') || {}).value || '';
+            const m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (m) ini = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+        } else {
+            const v = (document.getElementById('va-mes') || {}).value || '';
+            const m = v.match(/^(\d{4})-(\d{2})/);
+            if (m) ini = new Date(parseInt(m[1]), parseInt(m[2]) - 1, 1);
+        }
+    } catch (e) { ini = null; }
+    if (!ini) { const h = new Date(); ini = new Date(h.getFullYear(), h.getMonth(), 1); }
+    ini.setHours(0, 0, 0, 0);
+    return ini;
+};
+
+// 'sim' = ainda tem o que receber | 'nao' = último dia já passou antes do período | 'indef' = não dá pra saber
+window._beSituacaoNoPeriodo = function(colab, ini) {
+    if (!colab) return 'indef';
+    if (colab.status !== 'Desligado') return 'sim';
+    let dr = colab.dados_rescisao;
+    if (typeof dr === 'string') { try { dr = JSON.parse(dr); } catch (e) { dr = null; } }
+    const ud = dr && dr.ultimo_dia ? String(dr.ultimo_dia) : '';
+    const m = ud.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if (!m) return /defin/i.test(ud) ? 'sim' : 'indef';   // "A definir na assinatura" = ainda cumprindo aviso
+    const d = new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+    d.setHours(0, 0, 0, 0);
+    return d >= ini ? 'sim' : 'nao';
+};
+
+// texto curto para o selo "cumprindo aviso"
+window._beTextoAviso = function(colab) {
+    if (!colab || colab.status !== 'Desligado') return '';
+    let dr = colab.dados_rescisao;
+    if (typeof dr === 'string') { try { dr = JSON.parse(dr); } catch (e) { dr = null; } }
+    const ud = dr && dr.ultimo_dia ? String(dr.ultimo_dia) : '';
+    const m = ud.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    return m ? `cumprindo aviso — último dia ${m[1]}/${m[2]}/${m[3]}` : 'cumprindo aviso — último dia a definir';
+};
+
 window.carregarColaboradoresBeneficioExtra = async function() {
     const unidade = document.getElementById('be-unidade').value;
     const listaColab = document.getElementById('be-colaborador-lista');
@@ -105447,21 +105495,27 @@ window.carregarColaboradoresBeneficioExtra = async function() {
     }
     const { data, error } = await supabaseClient
         .from('perfis')
-        .select('id, nome')
+        .select('id, nome, status, dados_rescisao')
         .eq('unidade', unidade)
-        .eq('status', 'Ativo')
+        .in('status', ['Ativo', 'Desligado'])
         .order('nome');
 
-    if (error || !data || data.length === 0) {
-        listaColab.innerHTML = '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhum colaborador ativo encontrado nessa unidade.</span>';
+    const ini = window._beInicioFiltro();
+    const lista = (data || []).filter(c => c.status === 'Ativo' || window._beSituacaoNoPeriodo(c, ini) === 'sim');
+
+    if (error || lista.length === 0) {
+        listaColab.innerHTML = '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Nenhum colaborador ativo (ou cumprindo aviso) encontrado nessa unidade.</span>';
         return;
     }
 
-    listaColab.innerHTML = data.map(c => `
+    listaColab.innerHTML = lista.map(c => {
+        const selo = window._beTextoAviso(c);
+        return `
         <label class="linha-chk-be-colaborador" style="display: flex; align-items: center; gap: 10px; font-size: 0.85rem; cursor: pointer; padding: 7px 8px; border-radius: 6px; transition: background-color 0.15s;" onmouseover="this.style.backgroundColor='rgba(255,193,7,0.08)'" onmouseout="this.style.backgroundColor='transparent'">
             <input type="checkbox" class="chk-be-colaborador" value="${c.id}" data-nome="${c.nome.replace(/"/g, '&quot;')}" style="width: 17px; height: 17px; min-width: 17px; accent-color: #ffc107; cursor: pointer; margin: 0;">
-            <span>${c.nome}</span>
-        </label>`).join('');
+            <span>${c.nome}${selo ? ` <span style="color: #ff9800; font-size: 0.75rem;">• ${selo}</span>` : ''}</span>
+        </label>`;
+    }).join('');
 };
 
 window.marcarTodosBeColaborador = function(marcar) {
@@ -105596,6 +105650,23 @@ window.criarBeneficioCatalogo = async function() {
     await carregarCatalogoBeneficiosExtras();
 };
 
+window._beInfoColabAtribuicoes = {};
+window._beCarregarInfoColabAtribuicoes = async function() {
+    window._beInfoColabAtribuicoes = {};
+    try {
+        const ids = [...new Set((window.atribuicoesBeneficiosExtras || []).map(a => a.colaborador_id).filter(Boolean))];
+        for (let k = 0; k < ids.length; k += 40) {
+            const { data: ps, error: eP } = await supabaseClient.from('perfis').select('id, status, dados_rescisao').in('id', ids.slice(k, k + 40));
+            if (eP) throw eP;
+            (ps || []).forEach(p => { window._beInfoColabAtribuicoes[p.id] = p; });
+        }
+    } catch (e) {
+        // se não conseguir checar, a lista mostra TODOS (nunca esconde por engano)
+        console.warn('Benefícios extras: não consegui checar a situação dos colaboradores (lista mostra todos):', e);
+        window._beInfoColabAtribuicoes = {};
+    }
+};
+
 window.carregarAtribuicoesBeneficiosExtras = async function() {
     const tipo = window.beneficiosExtrasTipoAtual;
     const { data, error } = await supabaseClient
@@ -105605,18 +105676,34 @@ window.carregarAtribuicoesBeneficiosExtras = async function() {
         .order('criado_em', { ascending: false });
 
     window.atribuicoesBeneficiosExtras = (!error && data) ? data : [];
+    await window._beCarregarInfoColabAtribuicoes();
     renderizarListaAtribuicoesBeneficiosExtras();
 };
 
 window.renderizarListaAtribuicoesBeneficiosExtras = function() {
     const cont = document.getElementById('lista-atribuicoes-beneficios-extras');
-    if (window.atribuicoesBeneficiosExtras.length === 0) {
+    const todas = window.atribuicoesBeneficiosExtras || [];
+    if (todas.length === 0) {
         cont.innerHTML = '<p style="color: var(--cor-texto-secundario); font-size: 0.85rem; text-align: center;">Nenhum benefício cadastrado ainda.</p>';
         return;
     }
-    cont.innerHTML = window.atribuicoesBeneficiosExtras.map(a => {
+    // Esconde (SEM apagar) só quem teve o último dia ANTES do período filtrado: não tem nada a receber.
+    // Quem está cumprindo aviso continua aparecendo até o último dia.
+    const ini = window._beInicioFiltro();
+    const info = window._beInfoColabAtribuicoes || {};
+    const visiveis = todas.filter(a => !(a.colaborador_id && window._beSituacaoNoPeriodo(info[a.colaborador_id], ini) === 'nao'));
+    const ocultos = todas.length - visiveis.length;
+    const notaOcultos = ocultos > 0
+        ? `<p style="color: var(--cor-texto-secundario); font-size: 0.75rem; text-align: center; margin-top: 4px;">${ocultos} benefício(s) de colaborador(es) com último dia antes deste período ficaram ocultos (não têm nada a receber). Nada foi apagado.</p>`
+        : '';
+    if (visiveis.length === 0) {
+        cont.innerHTML = '<p style="color: var(--cor-texto-secundario); font-size: 0.85rem; text-align: center;">Nenhum benefício a receber neste período.</p>' + notaOcultos;
+        return;
+    }
+    cont.innerHTML = visiveis.map(a => {
+        const selo = (a.colaborador_id && window._beSituacaoNoPeriodo(info[a.colaborador_id], ini) === 'sim') ? window._beTextoAviso(info[a.colaborador_id]) : '';
         const alvo = a.colaborador_id
-            ? `<b>${a.colaborador_nome}</b> <span style="color: var(--cor-texto-secundario);">(${a.unidade})</span>`
+            ? `<b>${a.colaborador_nome}</b> <span style="color: var(--cor-texto-secundario);">(${a.unidade})</span>${selo ? ` <span style="color: #ff9800; font-size: 0.75rem;">• ${selo}</span>` : ''}`
             : `<b style="color: #ffc107;">👥 Todos — ${a.unidade}</b>`;
         return `
         <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255,193,7,0.06); border: 1px solid rgba(255,193,7,0.25); border-radius: 8px; padding: 8px 12px;">
@@ -105627,7 +105714,7 @@ window.renderizarListaAtribuicoesBeneficiosExtras = function() {
                 <i class="fa-solid fa-trash"></i>
             </button>
         </div>`;
-    }).join('');
+    }).join('') + notaOcultos;
 };
 
 window.adicionarAtribuicaoBeneficio = async function() {
