@@ -86777,8 +86777,10 @@ window.enviarTermosObrigatoriosAdmissao = async function(idColab, nome, empresa,
       // =========================================================================
 // MÁGICA: GERADOR AUTOMÁTICO DE TERMOS OBRIGATÓRIOS (REGIMENTO E PONTO)
 // =========================================================================
-window.gerarDocumentosAutomaticosPosAso = async function(idColab, nome, empresa, unidade, adm) {
-    if (!adm.telefone) return; // Se não tiver telefone, não tem como a Clara chamar para assinar
+window.gerarDocumentosAutomaticosPosAso = async function(idColab, nome, empresa, unidade, adm, opcoes) {
+    opcoes = opcoes || {};
+    const resultadosEnvio = []; // [{titulo, ok, motivo, pulado}]
+    if (!adm.telefone) return resultadosEnvio; // Se não tiver telefone, não tem como a Clara chamar para assinar
 
     const hojeBr = new Date().toLocaleDateString('pt-BR');
     const primeiroNome = nome.split(' ')[0];
@@ -86889,8 +86891,29 @@ DEPARTAMENTO DE RECURSOS HUMANOS {{EMPRESA}}`
         }
     ];
 
+    // 👇 TRAVA ANTI-DUPLICIDADE: nunca gera/envia de novo um termo que o colaborador JÁ TEM em
+    //    documentos_avulsos (conta também o nome antigo "REGIMENTO INTERNO"). Vale pra qualquer
+    //    chamada (manual ou automática). Se o modal mandou escolher só alguns, respeita a escolha.
+    const _titulosJaTem = new Set();
+    {
+        const { data: _jaTem, error: _errJaTem } = await supabaseClient
+            .from('documentos_avulsos').select('titulo_documento')
+            .eq('colaborador_id', idColab)
+            .in('titulo_documento', ['REGIMENTO INTERNO E PROCEDIMENTOS CORPORATIVOS', 'REGIMENTO INTERNO', 'ORIENTAÇÃO SOBRE A MARCAÇÃO DE PONTO']);
+        if (_errJaTem && opcoes.somenteTitulos) throw new Error('Não consegui conferir o que o colaborador já recebeu: ' + _errJaTem.message);
+        (_jaTem || []).forEach(d => {
+            _titulosJaTem.add(d.titulo_documento);
+            if (d.titulo_documento === 'REGIMENTO INTERNO') _titulosJaTem.add('REGIMENTO INTERNO E PROCEDIMENTOS CORPORATIVOS');
+        });
+    }
+    const documentosParaEnviar = documentosGatilho.filter(d => {
+        if (Array.isArray(opcoes.somenteTitulos) && !opcoes.somenteTitulos.includes(d.titulo)) return false;
+        if (_titulosJaTem.has(d.titulo)) { resultadosEnvio.push({ titulo: d.titulo, ok: false, pulado: true, motivo: 'Já enviado anteriormente' }); return false; }
+        return true;
+    });
+
     // O Sistema injeta os dados reais e cria os documentos avulsos
-    for (let doc of documentosGatilho) {
+    for (let doc of documentosParaEnviar) {
         
         let textoPersonalizado = doc.texto
             .replace(/{{NOME}}/g, nome)
@@ -86916,20 +86939,31 @@ DEPARTAMENTO DE RECURSOS HUMANOS {{EMPRESA}}`
             criado_por: 'Sistema de Admissão' // Marca quem gerou o documento
         }]);
 
-        if (!errDB) {
+        if (errDB) {
+            resultadosEnvio.push({ titulo: doc.titulo, ok: false, motivo: 'Erro ao gravar o documento: ' + errDB.message });
+        } else {
             // Se salvou no banco, chama a Clara no Zap!
-            await enviarMensagemGraphAPI(
-                adm.telefone, 
+            const rEnvio = await window.enviarMensagemGraphAPIDetalhado(
+                adm.telefone,
                 'aviso_assinatura_documento', // Template da Meta para envio de Link
                 [primeiroNome, doc.titulo],   // Troca o {{1}} pelo Nome e {{2}} pelo Titulo
-                urlImagemReal,                // A Logo da Empresa             
-                tokenUnico                    // O Link da assinatura
+                urlImagemReal,                // A Logo da Empresa
+                tokenUnico,                   // O Link da assinatura
+                null,
+                idColab
             );
+            if (!rEnvio.ok) {
+                // Não deixa o termo "fantasma" no banco: se o WhatsApp falhou, remove o registro recém-criado
+                // pra poder reenviar depois (senão a trava acharia que já foi enviado).
+                try { await supabaseClient.from('documentos_avulsos').delete().eq('token', tokenUnico); } catch (_e) {}
+            }
+            resultadosEnvio.push({ titulo: doc.titulo, ok: !!rEnvio.ok, motivo: rEnvio.ok ? '' : (rEnvio.motivo || 'Falha no envio') });
         }
         
         // Pausa para o WhatsApp não travar por envio em massa (Evita rate limit da Meta)
         await new Promise(r => setTimeout(r, 1500));
     }
+    return resultadosEnvio;
 };
 
     // ========================================================
@@ -97821,46 +97855,129 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
 };
 
       window.dispararBoasVindasETermosManuais = async function(idColab, nomeColab, empresaColab, unidadeColab) {
-    const btn = event.currentTarget;
-    const textoOriginal = btn.innerHTML;
-    
-    const confirmado = await mostrarConfirmacao(`Deseja disparar a sequência de Boas-Vindas e os Termos Obrigatórios para o WhatsApp de <b>${nomeColab}</b>?`, "Enviar Mensagens da Clara");
-    if (!confirmado) return;
+    // Botão "Enviar Clara" / "Mandar Novamente": abre um modal mostrando o que JÁ foi enviado e o que ainda falta.
+    // Regimento e Ponto já enviados ficam TRAVADOS (não reenvia). Boas-Vindas pode ser reenviada de propósito
+    // (ex.: colaborador trocou de número e o RH corrigiu o telefone no cadastro).
+    const TIT_REG = 'REGIMENTO INTERNO E PROCEDIMENTOS CORPORATIVOS';
+    const TIT_PONTO = 'ORIENTAÇÃO SOBRE A MARCAÇÃO DE PONTO';
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const fmt = (iso) => { try { return new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (_e) { return ''; } };
 
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Disparando...';
+    document.getElementById('modal-clara-envio')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'modal-clara-envio';
+    overlay.className = 'modal-arquivo-overlay';
+    overlay.style.cssText = 'z-index: 100005; display: flex; justify-content: center; align-items: center; padding: 16px;';
+    overlay.innerHTML = '<div class="glass-card" style="width:100%; max-width:460px; text-align:center; border:1px solid #25D366;"><i class="fa-solid fa-circle-notch fa-spin" style="color:#25D366;"></i> Conferindo o que já foi enviado...</div>';
+    document.body.appendChild(overlay);
+    const fechar = () => overlay.remove();
 
     try {
-        const { data: perfil, error } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
-        if (error || !perfil || !perfil.dados_admissao) throw new Error("Não foi possível carregar o perfil do colaborador.");
+        const [rPerfil, rDocs, rLog] = await Promise.all([
+            supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single(),
+            supabaseClient.from('documentos_avulsos').select('titulo_documento, status, created_at').eq('colaborador_id', idColab)
+                .in('titulo_documento', [TIT_REG, 'REGIMENTO INTERNO', TIT_PONTO]).order('created_at', { ascending: false }),
+            supabaseClient.from('mensagens_whatsapp_log').select('criado_em, status').eq('colaborador_id', idColab)
+                .eq('template_name', 'boas_vindas_clara').order('criado_em', { ascending: false }).limit(10)
+        ]);
+        if (rPerfil.error || !rPerfil.data || !rPerfil.data.dados_admissao) throw new Error('Não foi possível carregar o perfil do colaborador.');
+        if (rDocs.error) throw new Error('Não foi possível conferir os documentos já enviados: ' + rDocs.error.message);
+        const adm = rPerfil.data.dados_admissao;
+        const telefone = adm.telefone || '';
+        const semTelefone = !String(telefone).replace(/\D/g, '');
 
-        const adm = perfil.dados_admissao;
-        if (!adm.telefone) return mostrarAlerta("Este colaborador não possui telefone/WhatsApp cadastrado!", "erro");
+        const docReg = (rDocs.data || []).find(d => d.titulo_documento === TIT_REG || d.titulo_documento === 'REGIMENTO INTERNO');
+        const docPonto = (rDocs.data || []).find(d => d.titulo_documento === TIT_PONTO);
+        const logsBV = (rLog && rLog.data) || [];
+        const bvOk = logsBV.find(l => !/falh|erro|fail|rejeit/i.test(String(l.status || '')));
 
-        const primeiroNome = nomeColab.split(' ')[0];
+        const linha = (id, titulo, jaEnviado, detalheEnviado, travado) => {
+            const cor = jaEnviado ? '#25D366' : '#ff9800';
+            const icone = jaEnviado ? 'fa-circle-check' : 'fa-clock';
+            const txt = jaEnviado ? detalheEnviado : 'Ainda não enviado';
+            const marcadoPadrao = !jaEnviado;
+            return `<label style="display:flex; align-items:flex-start; gap:12px; padding:12px; border-radius:10px; border:1px solid ${travado ? 'var(--cor-borda)' : cor + '66'}; background:rgba(0,0,0,0.15); margin-bottom:10px; text-align:left; ${travado ? 'opacity:0.75;' : 'cursor:pointer;'}">
+                <input type="checkbox" id="${id}" ${marcadoPadrao ? 'checked' : ''} ${travado ? 'disabled' : ''} style="margin-top:4px; width:18px; height:18px; accent-color:#25D366; flex-shrink:0;" onchange="window._atualizarBotaoModalClara()">
+                <span style="flex:1; min-width:0;">
+                    <strong style="display:block; color:var(--cor-texto-principal); font-size:0.95rem;">${titulo}</strong>
+                    <span style="display:block; color:${cor}; font-size:0.8rem; margin-top:3px;"><i class="fa-solid ${icone}"></i> ${txt}</span>
+                    ${travado ? '<span style="display:block; color:var(--cor-texto-secundario); font-size:0.75rem; margin-top:3px;"><i class="fa-solid fa-lock"></i> Já enviado: não é reenviado.</span>' : ''}
+                </span>
+            </label>`;
+        };
 
-        // 1. Mensagem de Boas-Vindas
-        mostrarAlerta("1/3: Enviando mensagem de boas-vindas...", "aviso");
-        await enviarMensagemGraphAPI(adm.telefone, 'boas_vindas_clara', [primeiroNome], null, null);
-        
-        await new Promise(r => setTimeout(r, 1500)); // Pausa de segurança
+        const bvDetalhe = bvOk ? `Enviada em ${fmt(bvOk.criado_em)}${bvOk.status ? ' (' + esc(bvOk.status) + ')' : ''}` : '';
+        const bvDica = bvOk ? '<span style="display:block; color:var(--cor-texto-secundario); font-size:0.75rem; margin-top:3px;">Marque só se precisar reenviar (ex.: o colaborador trocou de número e você já corrigiu o telefone).</span>' : '';
 
-        // 2 e 3. Termos Obrigatórios (Regimento + Ponto)
-        mostrarAlerta("2/3 e 3/3: Gerando e enviando termos obrigatórios...", "aviso");
-        await window.gerarDocumentosAutomaticosPosAso(idColab, nomeColab, empresaColab, unidadeColab, adm);
+        let htmlBV = linha('clara-chk-bv', 'Mensagem de Boas-Vindas', !!bvOk, bvDetalhe, false);
+        if (bvOk) htmlBV = htmlBV.replace('</span>\n            </label>', bvDica + '</span>\n            </label>');
 
-        mostrarAlerta(`Sequência enviada com sucesso para o WhatsApp de ${primeiroNome}!`, "sucesso");
+        overlay.innerHTML = `
+        <div class="glass-card" style="width:100%; max-width:480px; border:1px solid #25D366; position:relative; max-height:92vh; overflow-y:auto;">
+            <button onclick="document.getElementById('modal-clara-envio').remove()" style="position:absolute; top:12px; right:14px; background:none; border:none; color:var(--cor-texto-principal); cursor:pointer; font-size:1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color:#25D366; margin:0 0 4px 0;"><i class="fa-brands fa-whatsapp"></i> Clara no WhatsApp</h3>
+            <p style="margin:0 0 4px 0; color:var(--cor-texto-principal); font-weight:700;">${esc(nomeColab)}</p>
+            <p style="margin:0 0 16px 0; font-size:0.85rem; color:${semTelefone ? '#dc3545' : 'var(--cor-texto-secundario)'};"><i class="fa-solid fa-phone"></i> ${semTelefone ? 'Sem telefone cadastrado, edite o cadastro antes de enviar.' : esc(telefone)}</p>
+            ${htmlBV}
+            ${linha('clara-chk-reg', 'Regimento Interno e Procedimentos', !!docReg, docReg ? `Enviado em ${fmt(docReg.created_at)} (${esc(docReg.status || 'Pendente')})` : '', !!docReg)}
+            ${linha('clara-chk-ponto', 'Orientação sobre a Marcação de Ponto', !!docPonto, docPonto ? `Enviado em ${fmt(docPonto.created_at)} (${esc(docPonto.status || 'Pendente')})` : '', !!docPonto)}
+            <div style="display:flex; gap:10px; margin-top:16px;">
+                <button class="btn-secondary" style="flex:1; justify-content:center; height:46px;" onclick="document.getElementById('modal-clara-envio').remove()">Cancelar</button>
+                <button id="btn-clara-enviar-selecionados" class="btn-primary" style="flex:1; justify-content:center; height:46px; background:#25D366; color:#fff; border:none; font-weight:bold;" ${semTelefone ? 'disabled' : ''}>
+                    <i class="fa-solid fa-paper-plane"></i> Enviar selecionados
+                </button>
+            </div>
+        </div>`;
 
-        // Recarrega a lista de admissões para o botão atualizar para "Mandar Novamente"
-        if (typeof carregarAdmissoesParaAdmin === 'function') {
-            carregarAdmissoesParaAdmin();
-        }
+        window._atualizarBotaoModalClara = function() {
+            const btn = document.getElementById('btn-clara-enviar-selecionados');
+            if (!btn) return;
+            const algum = ['clara-chk-bv', 'clara-chk-reg', 'clara-chk-ponto'].some(i => { const c = document.getElementById(i); return c && c.checked && !c.disabled; });
+            btn.disabled = semTelefone || !algum;
+            btn.style.opacity = btn.disabled ? '0.5' : '1';
+        };
+        window._atualizarBotaoModalClara();
 
+        document.getElementById('btn-clara-enviar-selecionados').onclick = async function() {
+            const btn = this;
+            const querBV = document.getElementById('clara-chk-bv')?.checked;
+            const titulos = [];
+            const cReg = document.getElementById('clara-chk-reg'); if (cReg && cReg.checked && !cReg.disabled) titulos.push(TIT_REG);
+            const cPonto = document.getElementById('clara-chk-ponto'); if (cPonto && cPonto.checked && !cPonto.disabled) titulos.push(TIT_PONTO);
+            if (!querBV && titulos.length === 0) return;
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando...';
+            const primeiroNome = nomeColab.split(' ')[0];
+            const resumo = [];
+            try {
+                if (querBV) {
+                    const r = await window.enviarMensagemGraphAPIDetalhado(telefone, 'boas_vindas_clara', [primeiroNome], null, null, null, idColab);
+                    resumo.push({ nome: 'Boas-Vindas', ok: !!r.ok, motivo: r.ok ? '' : (r.motivo || 'Falha no envio') });
+                    await new Promise(r2 => setTimeout(r2, 1500));
+                }
+                if (titulos.length > 0) {
+                    const res = await window.gerarDocumentosAutomaticosPosAso(idColab, nomeColab, empresaColab, unidadeColab, adm, { somenteTitulos: titulos });
+                    (res || []).forEach(x => resumo.push({ nome: x.titulo === TIT_REG ? 'Regimento Interno' : 'Orientação de Ponto', ok: x.ok, motivo: x.pulado ? 'Já tinha sido enviado, não reenviado' : x.motivo }));
+                }
+            } catch (err) {
+                resumo.push({ nome: 'Envio', ok: false, motivo: err.message });
+            }
+            fechar();
+            const falhou = resumo.filter(x => !x.ok);
+            const deuCerto = resumo.filter(x => x.ok).map(x => x.nome);
+            if (falhou.length === 0) {
+                mostrarAlerta(`Enviado para o WhatsApp de ${primeiroNome}: ${deuCerto.join(', ')}.`, 'sucesso');
+            } else {
+                const txtFalhas = falhou.map(x => `<b>${esc(x.nome)}</b>: ${esc(x.motivo)}`).join('<br>');
+                mostrarAlerta((deuCerto.length ? `Enviado: ${deuCerto.join(', ')}.<br><br>` : '') + `Não foi enviado:<br>${txtFalhas}`, deuCerto.length ? 'aviso' : 'erro');
+            }
+            if (typeof carregarAdmissoesParaAdmin === 'function') carregarAdmissoesParaAdmin();
+            if (typeof window.listarUsuarios === 'function') window.listarUsuarios(true);
+        };
     } catch (err) {
-        mostrarAlerta("Erro ao disparar mensagens: " + err.message, "erro");
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = textoOriginal;
+        fechar();
+        mostrarAlerta('Erro ao abrir o envio da Clara: ' + err.message, 'erro');
     }
 };
 
