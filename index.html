@@ -15806,6 +15806,43 @@ if (document.readyState === 'interactive' || document.readyState === 'complete')
         const SUPABASE_URL = 'https://kefvwdxebzgedugqeimz.supabase.co';
         const SUPABASE_ANON_KEY = 'sb_publishable_sWWZGDqK5Wy_n2ngT2xxWA_NX4gSNTo';
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        // 🔒 TRAVA DE FECHAMENTO DO BANCO DE HORAS: depois que um período é fechado, não deixa lançar (inserir) hora extra/abate/folga de banco
+        // com data dentro dele. Se a checagem falhar por qualquer motivo, o lançamento segue normal (nunca atrapalha o sistema).
+        (function instalarTravaFechamentoBH() {
+            try {
+                const fromOriginal = supabaseClient.from.bind(supabaseClient);
+                supabaseClient.from = function(tabela) {
+                    const q = fromOriginal(tabela);
+                    if (tabela !== 'horas_extras_ft' && tabela !== 'ausencias') return q;
+                    const insertOriginal = q.insert.bind(q);
+                    q.insert = function(linhas, opcoes) {
+                        const chamadas = [];
+                        const executar = async () => {
+                            try {
+                                if (typeof window.verificarBloqueioFechamentoBH === 'function') {
+                                    const msg = await window.verificarBloqueioFechamentoBH(linhas);
+                                    if (msg) {
+                                        if (typeof window.mostrarAlerta === 'function') window.mostrarAlerta(msg, 'erro');
+                                        return { data: null, error: { message: msg.replace(/<[^>]+>/g, ''), code: 'PERIODO_FECHADO_BH' }, count: null, status: 400, statusText: 'Bad Request' };
+                                    }
+                                }
+                            } catch (eTrava) { console.warn('Trava de fechamento indisponível (seguindo normal):', eTrava); }
+                            let b = insertOriginal(linhas, opcoes);
+                            for (const [m, a] of chamadas) b = b[m](...a);
+                            return await b;
+                        };
+                        const proxy = new Proxy({}, { get(_, prop) {
+                            if (prop === 'then') return (ok, falha) => executar().then(ok, falha);
+                            if (typeof prop === 'symbol') return undefined;
+                            return (...a) => { chamadas.push([prop, a]); return proxy; };
+                        } });
+                        return proxy;
+                    };
+                    return q;
+                };
+            } catch (eInst) { console.warn('Trava de fechamento não instalada:', eInst); }
+        })();
         
         let usuarioAtual = null;
         let escalaMesAtualGerada = [];
@@ -85075,7 +85112,34 @@ window.minToHrBH = function(mins) {
     return `${neg ? '-' : ''}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
 };
 
+// Devolve a mensagem de bloqueio (ou '' se pode lançar). Só olha lançamentos que mexem no banco (mesmo critério do Extrato).
+window.verificarBloqueioFechamentoBH = async function(linhas) {
+    const arr = (Array.isArray(linhas) ? linhas : [linhas]).filter(l => l && l.unidade && l.data_inicio);
+    const alvo = arr.filter(l => {
+        const motivo = String(l.motivo || '').trim();
+        if (/^(Liquida[çc][ãa]o|Hora Extra \(Banco Convertido\))/i.test(motivo)) return false; // pagamentos/liquidações do RH não são "lançamento novo no período"
+        return (motivo + ' ' + String(l.observacao || '')).toUpperCase().includes('BANCO');
+    });
+    if (alvo.length === 0) return '';
+    const agora = Date.now();
+    if (!window._cacheFechTravaBH || agora - window._cacheFechTravaBH.em > 30000) {
+        const { data, error } = await supabaseClient.from('banco_horas_fechamentos').select('numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado');
+        if (error) throw error;
+        window._cacheFechTravaBH = { em: agora, fechs: data || [] };
+    }
+    for (const l of alvo) {
+        const d = String(l.data_inicio).slice(0, 10);
+        const f = window._cacheFechTravaBH.fechs.find(x => x.periodo_ini <= d && d <= x.periodo_fim && (x.unidades || []).includes(l.unidade));
+        if (f) {
+            const br = (iso) => String(iso).split('-').reverse().join('/');
+            return `Período já fechado no Banco de Horas: <b>${l.unidade}</b> — Fechamento nº ${f.numero} (${br(f.periodo_ini)} a ${br(f.periodo_fim)}). Não é possível lançar com data ${br(d)}. Se precisar, peça ao RH para cancelar o fechamento.`;
+        }
+    }
+    return '';
+};
+
 window.registrarFechamentoBH = async function(loteId, candidatos, periodoIni, periodoFim) {
+    window._cacheFechTravaBH = null;
     const snapshot = candidatos.map(u => {
         const itens = [];
         (u.historicoCreditos || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'C', data: x.data, min: Math.round((x.horas || 0) * 60), desc: x.sigla || '', obs: String(x.obs || '').slice(0, 300) }));
@@ -85094,11 +85158,13 @@ window.registrarFechamentoBH = async function(loteId, candidatos, periodoIni, pe
         total_debito_min: Math.round(snapshot.reduce((a, s) => a + s.debito, 0)),
         status: 'Concluído', criado_por: usuarioAtual ? usuarioAtual.nome : null, snapshot
     }]).select('numero');
+    window._cacheFechTravaBH = null;
     if (error) throw error;
     return data && data[0] ? data[0].numero : null;
 };
 
 window.atualizarStatusFechamentoBHAposCancelar = async function(loteId) {
+    window._cacheFechTravaBH = null;
     const [r1, r2] = await Promise.all([
         supabaseClient.from('horas_extras_ft').select('id', { count: 'exact', head: true }).eq('zerado_lote_id', loteId),
         supabaseClient.from('ausencias').select('id', { count: 'exact', head: true }).eq('zerado_lote_id', loteId)
@@ -85109,6 +85175,7 @@ window.atualizarStatusFechamentoBHAposCancelar = async function(loteId) {
         status: restantes === 0 ? 'Cancelado' : 'Parcialmente cancelado',
         cancelado_por: usuarioAtual ? usuarioAtual.nome : null, cancelado_em: new Date().toISOString()
     }).eq('id', loteId);
+    window._cacheFechTravaBH = null;
 };
 
 window.abrirModalFechamentosBH = async function() {
