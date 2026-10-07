@@ -10978,8 +10978,8 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         </div>
         
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-            <button id="btn-zerar-bh-periodo" class="btn-secondary" onclick="window.abrirModalZerarBancoHorasPeriodo()" style="border-color: #28a745; color: #28a745; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#28a745'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#28a745'" title="Zera Créditos, Débitos e Saldo do período selecionado no filtro acima (respeitando busca/unidade filtradas), SEM criar nenhum lançamento de pagamento na folha. O histórico continua em Detalhes.">
-                <i class="fa-solid fa-eraser"></i> Zerar Banco de Horas do Período
+            <button id="btn-zerar-bh-periodo" class="btn-secondary" onclick="window.abrirAssistenteFechamentoBH()" style="border-color: #28a745; color: #28a745; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#28a745'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#28a745'" title="Zera Créditos, Débitos e Saldo do período selecionado no filtro acima (respeitando busca/unidade filtradas), SEM criar nenhum lançamento de pagamento na folha. O histórico continua em Detalhes.">
+                <i class="fa-solid fa-eraser"></i> Novo Fechamento (Zerar Banco de Horas)
             </button>
             <button id="btn-cancelar-zeragem-bh" class="btn-secondary" onclick="window.abrirModalCancelarZeragemPeriodo()" style="border-color: #ff9800; color: #ff9800; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#ff9800'; this.style.color='#06210f'" onmouseout="this.style.background='transparent'; this.style.color='#ff9800'" title="Desfaz uma zeragem em lote feita anteriormente (por unidade ou todas)">
                 <i class="fa-solid fa-rotate-left"></i> Cancelar Zeragem
@@ -85118,6 +85118,12 @@ window.abrirModalFechamentosBH = async function() {
         </div>
     </div>`);
 
+    // 👇 traz pro histórico os fechamentos antigos (feitos antes do histórico existir) — só importa o que falta
+    try {
+        const importados = await window.sincronizarFechamentosLegadosBH();
+        if (importados > 0) console.log(`Fechamentos antigos importados pro histórico: ${importados}`);
+    } catch (eImp) { console.warn('Importação de fechamentos antigos falhou:', eImp); }
+
     const { data, error } = await supabaseClient.from('banco_horas_fechamentos')
         .select('id, numero, empresa, periodo_ini, periodo_fim, unidades, total_colaboradores, total_credito_min, total_debito_min, status, criado_por, criado_em, cancelado_por, cancelado_em')
         .order('numero', { ascending: false }).limit(300);
@@ -85316,6 +85322,400 @@ window.cancelarFechamentoBH = async function(id) {
     }
     window.renderizarListaFechamentosBH();
     if (typeof carregarExtratoBancoHorasAdmin === 'function') carregarExtratoBancoHorasAdmin();
+};
+
+// =========================================================================
+// 🧭 ASSISTENTE "NOVO FECHAMENTO" (4 passos: Configurações > Ajustes > Revisão > Conclusão)
+// + IMPORTAÇÃO dos fechamentos antigos (feitos antes do histórico) pro mesmo histórico.
+// Usa a MESMA marcação de sempre (zerado_bh / zerado_lote_id) — nada de novo no cálculo.
+// =========================================================================
+window.buscarTudoBH = async function(montar) {
+    let tudo = [], de = 0;
+    for (;;) {
+        const { data, error } = await montar().range(de, de + 999);
+        if (error) throw error;
+        tudo = tudo.concat(data || []);
+        if (!data || data.length < 1000) break;
+        de += 1000;
+    }
+    return tudo;
+};
+
+// Reconstrói a "foto" de um fechamento ANTIGO a partir dos próprios lançamentos marcados (mesma regra do Extrato)
+window.montarSnapshotLegadoBH = function(rows) {
+    const porColab = {};
+    rows.forEach(f => {
+        if (!porColab[f.colaborador_id]) porColab[f.colaborador_id] = { id: f.colaborador_id, nome: f.nome, unidade: f.unidade, rows: [] };
+        porColab[f.colaborador_id].rows.push(f);
+    });
+    const sigla = (sig, mins) => ((sig === 'H+' || sig === 'HE') && (mins / 60) >= 6) ? 'FT' : sig;
+    return Object.values(porColab).map(c => {
+        const cred = [], deb = [], liq = [];
+        c.rows.forEach(f => {
+            const obsU = (f.observacao || '').toUpperCase(), motU = (f.motivo || '').toUpperCase();
+            const ehLiq = obsU.includes('LIQUIDAÇÃO') || motU.includes('LIQUIDAÇÃO');
+            if (obsU.includes('[ABATE_BANCO]')) {
+                const m = obsU.match(/DEDUÇÃO:\s*(\d+)\s*MINUTOS/);
+                if (m) {
+                    const obsLimpa = (f.observacao || '').replace(/\[ABATE_BANCO\] DEDUÇÃO: \d+ MINUTOS\.?( Motivo:)?/i, '').trim();
+                    const pref = f.sigla === 'ATR' ? 'Atraso: ' : (f.sigla === 'ABD' ? 'Abandono: ' : '');
+                    deb.push({ t: 'D', data: f.data_inicio, min: parseInt(m[1]), desc: pref + (f.motivo || 'Folga / Abate'), obs: obsLimpa.slice(0, 300) });
+                }
+            } else if (['H+', 'HE', 'FT'].includes(f.sigla) && (motU.includes('BANCO') || motU.includes('QUEBRA') || motU.includes('LIQUIDAÇÃO') || obsU.includes('BANCO'))) {
+                if (obsU.includes('TROCAR POR DESCANSO')) return;
+                const obs = String(f.observacao || '').slice(0, 300);
+                if (ehLiq) {
+                    const md = obsU.match(/\((\d+\.\d+)\)/);
+                    if (md) { const mins = Math.round(parseFloat(md[1]) * 60); liq.push({ t: 'L', data: f.data_inicio, min: mins, desc: sigla(f.sigla, mins), obs }); }
+                    return;
+                }
+                if (obsU.includes('DIAS TRABALHADOS A MAIS:')) {
+                    const re = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{2}:\d{2})\s*(?:ÀS|AS)\s*(\d{2}:\d{2})\)/g;
+                    let mm, achou = false;
+                    while ((mm = re.exec(obsU)) !== null) {
+                        achou = true;
+                        const [hE, mE] = mm[4].split(':').map(Number), [hS, mS] = mm[5].split(':').map(Number);
+                        let diff = (hS * 60 + mS) - (hE * 60 + mE);
+                        if (diff < 0) diff += 1440;
+                        if (diff > 360) diff -= 60;
+                        cred.push({ t: 'C', data: `${mm[3]}-${mm[2]}-${mm[1]}`, min: diff, desc: sigla(f.sigla, diff), obs });
+                    }
+                    if (!achou) {
+                        (obsU.match(/\((\d+\.\d+)\)/g) || []).forEach(m => {
+                            const mins = Math.round(parseFloat(m.replace('(', '').replace(')', '')) * 60);
+                            cred.push({ t: 'C', data: f.data_inicio, min: mins, desc: sigla(f.sigla, mins), obs });
+                        });
+                    }
+                } else {
+                    const md = obsU.match(/\((\d+\.\d+)\)/);
+                    if (md) { const mins = Math.round(parseFloat(md[1]) * 60); cred.push({ t: 'C', data: f.data_inicio, min: mins, desc: sigla(f.sigla, mins), obs }); }
+                }
+            }
+        });
+        const credito = cred.reduce((a, x) => a + x.min, 0);
+        const debito = Math.max(0, deb.reduce((a, x) => a + x.min, 0) - liq.reduce((a, x) => a + x.min, 0));
+        const itens = [...cred, ...deb, ...liq].sort((a, b) => String(a.data).localeCompare(String(b.data)));
+        return { id: c.id, nome: c.nome, unidade: c.unidade, rescisao: false, credito, debito, saldo: credito - debito, itens };
+    });
+};
+
+// Traz pro histórico os fechamentos que já existiam (feitos antes do histórico). Idempotente: só importa o que ainda não está lá.
+window.sincronizarFechamentosLegadosBH = async function() {
+    const colunas = 'zerado_lote_id, zerado_em, zerado_por, zerado_periodo_ini, zerado_periodo_fim, unidade';
+    const [a, b2, existentes] = await Promise.all([
+        window.buscarTudoBH(() => supabaseClient.from('horas_extras_ft').select(colunas).not('zerado_lote_id', 'is', null).order('zerado_em')),
+        window.buscarTudoBH(() => supabaseClient.from('ausencias').select(colunas).not('zerado_lote_id', 'is', null).order('zerado_em')),
+        window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos').select('id').order('criado_em'))
+    ]);
+    const jaTem = new Set(existentes.map(x => x.id));
+    const lotes = {};
+    [...a, ...b2].forEach(r => {
+        const id = r.zerado_lote_id;
+        if (jaTem.has(id)) return;
+        if (!lotes[id]) lotes[id] = { id, em: r.zerado_em, por: r.zerado_por, ini: r.zerado_periodo_ini, fim: r.zerado_periodo_fim };
+        if (r.zerado_em && (!lotes[id].em || r.zerado_em < lotes[id].em)) lotes[id].em = r.zerado_em;
+    });
+    const faltando = Object.values(lotes).sort((x, y) => String(x.em).localeCompare(String(y.em)));
+    let importados = 0;
+    const cols = 'id, colaborador_id, nome, unidade, sigla, motivo, observacao, data_inicio';
+    for (const lote of faltando) {
+        const [r1, r2] = await Promise.all([
+            window.buscarTudoBH(() => supabaseClient.from('horas_extras_ft').select(cols).eq('zerado_lote_id', lote.id).order('id')),
+            window.buscarTudoBH(() => supabaseClient.from('ausencias').select(cols).eq('zerado_lote_id', lote.id).order('id'))
+        ]);
+        const snapshot = window.montarSnapshotLegadoBH([...r1, ...r2]);
+        const { error } = await supabaseClient.from('banco_horas_fechamentos').insert([{
+            id: lote.id, empresa: null, periodo_ini: lote.ini, periodo_fim: lote.fim,
+            unidades: [...new Set(snapshot.map(s => s.unidade))].sort(),
+            total_colaboradores: snapshot.length,
+            total_credito_min: Math.round(snapshot.reduce((x, s) => x + s.credito, 0)),
+            total_debito_min: Math.round(snapshot.reduce((x, s) => x + s.debito, 0)),
+            status: 'Concluído', criado_por: lote.por || null, criado_em: lote.em || new Date().toISOString(), snapshot
+        }]);
+        if (!error) importados++;
+    }
+    return importados;
+};
+
+// ------------------------------ ASSISTENTE ------------------------------
+window.abrirAssistenteFechamentoBH = function() {
+    const antigo = document.getElementById('modal-wizard-fechamento-bh');
+    if (antigo) antigo.remove();
+    window.wizBH = {
+        passo: 1,
+        ini: document.getElementById('extrato-bh-data-inicio')?.value || '',
+        fim: document.getElementById('extrato-bh-data-fim')?.value || '',
+        mostrar: 'Ativos', unidade: 'Todas', base: [], ocorr: {}, incluir: {}, soBloq: false, busca: '', resultado: null, carregando: false
+    };
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-wizard-fechamento-bh" class="modal-arquivo-overlay" style="z-index: 100010; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 1050px; border: 1px solid #28a745; position: relative; max-height: 92vh; overflow-y: auto;">
+            <div id="corpo-wizard-bh"></div>
+        </div>
+    </div>`);
+    window.renderWizardBH();
+};
+
+window.fecharWizardBH = function() {
+    const m = document.getElementById('modal-wizard-fechamento-bh');
+    if (m) m.remove();
+};
+
+window.renderWizardBH = function() {
+    const corpo = document.getElementById('corpo-wizard-bh');
+    const w = window.wizBH;
+    if (!corpo || !w) return;
+    const esc = window.escHtmlBH, hr = window.minToHrBH;
+    const nomes = ['Configurações', 'Ajustes', 'Revisão', 'Conclusão'];
+    const stepper = `<div style="display:flex; justify-content:center; gap:0; margin: 6px 0 20px;">${nomes.map((n, i) => {
+        const num = i + 1, feito = num < w.passo, atual = num === w.passo;
+        const cor = (feito || atual) ? '#28a745' : '#6c757d';
+        return `<div style="display:flex; flex-direction:column; align-items:center; min-width:110px; position:relative;">
+            <div style="width:28px; height:28px; border-radius:50%; background:${feito ? '#28a745' : 'transparent'}; border:2px solid ${cor}; color:${feito ? '#06210f' : cor}; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:0.85rem;">${feito ? '<i class="fa-solid fa-check"></i>' : num}</div>
+            <span style="font-size:0.78rem; margin-top:4px; color:${cor}; font-weight:${atual ? 'bold' : 'normal'};">${n}</span></div>`;
+    }).join('<div style="width:50px; border-top:2px solid var(--cor-borda); margin-top:14px;"></div>')}</div>`;
+    const topo = `<button onclick="window.fecharWizardBH()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+        <h3 style="color:#28a745; margin-bottom:4px;"><i class="fa-solid fa-eraser"></i> Novo Fechamento do Banco de Horas</h3>${stepper}`;
+    const estiloInput = 'width:100%; padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);';
+    const inicioInfo = (w.passo > 1) ? `<p style="text-align:center; font-size:0.9rem; margin-bottom:14px;">Período <b>${formatarDataBR(w.ini)} - ${formatarDataBR(w.fim)}</b> | ${w.unidade === 'Todas' ? 'Todas as unidades' : esc(w.unidade)} | ${w.mostrar === 'Ativos' ? 'Colaboradores ativos' : (w.mostrar === 'Inativos' ? 'Em rescisão / desligados' : 'Todos os colaboradores')}</p>` : '';
+
+    if (w.passo === 1) {
+        const unids = [...new Set([...(window.todosSaldosBHAdmin || []).map(u => u.unidade), ...(typeof configsBancoHorasGlobais !== 'undefined' ? configsBancoHorasGlobais : []).map(c => c.unidade)].filter(Boolean))].sort();
+        corpo.innerHTML = topo + `
+            <p style="text-align:center; margin-bottom:18px;">Defina abaixo o período e os critérios que quer usar para realizar o fechamento</p>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-bottom:14px;">
+                <div><label style="font-size:0.8rem;">Início do período *</label><input type="date" id="wiz-bh-ini" value="${esc(w.ini)}" style="${estiloInput}"></div>
+                <div><label style="font-size:0.8rem;">Fim do período *</label><input type="date" id="wiz-bh-fim" value="${esc(w.fim)}" style="${estiloInput}"></div>
+                <div><label style="font-size:0.8rem;">Mostrar colaboradores *</label>
+                    <select id="wiz-bh-mostrar" style="${estiloInput}">
+                        <option value="Ativos" ${w.mostrar === 'Ativos' ? 'selected' : ''}>Ativos</option>
+                        <option value="Inativos" ${w.mostrar === 'Inativos' ? 'selected' : ''}>Em rescisão / desligados</option>
+                        <option value="Todos" ${w.mostrar === 'Todos' ? 'selected' : ''}>Todos</option>
+                    </select></div>
+                <div><label style="font-size:0.8rem;">Unidade *</label>
+                    <select id="wiz-bh-unidade" style="${estiloInput}">
+                        <option value="Todas">Todas as unidades</option>${unids.map(u => `<option value="${esc(u)}" ${w.unidade === u ? 'selected' : ''}>${esc(u)}</option>`).join('')}
+                    </select></div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--cor-texto-secundario);">Nada é apagado nem gera lançamento na folha: o fechamento só marca os lançamentos do período como fechados e fica registrado em "Fechamentos".</p>
+            <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+                <button type="button" class="btn-secondary" onclick="window.fecharWizardBH()">Cancelar</button>
+                <button type="button" class="btn-success" id="btn-wiz-bh-iniciar" style="background:#28a745; color:#06210f;" onclick="window.iniciarWizardBH()" ${w.carregando ? 'disabled' : ''}>${w.carregando ? '<i class="fa-solid fa-circle-notch fa-spin"></i> Buscando...' : 'Iniciar fechamento'}</button>
+            </div>`;
+        return;
+    }
+
+    if (w.passo === 2) {
+        const termo = window.removerAcentos ? window.removerAcentos((w.busca || '').toLowerCase()) : (w.busca || '').toLowerCase();
+        const comOcorr = w.base.filter(u => (w.ocorr[u.id] || []).length > 0)
+            .filter(u => !w.soBloq || w.ocorr[u.id].some(o => o.tipo === 'bloq'))
+            .filter(u => !termo || (window.removerAcentos ? window.removerAcentos(u.nome.toLowerCase()) : u.nome.toLowerCase()).includes(termo))
+            .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base' }));
+        const cor = { bloq: '#ff4d4d', aviso: '#ff9800', info: 'var(--cor-texto-secundario)' };
+        const linhas = comOcorr.map(u => `
+            <div style="display:flex; gap:12px; align-items:flex-start; padding:10px 12px; border-bottom:1px solid var(--cor-borda);">
+                <input type="checkbox" ${w.incluir[u.id] ? 'checked' : ''} onchange="window.wizBH.incluir['${u.id}'] = this.checked; window.atualizarContagemWizardBH();" style="margin-top:4px; width:18px; height:18px;" title="Incluir no fechamento">
+                <div style="flex:1;">
+                    <div style="font-weight:bold; color:#ffc107;">${esc(u.nome)} <small style="color:var(--cor-texto-secundario); font-weight:normal;">(${esc(u.unidade)})</small></div>
+                    ${w.ocorr[u.id].map(o => `<div style="font-size:0.82rem; color:${cor[o.tipo]};">${o.tipo === 'bloq' ? '<i class="fa-solid fa-circle-exclamation"></i> ' : ''}${esc(o.texto)}</div>`).join('')}
+                </div>
+            </div>`).join('');
+        corpo.innerHTML = topo + inicioInfo + `
+            <div style="border:1px solid var(--cor-borda); border-radius:8px; padding:14px;">
+                <p style="font-size:0.88rem; margin-bottom:10px;">Foram encontradas algumas ocorrências conforme o filtro e o período selecionados. Marque quem deve <b>entrar</b> no fechamento: os colaboradores <b>desmarcados não serão incluídos</b>. Quem tem lançamento aguardando aprovação vem desmarcado — aprove ou recuse o lançamento e refaça o fechamento para incluir.</p>
+                <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+                    <label style="font-size:0.85rem; display:flex; gap:6px; align-items:center;"><input type="checkbox" ${w.soBloq ? 'checked' : ''} onchange="window.wizBH.soBloq = this.checked; window.renderWizardBH();"> Mostrar apenas ocorrências que impedem o fechamento</label>
+                    <input type="text" placeholder="Buscar colaborador..." value="${esc(w.busca)}" oninput="window.wizBH.busca = this.value; window.renderWizardBH(); document.getElementById('wiz-bh-busca-foco')?.focus();" id="wiz-bh-busca-foco" style="flex:1; min-width:200px; padding:8px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);">
+                </div>
+                <div style="max-height:340px; overflow-y:auto; border:1px solid var(--cor-borda); border-radius:8px;">
+                    ${linhas || '<div style="padding:20px; text-align:center; color:var(--cor-texto-secundario);">Nenhuma ocorrência encontrada. É só continuar.</div>'}
+                </div>
+                <div id="wiz-bh-contagem" style="font-size:0.82rem; color:var(--cor-texto-secundario); margin-top:8px;"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; gap:10px; margin-top:16px;">
+                <button type="button" class="btn-secondary" onclick="window.fecharWizardBH()">Cancelar</button>
+                <div style="display:flex; gap:10px;">
+                    <button type="button" class="btn-secondary" onclick="window.wizBH.passo = 1; window.renderWizardBH();">Voltar para etapa anterior</button>
+                    <button type="button" class="btn-success" style="background:#28a745; color:#06210f;" onclick="window.wizBH.passo = 3; window.renderWizardBH();">Continuar fechamento</button>
+                </div>
+            </div>`;
+        window.atualizarContagemWizardBH();
+        return;
+    }
+
+    if (w.passo === 3) {
+        const lista = w.base.filter(u => w.incluir[u.id]).sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base' }));
+        const fora = w.base.length - lista.length;
+        const totC = lista.reduce((x, u) => x + (u.creditoTotal || 0), 0), totD = lista.reduce((x, u) => x + (u.debitoTotal || 0), 0);
+        const nomeTipo = { C: 'Crédito', D: 'Débito', L: 'Pagamento em folha' }, corTipo = { C: '#28a745', D: '#ff4d4d', L: '#ff9800' };
+        const linhas = lista.map((u, i) => {
+            const itens = [];
+            (u.historicoCreditos || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'C', data: x.data, min: Math.round((x.horas || 0) * 60), desc: x.sigla || '' }));
+            (u.historicoDebitos || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'D', data: x.data, min: Math.round(x.minutos || 0), desc: x.motivo || '' }));
+            (u.historicoLiquidacoes || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'L', data: x.data, min: Math.round((x.horas || 0) * 60), desc: x.sigla || 'Pagamento em Folha' }));
+            itens.sort((a, b) => String(a.data).localeCompare(String(b.data)));
+            return `<tr style="border-bottom:1px solid var(--cor-borda);">
+                <td style="padding:8px; font-weight:bold; color:#ffc107;">${esc(u.nome)}</td><td style="padding:8px;">${esc(u.unidade)}</td>
+                <td style="padding:8px; text-align:center; color:#4fc3f7;">${hr(u.creditoTotal)}</td><td style="padding:8px; text-align:center; color:#ff9800;">${hr(u.debitoTotal)}</td>
+                <td style="padding:8px; text-align:center; font-weight:bold; color:${u.saldo >= 0 ? '#28a745' : '#ff4d4d'};">${hr(u.saldo)}</td>
+                <td style="padding:8px; text-align:right;"><button type="button" class="btn-secondary" style="padding:4px 9px; font-size:0.75rem;" onclick="(function(){var e=document.getElementById('wiz-det-${i}'); e.style.display = e.style.display==='none' ? 'table-row' : 'none';})()"><i class="fa-solid fa-list"></i> Horários</button></td></tr>
+                <tr id="wiz-det-${i}" style="display:none; background:rgba(255,255,255,0.03);"><td colspan="6" style="padding:6px 14px; font-size:0.8rem;">
+                    ${itens.map(it => `<div>${it.data ? formatarDataBR(it.data) : '-'} — <b style="color:${corTipo[it.t]};">${nomeTipo[it.t]}</b> ${hr(it.min)} ${esc(it.desc)}</div>`).join('') || 'Sem lançamentos detalhados.'}</td></tr>`;
+        }).join('');
+        corpo.innerHTML = topo + inicioInfo + `
+            <p style="text-align:center; font-size:0.9rem; margin-bottom:12px;">Confira o que será fechado. Ao concluir, Créditos, Débitos e Saldo desses <b>${lista.length}</b> colaborador(es) zeram no Extrato${fora > 0 ? ` (${fora} ficaram de fora)` : ''}.</p>
+            <div style="max-height:360px; overflow:auto; border:1px solid var(--cor-borda); border-radius:8px;">
+                <table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+                    <thead><tr style="border-bottom:2px solid #28a745; color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase; position:sticky; top:0; background:var(--cor-fundo-card, #0d1b2a);"><th style="padding:8px;">Colaborador</th><th style="padding:8px;">Unidade</th><th style="padding:8px; text-align:center;">Créditos (+)</th><th style="padding:8px; text-align:center;">Débitos (-)</th><th style="padding:8px; text-align:center;">Saldo a fechar</th><th></th></tr></thead>
+                    <tbody>${linhas || '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--cor-texto-secundario);">Nenhum colaborador selecionado.</td></tr>'}</tbody>
+                    <tfoot><tr style="border-top:2px solid var(--cor-borda); font-weight:bold;"><td colspan="2" style="padding:8px;">Total</td><td style="padding:8px; text-align:center; color:#4fc3f7;">${hr(totC)}</td><td style="padding:8px; text-align:center; color:#ff9800;">${hr(totD)}</td><td style="padding:8px; text-align:center;">${hr(totC - totD)}</td><td></td></tr></tfoot>
+                </table>
+            </div>
+            <div style="display:flex; justify-content:space-between; gap:10px; margin-top:16px;">
+                <button type="button" class="btn-secondary" onclick="window.fecharWizardBH()">Cancelar</button>
+                <div style="display:flex; gap:10px;">
+                    <button type="button" class="btn-secondary" onclick="window.wizBH.passo = 2; window.renderWizardBH();">Voltar para etapa anterior</button>
+                    <button type="button" class="btn-success" id="btn-wiz-bh-concluir" style="background:#28a745; color:#06210f;" onclick="window.concluirWizardBH()" ${lista.length === 0 ? 'disabled' : ''}><i class="fa-solid fa-check-double"></i> Concluir fechamento</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    // passo 4
+    const r = w.resultado;
+    if (!r) {
+        corpo.innerHTML = topo + `<div style="text-align:center; padding:40px 0;"><i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color:#28a745;"></i><p style="margin-top:14px;">Fechando o banco de horas...</p></div>`;
+    } else if (r.ok) {
+        corpo.innerHTML = topo + `<div style="text-align:center; padding:20px 0;">
+            <i class="fa-solid fa-circle-check fa-3x" style="color:#28a745;"></i>
+            <h3 style="margin:12px 0 4px;">Fechamento ${r.numero ? 'nº ' + r.numero + ' ' : ''}concluído</h3>
+            <p style="color:var(--cor-texto-secundario); font-size:0.9rem;">${r.qtd} colaborador(es) fechado(s) no período ${formatarDataBR(w.ini)} - ${formatarDataBR(w.fim)}.${r.numero ? '' : '<br><span style="color:#ff9800;">Não foi possível registrar no histórico (confira se o SQL de fechamentos foi rodado), mas o fechamento foi feito.</span>'}</p>
+            <div style="display:flex; justify-content:center; gap:10px; margin-top:18px;">
+                ${r.numero ? `<button type="button" class="btn-secondary" style="border-color:#4fc3f7; color:#4fc3f7;" onclick="window.visualizarFechamentoBH('${r.loteId}')"><i class="fa-solid fa-eye"></i> Visualizar fechamento</button>` : ''}
+                <button type="button" class="btn-success" style="background:#28a745; color:#06210f;" onclick="window.fecharWizardBH()">Fechar</button>
+            </div></div>`;
+    } else {
+        corpo.innerHTML = topo + `<div style="text-align:center; padding:20px 0;"><i class="fa-solid fa-circle-xmark fa-3x" style="color:#ff4d4d;"></i>
+            <h3 style="margin:12px 0 4px;">Não foi possível concluir</h3>
+            <p style="color:var(--cor-texto-secundario); font-size:0.9rem;">Algo falhou ao fechar. Confira o Extrato (pode ter fechado só parte) e use "Fechamentos" para conferir ou cancelar.</p>
+            <button type="button" class="btn-secondary" style="margin-top:14px;" onclick="window.fecharWizardBH()">Fechar</button></div>`;
+    }
+};
+
+window.atualizarContagemWizardBH = function() {
+    const w = window.wizBH; const el = document.getElementById('wiz-bh-contagem');
+    if (!w || !el) return;
+    const n = w.base.filter(u => w.incluir[u.id]).length;
+    el.textContent = `${n} de ${w.base.length} colaborador(es) entram no fechamento.`;
+};
+
+window.iniciarWizardBH = async function() {
+    const w = window.wizBH; if (!w || w.carregando) return;
+    const ini = document.getElementById('wiz-bh-ini')?.value || '', fim = document.getElementById('wiz-bh-fim')?.value || '';
+    w.mostrar = document.getElementById('wiz-bh-mostrar')?.value || 'Ativos';
+    w.unidade = document.getElementById('wiz-bh-unidade')?.value || 'Todas';
+    if (!ini || !fim) return mostrarAlerta("Informe o início e o fim do período.", "aviso");
+    if (ini > fim) return mostrarAlerta("O início do período não pode ser depois do fim.", "aviso");
+    w.ini = ini; w.fim = fim; w.carregando = true; window.renderWizardBH();
+
+    try {
+        // aplica o período no filtro do Extrato (é de lá que vêm os cálculos de sempre)
+        document.getElementById('extrato-bh-data-inicio').value = ini;
+        document.getElementById('extrato-bh-data-fim').value = fim;
+        if (window.pickerPeriodoExtratoBH) window.pickerPeriodoExtratoBH.setDate([ini, fim], false);
+        await window.carregarExtratoBancoHorasAdmin();
+
+        const ehRescisao = (u) => (u.status === 'Desligado' || u.status_aprovacao === 'Rescisão Pendente' || u.status_aprovacao === 'Aguardando Assinatura');
+        w.base = (window.todosSaldosBHAdmin || [])
+            .filter(u => (u.creditoTotal > 0 || u.debitoTotal > 0) && (u.registrosAtivosZeragem || []).length > 0)
+            .filter(u => w.unidade === 'Todas' || u.unidade === w.unidade)
+            .filter(u => w.mostrar === 'Todos' || (w.mostrar === 'Inativos' ? ehRescisao(u) : !ehRescisao(u)));
+
+        // lançamentos aguardando aprovação no período (impedem o fechamento do colaborador)
+        const pend = {};
+        const [p1, p2] = await Promise.all([
+            window.buscarTudoBH(() => supabaseClient.from('horas_extras_ft').select('colaborador_id').eq('status', 'Pendente').gte('data_inicio', ini).lte('data_inicio', fim)),
+            window.buscarTudoBH(() => supabaseClient.from('ausencias').select('colaborador_id').eq('status', 'Pendente').gte('data_inicio', ini).lte('data_inicio', fim))
+        ]);
+        [...p1, ...p2].forEach(r => { pend[r.colaborador_id] = (pend[r.colaborador_id] || 0) + 1; });
+
+        w.ocorr = {}; w.incluir = {};
+        w.base.forEach(u => {
+            const o = [];
+            if (pend[u.id]) o.push({ tipo: 'bloq', texto: `${pend[u.id]} lançamento(s) aguardando aprovação no período` });
+            if (u.saldo < 0) o.push({ tipo: 'aviso', texto: `Saldo negativo de ${window.minToHrBH(-u.saldo)} (será zerado)` });
+            if (u.vencidoPositivo > 0 || u.vencidoNegativo > 0) o.push({ tipo: 'aviso', texto: `Possui horas vencidas (+${window.minToHrBH(u.vencidoPositivo)} / -${window.minToHrBH(u.vencidoNegativo)})` });
+            if (ehRescisao(u)) o.push({ tipo: 'aviso', texto: 'Em rescisão / desligado' });
+            if ((u.historicoCreditos || []).some(x => x.zerado) || (u.historicoDebitos || []).some(x => x.zerado)) o.push({ tipo: 'info', texto: 'Já possui lançamentos fechados em outro fechamento neste período (continuam fechados)' });
+            w.ocorr[u.id] = o;
+            w.incluir[u.id] = !pend[u.id];
+        });
+
+        w.carregando = false;
+        if (w.base.length === 0) {
+            window.renderWizardBH();
+            return mostrarAlerta("Nenhum colaborador com créditos ou débitos pra fechar nesse período/filtro.", "aviso");
+        }
+        w.passo = 2;
+    } catch (e) {
+        console.error('Falha ao iniciar fechamento', e);
+        w.carregando = false;
+        mostrarAlerta("Não foi possível carregar os dados do período. Confira o console e tente de novo.", "erro");
+    }
+    window.renderWizardBH();
+};
+
+window.concluirWizardBH = async function() {
+    const w = window.wizBH; if (!w) return;
+    const lista = w.base.filter(u => w.incluir[u.id]);
+    if (lista.length === 0) return mostrarAlerta("Nenhum colaborador selecionado pro fechamento.", "aviso");
+    w.passo = 4; w.resultado = null; window.renderWizardBH();
+
+    const loteId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const idsFts = [], idsAus = [];
+    lista.forEach(u => (u.registrosAtivosZeragem || []).forEach(r => { if (r.origem === 'horas_extras_ft') idsFts.push(r.id); else if (r.origem === 'ausencias') idsAus.push(r.id); }));
+    const payload = { zerado_bh: true, zerado_lote_id: loteId, zerado_em: new Date().toISOString(), zerado_por: usuarioAtual.nome, zerado_periodo_ini: w.ini, zerado_periodo_fim: w.fim };
+
+    let falha = false;
+    try {
+        for (const [tabela, ids] of [['horas_extras_ft', idsFts], ['ausencias', idsAus]]) {
+            for (let i = 0; i < ids.length; i += 200) {
+                const { error } = await supabaseClient.from(tabela).update(payload).in('id', ids.slice(i, i + 200));
+                if (error) throw error;
+            }
+        }
+    } catch (e) { console.error('Falha ao fechar banco de horas', e); falha = true; }
+
+    let numero = null;
+    if (!falha) {
+        try { numero = await window.registrarFechamentoBH(loteId, lista, w.ini, w.fim); }
+        catch (e2) { console.warn('Fechamento não registrado no histórico:', e2); }
+    }
+    w.resultado = { ok: !falha, numero, loteId, qtd: lista.length };
+    window.renderWizardBH();
+    if (typeof window.carregarExtratoBancoHorasAdmin === 'function') window.carregarExtratoBancoHorasAdmin();
+};
+
+window.garantirMapaFechamentosBH = async function() {
+    const usados = new Set((window.todosSaldosBHAdmin || []).map(u => u.ultimoLoteFechado).filter(Boolean));
+    if (usados.size === 0) { window.mapaFechamentosBH = window.mapaFechamentosBH || {}; return; }
+    const carregar = async () => {
+        const linhas = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos').select('id, numero').order('numero'));
+        const m = {}; linhas.forEach(l => { m[l.id] = l.numero; }); return m;
+    };
+    let mapa = await carregar();
+    // fechamentos antigos que ainda não estão no histórico: importa uma vez por sessão
+    if ([...usados].some(id => !mapa[id]) && !window._fechLegadosSincronizadosBH) {
+        window._fechLegadosSincronizadosBH = true;
+        try { await window.sincronizarFechamentosLegadosBH(); mapa = await carregar(); } catch (e) { console.warn('Importação de fechamentos antigos falhou:', e); }
+    }
+    window.mapaFechamentosBH = mapa;
+};
+
+window.chipFechamentoBH = function(u) {
+    const num = u && u.ultimoLoteFechado && window.mapaFechamentosBH ? window.mapaFechamentosBH[u.ultimoLoteFechado] : null;
+    if (!num) return '';
+    return `<br><a href="javascript:void(0)" onclick="window.visualizarFechamentoBH('${u.ultimoLoteFechado}')" title="Ver o fechamento nº ${num} (horários fechados)" style="display:inline-block; margin-top:4px; font-size:0.7rem; color:#28a745; border:1px solid #28a74570; background:rgba(40,167,69,0.1); padding:2px 8px; border-radius:10px; text-decoration:none; font-weight:bold;"><i class="fa-solid fa-lock"></i> Fechamento nº ${num}</a>`;
 };
 
 // ↩️ CANCELAR ZERAGEM EM LOTE (desfazer um "Zerar Banco de Horas do Período" feito antes)
@@ -85909,13 +86309,19 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 registrosAtivosZeragem.push({ origem: x._origemZeragem, id: x._regId });
             });
 
+            // 👇 NOVO: qual foi o último fechamento (lote) que pegou lançamentos desse colaborador — usado só pra mostrar o selo "Fechamento nº X" no Extrato
+            let ultimoLoteFechado = null; let ultimoLoteEm = '';
+            asHorasDesteColab.forEach(fz => {
+                if (fz.zerado_bh && fz.zerado_lote_id && String(fz.zerado_em || '') >= ultimoLoteEm) { ultimoLoteEm = String(fz.zerado_em || ''); ultimoLoteFechado = fz.zerado_lote_id; }
+            });
+
             // 👇 SALVA OS STATUS AQUI PARA A TABELA VISUAL SABER QUEM É QUEM 👇
             window.todosSaldosBHAdmin.push({
                 id: c.id, nome: c.nome, unidade: c.unidade, empresa: c.empresa,
                 status: c.status, status_aprovacao: c.status_aprovacao, // MÁGICA
                 creditoTotal: sumBaseCred, debitoTotal: totalMinutosDebito_exibido, saldo: saldoFinal,
                 vencidoPositivo, vencidoNegativo,
-                registrosAtivosZeragem,
+                registrosAtivosZeragem, ultimoLoteFechado,
                 historicoCreditos: listCreditos.map(x => ({ sigla: x.sigla, horas: x.minutosOriginais/60, data: x.data, obs: x.obs, zerado: !!x.zerado })),
                 historicoDebitos: listDebitos.map(x => ({ data: x.data, minutos: x.minutosOriginais, motivo: x.motivo, obs: x.obs, zerado: !!x.zerado })),
                 // 👇 Liquidações continuam registradas aqui (não somem do sistema), só não entram mais em Créditos (+).
@@ -85924,6 +86330,9 @@ window.carregarExtratoBancoHorasAdmin = async function() {
                 hVencidosPos, hVencidosNeg
             });
         }
+
+        // 👇 NOVO: carrega os números dos fechamentos (selo "Fechamento nº X" na linha). Se falhar, o Extrato segue normal sem o selo.
+        try { await window.garantirMapaFechamentosBH(); } catch (eMapa) { console.warn('Selo de fechamento indisponível:', eMapa); }
 
         window.filtrarExtratoBHAdminVisual();
 
@@ -86027,7 +86436,7 @@ window.filtrarExtratoBHAdminVisual = function() {
         htmlLinhasExtratoBH += `
             <tr style="background: ${bgRow}; border-bottom: 1px solid var(--cor-borda);">
                 <td style="padding: 15px; text-align: left;">
-                    <strong style="color:var(--cor-acento); font-size:1rem;">${u.nome}</strong> ${tagRescisao}
+                    <strong style="color:var(--cor-acento); font-size:1rem;">${u.nome}</strong> ${tagRescisao}${window.chipFechamentoBH(u)}
                 </td>
                 <td style="padding: 15px; text-align: left; color: var(--cor-texto-secundario); font-size:0.85rem;">${u.unidade}<br><small style="opacity:0.7;">${u.empresa}</small></td>
                 
