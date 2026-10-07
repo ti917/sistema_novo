@@ -84014,6 +84014,18 @@ window.iniciarPeriodoExtratoBH = function() {
     const isMobile = window.innerWidth <= 768;
 
     window.pickerPeriodoExtratoBH = flatpickr(el, {
+        onDayCreate: function(dObj, dStr, fp, dayElem) {
+            try {
+                const d = dayElem.dateObj;
+                const k = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                if (window.diaTotalmenteFechadoBH && window.diaTotalmenteFechadoBH(k, window.ctxFechBH)) {
+                    if (window.garantirEstiloDiaFechadoBH) window.garantirEstiloDiaFechadoBH();
+                    dayElem.classList.add('wiz-dia-fechado');
+                    dayElem.title = 'Dia já fechado em todas as unidades que usam Banco de Horas';
+                    dayElem.insertAdjacentHTML('beforeend', '<span class="wiz-lock"><i class="fa-solid fa-lock"></i></span>');
+                }
+            } catch (e) {}
+        },
         mode: "range",
         showMonths: isMobile ? 1 : 2,
         dateFormat: "Y-m-d",
@@ -85491,6 +85503,40 @@ window.iniciarPickerWizardBH = function() {
     }
 };
 
+// ---- Cadeados também no calendário de período do Extrato ----
+window.garantirEstiloDiaFechadoBH = function() {
+    if (document.getElementById('estilo-wiz-dia-fechado')) return;
+    const st = document.createElement('style'); st.id = 'estilo-wiz-dia-fechado';
+    st.textContent = '.flatpickr-day.wiz-dia-fechado:not(.selected):not(.startRange):not(.endRange){ color:#ff4d4d !important; background:rgba(220,53,69,0.14) !important; border-color:rgba(220,53,69,0.45) !important; position:relative; }' +
+        '.flatpickr-day.wiz-dia-fechado .wiz-lock{ position:absolute; right:3px; bottom:1px; font-size:7px; line-height:1; color:#ff4d4d; pointer-events:none; }' +
+        '.flatpickr-day.wiz-dia-fechado.selected .wiz-lock, .flatpickr-day.wiz-dia-fechado.startRange .wiz-lock, .flatpickr-day.wiz-dia-fechado.endRange .wiz-lock{ color:#fff; }';
+    document.head.appendChild(st);
+};
+
+window.ctxFechBH = { universo: [], fechs: [] };
+window.carregarContextoExtratoBH = async function() {
+    try {
+        const cfgs = (typeof configsBancoHorasGlobais !== 'undefined' && configsBancoHorasGlobais) ? configsBancoHorasGlobais : [];
+        const usa = {};
+        cfgs.forEach(c => { if (c.unidade) usa[c.unidade] = (c.usa_banco !== false); });
+        (window.todosSaldosBHAdmin || []).forEach(u => { if (u.unidade && !(u.unidade in usa)) usa[u.unidade] = true; });
+        let universo = Object.keys(usa).filter(k => usa[k]);
+        const unidsEmpresa = await obterUnidadesDaEmpresaSelecionada();
+        if (unidsEmpresa) universo = universo.filter(u => unidsEmpresa.includes(u));
+        if (!window._fechLegadosSincronizadosBH) {
+            window._fechLegadosSincronizadosBH = true;
+            try { await window.sincronizarFechamentosLegadosBH(); } catch (e) { console.warn('Importação de fechamentos antigos falhou:', e); }
+        }
+        const fechs = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos')
+            .select('id, numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('numero'));
+        window.ctxFechBH = { universo: universo.sort(), fechs: fechs || [] };
+    } catch (e) {
+        console.warn('Cadeados do Extrato indisponíveis:', e);
+        return;
+    }
+    if (window.pickerPeriodoExtratoBH) { try { window.pickerPeriodoExtratoBH.redraw(); } catch (e) {} }
+};
+
 // ---- Dias/unidades já fechados (mostra no calendário e avisa o que ainda está pendente) ----
 window.carregarContextoWizardBH = async function() {
     const w = window.wizBH; if (!w) return;
@@ -85523,17 +85569,18 @@ window.carregarContextoWizardBH = async function() {
     }
 };
 
-window.unidadesFechadasNoDiaBH = function(dStr) {
+window.unidadesFechadasNoDiaBH = function(dStr, ctx) {
     const s = new Set();
-    ((window.wizBH && window.wizBH.fechs) || []).forEach(f => {
+    ctx = ctx || window.wizBH;
+    ((ctx && ctx.fechs) || []).forEach(f => {
         if (f.periodo_ini && f.periodo_fim && f.periodo_ini <= dStr && dStr <= f.periodo_fim) (f.unidades || []).forEach(u => s.add(u));
     });
     return s;
 };
 
-window.diaTotalmenteFechadoBH = function(dStr) {
-    const w = window.wizBH; if (!w || !w.universo || w.universo.length === 0) return false;
-    const fechadas = window.unidadesFechadasNoDiaBH(dStr);
+window.diaTotalmenteFechadoBH = function(dStr, ctx) {
+    const w = ctx || window.wizBH; if (!w || !w.universo || w.universo.length === 0) return false;
+    const fechadas = window.unidadesFechadasNoDiaBH(dStr, w);
     return w.universo.every(u => fechadas.has(u));
 };
 
@@ -86224,6 +86271,7 @@ window.carregarExtratoBancoHorasAdmin = async function() {
 
     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px;"><i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color:#4fc3f7; margin-bottom:15px;"></i><br>Executando varredura contábil...</td></tr>';
     window.todosSaldosBHAdmin = [];
+    if (typeof window.iniciarPeriodoExtratoBH === 'function') window.iniciarPeriodoExtratoBH();
 
     try {
         const unidsFiltro = await obterUnidadesDaEmpresaSelecionada();
@@ -86520,6 +86568,8 @@ window.carregarExtratoBancoHorasAdmin = async function() {
         try { await window.garantirMapaFechamentosBH(); } catch (eMapa) { console.warn('Selo de fechamento indisponível:', eMapa); }
 
         window.filtrarExtratoBHAdminVisual();
+        // 🔒 cadeados nos dias já fechados em TODAS as unidades que usam Banco de Horas (não trava o Extrato se falhar)
+        window.carregarContextoExtratoBH().catch(() => {});
 
     } catch (e) {
         console.error(e);
