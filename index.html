@@ -86172,9 +86172,55 @@ window.carregarConfigBHUnidade = function() {
 // =========================================================================
 // 🔄 MOTOR CENTRAL: EXTRATO DO BANCO DE HORAS COM ESTRUTURA FIFO E AUSÊNCIAS (ADMIN)
 // =========================================================================
+// 📅 Período automático do Extrato: o ciclo seguinte ao último fechamento (ex.: fechou 26/07 a 25/09 -> já abre 26/09 a 25/11)
+window.definirPeriodoAutomaticoExtratoBH = async function() {
+    const hIni = document.getElementById('extrato-bh-data-inicio'), hFim = document.getElementById('extrato-bh-data-fim');
+    if (!hIni || !hFim || hIni.value || hFim.value) return; // já tem período escolhido: não mexe
+
+    // fechamentos antigos (feitos antes do histórico) entram no histórico uma vez por sessão
+    if (!window._fechLegadosSincronizadosBH) {
+        window._fechLegadosSincronizadosBH = true;
+        try { await window.sincronizarFechamentosLegadosBH(); } catch (eSync) { console.warn('Importação de fechamentos antigos falhou:', eSync); }
+    }
+    const fechs = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos').select('periodo_fim, unidades, status').neq('status', 'Cancelado').order('periodo_fim'));
+    if (!fechs || fechs.length === 0) return; // nunca houve fechamento: segue como sempre (sem período)
+
+    // só conta fechamentos da empresa selecionada
+    const unidsEmpresa = await obterUnidadesDaEmpresaSelecionada();
+    const dosDaEmpresa = fechs.filter(f => !unidsEmpresa || (f.unidades || []).some(u => unidsEmpresa.includes(u)));
+    if (dosDaEmpresa.length === 0) return;
+    const ultimoFim = dosDaEmpresa.map(f => f.periodo_fim).filter(Boolean).sort().pop();
+    if (!ultimoFim) return;
+
+    // duração do ciclo (em meses) pela regra mais comum entre as unidades que usam banco (60 dias = 2 meses)
+    let meses = 2;
+    try {
+        const { data: cfgs } = await supabaseClient.from('config_banco_horas').select('unidade, dias_validade, usa_banco');
+        const cont = {};
+        (cfgs || []).filter(c => c.usa_banco !== false && c.dias_validade && (!unidsEmpresa || unidsEmpresa.includes(c.unidade))).forEach(c => { cont[c.dias_validade] = (cont[c.dias_validade] || 0) + 1; });
+        const maisComum = Object.keys(cont).sort((a, b) => cont[b] - cont[a])[0];
+        if (maisComum) meses = Math.max(1, Math.round(parseInt(maisComum) / 30));
+    } catch (e) { /* mantém 2 meses */ }
+
+    const fim0 = new Date(ultimoFim + 'T00:00:00');
+    const ini = new Date(fim0.getFullYear(), fim0.getMonth(), fim0.getDate() + 1);
+    const fim = new Date(ini.getFullYear(), ini.getMonth() + meses, ini.getDate() - 1);
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    hIni.value = fmt(ini); hFim.value = fmt(fim);
+    if (!window.pickerPeriodoExtratoBH && typeof window.iniciarPeriodoExtratoBH === 'function') window.iniciarPeriodoExtratoBH();
+    if (window.pickerPeriodoExtratoBH) window.pickerPeriodoExtratoBH.setDate([hIni.value, hFim.value], false);
+};
+
 window.carregarExtratoBancoHorasAdmin = async function() {
     const tbody = document.getElementById('lista-extrato-bh-admin-body');
     if (!tbody) return;
+
+    // 👇 NOVO: na 1ª abertura da sessão, se nenhum período foi escolhido, já seleciona o PRÓXIMO período a fechar
+    // (logo depois do último fechamento). "Ver Tudo" continua limpando o filtro normalmente.
+    if (!window._periodoAutomaticoExtratoBHFeito) {
+        window._periodoAutomaticoExtratoBHFeito = true;
+        try { await window.definirPeriodoAutomaticoExtratoBH(); } catch (ePA) { console.warn('Período automático do Extrato indisponível:', ePA); }
+    }
 
     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px;"><i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color:#4fc3f7; margin-bottom:15px;"></i><br>Executando varredura contábil...</td></tr>';
     window.todosSaldosBHAdmin = [];
