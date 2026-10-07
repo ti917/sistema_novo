@@ -85445,7 +85445,8 @@ window.abrirAssistenteFechamentoBH = function() {
         passo: 1,
         ini: document.getElementById('extrato-bh-data-inicio')?.value || '',
         fim: document.getElementById('extrato-bh-data-fim')?.value || '',
-        mostrar: 'Ativos', unidade: 'Todas', base: [], ocorr: {}, incluir: {}, soBloq: false, busca: '', resultado: null, carregando: false
+        mostrar: 'Ativos', unidade: 'Todas', base: [], ocorr: {}, incluir: {}, soBloq: false, busca: '', resultado: null, carregando: false,
+        fechs: [], universo: []
     };
     document.body.insertAdjacentHTML('beforeend', `
     <div id="modal-wizard-fechamento-bh" class="modal-arquivo-overlay" style="z-index: 100010; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -85454,6 +85455,7 @@ window.abrirAssistenteFechamentoBH = function() {
         </div>
     </div>`);
     window.renderWizardBH();
+    window.carregarContextoWizardBH();
 };
 
 // Calendário de período do assistente (igual ao do Extrato: intervalo, 2 meses lado a lado)
@@ -85466,11 +85468,102 @@ window.iniciarPickerWizardBH = function() {
         mode: "range", showMonths: window.innerWidth <= 768 ? 1 : 2, dateFormat: "Y-m-d", altInput: true, altFormat: "d/m/Y", locale: "pt",
         position: "auto", defaultDate: (w.ini && w.fim) ? [w.ini, w.fim] : null,
         theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
-        onChange: function(sel) { if (sel.length === 2) { w.ini = fmt(sel[0]); w.fim = fmt(sel[1]); } }
+        onChange: function(sel) { if (sel.length === 2) { w.ini = fmt(sel[0]); w.fim = fmt(sel[1]); } window.atualizarAvisoPeriodoWizardBH(); },
+        onDayCreate: function(dObj, dStr, fp, dayElem) {
+            try {
+                if (window.diaTotalmenteFechadoBH(fmt(dayElem.dateObj))) {
+                    dayElem.classList.add('wiz-dia-fechado');
+                    dayElem.title = 'Dia já fechado em todas as unidades que usam Banco de Horas';
+                    dayElem.insertAdjacentHTML('beforeend', '<span class="wiz-lock"><i class="fa-solid fa-lock"></i></span>');
+                }
+            } catch (e) {}
+        }
     });
+    if (!document.getElementById('estilo-wiz-dia-fechado')) {
+        const st = document.createElement('style'); st.id = 'estilo-wiz-dia-fechado';
+        st.textContent = '.flatpickr-day.wiz-dia-fechado:not(.selected):not(.startRange):not(.endRange){ color:#ff4d4d !important; background:rgba(220,53,69,0.14) !important; border-color:rgba(220,53,69,0.45) !important; position:relative; }' +
+            '.flatpickr-day.wiz-dia-fechado .wiz-lock{ position:absolute; right:3px; bottom:1px; font-size:7px; line-height:1; color:#ff4d4d; pointer-events:none; }' +
+            '.flatpickr-day.wiz-dia-fechado.selected .wiz-lock, .flatpickr-day.wiz-dia-fechado.startRange .wiz-lock, .flatpickr-day.wiz-dia-fechado.endRange .wiz-lock{ color:#fff; }';
+        document.head.appendChild(st);
+    }
     if (window.pickerWizardBH.altInput) {
         window.pickerWizardBH.altInput.style.cssText += 'width:100%; padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda); cursor:pointer;';
     }
+};
+
+// ---- Dias/unidades já fechados (mostra no calendário e avisa o que ainda está pendente) ----
+window.carregarContextoWizardBH = async function() {
+    const w = window.wizBH; if (!w) return;
+    try {
+        // unidades que USAM banco de horas (config), limitadas à empresa selecionada
+        const cfgs = (typeof configsBancoHorasGlobais !== 'undefined' && configsBancoHorasGlobais) ? configsBancoHorasGlobais : [];
+        const usa = {};
+        cfgs.forEach(c => { if (c.unidade) usa[c.unidade] = (c.usa_banco !== false); });
+        (window.todosSaldosBHAdmin || []).forEach(u => { if (u.unidade && !(u.unidade in usa)) usa[u.unidade] = true; });
+        let universo = Object.keys(usa).filter(k => usa[k]);
+        const unidsEmpresa = await obterUnidadesDaEmpresaSelecionada();
+        if (unidsEmpresa) universo = universo.filter(u => unidsEmpresa.includes(u));
+        w.universo = universo.sort();
+        w.naoUsam = Object.keys(usa).filter(k => !usa[k]);
+
+        // fechamentos antigos entram no histórico (uma vez por sessão) e depois lê os ativos
+        if (!window._fechLegadosSincronizadosBH) {
+            window._fechLegadosSincronizadosBH = true;
+            try { await window.sincronizarFechamentosLegadosBH(); } catch (e) { console.warn('Importação de fechamentos antigos falhou:', e); }
+        }
+        w.fechs = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos')
+            .select('id, numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('numero'));
+    } catch (e) {
+        console.warn('Contexto de fechamentos indisponível:', e);
+        w.fechs = []; w.universo = w.universo || [];
+    }
+    if (window.wizBH === w && w.passo === 1) {
+        if (window.pickerWizardBH) { try { window.pickerWizardBH.redraw(); } catch (e) {} }
+        window.atualizarAvisoPeriodoWizardBH();
+    }
+};
+
+window.unidadesFechadasNoDiaBH = function(dStr) {
+    const s = new Set();
+    ((window.wizBH && window.wizBH.fechs) || []).forEach(f => {
+        if (f.periodo_ini && f.periodo_fim && f.periodo_ini <= dStr && dStr <= f.periodo_fim) (f.unidades || []).forEach(u => s.add(u));
+    });
+    return s;
+};
+
+window.diaTotalmenteFechadoBH = function(dStr) {
+    const w = window.wizBH; if (!w || !w.universo || w.universo.length === 0) return false;
+    const fechadas = window.unidadesFechadasNoDiaBH(dStr);
+    return w.universo.every(u => fechadas.has(u));
+};
+
+window.atualizarAvisoPeriodoWizardBH = function() {
+    const w = window.wizBH; const el = document.getElementById('wiz-bh-aviso-periodo');
+    if (!w || !el) return;
+    el.innerHTML = '';
+    if (!w.ini || !w.fim || !w.universo || w.universo.length === 0) return;
+    const esc = window.escHtmlBH;
+    // quais unidades (que usam banco) já têm TODOS os dias do período fechados
+    const dias = []; const d = new Date(w.ini + 'T00:00:00'); const dFim = new Date(w.fim + 'T00:00:00');
+    for (let i = 0; d <= dFim && i < 400; i++) { dias.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`); d.setDate(d.getDate() + 1); }
+    const porDia = dias.map(x => window.unidadesFechadasNoDiaBH(x));
+    const fechadas = w.universo.filter(u => porDia.every(s => s.has(u)));
+    const pendentes = w.universo.filter(u => !fechadas.includes(u));
+    const caixa = (cor, html) => `<div style="border:1px solid ${cor}66; background:${cor}1a; color:${cor}; border-radius:8px; padding:8px 12px; font-size:0.82rem; margin-top:6px;">${html}</div>`;
+    let html = '';
+    if (fechadas.length > 0 && pendentes.length === 0) {
+        html += caixa('#ff4d4d', '<i class="fa-solid fa-lock"></i> Esse período já está <b>fechado em todas as unidades</b> que usam Banco de Horas. Só feche de novo se houver lançamentos novos.');
+    } else if (fechadas.length > 0) {
+        html += caixa('#ff4d4d', `<i class="fa-solid fa-lock"></i> Já fechado: <b>${fechadas.map(esc).join(', ')}</b>`);
+        html += caixa('#ff9800', `<i class="fa-solid fa-triangle-exclamation"></i> Ainda <b>pendente de fechamento</b> (essas unidades utilizam Banco de Horas): <b>${pendentes.map(esc).join(', ')}</b>`);
+    }
+    const un = w.unidade && w.unidade !== 'Todas' ? w.unidade : null;
+    if (un) {
+        if (!w.universo.includes(un)) html += caixa('#9aa4b2', `${esc(un)} não utiliza Banco de Horas (ou não pertence à empresa selecionada).`);
+        else if (fechadas.includes(un)) html += caixa('#ff4d4d', `<i class="fa-solid fa-lock"></i> <b>${esc(un)}</b> já está fechada nesse período.`);
+        else if (fechadas.length > 0 || pendentes.includes(un)) html += caixa('#28a745', `<i class="fa-solid fa-circle-check"></i> <b>${esc(un)}</b> ainda está disponível para fechar nesse período.`);
+    }
+    el.innerHTML = html;
 };
 
 // Atalhos de ciclo (26 a 25): 0 = ciclo atual, -1 = ciclo anterior
@@ -85484,6 +85577,7 @@ window.wizBHCiclo = function(deslocamento) {
     const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     w.ini = fmt(ini); w.fim = fmt(fim);
     if (window.pickerWizardBH) window.pickerWizardBH.setDate([w.ini, w.fim], false);
+    window.atualizarAvisoPeriodoWizardBH();
 };
 
 window.fecharWizardBH = function() {
@@ -85521,6 +85615,7 @@ window.renderWizardBH = function() {
                         <button type="button" class="btn-secondary" style="padding:5px 12px; font-size:0.78rem;" onclick="window.wizBHCiclo(0)">Ciclo atual (26 a 25)</button>
                         <button type="button" class="btn-secondary" style="padding:5px 12px; font-size:0.78rem;" onclick="window.wizBHCiclo(-1)">Ciclo anterior</button>
                     </div>
+                    <div id="wiz-bh-aviso-periodo" style="margin-top:10px;"></div>
                 </div>
                 <div><label style="font-size:0.8rem;">Mostrar colaboradores *</label>
                     <select id="wiz-bh-mostrar" style="${estiloInput}">
@@ -85529,7 +85624,7 @@ window.renderWizardBH = function() {
                         <option value="Todos" ${w.mostrar === 'Todos' ? 'selected' : ''}>Todos</option>
                     </select></div>
                 <div><label style="font-size:0.8rem;">Unidade *</label>
-                    <select id="wiz-bh-unidade" style="${estiloInput}">
+                    <select id="wiz-bh-unidade" style="${estiloInput}" onchange="window.wizBH.unidade = this.value; window.atualizarAvisoPeriodoWizardBH();">
                         <option value="Todas">Todas as unidades</option>${unids.map(u => `<option value="${esc(u)}" ${w.unidade === u ? 'selected' : ''}>${esc(u)}</option>`).join('')}
                     </select></div>
             </div>
@@ -85539,6 +85634,7 @@ window.renderWizardBH = function() {
                 <button type="button" class="btn-success" id="btn-wiz-bh-iniciar" style="background:#28a745; color:#06210f;" onclick="window.iniciarWizardBH()" ${w.carregando ? 'disabled' : ''}>${w.carregando ? '<i class="fa-solid fa-circle-notch fa-spin"></i> Buscando...' : 'Iniciar fechamento'}</button>
             </div>`;
         window.iniciarPickerWizardBH();
+        window.atualizarAvisoPeriodoWizardBH();
         return;
     }
 
