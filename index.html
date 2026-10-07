@@ -84022,10 +84022,10 @@ window.iniciarPeriodoExtratoBH = function() {
                     dayElem.insertAdjacentHTML('beforeend', '<span class="wiz-lock"><i class="fa-solid fa-lock"></i></span>');
                 } else {
                     // fechado só em parte das unidades: a dica diz quais ainda estão pendentes
-                    const ctx = window.ctxFechBH, fechadas = window.unidadesFechadasNoDiaBH(k, ctx);
+                    const ctx = window.ctxFechBH;
                     const uni = (ctx && ctx.universo) || [];
-                    const pend = uni.filter(u => !fechadas.has(u));
-                    if (uni.length && pend.length && pend.length < uni.length) dayElem.title = 'Ainda pendente de fechamento: ' + pend.join(', ');
+                    const pend = window.unidadesPendentesNoDiaBH(k, ctx);
+                    if (uni.length && pend.length && pend.length < uni.length && window.unidadesFechadasNoDiaBH(k, ctx).size > 0) dayElem.title = 'Ainda pendente de fechamento: ' + pend.join(', ');
                 }
             } catch (e) {}
         },
@@ -85532,7 +85532,8 @@ window.carregarContextoExtratoBH = async function() {
         }
         const fechs = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos')
             .select('id, numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('numero'));
-        window.ctxFechBH = { universo: universo.sort(), fechs: fechs || [] };
+        const abertoDesde = await window.carregarAbertosPorUnidadeBH(unidsEmpresa);
+        window.ctxFechBH = { universo: universo.sort(), fechs: fechs || [], abertoDesde: abertoDesde };
     } catch (e) {
         console.warn('Cadeados do Extrato indisponíveis:', e);
         return;
@@ -85562,6 +85563,7 @@ window.carregarContextoWizardBH = async function() {
         }
         w.fechs = await window.buscarTudoBH(() => supabaseClient.from('banco_horas_fechamentos')
             .select('id, numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('numero'));
+        w.abertoDesde = await window.carregarAbertosPorUnidadeBH(unidsEmpresa);
     } catch (e) {
         console.warn('Contexto de fechamentos indisponível:', e);
         w.fechs = []; w.universo = w.universo || [];
@@ -85581,10 +85583,40 @@ window.unidadesFechadasNoDiaBH = function(dStr, ctx) {
     return s;
 };
 
+// Unidades (que usam banco) que ainda têm algo a fechar naquele dia.
+// Se já sabemos desde quando cada unidade tem lançamento em aberto (abertoDesde), a unidade só é "pendente"
+// quando já tem lançamento em aberto até aquele dia (unidade nova/sem movimento nunca fica pendente à toa).
+window.unidadesPendentesNoDiaBH = function(dStr, ctx) {
+    const w = ctx || window.wizBH; if (!w || !w.universo) return [];
+    const fechadas = window.unidadesFechadasNoDiaBH(dStr, w);
+    return w.universo.filter(u => {
+        if (fechadas.has(u)) return false;
+        if (w.abertoDesde) return !!(w.abertoDesde[u] && w.abertoDesde[u] <= dStr);
+        return true;
+    });
+};
+
+// O dia só fica "fechado" (vermelho + cadeado) se algum fechamento cobre o dia E nenhuma unidade que usa banco ficou pendente
 window.diaTotalmenteFechadoBH = function(dStr, ctx) {
     const w = ctx || window.wizBH; if (!w || !w.universo || w.universo.length === 0) return false;
-    const fechadas = window.unidadesFechadasNoDiaBH(dStr, w);
-    return w.universo.every(u => fechadas.has(u));
+    if (window.unidadesFechadasNoDiaBH(dStr, w).size === 0) return false;
+    return window.unidadesPendentesNoDiaBH(dStr, w).length === 0;
+};
+
+// Desde quando cada unidade tem lançamento (aprovado) AINDA NÃO fechado: { unidade: 'AAAA-MM-DD' }. Em falha, devolve null (vale a regra rígida).
+window.carregarAbertosPorUnidadeBH = async function(unidsEmpresa) {
+    try {
+        const mapa = {};
+        for (const tabela of ['horas_extras_ft', 'ausencias']) {
+            const linhas = await window.buscarTudoBH(() => {
+                let q = supabaseClient.from(tabela).select('unidade, data_inicio').eq('status', 'Aprovado').or('zerado_bh.is.null,zerado_bh.eq.false');
+                if (unidsEmpresa) q = q.in('unidade', unidsEmpresa);
+                return q;
+            });
+            (linhas || []).forEach(l => { if (l.unidade && l.data_inicio && (!mapa[l.unidade] || l.data_inicio < mapa[l.unidade])) mapa[l.unidade] = String(l.data_inicio).slice(0, 10); });
+        }
+        return mapa;
+    } catch (e) { console.warn('Lançamentos em aberto por unidade indisponíveis:', e); return null; }
 };
 
 window.atualizarAvisoPeriodoWizardBH = function() {
@@ -85598,10 +85630,11 @@ window.atualizarAvisoPeriodoWizardBH = function() {
     for (let i = 0; d <= dFim && i < 400; i++) { dias.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`); d.setDate(d.getDate() + 1); }
     const porDia = dias.map(x => window.unidadesFechadasNoDiaBH(x));
     const fechadas = w.universo.filter(u => porDia.every(s => s.has(u)));
-    const pendentes = w.universo.filter(u => !fechadas.includes(u));
+    const pendentes = w.universo.filter(u => dias.some(x => window.unidadesPendentesNoDiaBH(x, w).includes(u)));
+    const algumFechado = porDia.some(s => s.size > 0);
     const caixa = (cor, html) => `<div style="border:1px solid ${cor}66; background:${cor}1a; color:${cor}; border-radius:8px; padding:8px 12px; font-size:0.82rem; margin-top:6px;">${html}</div>`;
     let html = '';
-    if (fechadas.length > 0 && pendentes.length === 0) {
+    if (algumFechado && pendentes.length === 0) {
         html += caixa('#ff4d4d', '<i class="fa-solid fa-lock"></i> Esse período já está <b>fechado em todas as unidades</b> que usam Banco de Horas. Só feche de novo se houver lançamentos novos.');
     } else if (fechadas.length > 0) {
         html += caixa('#ff4d4d', `<i class="fa-solid fa-lock"></i> Já fechado: <b>${fechadas.map(esc).join(', ')}</b>`);
