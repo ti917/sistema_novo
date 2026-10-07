@@ -106117,19 +106117,30 @@ window.baixarPdfRelatorioAdmin = async function() {
             });
         } else {
             // Monta o corpo da tabela, com uma linha "faixa" para cada grupo (quando agrupado)
+            const valorCelulaPdf = function(l, c) {
+                const extra = l._pdf && l._pdf[c.key];
+                if (extra) return extra.url ? { content: extra.txt, url: extra.url } : extra.txt;
+                return String(l[c.key] ?? '-');
+            };
             let body = [];
             if (temGrupo) {
                 const grupos = {};
                 linhas.forEach(l => { const g = l._grupo || 'Outros'; (grupos[g] = grupos[g] || []).push(l); });
                 Object.keys(grupos).sort().forEach(g => {
                     body.push([{ content: `${g} (${grupos[g].length})`, colSpan: colunas.length, styles: { fillColor: [227, 242, 253], textColor: [2, 132, 199], fontStyle: 'bold', halign: 'left' } }]);
-                    grupos[g].forEach(l => body.push(colunas.map(c => String(l[c.key] ?? '-'))));
+                    grupos[g].forEach(l => body.push(colunas.map(c => valorCelulaPdf(l, c))));
                 });
             } else {
-                linhas.forEach(l => body.push(colunas.map(c => String(l[c.key] ?? '-'))));
+                linhas.forEach(l => body.push(colunas.map(c => valorCelulaPdf(l, c))));
             }
 
             doc.autoTable(Object.assign({}, estiloTabela, {
+                didDrawCell: function(d) {
+                    // células com localização viram link clicável pro mapa
+                    if (d.section === 'body' && d.cell && d.cell.raw && d.cell.raw.url) {
+                        try { doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url: d.cell.raw.url }); } catch (eLink) {}
+                    }
+                },
                 head: [colunas.map(c => c.header)],
                 body: body,
                 startY: ALTURA_CABECALHO,
@@ -106183,13 +106194,52 @@ window.gerarRelatorioAdmin = async function() {
                 { header: 'Entrada', key: 'entrada' }, { header: 'Ida Refeição', key: 'ida' }, { header: 'Volta Refeição', key: 'volta' }, { header: 'Saída', key: 'saida' }
             ];
             const fmtH = h => h ? new Date(h).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '-';
+
+            // 📍 Localização de cada batida: compara o ponto (lat/lng gravado na batida) com o endereço cadastrado da unidade
+            let mapaUnidadesGeo = {};
+            try {
+                const { data: unisGeo } = await supabaseClient.from('unidades_oficiais').select('nome, latitude, longitude, raio_permitido_metros');
+                (unisGeo || []).forEach(u => { if (u.nome) mapaUnidadesGeo[u.nome] = u; });
+            } catch (eGeo) { console.warn('Unidades sem coordenadas para o relatório:', eGeo); }
+            const distM = (la1, lo1, la2, lo2) => {
+                const R = 6371000, rad = x => x * Math.PI / 180;
+                const dLa = rad(la2 - la1), dLo = rad(lo2 - lo1);
+                const a = Math.sin(dLa / 2) ** 2 + Math.cos(rad(la1)) * Math.cos(rad(la2)) * Math.sin(dLo / 2) ** 2;
+                return 2 * R * Math.asin(Math.sqrt(a));
+            };
+            const fmtDist = m => m >= 1000 ? (m / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(m) + ' m';
+            // devolve { html, txt, url } para o horário + onde foi batido
+            const celulaPonto = (hora, lat, lng, nomeUnidade) => {
+                if (!hora) return { html: '-', txt: '-', url: null };
+                const h = fmtH(hora);
+                const la = parseFloat(lat), lo = parseFloat(lng);
+                if (!isFinite(la) || !isFinite(lo)) return { html: `<div style="font-weight:600;">${h}</div><div style="font-size:0.7rem; color:#94a3b8;">Sem localização</div>`, txt: h + '\nSem localização', url: null };
+                const url = `https://www.google.com/maps?q=${la},${lo}`;
+                const uni = mapaUnidadesGeo[nomeUnidade];
+                let rotulo = 'Ver no mapa', cor = '#4fc3f7', rotuloPdf = `${la.toFixed(5)}, ${lo.toFixed(5)}`;
+                if (uni && uni.latitude != null && uni.longitude != null) {
+                    const d = distM(la, lo, parseFloat(uni.latitude), parseFloat(uni.longitude));
+                    const raio = parseInt(uni.raio_permitido_metros) || 150;
+                    if (d <= raio) { rotulo = 'Na unidade'; cor = '#28a745'; rotuloPdf = 'Na unidade'; }
+                    else { rotulo = 'Fora da unidade · ' + fmtDist(d); cor = '#ff9800'; rotuloPdf = 'Fora da unidade - ' + fmtDist(d); }
+                }
+                return {
+                    html: `<div style="font-weight:600;">${h}</div><a href="${url}" target="_blank" rel="noopener" title="Abrir no mapa (${la.toFixed(5)}, ${lo.toFixed(5)})" style="font-size:0.72rem; color:${cor}; text-decoration:none; white-space:nowrap;"><i class="fa-solid fa-location-dot"></i> ${rotulo}</a>`,
+                    txt: h + '\n' + rotuloPdf, url
+                };
+            };
             (data || []).forEach(b => {
                 const colabRef = colabs.find(c => c.nome === b.nome_colaborador);
                 if (colabRef && !window.relColabPassaFiltro(colabRef)) return;
+                const pEnt = celulaPonto(b.entrada_hora, b.entrada_lat, b.entrada_lng, b.unidade);
+                const pIda = celulaPonto(b.ida_refeicao_hora, b.ida_refeicao_lat, b.ida_refeicao_lng, b.unidade);
+                const pVol = celulaPonto(b.volta_refeicao_hora, b.volta_refeicao_lat, b.volta_refeicao_lng, b.unidade);
+                const pSai = celulaPonto(b.saida_hora, b.saida_lat, b.saida_lng, b.unidade);
                 linhas.push({
                     colaborador: b.nome_colaborador || '-', unidade: b.unidade || '-',
                     data: b.data ? formatarDataBR(b.data) : '-',
-                    entrada: fmtH(b.entrada_hora), ida: fmtH(b.ida_refeicao_hora), volta: fmtH(b.volta_refeicao_hora), saida: fmtH(b.saida_hora),
+                    entrada: pEnt.html, ida: pIda.html, volta: pVol.html, saida: pSai.html,
+                    _pdf: { entrada: pEnt, ida: pIda, volta: pVol, saida: pSai },
                     _grupo: colabRef ? window.relGrupoDoColab(colabRef) : (document.getElementById('rel-agrupar').value ? (b.nome_colaborador || 'Outros') : null)
                 });
             });
