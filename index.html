@@ -10984,6 +10984,9 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
             <button id="btn-cancelar-zeragem-bh" class="btn-secondary" onclick="window.abrirModalCancelarZeragemPeriodo()" style="border-color: #ff9800; color: #ff9800; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#ff9800'; this.style.color='#06210f'" onmouseout="this.style.background='transparent'; this.style.color='#ff9800'" title="Desfaz uma zeragem em lote feita anteriormente (por unidade ou todas)">
                 <i class="fa-solid fa-rotate-left"></i> Cancelar Zeragem
             </button>
+            <button id="btn-fechamentos-bh" class="btn-secondary" onclick="window.abrirModalFechamentosBH()" style="border-color: #4fc3f7; color: #4fc3f7; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#4fc3f7'; this.style.color='#06210f'" onmouseout="this.style.background='transparent'; this.style.color='#4fc3f7'" title="Histórico dos fechamentos já feitos: visualizar, baixar PDF ou cancelar">
+                <i class="fa-solid fa-folder-open"></i> Fechamentos
+            </button>
             <button class="btn-secondary" onclick="window.exportarExtratoBHPDF()" style="border-color: #dc3545; color: #dc3545; padding: 10px 20px; font-weight: bold; border-radius: 8px; height: 45px; transition: 0.2s;" onmouseover="this.style.background='#dc3545'; this.style.color='#fff'" onmouseout="this.style.background='transparent'; this.style.color='#dc3545'">
                 <i class="fa-solid fa-file-pdf"></i> Exportar PDF
             </button>
@@ -85015,12 +85018,22 @@ window.confirmarZerarBHPeriodo = async function() {
         houveFalha = true;
     }
 
+    // 👇 NOVO: registra o FECHAMENTO no histórico (Nº, período, quem fechou e uma "foto" do que foi
+    // fechado, pra dar pra VISUALIZAR depois). Se a tabela ainda não existir (SQL não rodado) ou der
+    // qualquer erro, a zeragem acima já está feita e segue normal — só não entra no histórico.
+    let numeroFechamentoBH = null;
+    if (!houveFalha) {
+        try { numeroFechamentoBH = await window.registrarFechamentoBH(loteId, candidatosParaProcessar, periodoIni, periodoFim); }
+        catch (eReg) { console.warn('Fechamento não registrado no histórico:', eReg); }
+    }
+
     const modal = document.getElementById('modal-zerar-bh-periodo');
     if (modal) modal.remove();
 
     const rotuloUnidade = (unidadeSelecionada && unidadeSelecionada !== 'Todas') ? ` da unidade ${unidadeSelecionada}` : '';
     if (!houveFalha) {
-        mostrarAlerta(`Banco de Horas zerado! ${candidatosParaProcessar.length} colaborador(es)${rotuloUnidade} zerado(s) no período — sem gerar lançamento na folha. O histórico continua em Detalhes.`, "sucesso");
+        const txtNumFechBH = numeroFechamentoBH ? ` (Fechamento nº ${numeroFechamentoBH})` : '';
+        mostrarAlerta(`Banco de Horas zerado${txtNumFechBH}! ${candidatosParaProcessar.length} colaborador(es)${rotuloUnidade} zerado(s) no período — sem gerar lançamento na folha. O histórico continua em Detalhes.`, "sucesso");
     } else {
         mostrarAlerta("Não foi possível concluir a zeragem. Confira o console/log e tente de novo.", "erro");
     }
@@ -85031,6 +85044,280 @@ window.confirmarZerarBHPeriodo = async function() {
 };
 
 // =========================================================================
+// =========================================================================
+// 📁 HISTÓRICO DE FECHAMENTOS DO BANCO DE HORAS (estilo "Fechamento" do ponto)
+// -------------------------------------------------------------------------
+// Cada "Zerar Banco de Horas do Período" vira um FECHAMENTO numerado, com período,
+// quem fechou e uma foto (snapshot) do que foi fechado por colaborador — assim dá pra
+// VISUALIZAR os horários/lançamentos mesmo depois de fechado, baixar PDF e cancelar.
+// Tabela: banco_horas_fechamentos (sql_extra/banco_horas_fechamentos.sql).
+// =========================================================================
+window.escHtmlBH = function(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+window.minToHrBH = function(mins) {
+    const neg = mins < 0; const a = Math.abs(Math.round(mins || 0));
+    return `${neg ? '-' : ''}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+};
+
+window.registrarFechamentoBH = async function(loteId, candidatos, periodoIni, periodoFim) {
+    const snapshot = candidatos.map(u => {
+        const itens = [];
+        (u.historicoCreditos || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'C', data: x.data, min: Math.round((x.horas || 0) * 60), desc: x.sigla || '', obs: String(x.obs || '').slice(0, 300) }));
+        (u.historicoDebitos || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'D', data: x.data, min: Math.round(x.minutos || 0), desc: x.motivo || '', obs: String(x.obs || '').slice(0, 300) }));
+        (u.historicoLiquidacoes || []).filter(x => !x.zerado).forEach(x => itens.push({ t: 'L', data: x.data, min: Math.round((x.horas || 0) * 60), desc: x.sigla || 'Pagamento em Folha', obs: String(x.obs || '').slice(0, 300) }));
+        itens.sort((a, b) => String(a.data).localeCompare(String(b.data)));
+        const rescisao = (u.status === 'Desligado' || u.status_aprovacao === 'Rescisão Pendente' || u.status_aprovacao === 'Aguardando Assinatura');
+        return { id: u.id, nome: u.nome, unidade: u.unidade, rescisao, credito: u.creditoTotal || 0, debito: u.debitoTotal || 0, saldo: u.saldo || 0, itens };
+    });
+    const empresa = (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') ? empresaSelecionadaFiltro : 'Todas';
+    const { data, error } = await supabaseClient.from('banco_horas_fechamentos').insert([{
+        id: loteId, empresa, periodo_ini: periodoIni, periodo_fim: periodoFim,
+        unidades: [...new Set(snapshot.map(s => s.unidade))].sort(),
+        total_colaboradores: snapshot.length,
+        total_credito_min: Math.round(snapshot.reduce((a, s) => a + s.credito, 0)),
+        total_debito_min: Math.round(snapshot.reduce((a, s) => a + s.debito, 0)),
+        status: 'Concluído', criado_por: usuarioAtual ? usuarioAtual.nome : null, snapshot
+    }]).select('numero');
+    if (error) throw error;
+    return data && data[0] ? data[0].numero : null;
+};
+
+window.atualizarStatusFechamentoBHAposCancelar = async function(loteId) {
+    const [r1, r2] = await Promise.all([
+        supabaseClient.from('horas_extras_ft').select('id', { count: 'exact', head: true }).eq('zerado_lote_id', loteId),
+        supabaseClient.from('ausencias').select('id', { count: 'exact', head: true }).eq('zerado_lote_id', loteId)
+    ]);
+    if (r1.error || r2.error) return;
+    const restantes = (r1.count || 0) + (r2.count || 0);
+    await supabaseClient.from('banco_horas_fechamentos').update({
+        status: restantes === 0 ? 'Cancelado' : 'Parcialmente cancelado',
+        cancelado_por: usuarioAtual ? usuarioAtual.nome : null, cancelado_em: new Date().toISOString()
+    }).eq('id', loteId);
+};
+
+window.abrirModalFechamentosBH = async function() {
+    const antigo = document.getElementById('modal-fechamentos-bh');
+    if (antigo) antigo.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-fechamentos-bh" class="modal-arquivo-overlay" style="z-index: 100010; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 1000px; border: 1px solid #4fc3f7; position: relative; max-height: 90vh; overflow-y: auto;">
+            <button onclick="document.getElementById('modal-fechamentos-bh').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #4fc3f7; margin-bottom: 6px;"><i class="fa-solid fa-folder-open"></i> Fechamentos do Banco de Horas</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 14px;">Cada "Zerar Banco de Horas do Período" fica registrado aqui. Dá pra visualizar os horários mesmo depois de fechado, baixar o PDF ou cancelar o fechamento.</p>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px;">
+                <input type="text" id="busca-fechamentos-bh" placeholder="Buscar por nº, unidade ou quem fechou..." oninput="window.renderizarListaFechamentosBH()" style="flex:1; min-width:220px; padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);">
+                <select id="filtro-status-fechamentos-bh" onchange="window.renderizarListaFechamentosBH()" style="padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);">
+                    <option value="Todos">Todas as situações</option>
+                    <option value="Concluído">Concluído</option>
+                    <option value="Cancelado">Cancelado</option>
+                    <option value="Parcialmente cancelado">Parcialmente cancelado</option>
+                </select>
+            </div>
+            <div id="corpo-fechamentos-bh" style="text-align:center; padding: 30px 0; color: var(--cor-texto-secundario);"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando fechamentos...</div>
+        </div>
+    </div>`);
+
+    const { data, error } = await supabaseClient.from('banco_horas_fechamentos')
+        .select('id, numero, empresa, periodo_ini, periodo_fim, unidades, total_colaboradores, total_credito_min, total_debito_min, status, criado_por, criado_em, cancelado_por, cancelado_em')
+        .order('numero', { ascending: false }).limit(300);
+    const corpo = document.getElementById('corpo-fechamentos-bh');
+    if (!corpo) return;
+    if (error) {
+        corpo.innerHTML = `<p style="color:#ff9800; font-size:0.9rem;">O histórico de fechamentos ainda não está ativado (tabela <b>banco_horas_fechamentos</b> não encontrada ou sem permissão). Rode o SQL <b>banco_horas_fechamentos.sql</b> no Supabase.<br><small style="color:var(--cor-texto-secundario);">${window.escHtmlBH(error.message)}</small></p>`;
+        return;
+    }
+    window.fechamentosBHLista = data || [];
+    window.renderizarListaFechamentosBH();
+};
+
+window.renderizarListaFechamentosBH = function() {
+    const corpo = document.getElementById('corpo-fechamentos-bh');
+    if (!corpo) return;
+    const termo = (window.removerAcentos ? window.removerAcentos((document.getElementById('busca-fechamentos-bh')?.value || '').toLowerCase()) : (document.getElementById('busca-fechamentos-bh')?.value || '').toLowerCase());
+    const st = document.getElementById('filtro-status-fechamentos-bh')?.value || 'Todos';
+    const norm = (s) => window.removerAcentos ? window.removerAcentos(String(s || '').toLowerCase()) : String(s || '').toLowerCase();
+
+    const lista = (window.fechamentosBHLista || []).filter(f => {
+        if (st !== 'Todos' && f.status !== st) return false;
+        if (!termo) return true;
+        return norm(`${f.numero} ${(f.unidades || []).join(' ')} ${f.criado_por} ${f.empresa}`).includes(termo);
+    });
+    if (lista.length === 0) {
+        corpo.innerHTML = `<p style="text-align:center; color:var(--cor-texto-secundario); padding: 20px 0;">Nenhum fechamento encontrado.</p>`;
+        return;
+    }
+    const esc = window.escHtmlBH;
+    const corStatus = { 'Concluído': ['#28a745', 'rgba(40,167,69,0.15)'], 'Cancelado': ['#ff4d4d', 'rgba(220,53,69,0.15)'], 'Parcialmente cancelado': ['#ff9800', 'rgba(255,152,0,0.15)'] };
+    const linhas = lista.map(f => {
+        const [cor, bg] = corStatus[f.status] || ['#ccc', 'rgba(255,255,255,0.1)'];
+        const unids = (f.unidades || []);
+        const txtUnids = unids.length > 2 ? `${unids.slice(0, 2).join(', ')} +${unids.length - 2}` : unids.join(', ');
+        const quando = f.criado_em ? new Date(f.criado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '-';
+        return `<tr style="border-bottom:1px solid var(--cor-borda);">
+            <td style="padding:10px 8px; font-weight:bold;">${f.numero}</td>
+            <td style="padding:10px 8px;">${formatarDataBR(f.periodo_ini)} - ${formatarDataBR(f.periodo_fim)}</td>
+            <td style="padding:10px 8px;" title="${esc(unids.join(', '))}">${esc(txtUnids) || '-'}<br><small style="color:var(--cor-texto-secundario);">${f.total_colaboradores} colaborador(es)</small></td>
+            <td style="padding:10px 8px;"><span style="background:${bg}; color:${cor}; padding:3px 10px; border-radius:12px; font-size:0.78rem; font-weight:bold; white-space:nowrap;">${esc(f.status)}</span></td>
+            <td style="padding:10px 8px;">${esc(f.criado_por || '-')}<br><small style="color:var(--cor-texto-secundario);">${quando}</small></td>
+            <td style="padding:10px 8px; white-space:nowrap; text-align:right;">
+                <button type="button" class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-color:#4fc3f7; color:#4fc3f7;" onclick="window.visualizarFechamentoBH('${f.id}')"><i class="fa-solid fa-eye"></i> Visualizar</button>
+                <button type="button" class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-color:#dc3545; color:#dc3545;" onclick="window.visualizarFechamentoBH('${f.id}', true)" title="Baixar PDF"><i class="fa-solid fa-file-pdf"></i></button>
+                ${f.status === 'Cancelado' ? '' : `<button type="button" class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-color:#ff9800; color:#ff9800;" onclick="window.cancelarFechamentoBH('${f.id}')"><i class="fa-solid fa-rotate-left"></i> Cancelar</button>`}
+            </td>
+        </tr>`;
+    }).join('');
+    corpo.innerHTML = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+        <thead><tr style="border-bottom:2px solid #4fc3f7; color:var(--cor-texto-secundario); font-size:0.78rem; text-transform:uppercase;">
+            <th style="padding:8px;">Nº</th><th style="padding:8px;">Período</th><th style="padding:8px;">Unidades</th><th style="padding:8px;">Situação</th><th style="padding:8px;">Fechado por</th><th style="padding:8px; text-align:right;">Ações</th>
+        </tr></thead><tbody>${linhas}</tbody></table></div>`;
+};
+
+window.visualizarFechamentoBH = async function(id, baixarPdf) {
+    const { data, error } = await supabaseClient.from('banco_horas_fechamentos').select('*').eq('id', id).single();
+    if (error || !data) return mostrarAlerta("Não foi possível abrir esse fechamento.", "erro");
+    window.fechamentoBHAtual = data;
+    if (baixarPdf) return window.exportarFechamentoBHPDF();
+
+    const antigo = document.getElementById('modal-ver-fechamento-bh');
+    if (antigo) antigo.remove();
+    const esc = window.escHtmlBH;
+    const unidades = [...new Set((data.snapshot || []).map(s => s.unidade))].sort();
+    const quando = data.criado_em ? new Date(data.criado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '-';
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-ver-fechamento-bh" class="modal-arquivo-overlay" style="z-index: 100020; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 1100px; border: 1px solid #4fc3f7; position: relative; max-height: 92vh; overflow-y: auto;">
+            <button onclick="document.getElementById('modal-ver-fechamento-bh').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color: #4fc3f7; margin-bottom: 4px;"><i class="fa-solid fa-eye"></i> Fechamento nº ${data.numero} <small style="font-size:0.7em; color:var(--cor-texto-secundario);">(${esc(data.status)})</small></h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 14px;">
+                Período <b>${formatarDataBR(data.periodo_ini)} - ${formatarDataBR(data.periodo_fim)}</b> &nbsp;|&nbsp; ${esc(data.empresa || '')}<br>
+                Fechado em ${quando} por <b>${esc(data.criado_por || '-')}</b>${data.cancelado_em ? ` &nbsp;|&nbsp; Cancelado por ${esc(data.cancelado_por || '-')} em ${new Date(data.cancelado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}` : ''}
+            </p>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px;">
+                <input type="text" id="busca-ver-fechamento-bh" placeholder="Pesquisar por colaborador..." oninput="window.renderizarVerFechamentoBH()" style="flex:1; min-width:220px; padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);">
+                <select id="unidade-ver-fechamento-bh" onchange="window.renderizarVerFechamentoBH()" style="padding:10px; border-radius:8px; background: var(--cor-fundo-input); color:#fff; border:1px solid var(--cor-borda);">
+                    <option value="Todas">Todas as unidades</option>${unidades.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('')}
+                </select>
+                <button type="button" class="btn-secondary" style="border-color:#dc3545; color:#dc3545; padding:10px 16px;" onclick="window.exportarFechamentoBHPDF()"><i class="fa-solid fa-file-pdf"></i> Baixar PDF</button>
+            </div>
+            <div id="corpo-ver-fechamento-bh"></div>
+        </div>
+    </div>`);
+    window.renderizarVerFechamentoBH();
+};
+
+window.alternarDetalheFechamentoBH = function(idx) {
+    const el = document.getElementById(`det-fech-bh-${idx}`);
+    if (el) el.style.display = (el.style.display === 'none') ? 'table-row' : 'none';
+};
+
+window.renderizarVerFechamentoBH = function() {
+    const corpo = document.getElementById('corpo-ver-fechamento-bh');
+    const f = window.fechamentoBHAtual;
+    if (!corpo || !f) return;
+    const esc = window.escHtmlBH, hr = window.minToHrBH;
+    const norm = (s) => window.removerAcentos ? window.removerAcentos(String(s || '').toLowerCase()) : String(s || '').toLowerCase();
+    const termo = norm(document.getElementById('busca-ver-fechamento-bh')?.value || '');
+    const un = document.getElementById('unidade-ver-fechamento-bh')?.value || 'Todas';
+
+    const lista = (f.snapshot || []).map((s, i) => ({ s, i })).filter(({ s }) => (un === 'Todas' || s.unidade === un) && (!termo || norm(s.nome).includes(termo)))
+        .sort((a, b) => (a.s.nome || '').localeCompare(b.s.nome || '', 'pt-BR', { sensitivity: 'base' }));
+
+    const totC = lista.reduce((a, x) => a + (x.s.credito || 0), 0), totD = lista.reduce((a, x) => a + (x.s.debito || 0), 0);
+    const nomeTipo = { C: 'Crédito', D: 'Débito', L: 'Pagamento em folha' };
+    const corTipo = { C: '#28a745', D: '#ff4d4d', L: '#ff9800' };
+
+    const linhas = lista.map(({ s, i }) => {
+        const itens = (s.itens || []).map(it => `<tr>
+            <td style="padding:4px 8px;">${it.data ? formatarDataBR(it.data) : '-'}</td>
+            <td style="padding:4px 8px; color:${corTipo[it.t] || '#ccc'}; font-weight:bold;">${nomeTipo[it.t] || it.t}</td>
+            <td style="padding:4px 8px;">${hr(it.min)}</td>
+            <td style="padding:4px 8px;">${esc(it.desc)}</td>
+            <td style="padding:4px 8px; color:var(--cor-texto-secundario); font-size:0.78rem;">${esc(it.obs)}</td></tr>`).join('');
+        return `<tr style="border-bottom:1px solid var(--cor-borda);">
+            <td style="padding:9px 8px; font-weight:bold; color:#ffc107;">${esc(s.nome)}${s.rescisao ? ' <small style="color:#ff9800;">(Em Rescisão / Desligado)</small>' : ''}</td>
+            <td style="padding:9px 8px;">${esc(s.unidade)}</td>
+            <td style="padding:9px 8px; text-align:center; color:#4fc3f7;">${hr(s.credito)}</td>
+            <td style="padding:9px 8px; text-align:center; color:#ff9800;">${hr(s.debito)}</td>
+            <td style="padding:9px 8px; text-align:center; font-weight:bold; color:${s.saldo >= 0 ? '#28a745' : '#ff4d4d'};">${hr(s.saldo)}</td>
+            <td style="padding:9px 8px; text-align:right;"><button type="button" class="btn-secondary" style="padding:5px 10px; font-size:0.75rem;" onclick="window.alternarDetalheFechamentoBH(${i})"><i class="fa-solid fa-list"></i> Horários</button></td>
+        </tr>
+        <tr id="det-fech-bh-${i}" style="display:none; background:rgba(255,255,255,0.03);"><td colspan="6" style="padding:8px 14px;">
+            <table style="width:100%; font-size:0.82rem; text-align:left;"><thead><tr style="color:var(--cor-texto-secundario);"><th style="padding:4px 8px;">Data</th><th style="padding:4px 8px;">Tipo</th><th style="padding:4px 8px;">Horas</th><th style="padding:4px 8px;">Motivo</th><th style="padding:4px 8px;">Observação</th></tr></thead>
+            <tbody>${itens || '<tr><td colspan="5" style="padding:6px 8px; color:var(--cor-texto-secundario);">Sem lançamentos detalhados.</td></tr>'}</tbody></table>
+        </td></tr>`;
+    }).join('');
+
+    corpo.innerHTML = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+        <thead><tr style="border-bottom:2px solid #4fc3f7; color:var(--cor-texto-secundario); font-size:0.78rem; text-transform:uppercase;">
+            <th style="padding:8px;">Colaborador</th><th style="padding:8px;">Unidade</th><th style="padding:8px; text-align:center;">Créditos (+)</th><th style="padding:8px; text-align:center;">Débitos (-)</th><th style="padding:8px; text-align:center;">Saldo fechado</th><th style="padding:8px;"></th>
+        </tr></thead>
+        <tbody>${linhas || '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--cor-texto-secundario);">Nenhum colaborador encontrado.</td></tr>'}</tbody>
+        <tfoot><tr style="border-top:2px solid var(--cor-borda); font-weight:bold;"><td style="padding:8px;" colspan="2">${lista.length} colaborador(es)</td><td style="padding:8px; text-align:center; color:#4fc3f7;">${hr(totC)}</td><td style="padding:8px; text-align:center; color:#ff9800;">${hr(totD)}</td><td style="padding:8px; text-align:center;">${hr(totC - totD)}</td><td></td></tr></tfoot>
+    </table></div>`;
+};
+
+window.exportarFechamentoBHPDF = function() {
+    const f = window.fechamentoBHAtual;
+    if (!f) return;
+    const esc = window.escHtmlBH, hr = window.minToHrBH;
+    const nomeTipo = { C: 'Crédito', D: 'Débito', L: 'Pagto folha' };
+    const un = document.getElementById('unidade-ver-fechamento-bh')?.value || 'Todas';
+    const lista = (f.snapshot || []).filter(s => un === 'Todas' || s.unidade === un)
+        .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base' }));
+    const blocos = lista.map(s => `
+        <div style="margin-bottom:14px; page-break-inside:avoid;">
+            <div style="background:#e8f1fb; padding:6px 10px; font-weight:bold; display:flex; justify-content:space-between;">
+                <span>${esc(s.nome)} <span style="font-weight:normal; color:#555;">— ${esc(s.unidade)}</span></span>
+                <span>Créd. ${hr(s.credito)} | Déb. ${hr(s.debito)} | Saldo ${hr(s.saldo)}</span>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:10px;">
+                ${(s.itens || []).map(it => `<tr style="border-bottom:1px solid #ddd;"><td style="padding:3px 6px; width:80px;">${it.data ? formatarDataBR(it.data) : '-'}</td><td style="padding:3px 6px; width:80px;">${nomeTipo[it.t] || it.t}</td><td style="padding:3px 6px; width:60px;">${hr(it.min)}</td><td style="padding:3px 6px;">${esc(it.desc)} ${esc(it.obs)}</td></tr>`).join('') || '<tr><td style="padding:3px 6px; color:#777;">Sem lançamentos detalhados.</td></tr>'}
+            </table>
+        </div>`).join('');
+    const w = window.open('', '_blank');
+    if (!w) return mostrarAlerta("O navegador bloqueou a janela do PDF. Libere pop-ups para este site e tente de novo.", "aviso");
+    w.document.write(`<html><head><title>Fechamento nº ${f.numero} - Banco de Horas</title>
+        <style>body{font-family:Arial,sans-serif; font-size:12px; color:#111; margin:20px;} h2{margin:0 0 4px;} @media print{@page{margin:12mm;}}</style></head><body>
+        <h2>Fechamento do Banco de Horas nº ${f.numero}</h2>
+        <div style="margin-bottom:12px; color:#444;">Período ${formatarDataBR(f.periodo_ini)} - ${formatarDataBR(f.periodo_fim)} | ${esc(f.empresa || '')} | Situação: ${esc(f.status)}<br>
+        Fechado em ${f.criado_em ? new Date(f.criado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '-'} por ${esc(f.criado_por || '-')} | Unidade: ${esc(un === 'Todas' ? 'Todas' : un)} | ${lista.length} colaborador(es)</div>
+        ${blocos}
+        <script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script></body></html>`);
+    w.document.close();
+};
+
+window.cancelarFechamentoBH = async function(id) {
+    const f = (window.fechamentosBHLista || []).find(x => x.id === id);
+    if (!f) return;
+    const confirmado = await mostrarConfirmacao(
+        `Cancelar o <b>Fechamento nº ${f.numero}</b> (${formatarDataBR(f.periodo_ini)} a ${formatarDataBR(f.periodo_fim)})? Todos os lançamentos desse fechamento voltam a contar no Saldo/Créditos/Débitos do Extrato do Banco de Horas. Nada é apagado.`,
+        "Cancelar Fechamento"
+    );
+    if (!confirmado) return;
+
+    const payloadDesfazer = { zerado_bh: false, zerado_lote_id: null, zerado_em: null, zerado_por: null, zerado_periodo_ini: null, zerado_periodo_fim: null };
+    try {
+        const [r1, r2] = await Promise.all([
+            supabaseClient.from('horas_extras_ft').update(payloadDesfazer).eq('zerado_lote_id', id).select('id'),
+            supabaseClient.from('ausencias').update(payloadDesfazer).eq('zerado_lote_id', id).select('id')
+        ]);
+        if (r1.error) throw r1.error;
+        if (r2.error) throw r2.error;
+        const { error: eSt } = await supabaseClient.from('banco_horas_fechamentos').update({
+            status: 'Cancelado', cancelado_por: usuarioAtual ? usuarioAtual.nome : null, cancelado_em: new Date().toISOString()
+        }).eq('id', id);
+        if (eSt) throw eSt;
+        f.status = 'Cancelado';
+        mostrarAlerta(`Fechamento nº ${f.numero} cancelado! ${(r1.data || []).length + (r2.data || []).length} lançamento(s) voltaram a contar no Extrato do Banco de Horas.`, "sucesso");
+    } catch (e) {
+        console.error('Falha ao cancelar fechamento', e);
+        mostrarAlerta("Não foi possível cancelar o fechamento. Confira o console.", "erro");
+    }
+    window.renderizarListaFechamentosBH();
+    if (typeof carregarExtratoBancoHorasAdmin === 'function') carregarExtratoBancoHorasAdmin();
+};
+
 // ↩️ CANCELAR ZERAGEM EM LOTE (desfazer um "Zerar Banco de Horas do Período" feito antes)
 // -------------------------------------------------------------------------
 // Lista os últimos lotes de zeragem (agrupados pelo zerado_lote_id gravado direto nas
@@ -85189,6 +85476,7 @@ window.confirmarCancelarLoteZeragem = async function(loteId, unidadeFiltro) {
     }
 
     if (!houveFalha) {
+        try { await window.atualizarStatusFechamentoBHAposCancelar(loteId); } catch (eSt) { console.warn(eSt); }
         mostrarAlerta(`Zeragem cancelada! ${registrosParaDesfazer.length} lançamento(s) voltaram a contar no Extrato do Banco de Horas.`, "sucesso");
     } else {
         mostrarAlerta("Não foi possível desfazer a zeragem. Confira o console.", "erro");
