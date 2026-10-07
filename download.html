@@ -1,4 +1,4 @@
-<!-- v1.0.1 - página de download por ID, RH Soul -->
+<!-- v1.1.0 - página de download por ID, RH Soul (link temporário via função central-download) -->
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -157,24 +157,59 @@
             return;
         }
 
-        try {
-            const { data, error } = await supabaseClient
-                .from('central_downloads')
-                .select('nome_arquivo, url_arquivo')
-                .eq('id', idArquivo)
-                .single();
+        // Pede à função do servidor um link TEMPORÁRIO do arquivo (o bucket pode ficar fechado).
+        const pedirLink = async () => {
+            const r = await fetch(`${SUPABASE_URL}/functions/v1/central-download?id=${encodeURIComponent(idArquivo)}`, {
+                headers: { 'apikey': SUPABASE_ANON_KEY }
+            });
+            let j = null;
+            try { j = await r.json(); } catch (_) { /* função ainda não publicada */ }
+            return { ok: r.ok && j && j.url, status: r.status, dados: j };
+        };
 
-            if (error || !data) throw new Error('not_found');
+        try {
+            let nome, ext, url, usouFuncao = true;
+            const res = await pedirLink().catch(() => ({ ok: false, dados: null }));
+            if (res.ok) {
+                nome = res.dados.nome_arquivo; ext = '.' + (res.dados.ext || ''); url = res.dados.url;
+            } else if (res.dados && res.dados.erro) {
+                throw new Error('not_found'); // a função respondeu: link inválido / arquivo removido
+            } else {
+                // Função indisponível: comportamento antigo (funciona enquanto o bucket for público)
+                usouFuncao = false;
+                const { data, error } = await supabaseClient
+                    .from('central_downloads').select('nome_arquivo, url_arquivo').eq('id', idArquivo).single();
+                if (error || !data) throw new Error('not_found');
+                nome = data.nome_arquivo; ext = (data.url_arquivo || '').toLowerCase(); url = data.url_arquivo;
+            }
 
             let icone = 'fa-file-arrow-down';
-            const urlLower = (data.url_arquivo || '').toLowerCase();
-            if (urlLower.includes('.pdf')) icone = 'fa-file-pdf';
-            else if (urlLower.includes('.xls')) icone = 'fa-file-excel';
-            else if (urlLower.includes('.doc')) icone = 'fa-file-word';
+            const extLower = (ext || '').toLowerCase();
+            if (extLower.includes('.pdf')) icone = 'fa-file-pdf';
+            else if (extLower.includes('.xls')) icone = 'fa-file-excel';
+            else if (extLower.includes('.doc')) icone = 'fa-file-word';
 
             document.getElementById('icone-tipo-arquivo').className = `fa-solid ${icone}`;
-            document.getElementById('lbl-nome-arquivo').innerText = data.nome_arquivo;
-            document.getElementById('btn-baixar-arquivo').href = data.url_arquivo;
+            document.getElementById('lbl-nome-arquivo').innerText = nome;
+            const btn = document.getElementById('btn-baixar-arquivo');
+            btn.href = url;
+
+            if (usouFuncao) {
+                // O link temporário vale 5 min: ao tocar, pega um novo para nunca estar vencido
+                btn.removeAttribute('target');
+                btn.addEventListener('click', async (ev) => {
+                    ev.preventDefault();
+                    const original = btn.innerHTML;
+                    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Abrindo...';
+                    try {
+                        const novo = await pedirLink();
+                        if (!novo.ok) throw new Error('falha');
+                        window.location.href = novo.dados.url;
+                    } catch (_) {
+                        mostrarErro('Não foi possível abrir o arquivo agora. Tente novamente ou fale com o RH.');
+                    } finally { btn.innerHTML = original; }
+                });
+            }
 
             document.getElementById('card-carregando').classList.add('hidden');
             document.getElementById('card-arquivo').classList.remove('hidden');
