@@ -42271,6 +42271,16 @@ window.editarAdmissaoAdmin = async function(idColab) {
             }
         }
 
+        // 🔁 Já existe a mesma troca (mesmas unidades) com outra data? Pergunta antes de criar uma segunda.
+        if (mudouCargoOuUnidade && dataVigenciaValue) {
+            const trocaJaExistenteEd = window.acharTrocaDuplicada(adm, unidadeAntiga, unidadeFinal.trim(), dataVigenciaValue);
+            if (trocaJaExistenteEd) {
+                const substituirEd = await mostrarConfirmacao(`Já existe uma troca de <b>${unidadeAntiga}</b> para <b>${unidadeFinal.trim()}</b> registrada (${trocaJaExistenteEd.origem}) com data <b>${formatarDataBR(trocaJaExistenteEd.data)}</b>.<br><br>Você está salvando com a data <b>${formatarDataBR(dataVigenciaValue)}</b>. Deseja <b>SUBSTITUIR</b> a anterior por esta? (Se cancelar, nada é salvo.)`, "Substituir a troca anterior");
+                if (!substituirEd) return;
+                window.removerTrocaDuplicada(adm, unidadeAntiga, unidadeFinal.trim(), dataVigenciaValue);
+            }
+        }
+
         btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Atualizando Ficha...';
 
         const novoNome = document.getElementById('edit-adm-nome').value.trim().toUpperCase();
@@ -48489,6 +48499,26 @@ document.getElementById('form-solicitar-alteracao')?.addEventListener('submit', 
         return mostrarAlerta("Marque pelo menos um dado que deseja alterar!", "aviso");
     }
 
+    // 🔒 (08/10/2026) TROCA DE UNIDADE: o Gestor só pode pedir com vigência do dia 1 ao dia 20 do mês (depois disso o
+    // fechamento dos benefícios do período já está em andamento). O RH/Admin não tem essa trava.
+    const pedeTrocaUnidadeAlt = !!document.querySelector('.alt-checkbox[value="unidade"]:checked');
+    if (pedeTrocaUnidadeAlt && usuarioAtual && usuarioAtual.perfil === 'Gestor' && dataVigencia) {
+        const diaVigenciaAlt = parseInt(String(dataVigencia).split('-')[2], 10);
+        if (diaVigenciaAlt > 20) {
+            return mostrarAlerta("Troca de unidade só pode ter vigência do <b>dia 1 ao dia 20</b> do mês.<br><br>Para datas depois do dia 20, fale com o RH.", "aviso", "Troca de Unidade Bloqueada");
+        }
+    }
+
+    // 🔒 (08/10/2026) HORÁRIO/TURNO: a "Data de Início da Nova Escala" e a "Data de Vigência" precisam ser a MESMA data.
+    // O RH aplica o pedido pela data de vigência (a data da escala era só texto) — datas diferentes geravam confusão.
+    const pedeHorarioAlt = !!document.querySelector('.alt-checkbox[value="horario"]:checked');
+    if (pedeHorarioAlt && dataVigencia) {
+        const dataIniEscalaAlt = document.getElementById('alt-data-inicio-jornada')?.value || '';
+        if (dataIniEscalaAlt && dataIniEscalaAlt !== dataVigencia) {
+            return mostrarAlerta(`A <b>Data de Início da Nova Escala</b> (${formatarDataBR(dataIniEscalaAlt)}) e a data de <b>entrada em vigor</b> (${formatarDataBR(dataVigencia)}) precisam ser a <b>mesma data</b>.<br><br>Ajuste uma das duas para continuar.`, "aviso", "Datas diferentes");
+        }
+    }
+
     const confirmado = await mostrarConfirmacao(`Deseja enviar o pedido de alteração para <b>${nomeColab}</b> com vigência a partir de <b>${formatarDataBR(dataVigencia)}</b>?`, "Confirmar Envio");
     if (!confirmado) return;
 
@@ -49057,6 +49087,48 @@ window.alterarStatusAlteracao = async function(id, novoStatus) {
 window.excluirAlteracao = async function(id) {
     const confirmado = await mostrarConfirmacao("Deseja excluir este chamado do histórico?", "Excluir");
     if (!confirmado) return;
+
+    // 🔁 (08/10/2026) Excluir o chamado NÃO desfaz o que ele já gravou na ficha. Se esse chamado foi uma TROCA DE UNIDADE já
+    // aplicada (histórico de transferências e/ou pedido pendente com vigência futura), pergunta se quer desfazer isso também —
+    // senão a troca fica "fantasma" na ficha e ainda pode ser aplicada sozinha depois (foi o que gerou a duplicata do Everton).
+    try {
+        const { data: chamadoExc } = await supabaseClient.from('solicitacoes_alteracao').select('colaborador_id, status, alteracoes').eq('id', id).maybeSingle();
+        if (chamadoExc && chamadoExc.status === 'Concluído' && chamadoExc.colaborador_id && chamadoExc.alteracoes) {
+            const alts = typeof chamadoExc.alteracoes === 'string' ? JSON.parse(chamadoExc.alteracoes) : chamadoExc.alteracoes;
+            const chaveUnid = Object.keys(alts).find(k => /unidade/i.test(k) && !/hor[aá]rio|turno/i.test(k));
+            const chaveData = Object.keys(alts).find(k => k.includes('A PARTIR'));
+            const unidadeDoChamado = chaveUnid ? String(alts[chaveUnid]).replace(/<[^>]*>?/gm, '').trim() : '';
+            const mData = chaveData ? String(alts[chaveData]).replace(/<[^>]*>?/gm, '').match(/(\d{2})\/(\d{2})\/(\d{4})/) : null;
+            const dataDoChamado = mData ? `${mData[3]}-${mData[2]}-${mData[1]}` : '';
+
+            if (unidadeDoChamado && dataDoChamado) {
+                const { data: perfilExc } = await supabaseClient.from('perfis').select('nome, dados_admissao').eq('id', chamadoExc.colaborador_id).maybeSingle();
+                const admExc = (perfilExc && perfilExc.dados_admissao) || {};
+                const normU = x => String(x || '').trim().toUpperCase();
+                const pend = admExc.mudanca_pendente;
+                const pendeDesteChamado = !!(pend && (String(pend.id_chamado) === String(id) || (normU(pend.unidade_nova) === normU(unidadeDoChamado) && pend.data_vigencia === dataDoChamado)));
+                const entradaHist = (admExc.historico_transferencias || []).find(h => h && h.data_mudanca === dataDoChamado && normU(h.unidade_nova) === normU(unidadeDoChamado));
+
+                if (pendeDesteChamado || entradaHist) {
+                    const desfazer = await mostrarConfirmacao(
+                        `Este chamado era uma <b>troca de unidade</b> (${unidadeDoChamado}, a partir de ${formatarDataBR(dataDoChamado)}) de <b>${perfilExc.nome || 'colaborador'}</b> e <b>já foi aplicado na ficha</b>.<br><br>` +
+                        `Excluir só o chamado NÃO desfaz isso. Deseja <b>também remover</b> essa troca da ficha (histórico de transferências${pendeDesteChamado ? ' e o pedido pendente que ainda seria aplicado' : ''})?<br><br>` +
+                        `<small>A unidade atual do colaborador não é alterada por aqui. Se cancelar, só o chamado é excluído.</small>`,
+                        "Remover também da ficha"
+                    );
+                    if (desfazer) {
+                        if (pendeDesteChamado) delete admExc.mudanca_pendente;
+                        admExc.historico_transferencias = (admExc.historico_transferencias || []).filter(h => !(h && h.data_mudanca === dataDoChamado && normU(h.unidade_nova) === normU(unidadeDoChamado)));
+                        const { error: errDesf } = await supabaseClient.from('perfis').update({ dados_admissao: admExc }).eq('id', chamadoExc.colaborador_id);
+                        if (errDesf) mostrarAlerta("Não consegui remover a troca da ficha: " + errDesf.message, "erro");
+                        else mostrarAlerta("Troca removida da ficha.", "sucesso");
+                    }
+                }
+            }
+        }
+    } catch (eDesf) {
+        console.warn("Checagem de troca de unidade ao excluir chamado falhou (a exclusão segue normal):", eDesf);
+    }
     
     // 1. Apaga a solicitação do banco
     await supabaseClient.from('solicitacoes_alteracao').delete().eq('id', id);
@@ -49671,6 +49743,16 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
 
             // 1. ATUALIZA O HISTÓRICO DE TRANSFERÊNCIA
             if (mudouLocalOuFuncao) {
+                // 🔁 Já existe a mesma troca (mesmas unidades) com outra data? Pergunta antes de criar uma segunda.
+                const trocaJaExistente = window.acharTrocaDuplicada(adm, unidadeAntiga, unidade, dataVigencia);
+                if (trocaJaExistente) {
+                    const substituir = await mostrarConfirmacao(`Já existe uma troca de <b>${unidadeAntiga}</b> para <b>${unidade}</b> registrada (${trocaJaExistente.origem}) com data <b>${formatarDataBR(trocaJaExistente.data)}</b>.<br><br>Esta aplicação usa a data <b>${formatarDataBR(dataVigencia)}</b>. Deseja <b>SUBSTITUIR</b> a anterior por esta? (Se cancelar, nada é aplicado.)`, "Substituir a troca anterior");
+                    if (!substituir) {
+                        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check-double"></i> Aplicar Mudanças e Concluir Chamado';
+                        return;
+                    }
+                    window.removerTrocaDuplicada(adm, unidadeAntiga, unidade, dataVigencia);
+                }
                 if (!adm.historico_transferencias) adm.historico_transferencias = [];
                 let histExistente = adm.historico_transferencias.find(h => h.data_mudanca === dataVigencia);
                 if (histExistente) {
@@ -49997,6 +50079,38 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         }
     });
        };
+
+// 🔁 (08/10/2026) TROCA DE UNIDADE DUPLICADA: antes de gravar uma transferência, procura outra troca JÁ REGISTRADA (histórico
+// ou pedido pendente) entre as MESMAS unidades (origem e destino) com data DIFERENTE e próxima (até 60 dias). Isso acontece,
+// por exemplo, quando um chamado com vigência futura fica pendente e depois outro é aplicado com outra data — apagar o chamado
+// não desfaz o que ele já gravou na ficha, e a troca ficava em duplicidade.
+window.acharTrocaDuplicada = function(adm, unidadeAntiga, unidadeNova, dataNova) {
+    try {
+        const n = x => String(x || '').trim().toUpperCase();
+        if (!adm || !dataNova || n(unidadeAntiga) === n(unidadeNova)) return null;
+        const dNova = new Date(dataNova + 'T00:00:00');
+        const perto = (iso) => iso && iso !== dataNova && Math.abs(new Date(iso + 'T00:00:00') - dNova) <= 60 * 24 * 3600 * 1000;
+        const emHist = (adm.historico_transferencias || []).find(h => h && n(h.unidade_antiga) === n(unidadeAntiga) && n(h.unidade_nova) === n(unidadeNova) && perto(h.data_mudanca));
+        if (emHist) return { origem: 'histórico', data: emHist.data_mudanca };
+        const pend = adm.mudanca_pendente;
+        if (pend && n(pend.unidade_antiga) === n(unidadeAntiga) && n(pend.unidade_nova) === n(unidadeNova) && perto(pend.data_vigencia)) {
+            return { origem: 'pedido pendente', data: pend.data_vigencia };
+        }
+        return null;
+    } catch (e) { return null; }
+};
+
+// Remove a troca anterior (histórico e/ou pendente) que o usuário aceitou substituir.
+window.removerTrocaDuplicada = function(adm, unidadeAntiga, unidadeNova, dataNova) {
+    const n = x => String(x || '').trim().toUpperCase();
+    if (Array.isArray(adm.historico_transferencias)) {
+        adm.historico_transferencias = adm.historico_transferencias.filter(h => !(h && n(h.unidade_antiga) === n(unidadeAntiga) && n(h.unidade_nova) === n(unidadeNova) && h.data_mudanca !== dataNova));
+    }
+    const pend = adm.mudanca_pendente;
+    if (pend && n(pend.unidade_antiga) === n(unidadeAntiga) && n(pend.unidade_nova) === n(unidadeNova) && pend.data_vigencia !== dataNova) {
+        delete adm.mudanca_pendente;
+    }
+};
 
 // =========================================================
 // 🆕 APLICA MUDANÇAS DE UNIDADE/CARGO QUE FICARAM "PENDENTES" ESPERANDO A
