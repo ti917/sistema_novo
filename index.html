@@ -18957,6 +18957,37 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                     return `${navigator.platform || 'Dispositivo'} • ${nav}`;
                 })();
 
+                // 🔐 (08/10/2026) Admin e Gestor: código por e-mail em aparelho/navegador novo OU IP novo (ou 30 dias
+                // sem confirmar). Quem decide é a Edge Function "verificar-acesso-login" (código gerado e conferido
+                // no servidor). Se a função não responder (ainda não publicada, sem internet), segue a regra antiga abaixo.
+                if (usuarioAtual && (usuarioAtual.perfil === 'Admin' || usuarioAtual.perfil === 'Gestor')) {
+                    try {
+                        const { data: st, error: errSt } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                            body: { acao: 'status', fingerprint: deviceId, descricao: descricaoDispositivo }
+                        });
+                        if (!errSt && st && typeof st.exige === 'boolean') {
+                            if (!st.exige) return true;
+                            if (st.motivo !== '30_dias') {
+                                // aviso por e-mail de novo acesso (igual ao que já existia)
+                                supabaseClient.functions.invoke('enviar-email-seguranca-login', {
+                                    body: {
+                                        tipo: 'novo_dispositivo', nome: usuarioAtual.nome, email: emailLogin,
+                                        dispositivo: descricaoDispositivo + (st.ip ? ' • IP ' + st.ip : ''),
+                                        data_hora: new Date().toLocaleString('pt-BR'),
+                                        colaborador_id: usuarioAtual.id, fingerprint: deviceId
+                                    }
+                                }).catch(e => console.warn("Não consegui mandar o e-mail de aviso de novo acesso:", e));
+                            }
+                            if (loginLoadingEl) { loginLoadingEl.style.display = 'none'; loginLoadingEl.classList.add('hidden'); }
+                            await window._exigirCodigoServidor(deviceId, descricaoDispositivo, emailLogin, st.motivo, st.ip);
+                            return false;
+                        }
+                        console.warn("Trava de código no servidor indisponível, seguindo a regra antiga:", errSt || st);
+                    } catch (eSrv) {
+                        console.warn("Trava de código no servidor falhou, seguindo a regra antiga:", eSrv);
+                    }
+                }
+
                 const { data: dispositivoExistente, error: erroBusca } = await supabaseClient
                     .from('dispositivos_login')
                     .select('id, ultima_verificacao_codigo')
@@ -19015,6 +19046,90 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                 console.error("Erro na checagem de segurança de login (login segue normal, sem travar por causa disso):", e);
                 return true;
             }
+        };
+
+        window._exigirCodigoServidor = function(deviceId, descricaoDispositivo, emailLogin, motivo, ip) {
+            return new Promise((resolve) => {
+                const textoMotivo = {
+                    dispositivo_novo: 'Este navegador/aparelho ainda não foi confirmado para a sua conta.',
+                    ip_novo: 'Você está acessando de um IP novo' + (ip ? ' (' + ip + ')' : '') + ', que ainda não foi confirmado.',
+                    '30_dias': 'Já faz mais de 30 dias desde a última confirmação neste navegador.'
+                }[motivo] || 'Precisamos confirmar que é você.';
+                const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+                document.getElementById('modal-codigo-login')?.remove();
+                document.body.insertAdjacentHTML('beforeend', `
+                <div id="modal-codigo-login" style="position: fixed; inset: 0; background: rgba(0,10,25,0.97); z-index: 999999; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <div class="glass-card" style="width: 100%; max-width: 420px; border: 1px solid #4fc3f7; border-radius: 16px; padding: 30px; text-align: center;">
+                        <i class="fa-solid fa-shield-halved" style="font-size: 2.2rem; color: #4fc3f7; margin-bottom: 12px;"></i>
+                        <h3 style="color: #fff; margin-bottom: 8px;">Confirme seu acesso</h3>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 8px;">${esc(textoMotivo)}</p>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 20px;">Mandamos um código de 6 dígitos para <b style="color:#fff;">${esc(emailLogin)}</b>. Sem ele, o sistema não libera o acesso.</p>
+                        <input type="text" id="input-codigo-login" maxlength="6" placeholder="------" autocomplete="one-time-code" inputmode="numeric"
+                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 14px;">
+                        <div id="cod-login-erro" style="display:none; color: var(--cor-perigo); font-size: 0.85rem; margin-bottom: 14px;"></div>
+                        <button id="btn-confirmar-codigo-login" class="btn-success" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-check"></i> Confirmar</button>
+                        <button id="btn-reenviar-codigo-login" class="btn-secondary" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-rotate"></i> Reenviar código</button>
+                        <button id="btn-cancelar-codigo-login" style="background:none; border:none; color: var(--cor-texto-secundario); font-size: 0.8rem; cursor:pointer; text-decoration: underline;">Cancelar e sair</button>
+                    </div>
+                </div>`);
+
+                const inputCodigo = document.getElementById('input-codigo-login');
+                const btnConfirmar = document.getElementById('btn-confirmar-codigo-login');
+                const btnReenviar = document.getElementById('btn-reenviar-codigo-login');
+                const btnCancelar = document.getElementById('btn-cancelar-codigo-login');
+                const errorEl = document.getElementById('cod-login-erro');
+                const mostrarErro = (m) => { errorEl.innerText = m; errorEl.style.display = 'block'; };
+
+                const enviarCodigo = async () => {
+                    errorEl.style.display = 'none';
+                    try {
+                        const { data, error } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                            body: { acao: 'enviar', fingerprint: deviceId, descricao: descricaoDispositivo }
+                        });
+                        let msg = data && (data.erro || data.error);
+                        if (error && error.context) { try { const c = await error.context.clone().json(); msg = c?.erro || c?.error || msg; } catch (_e) {} }
+                        if (error || !data || data.sucesso === false) mostrarErro(msg || 'Não consegui enviar o código. Tente reenviar.');
+                    } catch (e) { mostrarErro('Não consegui enviar o código. Tente reenviar.'); }
+                };
+                enviarCodigo();
+
+                const confirmarCodigo = async () => {
+                    const codigoDigitado = (inputCodigo.value || '').trim();
+                    if (codigoDigitado.length !== 6) return mostrarErro('Digite os 6 dígitos do código.');
+                    btnConfirmar.disabled = true;
+                    btnConfirmar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Confirmando...';
+                    try {
+                        const { data, error } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                            body: { acao: 'confirmar', fingerprint: deviceId, codigo: codigoDigitado, descricao: descricaoDispositivo }
+                        });
+                        if (!error && data && data.sucesso === true) {
+                            document.getElementById('modal-codigo-login')?.remove();
+                            location.reload();
+                            return;
+                        }
+                        mostrarErro((data && (data.erro || data.error)) || 'Código inválido ou expirado. Peça um novo.');
+                    } catch (e) { mostrarErro('Não consegui conferir o código agora. Tente de novo.'); }
+                    btnConfirmar.disabled = false;
+                    btnConfirmar.innerHTML = '<i class="fa-solid fa-check"></i> Confirmar';
+                };
+
+                btnConfirmar.addEventListener('click', confirmarCodigo);
+                inputCodigo.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmarCodigo(); });
+                btnReenviar.addEventListener('click', () => {
+                    btnReenviar.disabled = true;
+                    btnReenviar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reenviando...';
+                    enviarCodigo().finally(() => setTimeout(() => {
+                        btnReenviar.disabled = false;
+                        btnReenviar.innerHTML = '<i class="fa-solid fa-rotate"></i> Reenviar código';
+                    }, 15000));
+                });
+                btnCancelar.addEventListener('click', async () => {
+                    document.getElementById('modal-codigo-login')?.remove();
+                    await supabaseClient.auth.signOut();
+                    location.reload();
+                });
+            });
         };
 
         window._exigirCodigoLoginPorEmail = function(dispositivoId, deviceId, emailLogin) {
