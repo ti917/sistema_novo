@@ -2253,8 +2253,140 @@
         // Precisa estar aqui também porque financeiro.html é um arquivo separado
         // do index.html — não reaproveita as funções JS de lá.
         // =========================================================================
+        window._exigirCodigoServidor = function(deviceId, descricaoDispositivo, emailLogin, motivo, ip) {
+            return new Promise((resolve) => {
+                const textoMotivo = {
+                    dispositivo_novo: 'Este navegador/aparelho ainda não foi confirmado para a sua conta.',
+                    ip_novo: 'Você está acessando de um IP novo' + (ip ? ' (' + ip + ')' : '') + ', que ainda não foi confirmado.',
+                    '30_dias': 'Já faz mais de 30 dias desde a última confirmação neste navegador.'
+                }[motivo] || 'Precisamos confirmar que é você.';
+                const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+                document.getElementById('modal-codigo-login')?.remove();
+                document.body.insertAdjacentHTML('beforeend', `
+                <div id="modal-codigo-login" style="position: fixed; inset: 0; background: rgba(0,10,25,0.97); z-index: 999999; display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <div class="glass-card" style="width: 100%; max-width: 420px; border: 1px solid #4fc3f7; border-radius: 16px; padding: 30px; text-align: center;">
+                        <i class="fa-solid fa-shield-halved" style="font-size: 2.2rem; color: #4fc3f7; margin-bottom: 12px;"></i>
+                        <h3 style="color: #fff; margin-bottom: 8px;">Confirme seu acesso</h3>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 8px;">${esc(textoMotivo)}</p>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 20px;">Mandamos um código de 6 dígitos para <b style="color:#fff;">${esc(emailLogin)}</b>. Sem ele, o sistema não libera o acesso.</p>
+                        <input type="text" id="input-codigo-login" maxlength="6" placeholder="------" autocomplete="one-time-code" inputmode="numeric"
+                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 14px;">
+                        <div id="cod-login-erro" style="display:none; color: var(--cor-perigo); font-size: 0.85rem; margin-bottom: 14px;"></div>
+                        <button id="btn-confirmar-codigo-login" class="btn-success" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-check"></i> Confirmar</button>
+                        <button id="btn-reenviar-codigo-login" class="btn-secondary" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-rotate"></i> Reenviar código</button>
+                        <button id="btn-cancelar-codigo-login" style="background:none; border:none; color: var(--cor-texto-secundario); font-size: 0.8rem; cursor:pointer; text-decoration: underline;">Cancelar e sair</button>
+                    </div>
+                </div>`);
+
+                const inputCodigo = document.getElementById('input-codigo-login');
+                const btnConfirmar = document.getElementById('btn-confirmar-codigo-login');
+                const btnReenviar = document.getElementById('btn-reenviar-codigo-login');
+                const btnCancelar = document.getElementById('btn-cancelar-codigo-login');
+                const errorEl = document.getElementById('cod-login-erro');
+                const mostrarErro = (m) => { errorEl.innerText = m; errorEl.style.display = 'block'; };
+                window.addEventListener('storage', (ev) => { if (ev.key === 'soul_acesso_confirmado') location.reload(); });
+
+                const enviarCodigo = async () => {
+                    errorEl.style.display = 'none';
+                    try {
+                        const { data, error } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                            body: { acao: 'enviar', fingerprint: deviceId, descricao: descricaoDispositivo }
+                        });
+                        let msg = data && (data.erro || data.error);
+                        if (error && error.context) { try { const c = await error.context.clone().json(); msg = c?.erro || c?.error || msg; } catch (_e) {} }
+                        if (error || !data || data.sucesso === false) mostrarErro(msg || 'Não consegui enviar o código. Tente reenviar.');
+                    } catch (e) { mostrarErro('Não consegui enviar o código. Tente reenviar.'); }
+                };
+                enviarCodigo();
+
+                const confirmarCodigo = async () => {
+                    const codigoDigitado = (inputCodigo.value || '').trim();
+                    if (codigoDigitado.length !== 6) return mostrarErro('Digite os 6 dígitos do código.');
+                    btnConfirmar.disabled = true;
+                    btnConfirmar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Confirmando...';
+                    try {
+                        const { data, error } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                            body: { acao: 'confirmar', fingerprint: deviceId, codigo: codigoDigitado, descricao: descricaoDispositivo }
+                        });
+                        if (!error && data && data.sucesso === true) {
+                            document.getElementById('modal-codigo-login')?.remove();
+                            // avisa outras abas abertas (ex: Financeiro e Comercial ao mesmo tempo) para recarregarem
+                            try { localStorage.setItem('soul_acesso_confirmado', String(Date.now())); } catch (_e) {}
+                            location.reload();
+                            return;
+                        }
+                        mostrarErro((data && (data.erro || data.error)) || 'Código inválido ou expirado. Peça um novo.');
+                    } catch (e) { mostrarErro('Não consegui conferir o código agora. Tente de novo.'); }
+                    btnConfirmar.disabled = false;
+                    btnConfirmar.innerHTML = '<i class="fa-solid fa-check"></i> Confirmar';
+                };
+
+                btnConfirmar.addEventListener('click', confirmarCodigo);
+                inputCodigo.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmarCodigo(); });
+                btnReenviar.addEventListener('click', () => {
+                    btnReenviar.disabled = true;
+                    btnReenviar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reenviando...';
+                    enviarCodigo().finally(() => setTimeout(() => {
+                        btnReenviar.disabled = false;
+                        btnReenviar.innerHTML = '<i class="fa-solid fa-rotate"></i> Reenviar código';
+                    }, 15000));
+                });
+                btnCancelar.addEventListener('click', async () => {
+                    document.getElementById('modal-codigo-login')?.remove();
+                    await supabaseClient.auth.signOut();
+                    location.reload();
+                });
+            });
+        };
+
+        // 🔐 (08/10/2026) Trava de acesso por código (mesma do index.html), agora também aqui.
+        // Quem decide é a Edge Function "verificar-acesso-login" (código gerado e conferido no servidor).
+        // Retorno: true = liberado | false = pediu código (modal assumiu a tela) | null = função indisponível.
+        window.verificarAcessoServidor = async function(contexto, emailLogin) {
+            try {
+                const CHAVE_DEVICE_ID = 'soul_device_id';
+                let deviceId = localStorage.getItem(CHAVE_DEVICE_ID);
+                if (!deviceId) {
+                    deviceId = (crypto.randomUUID ? crypto.randomUUID() : ('dev-' + Date.now() + '-' + Math.random().toString(36).slice(2)));
+                    localStorage.setItem(CHAVE_DEVICE_ID, deviceId);
+                }
+                const ua = navigator.userAgent || '';
+                const nav = (ua.match(/(Chrome|Firefox|Safari|Edg|OPR)\/[\d.]+/) || ['Navegador'])[0];
+                const descricaoDispositivo = `${navigator.platform || 'Dispositivo'} • ${nav}`;
+
+                const { data: st, error: errSt } = await supabaseClient.functions.invoke('verificar-acesso-login', {
+                    body: { acao: 'status', fingerprint: deviceId, descricao: descricaoDispositivo, contexto }
+                });
+                if (errSt || !st || typeof st.exige !== 'boolean') {
+                    console.warn("Trava de código no servidor indisponível:", errSt || st);
+                    return null;
+                }
+                if (!st.exige) return true;
+                if (st.motivo !== '30_dias') {
+                    supabaseClient.functions.invoke('enviar-email-seguranca-login', {
+                        body: {
+                            tipo: 'novo_dispositivo', nome: usuarioAtual.nome, email: emailLogin,
+                            dispositivo: descricaoDispositivo + (st.ip ? ' • IP ' + st.ip : ''),
+                            data_hora: new Date().toLocaleString('pt-BR'),
+                            colaborador_id: usuarioAtual.id, fingerprint: deviceId
+                        }
+                    }).catch(e => console.warn("Não consegui mandar o e-mail de aviso de novo acesso:", e));
+                }
+                await window._exigirCodigoServidor(deviceId, descricaoDispositivo, emailLogin, st.motivo, st.ip);
+                return false;
+            } catch (e) {
+                console.warn("Trava de código no servidor falhou:", e);
+                return null;
+            }
+        };
+
         window.verificarSegurancaLoginDispositivo = async function(emailLogin, loginLoadingEl) {
             try {
+                // 🔐 Primeiro tenta a trava nova (servidor). Se a função não responder, segue a regra antiga abaixo.
+                const resSrv = await window.verificarAcessoServidor('financeiro', emailLogin);
+                if (resSrv === true) return true;
+                if (resSrv === false) return false;
                 const CHAVE_DEVICE_ID = 'soul_device_id';
                 let deviceId = localStorage.getItem(CHAVE_DEVICE_ID);
                 if (!deviceId) {
