@@ -59245,6 +59245,66 @@ window.calcularVRAgora = async function() {
                 }
             }
             
+            // 🔄 (08/10/2026) TROCA DE UNIDADE DENTRO DO PERÍODO: o VR de um mês é calculado no fechamento do
+            // período anterior, quando o colaborador ainda estava na unidade antiga. Se a unidade antiga NÃO
+            // pagava VR e a nova paga, os dias do mês que já está em curso (da data da troca até o fim do mês
+            // de crédito anterior) ficaram sem pagar — entra como RETROATIVO (mesma conta do retroativo de
+            // admissão: dias de trabalho + 0,5, limitado ao teto). Se a antiga também pagava VR, só avisa.
+            // O mês de crédito atual (mês seguinte ao fim do filtro) já sai cheio pela unidade nova.
+            try {
+                if (!admissaoDentroDoMesDoFiltroVR && diasProporcionalVR !== 0) {
+                    const normUn = x => String(x || '').trim().toUpperCase();
+                    const unidadeNovaRegra = normUn(regraUnidade.unidade);
+                    const trocas = (adm.historico_transferencias || []).filter(h =>
+                        h && h.data_mudanca && h.data_mudanca >= dataInicioStr && h.data_mudanca <= dataFimStr &&
+                        h.unidade_antiga && h.unidade_nova &&
+                        normUn(h.unidade_nova) === unidadeNovaRegra && normUn(h.unidade_antiga) !== unidadeNovaRegra
+                    ).sort((x, y) => String(x.data_mudanca).localeCompare(String(y.data_mudanca)));
+
+                    if (trocas.length > 0) {
+                        const troca = trocas[trocas.length - 1];
+                        const dataTrocaBR = troca.data_mudanca.split('-').reverse().join('/');
+
+                        // A unidade antiga pagava VR para ele?
+                        const regraAntiga = regrasVR.find(r => normUn(r.unidade) === normUn(troca.unidade_antiga));
+                        let pagavaVRAntes = false;
+                        if (regraAntiga && String(regraAntiga.recebe_vr) !== 'false') {
+                            pagavaVRAntes = regraAntiga.escopo_recebimento === 'especificos'
+                                ? (Array.isArray(regraAntiga.colaboradores_recebem) && regraAntiga.colaboradores_recebem.map(String).includes(String(colab.id)))
+                                : !ehExcecaoPorCargo;
+                        }
+
+                        if (!pagavaVRAntes && recebeVRPorCargo) {
+                            // Início do retroativo: a data da troca ou o 1º dia do mês de crédito anterior (o que for maior)
+                            const primeiroDiaMesAnterior = new Date(anoFimFiltro, mesFimFiltro - 1, 1);
+                            const dTroca = new Date(troca.data_mudanca + 'T00:00:00');
+                            const fimMesAnterior = new Date(anoFimFiltro, mesFimFiltro, 0, 23, 59, 59);
+                            let tempT = dTroca > primeiroDiaMesAnterior ? new Date(dTroca) : new Date(primeiroDiaMesAnterior);
+                            let diasRetroTroca = 0;
+                            while (tempT <= fimMesAnterior) {
+                                const isoT = `${tempT.getFullYear()}-${String(tempT.getMonth()+1).padStart(2,'0')}-${String(tempT.getDate()).padStart(2,'0')}`;
+                                if (tempT >= dAdm && !window.isDiaDeFolga(colab, isoT)) diasRetroTroca++;
+                                tempT.setDate(tempT.getDate() + 1);
+                            }
+                            if (diasRetroTroca > 0) diasRetroTroca += 0.5;
+                            if (diasRetroTroca > diasPadraoFixoTeto) diasRetroTroca = diasPadraoFixoTeto;
+
+                            if (diasRetroTroca > 0) {
+                                retroativoCalculado += diasRetroTroca;
+                                // faltas/atestados que caírem até o fim desse mês também precisam abater
+                                if (fimMesAnterior > fimAbatimentoVR) fimAbatimentoVR = fimMesAnterior;
+                                labelExtra += `<br><span style="color: #29b6f6; font-size: 0.75rem; background: rgba(41, 182, 246, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-arrows-left-right"></i> Troca de unidade em ${dataTrocaBR} (de ${troca.unidade_antiga}, que não pagava VR) — retroativo de ${diasRetroTroca.toFixed(1)} dia(s) incluído</span>`;
+                                statusExcel = `Troca de unidade em ${dataTrocaBR} (retroativo ${diasRetroTroca.toFixed(1)} dia(s))`;
+                            }
+                        } else {
+                            labelExtra += `<br><span style="color: #29b6f6; font-size: 0.75rem; background: rgba(41, 182, 246, 0.12); padding: 3px 6px; border-radius: 4px; display: inline-block; margin-top: 5px;"><i class="fa-solid fa-arrows-left-right"></i> Troca de unidade em ${dataTrocaBR} (de ${troca.unidade_antiga}) — confira se há diferença a acertar</span>`;
+                        }
+                    }
+                }
+            } catch (eTrocaVR) {
+                console.warn("Retroativo de troca de unidade (VR) ignorado por erro:", eTrocaVR);
+            }
+
             // 👇 BLOCO 3: ABATIMENTOS BLINDADOS (SEPARANDO 12x36 de 44h) 👇
         // A MÁGICA 2: Removemos 'AD' e 'DES' da lista de abatimentos!
         let listaAbatimentosDesteColab = ['FA', 'ATM', 'AC', 'ATC', 'ATOB', 'AF', 'LDM', 'LDP', 'FER', 'LG']; 
