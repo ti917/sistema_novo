@@ -56076,42 +56076,68 @@ function garantirTesseractCarregado() {
 // alinhada palavra-por-palavra com o que aparece na imagem. Isso deixa o PDF pesquisável/
 // selecionável sem alterar em nada a imagem visível (a qualidade da digitalização não muda,
 // só ganha um "esqueleto" de texto escondido embaixo).
-window.__adicionarCamadaOcrInvisivel = async function(pdf, dataUrl, x, y, wMm, hMm) {
-    await garantirTesseractCarregado();
-    if (!window.Tesseract) return; // Tesseract não carregou (ex: sem internet nesse instante) — segue sem OCR, PDF continua normal
+window.__adicionarCamadaOcrInvisivel = async function(pdf, dataUrl, x, y, wMm, hMm, worker) {
+    // Devolve quantas palavras foram colocadas na página (0 = OCR não achou texto ou falhou).
+    if (!window.Tesseract) return 0;
     try {
-        const resultado = await window.Tesseract.recognize(dataUrl, 'por+eng', { logger: () => {} });
+        // Usa o "worker" compartilhado (criado uma vez só em gerarPdfDigitalizado): carregar o
+        // idioma a cada página era lento (vários segundos POR página).
+        const resultado = worker
+            ? await worker.recognize(dataUrl)
+            : await window.Tesseract.recognize(dataUrl, 'por+eng', { logger: () => {} });
         const dadosPagina = resultado && resultado.data;
-        if (!dadosPagina || !dadosPagina.width || !dadosPagina.height) return;
+        if (!dadosPagina) return 0;
 
-        const escalaX = wMm / dadosPagina.width;
-        const escalaY = hMm / dadosPagina.height;
+        // Tamanho real da imagem que foi lida (a fonte de verdade pra converter px -> mm).
+        const props = pdf.getImageProperties(dataUrl);
+        const larguraPx = props.width, alturaPagPx = props.height;
+        if (!larguraPx || !alturaPagPx) return 0;
 
-        const palavras = (dadosPagina.words || []).filter(p => p.text && p.text.trim().length > 0);
+        const escalaX = wMm / larguraPx;
+        const escalaY = hMm / alturaPagPx;
+
+        const palavras = (dadosPagina.words || []).filter(p => p.text && p.text.trim().length > 0 && (p.confidence === undefined || p.confidence >= 30));
+        let colocadas = 0;
         for (const palavra of palavras) {
             const bbox = palavra.bbox;
             if (!bbox) continue;
             const alturaPx = bbox.y1 - bbox.y0;
             if (alturaPx <= 0) continue;
 
-            const px = x + bbox.x0 * escalaX;
-            const py = y + bbox.y1 * escalaY; // baseline aproximada = base do bbox
-            const alturaMm = alturaPx * escalaY;
             const larguraMm = (bbox.x1 - bbox.x0) * escalaX;
+            const px = x + bbox.x0 * escalaX;
+            // Linha de base: usa a que o OCR mediu; se não veio, estima (a base do bbox inclui a
+            // "perninha" de letras como g/p/y, então sobe ~20% da altura).
+            const baseY = (palavra.baseline && isFinite(palavra.baseline.y0) && palavra.baseline.y0 > bbox.y0 && palavra.baseline.y0 <= bbox.y1)
+                ? palavra.baseline.y0
+                : bbox.y1 - alturaPx * 0.2;
+            const py = y + baseY * escalaY;
 
-            // Tamanho de fonte aproximado a partir da altura do bbox (1pt ≈ 0.3528mm)
-            let tamanhoFonte = alturaMm / 0.3528;
+            // Tamanho de fonte aproximado a partir da altura do bbox (1pt ≈ 0.3528mm); a altura
+            // do bbox pega letra alta + perninha, então ~75% dela é o corpo da fonte.
+            const tamanhoFonte = (alturaPx * escalaY * 0.75) / 0.3528;
             if (!isFinite(tamanhoFonte) || tamanhoFonte <= 0) continue;
 
             try {
                 pdf.setFontSize(tamanhoFonte);
-                // Espaça o texto pra ocupar a mesma largura da palavra na imagem, mantendo o
-                // alinhamento posicional (não precisa ficar visualmente perfeito — é invisível).
-                pdf.text(palavra.text, px, py, { renderingMode: 'invisible', maxWidth: larguraMm || undefined });
-            } catch (eTexto) { /* ignora palavra problemática e segue com as outras */ }
+                // Em vez de "maxWidth" (que QUEBRA a palavra em duas linhas quando passa da largura
+                // e desalinha a seleção do texto), espaça as letras pra palavra ocupar exatamente a
+                // largura que tem na imagem — a seleção/busca no PDF fica alinhada com o texto real.
+                const texto = palavra.text.trim();
+                const nat = pdf.getTextWidth(texto);
+                const opcoes = { renderingMode: 'invisible' };
+                if (texto.length > 1 && nat > 0 && larguraMm > 0) {
+                    const espaco = (larguraMm - nat) / (texto.length - 1);
+                    if (isFinite(espaco)) opcoes.charSpace = espaco;
+                }
+                pdf.text(texto, px, py, opcoes);
+                colocadas++;
+            } catch (eTexto) { /* ignora palavra problemática (ex.: símbolo fora da fonte) e segue com as outras */ }
         }
+        return colocadas;
     } catch (eOcr) {
         console.warn('OCR falhou nessa página, PDF segue sem camada de texto pesquisável nela:', eOcr);
+        return 0;
     }
 };
 
@@ -56153,20 +56179,50 @@ window.gerarPdfDigitalizado = async function() {
 
         // Camada de OCR invisível: roda depois de todas as imagens já estarem no PDF,
         // página por página, sem nunca alterar a imagem visível já inserida.
-        if (window.Tesseract) {
-            for (let i = 0; i < paginas.length; i++) {
-                if (btn) { btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reconhecendo texto (OCR) ' + (i + 1) + '/' + paginas.length + '...'; }
-                pdf.setPage(i + 1);
-                const pos = posicoesPagina[i];
-                await window.__adicionarCamadaOcrInvisivel(pdf, paginas[i].dataUrl, pos.x, pos.y, pos.w, pos.h);
+        // 🐛 CORREÇÃO: o Tesseract é carregado sob demanda (garantirTesseractCarregado), mas antes
+        // este bloco checava "if (window.Tesseract)" ANTES de carregá-lo — então, na prática, o
+        // OCR nunca rodava e o PDF saía sem texto pesquisável. Agora carrega primeiro.
+        let paginasComTexto = 0, ocrDisponivel = false;
+        if (btn) { btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Preparando reconhecimento de texto (OCR)...'; }
+        ocrDisponivel = await garantirTesseractCarregado();
+        if (ocrDisponivel && window.Tesseract) {
+            let worker = null;
+            try {
+                worker = await window.Tesseract.createWorker('por+eng');
+            } catch (eW) { console.warn('Não consegui iniciar o OCR:', eW); worker = null; }
+            if (worker) {
+                try {
+                    for (let i = 0; i < paginas.length; i++) {
+                        if (btn) { btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reconhecendo texto (OCR) ' + (i + 1) + '/' + paginas.length + '...'; }
+                        pdf.setPage(i + 1);
+                        const pos = posicoesPagina[i];
+                        const n = await window.__adicionarCamadaOcrInvisivel(pdf, paginas[i].dataUrl, pos.x, pos.y, pos.w, pos.h, worker);
+                        if (n > 0) paginasComTexto++;
+                    }
+                } finally {
+                    try { await worker.terminate(); } catch (eT) { /* encerrar o worker é só limpeza */ }
+                }
             }
             pdf.setFontSize(10); // restaura um tamanho padrão neutro pra não deixar estado estranho
         }
 
+        pdf.setProperties({
+            title: 'Documento digitalizado',
+            subject: 'Documento digitalizado pelo sistema',
+            author: (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) ? usuarioAtual.nome : 'Soul Gestão',
+            creator: 'Soul Gestão'
+        });
+
         const agora = new Date();
         const carimbo = agora.getFullYear() + String(agora.getMonth() + 1).padStart(2, '0') + String(agora.getDate()).padStart(2, '0') + '-' + String(agora.getHours()).padStart(2, '0') + String(agora.getMinutes()).padStart(2, '0');
         pdf.save('documento-digitalizado-' + carimbo + '.pdf');
-        mostrarAlerta('PDF gerado com ' + paginas.length + ' página(s)!' + (window.Tesseract ? ' Texto reconhecido e pesquisável dentro do PDF.' : ''), 'sucesso');
+        if (paginasComTexto === paginas.length) {
+            mostrarAlerta('PDF gerado com ' + paginas.length + ' página(s)! Texto reconhecido e pesquisável dentro do PDF.', 'sucesso');
+        } else if (paginasComTexto > 0) {
+            mostrarAlerta('PDF gerado com ' + paginas.length + ' página(s). Texto reconhecido em ' + paginasComTexto + ' delas (nas outras não encontrei texto legível).', 'aviso');
+        } else {
+            mostrarAlerta('PDF gerado com ' + paginas.length + ' página(s), mas <b>sem texto pesquisável</b>' + (ocrDisponivel ? ' (não encontrei texto legível nas páginas).' : ' (o reconhecimento de texto não carregou — verifique a internet e tente de novo).'), 'aviso');
+        }
     } catch (e) {
         mostrarAlerta('Erro ao gerar o PDF: ' + e.message, 'erro');
     } finally {
