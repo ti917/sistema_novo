@@ -6501,6 +6501,9 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                 <label style="display:block; margin-bottom:6px; color:var(--cor-texto-secundario); font-size:0.85rem;">Tipo do Relatório</label>
                 <select id="rel-tipo" class="form-select" onchange="window.aoMudarTipoRelatorio()">
                     <option value="">Selecione...</option>
+                    <optgroup label="Relatório Mensal (Excel)">
+                        <option value="relatorio_mensal">Relatório Mensal por Unidade (Excel)</option>
+                    </optgroup>
                     <optgroup label="Ponto e Jornada">
                         <option value="jornada_espelho">Jornada (Espelho de Ponto)</option>
                         <option value="registros_ponto">Registros de Ponto</option>
@@ -107038,9 +107041,290 @@ window.baixarPdfRelatorioAdmin = async function() {
     }
 };
 
+// =========================================================================
+// 📊 RELATÓRIO MENSAL (EXCEL) — pedido do RH (10/2026).
+// Uma linha por colaborador COM algum registro no período (falta, atestado, refeição > 1h,
+// troca de turno, advertência, férias, afastamento, aviso prévio ou desligamento), agrupado
+// por UNIDADE, com aba RESUMO por unidade. "Ponto irregular" e "Atualizações" ficam em branco
+// (amarelo) para preenchimento manual. SOMENTE LEITURA: só faz SELECT, nada é gravado.
+// =========================================================================
+window.gerarRelatorioMensalExcel = async function() {
+    const area = document.getElementById('rel-resultado-area');
+    const ini = document.getElementById('rel-data-ini').value;
+    const fim = document.getElementById('rel-data-fim').value;
+    if (!ini || !fim) return mostrarAlerta('Selecione o período (início e fim do mês) para o Relatório Mensal.', 'aviso');
+    if (typeof ExcelJS === 'undefined') return mostrarAlerta('A biblioteca de Excel ainda está carregando. Aguarde alguns segundos e tente de novo.', 'aviso');
+    area.innerHTML = '<p style="text-align:center; padding:30px;"><i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color:#4fc3f7;"></i><br><span style="color:var(--cor-texto-secundario);">Montando o Relatório Mensal...</span></p>';
+
+    try {
+        const d12 = s => new Date(String(s).substring(0, 10) + 'T12:00:00');
+        const iso = dt => dt.toISOString().substring(0, 10);
+        const brDia = s => { const p = String(s).substring(0, 10).split('-'); return p.length === 3 ? `${p[2]}/${p[1]}` : '-'; };
+        const brData = s => { const p = String(s).substring(0, 10).split('-'); return p.length === 3 ? `${p[2]}/${p[1]}/${p[0]}` : '-'; };
+        const diasNoPeriodo = (a, b) => {
+            const x = d12(a > ini ? a : ini), y = d12((b || a) < fim ? (b || a) : fim);
+            const n = Math.round((y - x) / 86400000) + 1;
+            return n > 0 ? n : 0;
+        };
+        // Busca paginada (o Supabase devolve no máximo 1000 linhas por consulta)
+        const buscarTodos = async (montar) => {
+            let todos = [], de = 0;
+            for (let guarda = 0; guarda < 60; guarda++) {
+                const { data, error } = await montar().range(de, de + 999);
+                if (error) throw error;
+                todos = todos.concat(data || []);
+                if (!data || data.length < 1000) break;
+                de += 1000;
+            }
+            return todos;
+        };
+
+        const [perfisTodos, ausencias, pontos, trocas, ferias, advs] = await Promise.all([
+            buscarTodos(() => supabaseClient.from('perfis').select('id, nome, unidade, empresa, status, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').order('id')),
+            buscarTodos(() => supabaseClient.from('ausencias').select('id, colaborador_id, sigla, data_inicio, data_fim').eq('status', 'Aprovado').in('sigla', ['FA', 'ATM', 'AF']).lte('data_inicio', fim).or(`data_fim.gte.${ini},data_fim.is.null`).order('id')),
+            buscarTodos(() => supabaseClient.from('pontos_diarios_whatsapp').select('id, colaborador_id, ida_refeicao_hora, volta_refeicao_hora').gte('data', ini).lte('data', fim).not('ida_refeicao_hora', 'is', null).not('volta_refeicao_hora', 'is', null).order('id')),
+            buscarTodos(() => supabaseClient.from('trocas_turno').select('id, solicitante_id, substituto_id, dia_solicitante_ira, dia_substituto_ira').eq('status', 'Aprovado').or(`and(dia_solicitante_ira.gte.${ini},dia_solicitante_ira.lte.${fim}),and(dia_substituto_ira.gte.${ini},dia_substituto_ira.lte.${fim})`).order('id')),
+            buscarTodos(() => supabaseClient.from('solicitacoes_ferias').select('id, colaborador_id, data_inicio_ferias, data_fim_ferias, status').neq('status', 'Reprovado').neq('status', 'Pendente').lte('data_inicio_ferias', fim).gte('data_fim_ferias', ini).order('id')),
+            buscarTodos(() => supabaseClient.from('advertencias').select('id, colaborador_id, status, created_at').in('status', ['Aguardando Assinatura', 'Concluído']).gte('created_at', ini).lte('created_at', fim + 'T23:59:59').order('id'))
+        ]);
+
+        const colabs = perfisTodos.filter(c => window.relColabPassaFiltro(c));
+        const m = {}; // id -> acumulador
+        colabs.forEach(c => { m[c.id] = { c, fal: 0, atm: 0, ref: 0, tro: 0, trat: [] }; });
+
+        ausencias.forEach(a => {
+            const o = m[a.colaborador_id]; if (!o) return;
+            const dias = diasNoPeriodo(a.data_inicio, a.data_fim);
+            if (!dias) return;
+            if (a.sigla === 'FA') o.fal += dias;
+            else if (a.sigla === 'ATM') o.atm += dias;
+            else if (a.sigla === 'AF') o.trat.push({ p: 3, t: 'AFASTADO(A)', a: `DESDE ${brData(a.data_inicio)}` + (a.data_fim ? ` ATÉ ${brData(a.data_fim)}` : '') });
+        });
+        pontos.forEach(p => {
+            const o = m[p.colaborador_id]; if (!o) return;
+            const mins = Math.floor((new Date(p.volta_refeicao_hora) - new Date(p.ida_refeicao_hora)) / 60000);
+            if (mins > 60 && mins < 600) o.ref++; // > 1h (ignora lixo de dados acima de 10h)
+        });
+        trocas.forEach(t => { [t.solicitante_id, t.substituto_id].forEach(id => { if (m[id]) m[id].tro++; }); });
+        ferias.forEach(f => {
+            const o = m[f.colaborador_id]; if (!o) return;
+            o.trat.push({ p: 4, t: 'FÉRIAS', a: `${brData(f.data_inicio_ferias)} A ${brData(f.data_fim_ferias)}` });
+        });
+        advs.forEach(a => {
+            const o = m[a.colaborador_id]; if (!o) return;
+            o.trat.push({ p: 5, t: 'ADVERTÊNCIA', a: a.status === 'Concluído' ? 'ADVERTÊNCIA ASSINADA' : 'ADVERTÊNCIA AGUARDANDO ASSINATURA' });
+        });
+        // Desligamento / aviso prévio (vem do cadastro do colaborador)
+        const parseUltimoDia = (txt) => { // aceita dd/mm/aaaa ou aaaa-mm-dd
+            if (!txt) return null;
+            const s = String(txt).trim();
+            if (/^\d{2}\/\d{2}\/\d{4}/.test(s)) { const [d, mo, y] = s.substring(0, 10).split('/'); return `${y}-${mo}-${d}`; }
+            if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+            return null;
+        };
+        colabs.forEach(c => {
+            const o = m[c.id], resc = c.dados_rescisao || {};
+            const ult = parseUltimoDia(resc.ultimo_dia);
+            if (c.status === 'Desligado') {
+                if (ult && ult >= ini && ult <= fim) o.trat.push({ p: 1, t: 'DESLIGADO(A)', a: `ÚLTIMO DIA ${brData(ult)}` });
+            } else if (['Rescisão Pendente', 'Aguardando Assinatura'].includes(c.status_aprovacao)) {
+                o.trat.push({ p: 2, t: 'AVISO PRÉVIO', a: ult ? `ÚLTIMO DIA ${brData(ult)}` : '' });
+            }
+        });
+
+        // Entram TODOS os colaboradores ativos (separados por unidade) — "ponto irregular" e refeição
+        // nem sempre dá pra saber pelo sistema, então não dá pra listar só quem tem ocorrência.
+        // Saem: admissão ainda não aprovada, desligado fora do período e quem começa depois do período.
+        const inicioContrato = (c) => {
+            const a = c.dados_admissao || {};
+            const v = (a.jornada && a.jornada.data_inicio) || a.data_inicio || '';
+            return /^\d{4}-\d{2}-\d{2}/.test(String(v)) ? String(v).substring(0, 10) : null;
+        };
+        const ativoNoPeriodo = (o) => {
+            const c = o.c;
+            if (['Ativo'].includes(c.status) && ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura'].includes(c.status_aprovacao)) {
+                const ic = inicioContrato(c);
+                return !(ic && ic > fim);
+            }
+            return false;
+        };
+        const linhas = Object.values(m).filter(o => ativoNoPeriodo(o) || o.fal || o.atm || o.ref || o.tro || o.trat.length)
+            .map(o => {
+                o.trat.sort((x, y) => x.p - y.p);
+                return {
+                    un: (o.c.unidade || 'SEM UNIDADE').toString().trim().toUpperCase(),
+                    nome: (o.c.nome || '').toString().trim().toUpperCase(),
+                    fal: o.fal || null, atm: o.atm || null, ref: o.ref || null, tro: o.tro || null,
+                    trat: o.trat.length ? o.trat[0].t : '',
+                    and: o.trat.map(x => x.a).filter(Boolean).join(' | ')
+                };
+            })
+            .sort((a, b) => a.un.localeCompare(b.un, 'pt-BR') || a.nome.localeCompare(b.nome, 'pt-BR'));
+
+        if (!linhas.length) {
+            area.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:30px;">Nenhum registro encontrado nesse período com esses filtros.</p>';
+            return;
+        }
+
+        // ---------------- Monta o Excel ----------------
+        const NAVY = 'FF1F3A5F', BLUE = 'FF2F6DB5', LIGHT = 'FFEAF1FA', GRID = 'FFD5DEE9', INPUT = 'FFFFF8DC', GOLD = 'FFC98A00';
+        const solid = argb => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+        const fino = { style: 'thin', color: { argb: GRID } };
+        const borda = { top: fino, left: fino, bottom: fino, right: fino };
+        const FONTE = 'Arial';
+        const mesesPt = ['JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO', 'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'];
+        const mesmoMes = ini.substring(0, 7) === fim.substring(0, 7);
+        const rotuloPeriodo = mesmoMes ? `${mesesPt[parseInt(ini.substring(5, 7), 10) - 1]}/${ini.substring(0, 4)}` : `${brData(ini)} A ${brData(fim)}`;
+
+        const wb = new ExcelJS.Workbook();
+        wb.creator = 'RH Portal';
+        wb.calcProperties.fullCalcOnLoad = true;
+        const resumo = wb.addWorksheet('RESUMO', { views: [{ showGridLines: false }] });
+        const det = wb.addWorksheet('DETALHE', { views: [{ state: 'frozen', xSplit: 2, ySplit: 3, showGridLines: false }] });
+
+        // ---- DETALHE ----
+        const heads = ['UNIDADE', 'COLABORADOR', 'FALTAS', 'ATESTADOS\n(DIAS)', 'REFEIÇÃO\n> 1H', 'PONTO\nIRREGULAR', 'TROCAS\nNO MÊS', 'TRATATIVA', 'ANDAMENTO', 'ATUALIZAÇÕES'];
+        const larg = [22, 46, 10, 12, 11, 12, 11, 27, 38, 48];
+        larg.forEach((w, i) => { det.getColumn(i + 1).width = w; });
+        det.mergeCells('A1:J1');
+        Object.assign(det.getCell('A1'), { value: `RELATÓRIO MENSAL DE OCORRÊNCIAS — ${rotuloPeriodo}` });
+        det.getCell('A1').font = { name: FONTE, size: 16, bold: true, color: { argb: 'FFFFFFFF' } };
+        det.getCell('A1').fill = solid(NAVY);
+        det.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
+        det.getRow(1).height = 34;
+        det.mergeCells('A2:J2');
+        det.getCell('A2').value = 'Colunas em amarelo (Ponto irregular e Atualizações) são preenchidas manualmente pelo RH.';
+        det.getCell('A2').font = { name: FONTE, size: 9, italic: true, color: { argb: 'FF5A6B7F' } };
+        det.getCell('A2').fill = solid(LIGHT);
+        det.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
+        det.getRow(2).height = 18;
+        heads.forEach((h, i) => {
+            const c = det.getCell(3, i + 1);
+            c.value = h;
+            c.font = { name: FONTE, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+            c.fill = solid(i === 5 || i === 9 ? GOLD : BLUE);
+            c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+            c.border = borda;
+        });
+        det.getRow(3).height = 36;
+
+        const r0 = 4;
+        let faixa = false, ant = null;
+        linhas.forEach((x, k) => {
+            const r = r0 + k;
+            if (x.un !== ant) { faixa = !faixa; ant = x.un; }
+            const vals = [x.un, x.nome, x.fal, x.atm, x.ref, null, x.tro, x.trat || null, x.and || null, null];
+            vals.forEach((v, i) => {
+                const c = det.getCell(r, i + 1);
+                c.value = v;
+                c.font = { name: FONTE, size: 10, bold: i === 1 };
+                c.alignment = { horizontal: i >= 2 && i <= 6 ? 'center' : 'left', vertical: 'middle', wrapText: i === 8 || i === 9 };
+                c.fill = solid(i === 5 || i === 9 ? INPUT : (faixa ? 'FFF6F9FD' : 'FFFFFFFF'));
+                const topo = (k > 0 && x.un !== linhas[k - 1].un) ? { style: 'medium', color: { argb: NAVY } } : fino;
+                c.border = { top: topo, left: fino, bottom: fino, right: fino };
+            });
+        });
+        const rl = r0 + linhas.length - 1, rt = rl + 1;
+        for (let i = 1; i <= 10; i++) {
+            const c = det.getCell(rt, i);
+            c.fill = solid(NAVY); c.border = borda;
+            c.font = { name: FONTE, bold: true, color: { argb: 'FFFFFFFF' } };
+            c.alignment = { horizontal: i <= 2 ? 'left' : 'center' };
+        }
+        det.getCell(rt, 1).value = 'TOTAL';
+        det.getCell(rt, 2).value = { formula: `SUBTOTAL(103,B${r0}:B${rl})&" colaboradores"`, result: `${linhas.length} colaboradores` };
+        const somaCol = k => linhas.reduce((s, x) => s + (x[k] || 0), 0);
+        [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', null], ['G', 'tro']].forEach(([col, k]) => {
+            det.getCell(`${col}${rt}`).value = { formula: `SUBTOTAL(109,${col}${r0}:${col}${rl})`, result: k ? somaCol(k) : 0 };
+        });
+        det.autoFilter = { from: { row: 3, column: 1 }, to: { row: rl, column: 10 } };
+        const cf = (col, op, val, fc, bg) => det.addConditionalFormatting({ ref: `${col}${r0}:${col}${rl}`, rules: [{ type: 'cellIs', operator: op, formulae: [val], style: { font: { bold: true, color: { argb: fc } }, fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: bg } } } }] });
+        cf('C', 'greaterThan', 0, 'FFC0392B', 'FFFDE8E6');
+        cf('D', 'greaterThan', 0, 'FF6C3FB5', 'FFEFE8FA');
+        cf('E', 'greaterThan', 0, 'FFB26A00', 'FFFFF1D6');
+        cf('G', 'greaterThan', 2, 'FFC0392B', 'FFFDE8E6');
+        [['DESLIGADO', 'FFC0392B', 'FFFDE8E6'], ['ADVERT', 'FFB26A00', 'FFFFF1D6'], ['FÉRIAS', 'FF1F6FB2', 'FFE3F0FB'], ['AFASTAD', 'FF6C3FB5', 'FFEFE8FA'], ['AVISO', 'FFB26A00', 'FFFFF1D6'], ['FALTA DE', 'FF5A6B7F', 'FFE9EDF2'], ['ORIENTAD', 'FF1E8449', 'FFE3F5EA']].forEach(([t, fc, bg]) => {
+            det.addConditionalFormatting({ ref: `H${r0}:H${rl}`, rules: [{ type: 'expression', formulae: [`ISNUMBER(SEARCH("${t}",$H${r0}))`], style: { font: { bold: true, color: { argb: fc } }, fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: bg } } } }] });
+        });
+        det.pageSetup = { orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 0, printTitlesRow: '3:3', horizontalCentered: true };
+        det.headerFooter.oddFooter = '&LSoul Gestão — Relatório Mensal&CPágina &P de &N';
+
+        // ---- RESUMO (fórmulas sobre a aba DETALHE) ----
+        const unidades = [...new Set(linhas.map(x => x.un))];
+        const cab = ['UNIDADE', 'COLABORADORES', 'FALTAS', 'ATESTADOS\n(DIAS)', 'REFEIÇÃO\n> 1H', 'PONTO\nIRREGULAR', 'TROCAS\nNO MÊS', 'DESLIGADOS', 'ADVERTÊNCIAS'];
+        [26, 16, 11, 12, 11, 12, 11, 13, 15].forEach((w, i) => { resumo.getColumn(i + 1).width = w; });
+        resumo.mergeCells('A1:I1');
+        resumo.getCell('A1').value = `RESUMO POR UNIDADE — ${rotuloPeriodo}`;
+        resumo.getCell('A1').font = { name: FONTE, size: 16, bold: true, color: { argb: 'FFFFFFFF' } };
+        resumo.getCell('A1').fill = solid(NAVY);
+        resumo.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
+        resumo.getRow(1).height = 34;
+        resumo.mergeCells('A2:I2');
+        resumo.getCell('A2').value = 'Totais calculados automaticamente a partir da aba DETALHE.';
+        resumo.getCell('A2').font = { name: FONTE, size: 9, italic: true, color: { argb: 'FF5A6B7F' } };
+        resumo.getCell('A2').fill = solid(LIGHT);
+        resumo.getCell('A2').alignment = { horizontal: 'center' };
+        cab.forEach((h, i) => {
+            const c = resumo.getCell(4, i + 1);
+            c.value = h; c.font = { name: FONTE, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+            c.fill = solid(BLUE); c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; c.border = borda;
+        });
+        resumo.getRow(4).height = 36;
+        const D = col => `DETALHE!$${col}$${r0}:$${col}$${rl}`;
+        unidades.forEach((u, k) => {
+            const r = 5 + k, doU = linhas.filter(x => x.un === u);
+            const soma = key => doU.reduce((s, x) => s + (x[key] || 0), 0);
+            resumo.getCell(r, 1).value = u;
+            resumo.getCell(r, 2).value = { formula: `COUNTIF(${D('A')},$A${r})`, result: doU.length };
+            [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', null], ['G', 'tro']].forEach(([col, key], j) => {
+                resumo.getCell(r, 3 + j).value = { formula: `SUMIFS(${D(col)},${D('A')},$A${r})`, result: key ? soma(key) : 0 };
+            });
+            resumo.getCell(r, 8).value = { formula: `COUNTIFS(${D('A')},$A${r},${D('H')},"DESLIGADO*")`, result: doU.filter(x => x.trat.startsWith('DESLIGADO')).length };
+            resumo.getCell(r, 9).value = { formula: `COUNTIFS(${D('A')},$A${r},${D('H')},"ADVERT*")`, result: doU.filter(x => x.trat.startsWith('ADVERT')).length };
+            for (let i = 1; i <= 9; i++) {
+                const c = resumo.getCell(r, i);
+                c.border = borda; c.font = { name: FONTE, size: 10, bold: i === 1 };
+                c.alignment = { horizontal: i === 1 ? 'left' : 'center' };
+                c.fill = solid(k % 2 ? 'FFF6F9FD' : 'FFFFFFFF');
+            }
+        });
+        const rTot = 5 + unidades.length;
+        resumo.getCell(rTot, 1).value = 'TOTAL GERAL';
+        for (let i = 2; i <= 9; i++) {
+            const col = String.fromCharCode(64 + i);
+            let res = 0;
+            for (let r = 5; r < rTot; r++) res += (resumo.getCell(r, i).value.result || 0);
+            resumo.getCell(rTot, i).value = { formula: `SUM(${col}5:${col}${rTot - 1})`, result: res };
+        }
+        for (let i = 1; i <= 9; i++) {
+            const c = resumo.getCell(rTot, i);
+            c.fill = solid(NAVY); c.border = borda;
+            c.font = { name: FONTE, bold: true, color: { argb: 'FFFFFFFF' } };
+            c.alignment = { horizontal: i === 1 ? 'left' : 'center' };
+        }
+        resumo.pageSetup = { orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+
+        const buffer = await wb.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Relatorio_Mensal_${rotuloPeriodo.replace(/[\/ ]/g, '_')}.xlsx`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 4000);
+
+        area.innerHTML = `<div style="text-align:center; padding:30px;"><i class="fa-solid fa-circle-check fa-2x" style="color:#28a745;"></i>
+            <p style="margin:12px 0 4px; font-weight:bold;">Relatório Mensal gerado — ${rotuloPeriodo}</p>
+            <p style="color:var(--cor-texto-secundario); font-size:0.85rem; margin:0;">${linhas.length} colaboradores em ${unidades.length} unidade(s). O download começou automaticamente.</p></div>`;
+    } catch (err) {
+        console.error('Relatório Mensal:', err);
+        area.innerHTML = `<p style="text-align:center; color:#dc3545; padding:30px;">Não foi possível gerar o Relatório Mensal: ${(err && err.message) || err}</p>`;
+    }
+};
+
 window.gerarRelatorioAdmin = async function() {
     const tipo = document.getElementById('rel-tipo').value;
     if (!tipo) return mostrarAlerta('Selecione o tipo de relatório!', 'aviso');
+    if (tipo === 'relatorio_mensal') return window.gerarRelatorioMensalExcel();
 
     const area = document.getElementById('rel-resultado-area');
     area.innerHTML = '<p style="text-align:center; padding:30px;"><i class="fa-solid fa-circle-notch fa-spin fa-2x" style="color:#4fc3f7;"></i></p>';
