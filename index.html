@@ -6526,6 +6526,9 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         [data-theme="light"] #tela-relatorios-admin .relf-item:hover { background: rgba(0,0,0,0.05); }
         #tela-relatorios-admin .relf-item input { width: 16px; height: 16px; padding: 0; margin: 0; flex: 0 0 auto; accent-color: var(--cor-acento); cursor: pointer; }
         #tela-relatorios-admin .relf-item.marcado { font-weight: 700; }
+        #tela-relatorios-admin .relf-sep { margin: 8px 6px 2px; padding-top: 8px; border-top: 1px solid var(--cor-borda); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cor-texto-secundario); }
+        #tela-relatorios-admin .relf-item.inativo span { opacity: 0.65; }
+        #tela-relatorios-admin .relf-tag-inativa { font-style: normal; font-size: 0.66rem; font-weight: 700; margin-left: 6px; padding: 1px 7px; border-radius: 10px; background: rgba(220,53,69,0.18); color: #ff8a95; }
         #tela-relatorios-admin .relf-vazio { padding: 16px; text-align: center; color: var(--cor-texto-secundario); font-size: 0.85rem; }
         #tela-relatorios-admin .relf-multi-rodape { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--cor-borda); font-size: 0.76rem; color: var(--cor-texto-secundario); }
         #tela-relatorios-admin .relf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
@@ -106758,7 +106761,7 @@ window.inicializarRelatoriosAdmin = function() {
         window.pickerPeriodoRelatorios = null;
     }
     if (typeof initPeriodoRangePicker === 'function') {
-        window.pickerPeriodoRelatorios = initPeriodoRangePicker('rel-periodo-flatpickr', 'rel-data-ini', 'rel-data-fim');
+        window.pickerPeriodoRelatorios = initPeriodoRangePicker('rel-periodo-flatpickr', 'rel-data-ini', 'rel-data-fim', () => { if (document.getElementById('rel-filtro-tipo').value === 'unidade') window.atualizarSelectFiltroRelatorio(); });
     }
 };
 
@@ -106789,6 +106792,8 @@ window.relPeriodoRapido = function(qual) {
     document.getElementById('rel-data-ini').value = f(alvo);
     document.getElementById('rel-data-fim').value = f(ultimo);
     if (window.pickerPeriodoRelatorios) { try { window.pickerPeriodoRelatorios.setDate([f(alvo), f(ultimo)], false); } catch (e) {} }
+    const ft = document.getElementById('rel-filtro-tipo');
+    if (ft && ft.value === 'unidade') window.atualizarSelectFiltroRelatorio();
 };
 
 window.atualizarSelectFiltroRelatorio = async function() {
@@ -106815,8 +106820,26 @@ window.atualizarSelectFiltroRelatorio = async function() {
             const colabs = await window.carregarApoioRelatorios();
             opcoes = colabs.map(c => ({ v: c.id, t: c.nome || '-' })).sort((a, b) => a.t.localeCompare(b.t, 'pt-BR'));
         } else if (dim === 'unidade') {
-            const { data } = await supabaseClient.from('unidades_oficiais').select('nome').order('nome');
-            opcoes = [...new Set((data || []).map(u => u.nome).filter(Boolean))].map(n => ({ v: n, t: n }));
+            // Traz também as desativadas (úteis p/ relatório de meses passados), mas elas ficam
+            // separadas no fim da lista, marcadas como "desativada".
+            // Desativada só aparece se estava ativa em algum dia do período escolhido
+            // (desativada_em >= início do período). Sem data registrada, continua aparecendo.
+            let resU = await supabaseClient.from('unidades_oficiais').select('nome, ativo, desativada_em').order('nome');
+            if (resU.error) resU = await supabaseClient.from('unidades_oficiais').select('nome, ativo').order('nome');
+            const data = resU.data;
+            const iniPer = (document.getElementById('rel-data-ini') || {}).value || '';
+            const porNome = {};
+            (data || []).forEach(u => {
+                if (!u.nome) return;
+                let visivel = u.ativo !== false;
+                if (!visivel && iniPer && u.desativada_em && String(u.desativada_em).slice(0, 10) < iniPer) visivel = false;
+                else if (!visivel) visivel = true;
+                const ativa = u.ativo !== false;
+                const ant = porNome[u.nome];
+                porNome[u.nome] = ant ? { ativa: ant.ativa || ativa, visivel: ant.visivel || visivel } : { ativa, visivel };
+            });
+            opcoes = Object.keys(porNome).filter(n => porNome[n].visivel).map(n => ({ v: n, t: n, inativo: !porNome[n].ativa }))
+                .sort((a, b) => (a.inativo - b.inativo) || a.t.localeCompare(b.t, 'pt-BR'));
         } else if (dim === 'cargo') {
             const { data } = await supabaseClient.from('cargos_oficiais').select('nome').order('nome');
             opcoes = [...new Set((data || []).map(c => c.nome).filter(Boolean))].map(n => ({ v: n, t: n }));
@@ -106857,7 +106880,7 @@ window.relMultiToggle = function(i, marcado) {
 };
 window.relMultiMarcarTodos = function(marcar) {
     if (!marcar) { window.relMultiSel = new Set(); }
-    else window.relMultiVisiveis().forEach(i => window.relMultiSel.add(window.relMultiOpcoes[i].v));
+    else window.relMultiVisiveis().forEach(i => { if (!window.relMultiOpcoes[i].inativo) window.relMultiSel.add(window.relMultiOpcoes[i].v); });
     window.relMultiRenderLista(true);
     window.relMultiAtualizarResumo();
 };
@@ -106871,9 +106894,12 @@ window.relMultiRenderLista = function(manterScroll) {
     const lista = document.getElementById('rel-multi-lista'); if (!lista) return;
     const topo = lista.scrollTop;
     const vis = window.relMultiVisiveis();
+    let separou = false;
     lista.innerHTML = vis.length ? vis.map(i => {
         const o = window.relMultiOpcoes[i], on = window.relMultiSel.has(o.v);
-        return `<label class="relf-item${on ? ' marcado' : ''}"><input type="checkbox" ${on ? 'checked' : ''} onchange="window.relMultiToggle(${i}, this.checked)"><span>${window.relMultiEsc(o.t)}</span></label>`;
+        let cab = '';
+        if (o.inativo && !separou) { separou = true; cab = '<div class="relf-sep">Desativadas</div>'; }
+        return cab + `<label class="relf-item${on ? ' marcado' : ''}${o.inativo ? ' inativo' : ''}"><input type="checkbox" ${on ? 'checked' : ''} onchange="window.relMultiToggle(${i}, this.checked)"><span>${window.relMultiEsc(o.t)}${o.inativo ? ' <em class="relf-tag-inativa">desativada</em>' : ''}</span></label>`;
     }).join('') : '<div class="relf-vazio">Nada encontrado.</div>';
     if (manterScroll) lista.scrollTop = topo;
 };
