@@ -10275,7 +10275,7 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                                     </div>
                                     <div class="form-group">
                                         <label id="resc-data-label">Data do Aviso / Rescisão <span style="color: var(--cor-perigo);">*</span></label>
-                                        <input type="date" id="resc-data" required onchange="calcularUltimoDia()" onclick="this.showPicker()" onkeydown="return false">
+                                        <input type="date" id="resc-data" required onchange="calcularUltimoDia()" onclick="if(!this.readOnly)this.showPicker()" onkeydown="return false">
                                         <small id="resc-data-dica" style="display:none;margin-top:6px;color:var(--cor-texto-secundario);font-size:0.78rem;line-height:1.35;"></small>
                                     </div>
                                 </div>
@@ -35405,6 +35405,7 @@ window.atualizarRotuloDataRescisao = function(prefix, tipo) {
 
 window.atualizarRegrasRescisao = function() {
     const tipo = document.getElementById('resc-tipo').value;
+    window.travarDataComunicadoGestor(false);
     window.atualizarRotuloDataRescisao('resc', tipo);
     const cumprir = document.getElementById('resc-cumprir-aviso');
     const boxOpcoes = document.getElementById('box-opcoes-aviso');
@@ -37327,6 +37328,12 @@ if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo
             if (dataEscolhidaResc < hojeLocalResc) {
                 return mostrarAlerta("Não é possível lançar desligamento com <b>data já passada</b>: isso atrasa os pagamentos da rescisão.<br><br>Informe a <b>data de hoje</b> ou uma data futura (dentro do período permitido, do 6º dia útil ao dia 20).", "erro", "⛔ Data Retroativa");
             }
+        }
+
+        if (tipo === 'Término de Contrato') {
+            const colabTerm = listaColaboradoresAtivosRescisao.find(c => c.id === idColab);
+            const erroTerm = window.validarComunicadoTermino(colabTerm, dataRescisao);
+            if (erroTerm) return mostrarAlerta(erroTerm, "erro", "⛔ Data do Comunicado");
         }
 
         const confirmado = await mostrarConfirmacao(`Deseja enviar o pedido de desligamento de <b>${colabNome}</b> para aprovação do RH?`, "Enviar Solicitação");
@@ -72685,11 +72692,21 @@ window.buscarColaboradoresParaRescisaoAdmin = async function() {
         // ========================================================
 // 3. PREENCHIMENTO AUTOMÁTICO DA DATA (45 OU 90 DIAS)
 // ========================================================
+window.travarDataComunicadoGestor = function(travar) {
+    const el = document.getElementById('resc-data');
+    if (!el) return;
+    el.readOnly = !!travar;
+    el.style.opacity = travar ? '0.75' : '';
+    el.style.cursor = travar ? 'not-allowed' : '';
+    el.title = travar ? 'Data definida automaticamente pelo vencimento do contrato' : '';
+};
+
 function autoPreencherDataExperiencia(idColab, isAdmin) {
     const prefix = isAdmin ? 'resc-admin' : 'resc';
     const tipo = document.getElementById(`${prefix}-tipo`).value;
     const inputData = document.getElementById(`${prefix}-data`);
 
+    if (!isAdmin && tipo !== 'Término de Contrato') window.travarDataComunicadoGestor(false);
     if (tipo === 'Término de Contrato' && idColab) {
         let colab = isAdmin 
             ? window.listaColaboradoresAtivosRescisaoAdmin.find(c => c.id === idColab)
@@ -72709,6 +72726,8 @@ function autoPreencherDataExperiencia(idColab, isAdmin) {
                 
                 // Crava a data no input
                 inputData.value = venc.iso(dataFinal);
+                // 🔒 Gestor não edita: no Término de Contrato a data vem do sistema (vencimento do contrato)
+                if (!isAdmin) window.travarDataComunicadoGestor(true);
                 
                 // Atualiza o display de datas e pagamentos
                 if (isAdmin) calcularUltimoDiaAdmin(); else calcularUltimoDia();
@@ -72869,6 +72888,7 @@ window.buscarColaboradoresParaRescisao = async function() {
     selectColab.disabled = false;
     
     document.getElementById('resc-data').value = '';
+    if (window.travarDataComunicadoGestor) window.travarDataComunicadoGestor(false);
     calcularUltimoDia();
 };
 
@@ -73018,6 +73038,12 @@ document.getElementById('form-rescisao-admin')?.addEventListener('submit', async
 if (tipo !== 'Pedido do Funcionário' && tipo !== 'Término de Contrato' && tipo !== 'Justa Causa' && tipo !== 'Falecimento' && tipo !== 'Pedido da Empresa (Antecipação Experiência)' && (diaResc < sextoDiaUtil || diaResc > 20)) {
     return mostrarAlerta(`O fechamento da folha impede movimentações comuns nesta data.<br><br>Desligamentos sem justa causa só são permitidos entre o <b>6º dia útil (dia ${String(sextoDiaUtil).padStart(2, '0')})</b> e o <b>dia 20</b>.`, "erro", "⛔ Período Bloqueado");
 }
+
+        if (tipo === 'Término de Contrato') {
+            const colabTermAdm = (window.listaColaboradoresAtivosRescisaoAdmin || []).find(c => c.id === idColab);
+            const erroTermAdm = window.validarComunicadoTermino(colabTermAdm, dataRescisao);
+            if (erroTermAdm) return mostrarAlerta(erroTermAdm, "erro", "⛔ Data do Comunicado");
+        }
 
         const confirmado = await mostrarConfirmacao(`Deseja lançar a rescisão de <b>${colabNome}</b>? O status ficará pendente de homologação na aba Histórico para gerar o documento oficial.`, "Lançar Desligamento");
         if (!confirmado) return;
@@ -95762,6 +95788,23 @@ window.gerarExcelOBSASeguro = async function(idColab, unidade, nomeColaborador) 
 // 30+30 (admissão antes de 01/05/2026) ou 45+45 (depois). Se o vencimento cair numa
 // folga do colaborador, a data recua para o dia de trabalho anterior.
 // ========================================================
+// 🔒 Trava: no Término de Contrato o comunicado nunca pode ser DEPOIS do vencimento do contrato
+// (45+45 / 30+30 dias). Retorna a mensagem de erro, ou '' se estiver tudo certo.
+window.validarComunicadoTermino = function(colab, dataIso) {
+    try {
+        if (!colab || !dataIso) return '';
+        const venc = window.calcularVencimentosExperiencia(colab.dados_admissao);
+        if (!venc) return '';
+        const [a, m, d] = dataIso.split('-');
+        const dt = new Date(a, m - 1, d);
+        if (dt > venc.fim2) {
+            const f = (x) => `${String(x.getDate()).padStart(2, '0')}/${String(x.getMonth() + 1).padStart(2, '0')}/${x.getFullYear()}`;
+            return `A data do comunicado (<b>${f(dt)}</b>) é <b>depois do vencimento do contrato</b> de experiência (<b>${f(venc.fim2)}</b>).<br><br>No Término de Contrato o comunicado deve ser no dia do vencimento (ou no último dia de trabalho antes, se cair na folga). Corrija a data.`;
+        }
+    } catch (e) { console.warn('validarComunicadoTermino', e); }
+    return '';
+};
+
 window.calcularVencimentosExperiencia = function(adm) {
     adm = adm || {};
     const ini = adm.jornada?.data_inicio || adm.data_inicio;
@@ -107364,18 +107407,20 @@ window.gerarRelatorioMensalExcel = async function() {
             return todos;
         };
 
-        const [perfisTodos, ausencias, pontos, trocas, ferias, advs] = await Promise.all([
+        const [perfisTodos, ausencias, pontos, trocas, ferias, advs, ocoPonto] = await Promise.all([
             buscarTodos(() => supabaseClient.from('perfis').select('id, nome, unidade, empresa, status, status_aprovacao, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador').order('id')),
             buscarTodos(() => supabaseClient.from('ausencias').select('id, colaborador_id, sigla, data_inicio, data_fim').eq('status', 'Aprovado').in('sigla', ['FA', 'ATM', 'AF']).lte('data_inicio', fim).or(`data_fim.gte.${ini},data_fim.is.null`).order('id')),
             buscarTodos(() => supabaseClient.from('pontos_diarios_whatsapp').select('id, colaborador_id, ida_refeicao_hora, volta_refeicao_hora').gte('data', ini).lte('data', fim).not('ida_refeicao_hora', 'is', null).not('volta_refeicao_hora', 'is', null).order('id')),
             buscarTodos(() => supabaseClient.from('trocas_turno').select('id, solicitante_id, substituto_id, dia_solicitante_ira, dia_substituto_ira').eq('status', 'Aprovado').or(`and(dia_solicitante_ira.gte.${ini},dia_solicitante_ira.lte.${fim}),and(dia_substituto_ira.gte.${ini},dia_substituto_ira.lte.${fim})`).order('id')),
             buscarTodos(() => supabaseClient.from('solicitacoes_ferias').select('id, colaborador_id, data_inicio_ferias, data_fim_ferias, status').neq('status', 'Reprovado').neq('status', 'Pendente').lte('data_inicio_ferias', fim).gte('data_fim_ferias', ini).order('id')),
-            buscarTodos(() => supabaseClient.from('advertencias').select('id, colaborador_id, status, created_at').in('status', ['Aguardando Assinatura', 'Concluído']).gte('created_at', ini).lte('created_at', fim + 'T23:59:59').order('id'))
+            buscarTodos(() => supabaseClient.from('advertencias').select('id, colaborador_id, status, created_at').in('status', ['Aguardando Assinatura', 'Concluído']).gte('created_at', ini).lte('created_at', fim + 'T23:59:59').order('id')),
+            // Ocorrências de ponto (RH → colaborador e colaborador → RH): conta todas com a data da falha no período
+            buscarTodos(() => supabaseClient.from('ocorrencias_ponto').select('id, colaborador_id, data_falha, status').gte('data_falha', ini).lte('data_falha', fim).order('id'))
         ]);
 
         const colabs = perfisTodos.filter(c => window.relColabPassaFiltro(c));
         const m = {}; // id -> acumulador
-        colabs.forEach(c => { m[c.id] = { c, fal: 0, atm: 0, ref: 0, tro: 0, trat: [] }; });
+        colabs.forEach(c => { m[c.id] = { c, fal: 0, atm: 0, ref: 0, tro: 0, pi: 0, trat: [] }; });
 
         ausencias.forEach(a => {
             const o = m[a.colaborador_id]; if (!o) return;
@@ -107391,6 +107436,7 @@ window.gerarRelatorioMensalExcel = async function() {
             if (mins > 60 && mins < 600) o.ref++; // > 1h (ignora lixo de dados acima de 10h)
         });
         trocas.forEach(t => { [t.solicitante_id, t.substituto_id].forEach(id => { if (m[id]) m[id].tro++; }); });
+        ocoPonto.forEach(oc => { if (m[oc.colaborador_id]) m[oc.colaborador_id].pi++; });
         ferias.forEach(f => {
             const o = m[f.colaborador_id]; if (!o) return;
             o.trat.push({ p: 4, t: 'FÉRIAS', a: `${brData(f.data_inicio_ferias)} A ${brData(f.data_fim_ferias)}` });
@@ -107433,13 +107479,13 @@ window.gerarRelatorioMensalExcel = async function() {
             }
             return false;
         };
-        const linhas = Object.values(m).filter(o => ativoNoPeriodo(o) || o.fal || o.atm || o.ref || o.tro || o.trat.length)
+        const linhas = Object.values(m).filter(o => ativoNoPeriodo(o) || o.fal || o.atm || o.ref || o.pi || o.tro || o.trat.length)
             .map(o => {
                 o.trat.sort((x, y) => x.p - y.p);
                 return {
                     un: (o.c.unidade || 'SEM UNIDADE').toString().trim().toUpperCase(),
                     nome: (o.c.nome || '').toString().trim().toUpperCase(),
-                    fal: o.fal || null, atm: o.atm || null, ref: o.ref || null, tro: o.tro || null,
+                    fal: o.fal || null, atm: o.atm || null, ref: o.ref || null, pi: o.pi || null, tro: o.tro || null,
                     trat: o.trat.length ? o.trat[0].t : '',
                     and: o.trat.map(x => x.a).filter(Boolean).join(' | ')
                 };
@@ -107478,7 +107524,7 @@ window.gerarRelatorioMensalExcel = async function() {
         det.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
         det.getRow(1).height = 34;
         det.mergeCells('A2:J2');
-        det.getCell('A2').value = 'Colunas em amarelo (Ponto irregular e Atualizações) são preenchidas manualmente pelo RH.';
+        det.getCell('A2').value = 'Ponto irregular = ocorrências de ponto do mês (enviadas pelo RH ao colaborador ou pelo colaborador ao RH). A coluna em amarelo (Atualizações) é preenchida manualmente pelo RH.';
         det.getCell('A2').font = { name: FONTE, size: 9, italic: true, color: { argb: 'FF5A6B7F' } };
         det.getCell('A2').fill = solid(LIGHT);
         det.getCell('A2').alignment = { horizontal: 'center', vertical: 'middle' };
@@ -107487,7 +107533,7 @@ window.gerarRelatorioMensalExcel = async function() {
             const c = det.getCell(3, i + 1);
             c.value = h;
             c.font = { name: FONTE, size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            c.fill = solid(i === 5 || i === 9 ? GOLD : BLUE);
+            c.fill = solid(i === 9 ? GOLD : BLUE);
             c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
             c.border = borda;
         });
@@ -107498,13 +107544,13 @@ window.gerarRelatorioMensalExcel = async function() {
         linhas.forEach((x, k) => {
             const r = r0 + k;
             if (x.un !== ant) { faixa = !faixa; ant = x.un; }
-            const vals = [x.un, x.nome, x.fal, x.atm, x.ref, null, x.tro, x.trat || null, x.and || null, null];
+            const vals = [x.un, x.nome, x.fal, x.atm, x.ref, x.pi, x.tro, x.trat || null, x.and || null, null];
             vals.forEach((v, i) => {
                 const c = det.getCell(r, i + 1);
                 c.value = v;
                 c.font = { name: FONTE, size: 10, bold: i === 1 };
                 c.alignment = { horizontal: i >= 2 && i <= 6 ? 'center' : 'left', vertical: 'middle', wrapText: i === 8 || i === 9 };
-                c.fill = solid(i === 5 || i === 9 ? INPUT : (faixa ? 'FFF6F9FD' : 'FFFFFFFF'));
+                c.fill = solid(i === 9 ? INPUT : (faixa ? 'FFF6F9FD' : 'FFFFFFFF'));
                 const topo = (k > 0 && x.un !== linhas[k - 1].un) ? { style: 'medium', color: { argb: NAVY } } : fino;
                 c.border = { top: topo, left: fino, bottom: fino, right: fino };
             });
@@ -107519,7 +107565,7 @@ window.gerarRelatorioMensalExcel = async function() {
         det.getCell(rt, 1).value = 'TOTAL';
         det.getCell(rt, 2).value = { formula: `SUBTOTAL(103,B${r0}:B${rl})&" colaboradores"`, result: `${linhas.length} colaboradores` };
         const somaCol = k => linhas.reduce((s, x) => s + (x[k] || 0), 0);
-        [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', null], ['G', 'tro']].forEach(([col, k]) => {
+        [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', 'pi'], ['G', 'tro']].forEach(([col, k]) => {
             det.getCell(`${col}${rt}`).value = { formula: `SUBTOTAL(109,${col}${r0}:${col}${rl})`, result: k ? somaCol(k) : 0 };
         });
         det.autoFilter = { from: { row: 3, column: 1 }, to: { row: rl, column: 10 } };
@@ -107527,6 +107573,7 @@ window.gerarRelatorioMensalExcel = async function() {
         cf('C', 'greaterThan', 0, 'FFC0392B', 'FFFDE8E6');
         cf('D', 'greaterThan', 0, 'FF6C3FB5', 'FFEFE8FA');
         cf('E', 'greaterThan', 0, 'FFB26A00', 'FFFFF1D6');
+        cf('F', 'greaterThan', 0, 'FFB26A00', 'FFFFF1D6');
         cf('G', 'greaterThan', 2, 'FFC0392B', 'FFFDE8E6');
         [['DESLIGADO', 'FFC0392B', 'FFFDE8E6'], ['ADVERT', 'FFB26A00', 'FFFFF1D6'], ['FÉRIAS', 'FF1F6FB2', 'FFE3F0FB'], ['AFASTAD', 'FF6C3FB5', 'FFEFE8FA'], ['AVISO', 'FFB26A00', 'FFFFF1D6'], ['FALTA DE', 'FF5A6B7F', 'FFE9EDF2'], ['ORIENTAD', 'FF1E8449', 'FFE3F5EA']].forEach(([t, fc, bg]) => {
             det.addConditionalFormatting({ ref: `H${r0}:H${rl}`, rules: [{ type: 'expression', formulae: [`ISNUMBER(SEARCH("${t}",$H${r0}))`], style: { font: { bold: true, color: { argb: fc } }, fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: bg } } } }] });
@@ -107561,7 +107608,7 @@ window.gerarRelatorioMensalExcel = async function() {
             const soma = key => doU.reduce((s, x) => s + (x[key] || 0), 0);
             resumo.getCell(r, 1).value = u;
             resumo.getCell(r, 2).value = { formula: `COUNTIF(${D('A')},$A${r})`, result: doU.length };
-            [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', null], ['G', 'tro']].forEach(([col, key], j) => {
+            [['C', 'fal'], ['D', 'atm'], ['E', 'ref'], ['F', 'pi'], ['G', 'tro']].forEach(([col, key], j) => {
                 resumo.getCell(r, 3 + j).value = { formula: `SUMIFS(${D(col)},${D('A')},$A${r})`, result: key ? soma(key) : 0 };
             });
             resumo.getCell(r, 8).value = { formula: `COUNTIFS(${D('A')},$A${r},${D('H')},"DESLIGADO*")`, result: doU.filter(x => x.trat.startsWith('DESLIGADO')).length };
