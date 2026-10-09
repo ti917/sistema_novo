@@ -51920,7 +51920,7 @@ window.confirmarSelecaoColabs = function() {
 // martelar um banco que já está sofrendo.
 // Limite: a fila vale por navegador; dois RHs disparando ao mesmo tempo somam as taxas.
 // =====================================
-window.ZAP_INTERVALO_MS = window.ZAP_INTERVALO_MS || 1200;
+window.ZAP_INTERVALO_MS = window.ZAP_INTERVALO_MS || 600; // era 1200 (09/10/2026): ~100 msgs/min por navegador; backoff automático segue valendo
 window._zapFilaProximoSlot = 0;
 window._zapFalhasSeguidas = 0;
 
@@ -70818,6 +70818,24 @@ const observadorUnidadesZap = new MutationObserver(() => {
 observadorUnidadesZap.observe(document.getElementById('zap-boas-unidade'), { childList: true });
 
 // Lógica de Submit do Comunicado (MOTOR TURBO 🚀)
+window.comprimirImagemComunicado = async function(arquivo) {
+    if (!arquivo || !/^image\/(jpeg|png)$/.test(arquivo.type) || arquivo.size < 400 * 1024) return arquivo; // já leve
+    const url = URL.createObjectURL(arquivo);
+    try {
+        const img = await new Promise((ok, erro) => { const im = new Image(); im.onload = () => ok(im); im.onerror = erro; im.src = url; });
+        const MAX = 1600;
+        const escala = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(img.naturalWidth * escala); cv.height = Math.round(img.naturalHeight * escala);
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height); // PNG transparente vira fundo branco no JPEG
+        ctx.drawImage(img, 0, 0, cv.width, cv.height);
+        const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.85));
+        if (!blob || blob.size >= arquivo.size) return arquivo; // não ficou menor: mantém o original
+        return new File([blob], arquivo.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+    } finally { URL.revokeObjectURL(url); }
+};
+
 document.getElementById('form-zap-comunicado').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = document.getElementById('btn-enviar-zap-comunicado');
@@ -70844,7 +70862,11 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
         const unidade = document.getElementById('zap-com-unidade').value;
         const caminhoBase = `Comunicados/${formatarNomePasta(empresa)}/${formatarNomePasta(unidade)}`;
         
-        const urls = await subirDocumentos(caminhoBase, files);
+        // Comprime a imagem antes de subir (foto de celular de 5-10 MB vira ~300 KB): sobe mais rápido
+        // e a Meta/WhatsApp baixa mais rápido pra cada destinatário. Se der qualquer problema, usa o original.
+        let arquivosParaSubir = files;
+        try { arquivosParaSubir = [await window.comprimirImagemComunicado(files[0])]; } catch (_e) { arquivosParaSubir = files; }
+        const urls = await subirDocumentos(caminhoBase, arquivosParaSubir);
         const linkImagem = urls[0];
 
         // 2. Loop de disparo em Lotes Paralelos (O MOTOR TURBO!)
@@ -70872,6 +70894,10 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
 
             // Executa os 10 disparos JUNTOS e aguarda eles finalizarem
             const resultados = await Promise.all(promessasLote);
+            // Progresso na tela (antes parecia travado): enviados/total e tempo restante aproximado
+            const feitos = Math.min(i + tamanhoLote, alvo.length);
+            const faltamMin = Math.ceil(((alvo.length - feitos) * (window.ZAP_INTERVALO_MS || 600)) / 60000);
+            btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando ${feitos}/${alvo.length}` + (feitos < alvo.length ? ` (faltam ~${Math.max(1, faltamMin)} min — não feche esta tela)` : '');
 
             // Confere quem recebeu e quem falhou nesse lote
             resultados.forEach(r => {
