@@ -48771,7 +48771,10 @@ document.getElementById('form-solicitar-alteracao')?.addEventListener('submit', 
                     if (status === 'Folga') textoDias.push(`${dia}: Folga`);
                     else if (status === 'Alternado') {
                         const padrao = linha.querySelector('.j-alt-pattern').value;
-                        textoDias.push(`${dia}: Alternado (${padrao})`);
+                        // 🆕 leva também se o 1º dia trabalha/folga e o horário (antes só ia "Alternado (1x1)" e o RH ficava sem saber)
+                        const inicioAltTxt = linha.querySelector('.j-alt-inicio')?.value || 'Trabalha';
+                        const h2tAlt = window.lerHorario2DaLinha(linha);
+                        textoDias.push(`${dia}: Alternado (${padrao} · 1º dia: ${inicioAltTxt} · ${ent}-${sai}${h2tAlt ? ' e ' + h2tAlt.replace(' às ', '-') : ''})`);
                     }
                     else { const h2t = window.lerHorario2DaLinha(linha); textoDias.push(`${dia}: ${ent}-${sai}${h2t ? ' e ' + h2t.replace(' às ', '-') : ''}`); }
                 });
@@ -49091,6 +49094,37 @@ window.filtrarAlteracoesAdmin = function() {
 // mini-grade, um dia por bloco, igual ao resto do sistema já mostra jornada em
 // outras telas. Se o texto não bater com o formato esperado (ou vier de um chamado
 // antigo com outro texto), devolve exatamente como veio — não quebra nada.
+// 🆕 Lê o texto do pedido semanal ("Qua: 06:00-15:00, Sáb: Alternado (1x1 · 1º dia: Trabalha · 06:00-15:00), Dom: Folga")
+// e devolve a escala no mesmo formato que o sistema grava, pra já pré-preencher a grade do RH.
+window.escalaDoTextoPedido = function(resto) {
+    const nomes = { 'Dom': 'Domingo', 'Seg': 'Segunda-feira', 'Ter': 'Terça-feira', 'Qua': 'Quarta-feira', 'Qui': 'Quinta-feira', 'Sex': 'Sexta-feira', 'Sáb': 'Sábado', 'Sab': 'Sábado' };
+    const escala = {}; const semInicio = []; const semHorario = [];
+    let horarioTrabalho = null;
+    String(resto || '').split(',').map(d => d.trim()).filter(Boolean).forEach(d => {
+        const idx = d.indexOf(':');
+        if (idx === -1) return;
+        const abre = d.slice(0, idx).trim();
+        const info = d.slice(idx + 1).trim();
+        const dia = nomes[abre];
+        if (!dia) return;
+        if (/^folga$/i.test(info)) { escala[dia] = { status: 'Folga', horario: 'Folga' }; return; }
+        const t = info.match(/(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})(?:\s+e\s+(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2}))?/);
+        const cfg = { status: 'Trabalho' };
+        if (t) { cfg.horario = `${t[1]} às ${t[2]}`; if (t[3]) cfg.horario2 = `${t[3]} às ${t[4]}`; }
+        if (/^alternado/i.test(info)) {
+            cfg.status = 'Alternado';
+            const pad = info.match(/\((\d+x\d+)/); cfg.padrao = pad ? pad[1] : '1x1';
+            const ini = info.match(/1º dia:\s*(Trabalha|Folga)/i);
+            if (ini) cfg.inicio = ini[1][0].toUpperCase() + ini[1].slice(1).toLowerCase(); else semInicio.push(dia);
+            if (!t) semHorario.push(dia);
+        } else if (t && !horarioTrabalho) { horarioTrabalho = cfg.horario; }
+        escala[dia] = cfg;
+    });
+    // alternado sem horário no pedido (pedidos antigos): sugere o horário dos outros dias, mas avisa
+    Object.keys(escala).forEach(dia => { if (escala[dia].status === 'Alternado' && !escala[dia].horario) escala[dia].horario = horarioTrabalho || '09:00 às 19:00'; });
+    return { escala, semInicio, semHorario };
+};
+
 window.formatarResumoHorarioAlteracao = function(valorTexto) {
     if (typeof valorTexto !== 'string') return valorTexto;
 
@@ -49132,10 +49166,23 @@ window.formatarResumoHorarioAlteracao = function(valorTexto) {
         if (idx === -1) return '';
         const dia = d.slice(0, idx).trim();
         const info = d.slice(idx + 1).trim();
-        const ehFolga = /folga/i.test(info);
-        const infoHtml = ehFolga
-            ? `<span style="color: var(--cor-texto-secundario); font-style: italic;">Folga</span>`
-            : `<span style="color: #fff; font-weight: 600;">${info}</span>`;
+        const ehAlternado = /^alternado/i.test(info);
+        const ehFolga = !ehAlternado && /folga/i.test(info);
+        let infoHtml;
+        if (ehAlternado) {
+            // 🆕 mostra padrão, se o 1º dia trabalha/folga e o horário; pedidos antigos sem isso ganham um aviso
+            const pad = (info.match(/\((\d+x\d+)/) || [])[1] || '';
+            const ini = (info.match(/1º dia:\s*(Trabalha|Folga)/i) || [])[1];
+            const hor = (info.match(/(\d{2}:\d{2}\s*-\s*\d{2}:\d{2}(?:\s+e\s+\d{2}:\d{2}\s*-\s*\d{2}:\d{2})?)/) || [])[1];
+            infoHtml = `<span style="color: #fff; font-weight: 600; text-align:right;">Alternado ${pad ? '(' + pad + ')' : ''}${hor ? '<br>' + hor : ''}<br>`
+                + (ini ? `<small style="color:#ffc107;">1º dia: ${ini}</small>` : `<small style="color:#ff8a95;"><i class="fa-solid fa-triangle-exclamation"></i> não informou se começa trabalhando ou folgando</small>`)
+                + (hor ? '' : `<br><small style="color:#ff8a95;"><i class="fa-solid fa-triangle-exclamation"></i> sem horário no pedido</small>`)
+                + `</span>`;
+        } else {
+            infoHtml = ehFolga
+                ? `<span style="color: var(--cor-texto-secundario); font-style: italic;">Folga</span>`
+                : `<span style="color: #fff; font-weight: 600;">${info}</span>`;
+        }
         return `<div style="display:flex; justify-content:space-between; gap:8px; padding:5px 9px; background: rgba(255,255,255,0.04); border-radius:6px;">
             <span style="color:#ff9800; font-weight:bold;">${dia}</span>${infoHtml}
         </div>`;
@@ -49904,6 +49951,8 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         document.getElementById('aplic-alt-aviso-preselect').classList.remove('hidden');
     }
 
+    // 🆕 Escala semanal que o GESTOR pediu (lida do texto do pedido) — alimenta a grade do RH
+    let escalaPedidaAplic = null;
     // Tenta puxar a data que o gestor pediu no chamado para já preencher o input de vigência
     let dataPedida = '';
     Object.keys(alt.alteracoes).forEach(k => {
@@ -49973,15 +50022,32 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
                     // aqui só garantimos que o TIPO certo já vem selecionado — o Admin ainda
                     // precisa conferir/preencher a grade semanal manualmente, olhando o
                     // resumo do pedido ao lado.
-                    console.log('[Alteração Cadastral] Jornada semanal detectada no pedido — confira a grade manualmente, o texto completo é:', textoPedido);
+                    // 🆕 Antes só avisava no console e o RH tinha que digitar a grade inteira. Agora lê o pedido e já preenche.
+                    const mSemanal = textoPedido.match(/->\s*(.*)$/);
+                    if (mSemanal) {
+                        const lido = window.escalaDoTextoPedido(mSemanal[1]);
+                        if (Object.keys(lido.escala).length > 0) {
+                            escalaPedidaAplic = lido.escala;
+                            const avisos = [];
+                            if (lido.semInicio.length) avisos.push(`O gestor <b>não informou</b> se o <b>${lido.semInicio.join(', ')}</b> alternado começa <b>trabalhando ou folgando</b> — confirme com ele e ajuste no campo "Neste dia 1" abaixo.`);
+                            if (lido.semHorario.length) avisos.push(`O pedido não trazia o <b>horário</b> do <b>${lido.semHorario.join(', ')}</b> alternado — conferi com o dos outros dias, ajuste se precisar.`);
+                            window.__avisosGradeAplic = avisos;
+                        }
+                    }
                 }
             }
         }
     }
 
     // Renderiza a grade semanal se não for 12x36
-    if (tipoJornadaAtual !== '12x36') {
-        window.renderizarGridSemanalAplicAlt(jornadaVigente.escala || {});
+    if (tipoJornadaAtual !== '12x36' || escalaPedidaAplic) {
+        window.renderizarGridSemanalAplicAlt(escalaPedidaAplic || jornadaVigente.escala || {});
+    }
+    // 🆕 avisos do que o gestor deixou de informar (ex.: sábado alternado sem dizer se começa folgando)
+    if (window.__avisosGradeAplic && window.__avisosGradeAplic.length) {
+        const boxSemAplic = document.getElementById('aplic-alt-box-semanal');
+        if (boxSemAplic) boxSemAplic.insertAdjacentHTML('afterbegin', `<div style="background: rgba(255,193,7,0.12); border: 1px dashed #ffc107; color: #ffc107; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.85rem;"><i class="fa-solid fa-triangle-exclamation"></i> ${window.__avisosGradeAplic.join('<br>')}</div>`);
+        window.__avisosGradeAplic = null;
     }
 
     // Toggle do Horário
@@ -49992,7 +50058,7 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
         } else {
              document.getElementById('aplic-alt-box-12x36').classList.add('hidden');
              document.getElementById('aplic-alt-box-semanal').classList.remove('hidden');
-             window.renderizarGridSemanalAplicAlt(jornadaVigente.escala || {});
+             window.renderizarGridSemanalAplicAlt(escalaPedidaAplic || jornadaVigente.escala || {});
         }
     });
     // 🐛 CORREÇÃO (13/10/2026): quando o pedido era "44h Semanais" e o colaborador estava em 12x36, o código acima
@@ -50005,7 +50071,7 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
             document.getElementById('aplic-alt-box-12x36').classList.add('hidden');
             document.getElementById('aplic-alt-box-semanal').classList.remove('hidden');
             if (!document.querySelector('#aplic-alt-lista-semana-grid .alt-grid-semana-aplic')) {
-                window.renderizarGridSemanalAplicAlt(jornadaVigente.escala || {});
+                window.renderizarGridSemanalAplicAlt(escalaPedidaAplic || jornadaVigente.escala || {});
             }
         }
     })();
