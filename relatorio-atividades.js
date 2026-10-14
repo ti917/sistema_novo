@@ -1224,7 +1224,7 @@
     }
     function fecharSelecaoImg(e) {
         if (e.target.closest && (e.target.closest('.ra-img') || e.target.closest('#ra-barra'))) return;
-        document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); S.imgSel = null;
+        document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); S.imgSel = null; limparGuias();
     }
     // ---- guias inteligentes (como nos editores): alinhar ao centro da página, às margens e às outras imagens; igualar tamanhos
     const LIMIAR = 6;
@@ -1263,9 +1263,15 @@
             document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); d.classList.add('sel'); S.imgSel = i.id;
             const redim = e.target.classList.contains('alca');
             const x0 = e.clientX, y0 = e.clientY, ix = i.x, iy = i.page * PG.P + i.y, iw = i.w, ih = i.h, ratio = iw / ih;
+            limparGuias();
             d.setPointerCapture(e.pointerId);
+            // posição do mouse em coordenadas da folha (considera rolagem e zoom a cada movimento)
+            const noPalco = (ev) => { const r = $('ra-stage').getBoundingClientRect(); return { x: (ev.clientX - r.left) / S.escala, y: (ev.clientY - r.top) / S.escala }; };
+            const p0 = noPalco(e); let ultimo = e, raf = 0;
             const mover = (ev) => {
-                const dx = (ev.clientX - x0) / S.escala, dy = (ev.clientY - y0) / S.escala;
+                ultimo = ev;
+                const pn = noPalco(ev);
+                const dx = pn.x - p0.x, dy = pn.y - p0.y;
                 const snap = !ev.altKey;   // segurar Alt desliga o "ímã"
                 limparGuias();
                 if (redim) {
@@ -1305,8 +1311,25 @@
                 }
                 posicionarImagens();
             };
-            const soltar = () => { limparGuias(); d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); sujo(); paginar(); };
-            d.addEventListener('pointermove', mover); d.addEventListener('pointerup', soltar); d.addEventListener('pointercancel', soltar);
+            const cenaEl = $('ra-cena');
+            const rolou = () => mover(ultimo);   // roda a roda do mouse com a imagem presa: ela acompanha a página
+            // rolagem automática quando o mouse chega perto da borda da área visível
+            const auto = () => {
+                const cr = cenaEl.getBoundingClientRect(); const topo = Math.max(cr.top, 90), base = Math.min(cr.bottom, window.innerHeight);
+                let v = 0; const y = ultimo.clientY;
+                if (y > base - 50) v = Math.min(30, (y - (base - 50)) * 0.6 + 2); else if (y < topo + 50) v = -Math.min(30, ((topo + 50) - y) * 0.6 + 2);
+                if (v) { const antes = cenaEl.scrollTop; cenaEl.scrollTop += v; if (cenaEl.scrollTop === antes) window.scrollBy(0, v); }
+                raf = requestAnimationFrame(auto);
+            };
+            const soltar = () => {
+                cancelAnimationFrame(raf); limparGuias();
+                d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); d.removeEventListener('lostpointercapture', soltar);
+                cenaEl.removeEventListener('scroll', rolou); window.removeEventListener('scroll', rolou);
+                sujo(); paginar();
+            };
+            d.addEventListener('pointermove', mover); d.addEventListener('pointerup', soltar); d.addEventListener('pointercancel', soltar); d.addEventListener('lostpointercapture', soltar);
+            cenaEl.addEventListener('scroll', rolou); window.addEventListener('scroll', rolou);
+            if (!redim) raf = requestAnimationFrame(auto);
         });
         const g90 = d.querySelector('.g90');
         if (g90) g90.addEventListener('click', (e) => { e.stopPropagation(); i.rot = (((i.rot || 0) + 90) % 360); posicionarImagens(); sujo(); });
@@ -1495,6 +1518,7 @@
         carregarLista();
     }
     document.addEventListener('mousedown', fecharSelecaoImg, true);
+    document.addEventListener('pointerdown', (e) => { if (!(e.target.closest && e.target.closest('.ra-img'))) limparGuias(); }, true);
     document.addEventListener('mousedown', (e) => { document.querySelectorAll('details.ra-ms[open]').forEach((d) => { if (!d.contains(e.target)) d.removeAttribute('open'); }); }, true);
     window.addEventListener('scroll', agendarBarraFixa, true);
     window.addEventListener('scroll', agendarFlut, true);
