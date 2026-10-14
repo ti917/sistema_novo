@@ -45,16 +45,44 @@
         .ra-badge { display:inline-block; padding:3px 9px; border-radius:20px; font-size:.7rem; font-weight:800; letter-spacing:.04em; }
         .ra-badge.rasc { background:rgba(241,196,15,.15); color:#f1c40f; border:1px solid rgba(241,196,15,.4); }
         .ra-badge.env { background:rgba(46,204,113,.15); color:#2ecc71; border:1px solid rgba(46,204,113,.4); }
+        .ra-resumo { display:flex; gap:10px; flex-wrap:wrap; }
+        .ra-pilula { display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:12px; border:1px solid var(--cor-borda); background:var(--cor-fundo-cartao, rgba(255,255,255,.04)); font-size:.8rem; color:var(--cor-texto-secundario); }
+        .ra-pilula b { font-size:1.15rem; color:var(--cor-texto-principal); }
+        .ra-filtros { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .ra-chip { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-secundario); border-radius:999px; padding:6px 14px; font-size:.78rem; cursor:pointer; font-weight:600; }
+        .ra-chip.on { background:rgba(79,195,247,.15); border-color:#4fc3f7; color:#4fc3f7; }
+        .ra-busca { flex:1; min-width:200px; max-width:340px; margin-left:auto; }
+        .ra-grade { display:grid; grid-template-columns:repeat(auto-fill, minmax(310px, 1fr)); gap:14px; }
+        .ra-card { position:relative; display:flex; flex-direction:column; gap:10px; padding:16px 16px 14px; border-radius:14px; border:1px solid var(--cor-borda); background:var(--cor-fundo-cartao, rgba(255,255,255,.04)); transition:transform .15s, border-color .15s, box-shadow .15s; }
+        .ra-card:hover { transform:translateY(-2px); border-color:rgba(79,195,247,.6); box-shadow:0 8px 22px rgba(0,0,0,.25); }
+        .ra-card::before { content:''; position:absolute; left:0; top:14px; bottom:14px; width:4px; border-radius:0 4px 4px 0; background:#f1c40f; }
+        .ra-card.env::before { background:#2ecc71; }
+        .ra-card-topo { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+        .ra-card-titulo { font-weight:800; font-size:1rem; line-height:1.25; word-break:break-word; }
+        .ra-tags { display:flex; flex-wrap:wrap; gap:6px; }
+        .ra-tag { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:8px; font-size:.74rem; background:rgba(79,195,247,.1); color:#7fd3f7; border:1px solid rgba(79,195,247,.25); max-width:100%; }
+        .ra-tag.cg { background:rgba(46,204,113,.1); color:#6fdc9f; border-color:rgba(46,204,113,.3); }
+        .ra-tag.un { background:rgba(155,89,182,.12); color:#c39bd3; border-color:rgba(155,89,182,.3); }
+        .ra-tag span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .ra-card-meta { font-size:.74rem; color:var(--cor-texto-secundario); display:flex; flex-direction:column; gap:3px; }
+        .ra-card-acoes { display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:10px; border-top:1px solid var(--cor-borda); }
+        .ra-card-acoes .ra-btn.prim2 { flex:1; justify-content:center; background:rgba(79,195,247,.12); border-color:rgba(79,195,247,.5); color:#4fc3f7; font-weight:700; }
+        .ra-vazio { padding:46px 20px; text-align:center; color:var(--cor-texto-secundario); border:1px dashed var(--cor-borda); border-radius:14px; }
+        .ra-vazio i { font-size:2.4rem; opacity:.45; margin-bottom:8px; display:block; }
+        .ra-modal-fundo { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100000; display:flex; align-items:center; justify-content:center; padding:16px; }
+        .ra-modal { width:100%; max-width:440px; background:var(--cor-fundo-cartao, #12263a); border:1px solid var(--cor-borda); border-radius:16px; padding:22px; box-shadow:0 20px 50px rgba(0,0,0,.5); }
+        .ra-modal h4 { margin:0 0 6px; color:#4fc3f7; } .ra-modal p { margin:0 0 14px; font-size:.84rem; color:var(--cor-texto-secundario); }
         .ra-btn { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-principal); border-radius:8px; padding:7px 11px; cursor:pointer; font-size:.8rem; display:inline-flex; align-items:center; gap:6px; }
         .ra-btn:hover { border-color:#4fc3f7; color:#4fc3f7; }
         .ra-btn.prim { background:#4fc3f7; color:#04202e; border-color:#4fc3f7; font-weight:800; }
         .ra-btn.ok { background:#2ecc71; color:#04200f; border-color:#2ecc71; font-weight:800; }
         .ra-btn.perigo { color:#e74c3c; border-color:rgba(231,76,60,.5); }
         .ra-btn:disabled { opacity:.5; cursor:not-allowed; }
-        .ra-meta { display:grid; grid-template-columns: 2fr 1fr 1fr; gap:10px; }
+        .ra-meta { display:grid; grid-template-columns: 1.6fr .8fr 1.4fr 1.2fr; gap:10px; }
         .ra-meta label { font-size:.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px; }
-        .ra-barra { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border:1px solid var(--cor-borda); border-radius:10px; background:rgba(255,255,255,.03); position:sticky; top:0; z-index:30; backdrop-filter: blur(6px); }
+        .ra-barra { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; position:sticky; top:calc(var(--aviso-offset, 0px) + 86px); z-index:40; box-shadow:0 6px 14px rgba(0,0,0,.35); }
         [data-theme="light"] .ra-barra { background:#fff; }
+        @media (max-width:1024px){ .ra-barra { top:calc(var(--aviso-offset, 0px) + 66px); } }
         .ra-barra .sep { width:1px; height:22px; background:var(--cor-borda); margin:0 4px; }
         .ra-barra button, .ra-barra select { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-principal); border-radius:7px; padding:6px 9px; cursor:pointer; font-size:.82rem; min-width:32px; }
         .ra-barra select { background:var(--cor-fundo-cartao, transparent); width:auto !important; min-width:0; max-width:190px; flex:0 0 auto; }
@@ -63,7 +91,7 @@
         .ra-pgdel:hover { opacity:1; }
         .ra-barra button:hover { border-color:#4fc3f7; color:#4fc3f7; }
         .ra-barra input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--cor-borda); border-radius:7px; background:none; cursor:pointer; }
-        .ra-cena { overflow:auto; background:rgba(0,0,0,.18); border:1px solid var(--cor-borda); border-radius:12px; padding:18px 10px 30px; max-height:calc(100vh - 230px); }
+        .ra-cena { overflow:auto; background:rgba(0,0,0,.18); border:1px solid var(--cor-borda); border-radius:12px; padding:18px 10px 30px; max-height:calc(100vh - 225px - var(--aviso-offset, 0px)); }
         [data-theme="light"] .ra-cena { background:#e5e9f0; }
         .ra-escala { margin:0 auto; position:relative; }
         .ra-stage { position:relative; width:${PG.W}px; transform-origin:top left; }
@@ -104,7 +132,8 @@
         .ra-aviso { padding:10px 14px; border-radius:10px; font-size:.82rem; }
         .ra-aviso.amarelo { background:rgba(241,196,15,.1); border:1px solid rgba(241,196,15,.4); color:#f1c40f; }
         .ra-dica { font-size:.75rem; color:var(--cor-texto-secundario); }
-        @media (max-width:760px){ .ra-meta{ grid-template-columns:1fr; } }
+        @media (max-width:980px){ .ra-meta{ grid-template-columns:1fr 1fr; } }
+        @media (max-width:640px){ .ra-meta{ grid-template-columns:1fr; } }
         @media print { .ra-barra { display:none; } }
         `;
         document.head.appendChild(st);
@@ -122,9 +151,9 @@
     async function carregarLista() {
         const raiz = $('ra-raiz');
         raiz.innerHTML = '<div class="glass-card"><i class="fa-solid fa-spinner fa-spin"></i> Carregando seus relatórios...</div>';
-        const { data, error } = await supabaseClient.from('relatorios_atividades')
-            .select('id,titulo,mes_referencia,unidade,status,pdf_url,enviado_em,atualizado_em,criado_em')
-            .eq('gestor_id', idGestor()).order('atualizado_em', { ascending: false }).limit(500);
+        const consulta = (cols) => supabaseClient.from('relatorios_atividades').select(cols).eq('gestor_id', idGestor()).order('atualizado_em', { ascending: false }).limit(500);
+        let { data, error } = await consulta('id,titulo,mes_referencia,unidade,cargo,status,pdf_url,enviado_em,atualizado_em,criado_em');
+        if (error && /cargo/i.test(error.message || '') && /(column|schema cache|coluna)/i.test(error.message || '')) { S.semColunaCargo = true; ({ data, error } = await consulta('id,titulo,mes_referencia,unidade,status,pdf_url,enviado_em,atualizado_em,criado_em')); }
         if (error) {
             raiz.innerHTML = '<div class="glass-card">' + (erroTabela(error) ? avisoTabela() : '<div class="ra-aviso amarelo">Erro ao carregar: ' + esc(error.message) + '</div>') + '</div>';
             return;
@@ -138,41 +167,150 @@
 
     function desenharLista() {
         const raiz = $('ra-raiz');
-        const linhas = S.lista.map((r) => `
-            <tr>
-                <td><b>${esc(r.titulo || 'Sem título')}</b><div class="ra-dica">${esc(r.unidade || '')}</div></td>
-                <td>${esc(fmtMes(r.mes_referencia))}</td>
-                <td><span class="ra-badge ${r.status === 'enviado' ? 'env' : 'rasc'}">${r.status === 'enviado' ? 'ENVIADO' : 'RASCUNHO'}</span>${r.enviado_em ? '<div class="ra-dica">' + fmtData(r.enviado_em) + '</div>' : ''}</td>
-                <td>${fmtData(r.atualizado_em)}</td>
-                <td style="white-space:nowrap; display:flex; gap:6px; flex-wrap:wrap;">
-                    <button class="ra-btn" onclick="RelAtv.abrir('${r.id}')"><i class="fa-solid ${r.status === 'enviado' ? 'fa-eye' : 'fa-pen'}"></i> ${r.status === 'enviado' ? 'Ver' : 'Editar'}</button>
-                    ${r.pdf_url ? `<a class="ra-btn" href="${esc(r.pdf_url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i> PDF</a>` : ''}
-                    <button class="ra-btn" onclick="RelAtv.duplicar('${r.id}')" title="Cria uma cópia editável"><i class="fa-regular fa-copy"></i></button>
-                    ${r.status !== 'enviado' ? `<button class="ra-btn perigo" onclick="RelAtv.excluir('${r.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>` : ''}
-                </td>
-            </tr>`).join('');
+        const todos = S.lista || [];
+        const nRasc = todos.filter((r) => r.status !== 'enviado').length, nEnv = todos.length - nRasc;
+        const f = S.filtroLista || 'todos', q = (S.buscaLista || '').toLowerCase();
+        const lista = todos.filter((r) => (f === 'todos' || (f === 'enviado' ? r.status === 'enviado' : r.status !== 'enviado'))
+            && (!q || [r.titulo, r.unidade, r.cargo, fmtMes(r.mes_referencia)].join(' ').toLowerCase().includes(q)));
+        const cards = lista.map((r) => {
+            const env = r.status === 'enviado';
+            return `
+            <div class="ra-card ${env ? 'env' : ''}">
+                <div class="ra-card-topo">
+                    <div class="ra-card-titulo">${esc(r.titulo || 'Sem título')}</div>
+                    <span class="ra-badge ${env ? 'env' : 'rasc'}">${env ? 'ENVIADO' : 'RASCUNHO'}</span>
+                </div>
+                <div class="ra-tags">
+                    <span class="ra-tag"><i class="fa-regular fa-calendar"></i><span>${esc(fmtMes(r.mes_referencia))}</span></span>
+                    ${r.cargo ? `<span class="ra-tag cg" title="${esc(r.cargo)}"><i class="fa-solid fa-user-tie"></i><span>${esc(r.cargo)}</span></span>` : ''}
+                    ${r.unidade ? `<span class="ra-tag un" title="${esc(r.unidade)}"><i class="fa-solid fa-building"></i><span>${esc(r.unidade)}</span></span>` : '<span class="ra-tag un" style="opacity:.6;"><i class="fa-solid fa-building"></i><span>Sem unidade</span></span>'}
+                </div>
+                <div class="ra-card-meta">
+                    <span><i class="fa-regular fa-clock"></i> Atualizado em ${fmtData(r.atualizado_em)}</span>
+                    ${env && r.enviado_em ? `<span style="color:#2ecc71;"><i class="fa-solid fa-paper-plane"></i> Enviado ao financeiro em ${fmtData(r.enviado_em)}</span>` : ''}
+                </div>
+                <div class="ra-card-acoes">
+                    <button class="ra-btn prim2" onclick="RelAtv.abrir('${r.id}')"><i class="fa-solid ${env ? 'fa-eye' : 'fa-pen'}"></i> ${env ? 'Ver' : 'Editar'}</button>
+                    ${r.pdf_url ? `<a class="ra-btn" href="${esc(r.pdf_url)}" target="_blank" rel="noopener" title="Abrir o PDF"><i class="fa-solid fa-file-pdf" style="color:#e74c3c;"></i> PDF</a>` : ''}
+                    <button class="ra-btn" onclick="RelAtv.duplicar('${r.id}')" title="Criar uma cópia editável"><i class="fa-regular fa-copy"></i></button>
+                    ${!env ? `<button class="ra-btn perigo" onclick="RelAtv.excluir('${r.id}')" title="Excluir rascunho"><i class="fa-solid fa-trash"></i></button>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+        const chip = (k, t, n) => `<button class="ra-chip ${f === k ? 'on' : ''}" onclick="RelAtv.filtrarLista('${k}')">${t} (${n})</button>`;
+        const vazio = todos.length
+            ? '<div class="ra-vazio"><i class="fa-solid fa-magnifying-glass"></i>Nenhum relatório encontrado com esse filtro.</div>'
+            : '<div class="ra-vazio"><i class="fa-regular fa-file-lines"></i><b>Você ainda não criou nenhum relatório.</b><p style="margin:6px 0 14px;">Clique em "Novo relatório" para começar.</p><button class="ra-btn prim" onclick="RelAtv.novo()"><i class="fa-solid fa-plus"></i> Novo relatório</button></div>';
         raiz.innerHTML = `
             <div class="ra-wrap">
                 <div class="ra-topo">
-                    <h3><i class="fa-solid fa-file-lines"></i> Relatório de Atividades</h3>
+                    <div>
+                        <h3><i class="fa-solid fa-file-lines"></i> Relatório de Atividades</h3>
+                        <div class="ra-dica" style="margin-top:4px;">Escreva como no Word, com a folha timbrada da Soul. Pode criar quantos relatórios precisar. Quando terminar, baixe o PDF e envie ao financeiro.</div>
+                    </div>
                     <button class="ra-btn prim" onclick="RelAtv.novo()"><i class="fa-solid fa-plus"></i> Novo relatório</button>
                 </div>
-                <div class="ra-dica">Escreva como no Word, com a folha timbrada da Soul. Pode criar quantos relatórios precisar. Quando terminar, baixe o PDF e envie ao financeiro.</div>
-                <div class="glass-card" style="padding:0; overflow-x:auto;">
-                    ${S.lista.length ? `<table class="ra-tabela"><thead><tr><th>Relatório</th><th>Mês ref.</th><th>Status</th><th>Atualizado</th><th>Ações</th></tr></thead><tbody>${linhas}</tbody></table>`
-                        : '<div style="padding:30px; text-align:center; color:var(--cor-texto-secundario);"><i class="fa-regular fa-file-lines" style="font-size:2rem; opacity:.5;"></i><p>Você ainda não criou nenhum relatório.</p></div>'}
+                <div class="ra-resumo">
+                    <div class="ra-pilula"><b>${todos.length}</b> relatórios</div>
+                    <div class="ra-pilula"><b style="color:#f1c40f;">${nRasc}</b> rascunhos</div>
+                    <div class="ra-pilula"><b style="color:#2ecc71;">${nEnv}</b> enviados</div>
                 </div>
+                <div class="ra-filtros">
+                    ${chip('todos', 'Todos', todos.length)}${chip('rascunho', 'Rascunhos', nRasc)}${chip('enviado', 'Enviados', nEnv)}
+                    <input class="modern-input ra-busca" id="ra-busca" placeholder="Buscar por título, unidade ou mês..." value="${esc(S.buscaLista || '')}" oninput="RelAtv.buscarLista(this.value)">
+                </div>
+                ${lista.length ? `<div class="ra-grade">${cards}</div>` : vazio}
             </div>`;
+        if (q) { const el = $('ra-busca'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
+    }
+    function filtrarLista(k) { S.filtroLista = k; desenharLista(); }
+    function buscarLista(v) { S.buscaLista = v; desenharLista(); }
+
+    // ---------------------------------------------------------------- Unidades do gestor
+    function unidadesDoGestor() {
+        const bruto = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.unidade) ? [].concat(usuarioAtual.unidade).join(',') : '';
+        return Array.from(new Set(bruto.split(',').map((u) => u.trim()).filter(Boolean)));
+    }
+    // cargos cadastrados para a unidade (mesma base usada nas admissões); só o nome do cargo, sem valores
+    async function cargosDaUnidade(unidade) {
+        if (!unidade) return [];
+        S.cacheCargos = S.cacheCargos || {};
+        if (S.cacheCargos[unidade]) return S.cacheCargos[unidade];
+        try {
+            const { data, error } = await supabaseClient.from('salarios_base').select('cargo').eq('unidade', unidade);
+            if (error) return [];
+            const lista = Array.from(new Set((data || []).map((x) => (x.cargo || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+            S.cacheCargos[unidade] = lista; return lista;
+        } catch (e) { return []; }
+    }
+    const opcoesCargo = (lista, sel) => '<option value="">Sem cargo específico (opcional)</option>' + lista.map((c) => `<option value="${esc(c)}" ${c === sel ? 'selected' : ''}>${esc(c)}</option>`).join('');
+
+    function escolherUnidade(unidades) {
+        return new Promise((resolve) => {
+            const fundo = document.createElement('div'); fundo.className = 'ra-modal-fundo';
+            fundo.innerHTML = `<div class="ra-modal">
+                <h4><i class="fa-solid fa-building"></i> Para qual unidade é este relatório?</h4>
+                <p>Escolha a unidade a que as atividades se referem. Você pode trocar depois, dentro do relatório.</p>
+                <select class="modern-input" id="ra-sel-un" style="width:100%; margin-bottom:12px;">
+                    <option value="">Selecione a unidade...</option>${unidades.map((u) => `<option value="${esc(u)}">${esc(u)}</option>`).join('')}
+                </select>
+                <label style="font-size:.74rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px;">Cargo (opcional — os cargos da unidade escolhida)</label>
+                <select class="modern-input" id="ra-sel-cg" style="width:100%; margin-bottom:16px;" disabled><option value="">Escolha a unidade primeiro</option></select>
+                <div style="display:flex; gap:8px; justify-content:flex-end;">
+                    <button class="ra-btn" id="ra-un-cancel">Cancelar</button>
+                    <button class="ra-btn prim" id="ra-un-ok"><i class="fa-solid fa-arrow-right"></i> Criar relatório</button>
+                </div></div>`;
+            document.body.appendChild(fundo);
+            const fim = (v) => { fundo.remove(); resolve(v); };
+            fundo.querySelector('#ra-sel-un').onchange = async (e) => {
+                const cg = fundo.querySelector('#ra-sel-cg'); cg.disabled = true; cg.innerHTML = '<option value="">Buscando cargos...</option>';
+                const lista = await cargosDaUnidade(e.target.value);
+                cg.innerHTML = opcoesCargo(lista, ''); cg.disabled = !e.target.value;
+                if (e.target.value && !lista.length) cg.innerHTML = '<option value="">Nenhum cargo cadastrado nesta unidade (opcional)</option>';
+            };
+            fundo.querySelector('#ra-un-cancel').onclick = () => fim(null);
+            fundo.addEventListener('mousedown', (e) => { if (e.target === fundo) fim(null); });
+            fundo.querySelector('#ra-un-ok').onclick = () => { const v = fundo.querySelector('#ra-sel-un').value; if (!v) { alerta('Selecione a unidade do relatório.', 'aviso'); return; } fim({ unidade: v, cargo: fundo.querySelector('#ra-sel-cg').value || '' }); };
+        });
+    }
+    async function recarregarCargos(unidade, atual) {
+        const sel = $('ra-cargo'); if (!sel) return;
+        const lista = await cargosDaUnidade(unidade);
+        const l2 = atual && !lista.includes(atual) ? [atual].concat(lista) : lista;
+        sel.innerHTML = opcoesCargo(l2, atual || '');
+        if (unidade && !lista.length && !atual) sel.innerHTML = '<option value="">Nenhum cargo cadastrado nesta unidade (opcional)</option>';
+    }
+    function linhaDoDocumento(rotulo, valor, depoisDe) {
+        const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
+        const ps = Array.from(ed.querySelectorAll('p'));
+        const re = new RegExp('^\\s*' + rotulo + ':', 'i');
+        const lu = ps.find((x) => re.test(x.textContent));
+        if (lu) { if (valor) lu.innerHTML = '<b>' + rotulo + ':</b> ' + esc(valor); else lu.remove(); }
+        else if (valor) {
+            const ref = depoisDe.map((r2) => ps.find((x) => new RegExp('^\\s*' + r2 + ':', 'i').test(x.textContent))).find(Boolean);
+            if (ref) ref.insertAdjacentHTML('afterend', '<p><b>' + rotulo + ':</b> ' + esc(valor) + '</p>');
+        }
+    }
+    function mudarCargo(v) { sujo(); linhaDoDocumento('Cargo', v, ['Unidade', 'Gestor']); agendarPaginacao(); }
+    // troca a unidade e atualiza a linha "Unidade:" do cabeçalho do texto
+    function mudarUnidade(v) {
+        sujo();
+        if (S.somenteLeitura) return;
+        linhaDoDocumento('Unidade', v, ['Gestor']);
+        linhaDoDocumento('Cargo', '', []);          // o cargo anterior pertencia à outra unidade
+        recarregarCargos(v, '');
+        agendarPaginacao();
     }
 
     // ---------------------------------------------------------------- Modelo inicial
-    function modeloInicial(mes, unidade) {
+    function modeloInicial(mes, unidade, cargo) {
         const hoje = new Date();
         const mesNome = hoje.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
         return '<h1 style="text-align:center">RELATÓRIO DE ATIVIDADES</h1>'
             + '<p style="text-align:center"><b>Período:</b> ' + esc(mesNome) + '</p>'
             + '<p><b>Gestor:</b> ' + esc(nomeGestor()) + '</p>'
             + (unidade ? '<p><b>Unidade:</b> ' + esc(unidade) + '</p>' : '')
+            + (cargo ? '<p><b>Cargo:</b> ' + esc(cargo) + '</p>' : '')
             + '<p><br></p><h2>1. Atividades realizadas</h2><p><br></p>'
             + '<h2>2. Ocorrências e pontos de atenção</h2><p><br></p>'
             + '<h2>3. Observações</h2><p><br></p>';
@@ -182,8 +320,10 @@
     function mesAtualIso() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
 
     async function novo() {
-        const unidade = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.unidade) ? [].concat(usuarioAtual.unidade).join(', ') : '';
-        S.atual = { id: null, titulo: 'Relatório de Atividades', mes_referencia: mesAtualIso(), unidade, conteudo_html: modeloInicial(mesAtualIso(), unidade), imagens: [], status: 'rascunho', pdf_url: null };
+        const unids = unidadesDoGestor();
+        let unidade = unids[0] || '', cargo = '';
+        if (unids.length >= 1) { const esc2 = await escolherUnidade(unids); if (!esc2) return; unidade = esc2.unidade; cargo = esc2.cargo; }
+        S.atual = { id: null, titulo: 'Relatório de Atividades', mes_referencia: mesAtualIso(), unidade, cargo, conteudo_html: modeloInicial(mesAtualIso(), unidade, cargo), imagens: [], status: 'rascunho', pdf_url: null };
         S.somenteLeitura = false;
         desenharEditor();
     }
@@ -202,7 +342,7 @@
     async function duplicar(id) {
         const { data, error } = await supabaseClient.from('relatorios_atividades').select('*').eq('id', id).single();
         if (error || !data) return alerta('Não foi possível duplicar.', 'erro');
-        S.atual = { id: null, titulo: (data.titulo || 'Relatório') + ' (cópia)', mes_referencia: data.mes_referencia, unidade: data.unidade, conteudo_html: data.conteudo_html, imagens: (data.imagens || []).map((i) => ({ ...i, id: novoId() })), status: 'rascunho', pdf_url: null };
+        S.atual = { id: null, titulo: (data.titulo || 'Relatório') + ' (cópia)', mes_referencia: data.mes_referencia, unidade: data.unidade, cargo: data.cargo || null, conteudo_html: data.conteudo_html, imagens: (data.imagens || []).map((i) => ({ ...i, id: novoId() })), status: 'rascunho', pdf_url: null };
         S.somenteLeitura = false;
         desenharEditor();
         S.dirty = true;
@@ -269,6 +409,13 @@
         </div>`;
     }
 
+    function campoUnidade(r, ro) {
+        const unids = unidadesDoGestor();
+        if (!unids.length) return `<input class="modern-input" id="ra-unidade" value="${esc(r.unidade || '')}" placeholder="Nome da unidade" ${ro ? 'disabled' : ''} oninput="RelAtv.mudarUnidade(this.value)">`;
+        const lista = r.unidade && !unids.includes(r.unidade) ? [r.unidade].concat(unids) : unids;
+        return `<select class="modern-input" id="ra-unidade" ${ro ? 'disabled' : ''} onchange="RelAtv.mudarUnidade(this.value)"><option value="">Selecione a unidade...</option>${lista.map((u) => `<option value="${esc(u)}" ${u === r.unidade ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select>`;
+    }
+
     function desenharEditor() {
         const r = S.atual, ro = S.somenteLeitura;
         $('ra-raiz').innerHTML = `
@@ -286,7 +433,8 @@
             <div class="ra-meta">
                 <div><label>Título do relatório</label><input class="modern-input" id="ra-titulo" value="${esc(r.titulo)}" ${ro ? 'disabled' : ''} oninput="RelAtv.sujo()"></div>
                 <div><label>Mês de referência</label><input class="modern-input" type="month" id="ra-mes" value="${esc(r.mes_referencia || '')}" ${ro ? 'disabled' : ''} oninput="RelAtv.sujo()"></div>
-                <div><label>Unidade</label><input class="modern-input" id="ra-unidade" value="${esc(r.unidade || '')}" ${ro ? 'disabled' : ''} oninput="RelAtv.sujo()"></div>
+                <div><label>Unidade deste relatório</label>${campoUnidade(r, ro)}</div>
+                <div><label>Cargo (opcional)</label><select class="modern-input" id="ra-cargo" ${ro ? 'disabled' : ''} onchange="RelAtv.mudarCargo(this.value)"><option value="">${r.cargo ? esc(r.cargo) : 'Sem cargo específico (opcional)'}</option></select></div>
             </div>
             ${ro ? '<div class="ra-aviso amarelo">Este relatório já foi enviado ao financeiro e não pode mais ser editado. Use o botão de copiar na lista para criar uma nova versão.</div>' : ''}
             ${ro ? '' : barraHtml()}
@@ -304,6 +452,7 @@
         desenharImagens();
         ajustarEscala();
         paginar();
+        recarregarCargos(S.atual.unidade, S.atual.cargo);
         S.dirty = false;
         atualizarStatusSalvo();
         clearInterval(S.timerAuto);
@@ -748,6 +897,44 @@
     function medirImagem(src) {
         return new Promise((res, rej) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 }); im.onerror = () => rej(new Error('não consegui carregar a imagem')); im.src = src; });
     }
+    // desenha: [assinatura] / linha / NOME / Gestor(a) — Unidade (fundo transparente)
+    async function comporBlocoAssinatura(urlAssin) {
+        const E = 3, W = 420, H_ASSIN = urlAssin ? 110 : 50;
+        let im = null;
+        if (urlAssin) {
+            im = await new Promise((res) => { const x = new Image(); x.crossOrigin = 'anonymous'; x.onload = () => res(x); x.onerror = () => res(null); x.src = urlAssin; });
+        }
+        const nome = String(nomeGestor() || '').toUpperCase();
+        const un = String((($('ra-unidade') || {}).value) || (S.atual && S.atual.unidade) || '');
+        const papel = 'Gestor(a) responsável';
+        const H = H_ASSIN + 18 + 30 + 26 + (un ? 24 : 0) + 8;
+        const montar = (usarImg) => {
+            const c = document.createElement('canvas'); c.width = W * E; c.height = H * E;
+            const x = c.getContext('2d'); x.scale(E, E);
+            if (usarImg && im) {
+                const e = Math.min((W - 40) / im.naturalWidth, H_ASSIN / im.naturalHeight);
+                const w = im.naturalWidth * e, h = im.naturalHeight * e;
+                x.drawImage(im, (W - w) / 2, H_ASSIN - h, w, h);
+            }
+            const yl = H_ASSIN + 6;
+            x.strokeStyle = '#111'; x.lineWidth = 1.4; x.beginPath(); x.moveTo(40, yl); x.lineTo(W - 40, yl); x.stroke();
+            x.fillStyle = '#111'; x.textAlign = 'center';
+            let f = 19; x.font = '700 ' + f + 'px Calibri, Carlito, Arial, sans-serif';
+            while (x.measureText(nome).width > W - 30 && f > 11) { f--; x.font = '700 ' + f + 'px Calibri, Carlito, Arial, sans-serif'; }
+            x.fillText(nome, W / 2, yl + 26);
+            x.font = '400 15px Calibri, Carlito, Arial, sans-serif';
+            let t = papel; while (x.measureText(t).width > W - 30 && t.length > 8) t = t.slice(0, -2);
+            x.fillText(t === papel ? t : t + '…', W / 2, yl + 48);
+            if (un) { x.font = '400 13px Calibri, Carlito, Arial, sans-serif'; let u = un; while (x.measureText(u).width > W - 30 && u.length > 8) u = u.slice(0, -2); x.fillText(u === un ? u : u + '…', W / 2, yl + 68); }
+            return c;
+        };
+        const paraBlob = (c) => new Promise((res, rej) => { try { c.toBlob((b) => b ? res(b) : rej(new Error('falha')), 'image/png'); } catch (e) { rej(e); } });
+        let blob;
+        try { blob = await paraBlob(montar(true)); }
+        catch (e) { blob = await paraBlob(montar(false)); alerta('Não consegui incorporar a imagem da assinatura (bloqueio do navegador). Inseri só a linha com o seu nome.', 'aviso'); }
+        return { blob, w: W, h: H };
+    }
+
     async function assinar(tipo) {
         if (S.somenteLeitura) return;
         try {
@@ -756,10 +943,18 @@
             let reg;
             if (tipo === 'assinatura') {
                 const cfg = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.assinatura_admin) || {};
-                if (!cfg.assinatura_url) return alerta('Você ainda não cadastrou a sua assinatura. Cadastre em Edição de Documentos › Assinar Documento (se essa aba não aparecer para você, peça ao Admin para liberar).', 'aviso');
-                const m = await medirImagem(cfg.assinatura_url);
-                const w = 200, h = Math.round(w * m.h / m.w);
-                reg = { id: novoId(), url: cfg.assinatura_url, url_remota: cfg.assinatura_url, page: pg, x: PG.W - PG.RIGHT - w - 10, y: PG.TOP + PG.CH - h - 20, w, h, tipo: 'assinatura' };
+                const temAssin = !!cfg.assinatura_url;
+                if (!temAssin) alerta('Sua assinatura ainda não foi cadastrada (Edição de Documentos › Assinar Documento). Inseri só a linha com o seu nome.', 'aviso');
+                // monta, numa imagem só: assinatura + linha + nome (+ cargo da unidade), pronta para arrastar para onde quiser
+                const bloco = await comporBlocoAssinatura(temAssin ? cfg.assinatura_url : null);
+                const w = 300, h = Math.round(w * bloco.h / bloco.w);
+                const local = URL.createObjectURL(bloco.blob);
+                S.atual.imagens = (S.atual.imagens || []).filter((x) => x.tipo !== 'assinatura');   // uma assinatura do gestor por relatório
+                reg = { id: novoId(), url: local, page: pg, x: Math.round((PG.W - w) / 2), y: Math.min(PG.TOP + PG.CH - h - 14, PG.TOP + 560), w, h, subindo: true, tipo: 'assinatura' };
+                S.atual.imagens.push(reg); desenharImagens(); paginar(); sujo();
+                const urls = await subirDocumentos(pastaGestor(), [new File([bloco.blob], 'assinatura-gestor.png', { type: 'image/png' })]);
+                reg.url_remota = urls[0]; delete reg.subindo; sujo();
+                return;
             } else {
                 if (typeof window._gerarImagemCarimboPadrao !== 'function' || typeof window._empresaCarimboPadrao !== 'function') return alerta('O carimbo não está disponível nesta tela.', 'aviso');
                 if (typeof window._resolverNomeCarimboAdmin === 'function') await window._resolverNomeCarimboAdmin();
@@ -880,13 +1075,13 @@
     function coletar() {
         const r = S.atual;
         r.titulo = ($('ra-titulo').value || '').trim() || 'Relatório de Atividades';
-        r.mes_referencia = $('ra-mes').value || null; r.unidade = ($('ra-unidade').value || '').trim() || null;
+        r.mes_referencia = $('ra-mes').value || null; r.unidade = ($('ra-unidade').value || '').trim() || null; r.cargo = ($('ra-cargo') && $('ra-cargo').value || '').trim() || null;
         r.conteudo_html = html();
         return r;
     }
     function payload(r) {
         return {
-            gestor_id: idGestor(), gestor_nome: nomeGestor(), titulo: r.titulo, mes_referencia: r.mes_referencia, unidade: r.unidade, conteudo_html: r.conteudo_html,
+            gestor_id: idGestor(), gestor_nome: nomeGestor(), titulo: r.titulo, mes_referencia: r.mes_referencia, unidade: r.unidade, conteudo_html: r.conteudo_html, ...(r.cargo !== undefined && !S.semColunaCargo ? { cargo: r.cargo } : {}),
             imagens: (r.imagens || []).map((i) => ({ id: i.id, url: i.url_remota || i.url, page: i.page, x: i.x, y: i.y, w: i.w, h: i.h })),
             atualizado_em: new Date().toISOString()
         };
@@ -897,15 +1092,17 @@
         if ((S.atual.imagens || []).some((i) => i.subindo)) { if (mostrar) alerta('Aguarde o envio das imagens terminar.', 'aviso'); return false; }
         S.salvando = true;
         try {
-            const r = coletar(), p = payload(r);
-            if (r.id) {
-                const { error } = await supabaseClient.from('relatorios_atividades').update(p).eq('id', r.id).eq('gestor_id', idGestor());
-                if (error) throw error;
-            } else {
-                const { data, error } = await supabaseClient.from('relatorios_atividades').insert({ ...p, status: 'rascunho' }).select('id').single();
-                if (error) throw error;
-                r.id = data.id;
-            }
+            const r = coletar();
+            const gravar = async (p) => {
+                if (r.id) return await supabaseClient.from('relatorios_atividades').update(p).eq('id', r.id).eq('gestor_id', idGestor());
+                const res = await supabaseClient.from('relatorios_atividades').insert({ ...p, status: 'rascunho' }).select('id').single();
+                if (!res.error) r.id = res.data.id;
+                return res;
+            };
+            let res = await gravar(payload(r));
+            // coluna "cargo" ainda não criada no banco: salva sem ela (o cargo continua no texto do relatório)
+            if (res.error && /cargo/i.test(res.error.message || '') && /(column|schema cache|coluna)/i.test(res.error.message || '')) { S.semColunaCargo = true; res = await gravar(payload(r)); }
+            if (res.error) throw res.error;
             S.dirty = false; atualizarStatusSalvo();
             if (mostrar) alerta('Rascunho salvo.', 'sucesso');
             return true;
@@ -998,6 +1195,7 @@
 
     async function enviar() {
         if (S.pdfGerando || S.somenteLeitura) return;
+        if (!(($('ra-unidade') || {}).value || '').trim()) return alerta('Selecione a unidade deste relatório antes de enviar ao financeiro.', 'aviso');
         const ok = typeof window.mostrarConfirmacao === 'function'
             ? await window.mostrarConfirmacao('Enviar este relatório ao financeiro? Depois de enviado ele não poderá mais ser editado (você pode criar uma cópia).', 'Enviar ao financeiro')
             : confirm('Enviar este relatório ao financeiro?');
@@ -1039,5 +1237,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();

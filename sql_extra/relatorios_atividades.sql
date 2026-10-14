@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS public.relatorios_atividades (
   titulo         text NOT NULL DEFAULT 'Relatório de Atividades',
   mes_referencia text,                       -- 'AAAA-MM'
   unidade        text,
+  cargo          text,                       -- opcional
   conteudo_html  text,                       -- texto do editor
   imagens        jsonb NOT NULL DEFAULT '[]'::jsonb,  -- [{id,url,page,x,y,w,h}]
   status         text NOT NULL DEFAULT 'rascunho' CHECK (status IN ('rascunho','enviado')),
@@ -16,6 +17,9 @@ CREATE TABLE IF NOT EXISTS public.relatorios_atividades (
   criado_em      timestamptz NOT NULL DEFAULT now(),
   atualizado_em  timestamptz NOT NULL DEFAULT now()
 );
+
+-- (se a tabela já existia, esta linha adiciona a coluna do cargo)
+ALTER TABLE public.relatorios_atividades ADD COLUMN IF NOT EXISTS cargo text;
 
 CREATE INDEX IF NOT EXISTS relatorios_atividades_gestor_idx ON public.relatorios_atividades (gestor_id, atualizado_em DESC);
 CREATE INDEX IF NOT EXISTS relatorios_atividades_status_idx ON public.relatorios_atividades (status, enviado_em DESC);
