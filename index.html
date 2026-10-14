@@ -12684,6 +12684,13 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
     <div class="modal-arquivo-content" style="max-width: 500px; text-align: center;">
         <button onclick="fecharModalAssinatura()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
         <h3 style="color: var(--cor-acento); margin-bottom: 10px;"><i class="fa-solid fa-file-signature"></i> Assinatura do Responsável</h3>
+        <div id="assin-cadastrada-escala" class="hidden" style="margin-bottom: 14px; padding: 12px; border: 1px solid rgba(40,167,69,0.35); background: rgba(40,167,69,0.06); border-radius: 10px;">
+            <div style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-bottom: 8px;"><i class="fa-solid fa-circle-check" style="color:#28a745;"></i> Você tem uma assinatura cadastrada</div>
+            <img id="assin-cadastrada-escala-img" alt="Assinatura cadastrada" style="height: 54px; max-width: 220px; object-fit: contain; background: #fff; border-radius: 6px; padding: 4px; display: block; margin: 0 auto 6px auto;">
+            <div id="assin-cadastrada-escala-nome" style="font-size: 0.78rem; color: var(--cor-texto-secundario); margin-bottom: 10px;"></div>
+            <button type="button" id="btn-trancar-assin-cadastrada" class="btn-primary" style="width: 100%; justify-content: center;" onclick="confirmarTrancarEscala(true)"><i class="fa-solid fa-lock"></i> Trancar com minha assinatura cadastrada</button>
+            <div style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-top: 10px;">ou, se preferir, assine abaixo:</div>
+        </div>
         <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">Assine abaixo para trancar a escala definitivamente.</p>
         
         <canvas id="canvas-assinatura" class="signature-pad"></canvas>
@@ -31872,7 +31879,40 @@ async function salvarEscalaNoBanco() {
 
     document.getElementById('modal-assinatura').classList.remove('hidden');
     setTimeout(redimensionarCanvas, 100); // Dá um tempo pro modal abrir antes de ajustar o tamanho do canvas
+    window.prepararAssinaturaCadastradaEscala();
 }
+
+// 👇 Se o usuário já cadastrou a assinatura (Edição de Documentos › Assinar Documento), oferece
+// trancar a escala com ela. O desenho no quadro continua disponível pra quem preferir/não tiver cadastro.
+window.prepararAssinaturaCadastradaEscala = async function() {
+    const box = document.getElementById('assin-cadastrada-escala');
+    if (!box) return;
+    const url = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+    if (!url) { box.classList.add('hidden'); return; }
+    document.getElementById('assin-cadastrada-escala-img').src = url;
+    box.classList.remove('hidden');
+    let nome = (usuarioAtual && usuarioAtual.nome) || '';
+    try {
+        if (typeof window._resolverNomeCarimboAdmin === 'function') nome = (await window._resolverNomeCarimboAdmin()) || nome;
+    } catch (e) { /* usa o nome do login */ }
+    window._nomeAssinaturaEscalaCadastrada = nome;
+    document.getElementById('assin-cadastrada-escala-nome').innerText = 'Vai sair no documento como: ' + String(nome).toUpperCase();
+};
+
+// Baixa a assinatura cadastrada e devolve em PNG base64 (mesmo formato do desenho no quadro)
+window._assinaturaCadastradaEscalaBase64 = async function(url) {
+    const resp = await fetch(url, { mode: 'cors', cache: 'no-store' });
+    if (!resp.ok) throw new Error('não consegui baixar a assinatura cadastrada');
+    const blob = await resp.blob();
+    const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('falha ao ler a assinatura')); r.readAsDataURL(blob); });
+    // Normaliza pra PNG (preserva transparência)
+    return await new Promise((res) => {
+        const im = new Image();
+        im.onload = () => { try { const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; c.getContext('2d').drawImage(im, 0, 0); res(c.toDataURL('image/png')); } catch (e) { res(dataUrl); } };
+        im.onerror = () => res(dataUrl);
+        im.src = dataUrl;
+    });
+};
 
 // 👇 ADICIONE AS NOVAS FUNÇÕES DO CANVAS E SALVAMENTO 👇
 let canvas = document.getElementById('canvas-assinatura');
@@ -31909,21 +31949,33 @@ function fecharModalAssinatura() { document.getElementById('modal-assinatura').c
      // ==========================================
 // SALVAMENTO DA ASSINATURA EM BASE64
 // ==========================================
-window.confirmarTrancarEscala = async function() {
+window.confirmarTrancarEscala = async function(usarCadastrada) {
     const mesAno = document.getElementById('filtro-mes-escala').value;
     const unidade = document.getElementById('filtro-unidade-escala').value;
     const btn = document.querySelector('#modal-assinatura .btn-success');
+    const btnCad = document.getElementById('btn-trancar-assin-cadastrada');
+    const htmlBtnCad = btnCad ? btnCad.innerHTML : '';
     
     btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Salvando...'; 
     btn.disabled = true;
+    if (btnCad) btnCad.disabled = true;
 
     try {
-        // 1. MÁGICA: Extrai a assinatura em BASE64 (Texto) direto do Canvas!
-        const base64Signature = canvas.toDataURL('image/png');
+        let base64Signature, assinadoPor = usuarioAtual.nome;
+        if (usarCadastrada === true) {
+            // Assinatura cadastrada em "Assinar Documento" (PNG transparente) + nome completo do colaborador vinculado
+            const urlCad = usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+            if (!urlCad) throw new Error('você ainda não cadastrou a sua assinatura');
+            base64Signature = await window._assinaturaCadastradaEscalaBase64(urlCad);
+            assinadoPor = window._nomeAssinaturaEscalaCadastrada || usuarioAtual.nome;
+        } else {
+            // 1. MÁGICA: Extrai a assinatura em BASE64 (Texto) direto do Canvas!
+            base64Signature = canvas.toDataURL('image/png');
+        }
 
         // 2. Salva o texto Base64 DIRETAMENTE na tabela (Coluna assinatura)
         const { error: errUpdate } = await supabaseClient.from('escalas_mensais')
-            .update({ fechada: true, assinatura: base64Signature, assinado_por: usuarioAtual.nome })
+            .update({ fechada: true, assinatura: base64Signature, assinado_por: assinadoPor })
             .eq('mes_ano', mesAno).eq('unidade', unidade);
             
         if (errUpdate) throw errUpdate;
@@ -31932,6 +31984,7 @@ window.confirmarTrancarEscala = async function() {
         
         btn.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar e Assinar'; 
         btn.disabled = false;
+        if (btnCad) { btnCad.innerHTML = htmlBtnCad; btnCad.disabled = false; }
         
         fecharModalAssinatura();
         processarEscala(); 
@@ -31939,6 +31992,7 @@ window.confirmarTrancarEscala = async function() {
         await mostrarAlerta("Erro ao trancar escala: " + error.message, "erro");
         btn.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar e Assinar'; 
         btn.disabled = false;
+        if (btnCad) { btnCad.innerHTML = htmlBtnCad; btnCad.disabled = false; }
     }
 };
         
