@@ -1267,9 +1267,10 @@
             d.setPointerCapture(e.pointerId);
             // posição do mouse em coordenadas da folha (considera rolagem e zoom a cada movimento)
             const noPalco = (ev) => { const r = $('ra-stage').getBoundingClientRect(); return { x: (ev.clientX - r.left) / S.escala, y: (ev.clientY - r.top) / S.escala }; };
-            const p0 = noPalco(e); let ultimo = e, raf = 0;
+            const p0 = noPalco(e); let ultimo = e, raf = 0, moveu = false; const pagAntes = i.page;
             const mover = (ev) => {
                 ultimo = ev;
+                if (!moveu) { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return; moveu = true; }   // só um clique: não mexe em nada nem rola a tela
                 const pn = noPalco(ev);
                 const dx = pn.x - p0.x, dy = pn.y - p0.y;
                 const snap = !ev.altKey;   // segurar Alt desliga o "ímã"
@@ -1312,11 +1313,11 @@
                 posicionarImagens();
             };
             const cenaEl = $('ra-cena');
-            const rolou = () => mover(ultimo);   // roda a roda do mouse com a imagem presa: ela acompanha a página
+            const rolou = () => { if (moveu) mover(ultimo); };   // roda a roda do mouse com a imagem presa: ela acompanha a página
             // rolagem automática quando o mouse chega perto da borda da área visível
             const auto = () => {
                 const cr = cenaEl.getBoundingClientRect(); const topo = Math.max(cr.top, 90), base = Math.min(cr.bottom, window.innerHeight);
-                let v = 0; const y = ultimo.clientY;
+                let v = 0; const y = ultimo.clientY; if (!moveu) { raf = requestAnimationFrame(auto); return; }
                 if (y > base - 50) v = Math.min(30, (y - (base - 50)) * 0.6 + 2); else if (y < topo + 50) v = -Math.min(30, ((topo + 50) - y) * 0.6 + 2);
                 if (v) { const antes = cenaEl.scrollTop; cenaEl.scrollTop += v; if (cenaEl.scrollTop === antes) window.scrollBy(0, v); }
                 raf = requestAnimationFrame(auto);
@@ -1325,7 +1326,9 @@
                 cancelAnimationFrame(raf); limparGuias();
                 d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); d.removeEventListener('lostpointercapture', soltar);
                 cenaEl.removeEventListener('scroll', rolou); window.removeEventListener('scroll', rolou);
-                sujo(); paginar();
+                sujo();
+                // o texto não depende da imagem: só repagina se ela mudou de página (evita o texto "pular" e a tela descer ao soltar)
+                if (moveu && i.page !== pagAntes) { const st = cenaEl.scrollTop; paginar(); cenaEl.scrollTop = st; }
             };
             d.addEventListener('pointermove', mover); d.addEventListener('pointerup', soltar); d.addEventListener('pointercancel', soltar); d.addEventListener('lostpointercapture', soltar);
             cenaEl.addEventListener('scroll', rolou); window.addEventListener('scroll', rolou);
