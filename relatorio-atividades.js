@@ -175,7 +175,10 @@
         .ra-guia-tag { position:absolute; pointer-events:none; z-index:21; background:#ffb300; color:#000; font:700 11px Arial,sans-serif; padding:2px 7px; border-radius:6px; white-space:nowrap; }
         .ra-img .alca { display:none; position:absolute; right:-7px; bottom:-7px; width:15px; height:15px; background:#4fc3f7; border:2px solid #fff; border-radius:50%; cursor:nwse-resize; }
         .ra-img .del { display:none; position:absolute; right:-10px; top:-12px; width:24px; height:24px; background:#e74c3c; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer; font:700 13px/20px Arial; text-align:center; padding:0; }
-        .ra-img.sel .alca, .ra-img.sel .del { display:block; }
+        .ra-img .g90 { display:none; position:absolute; left:-10px; top:-12px; width:24px; height:24px; background:#4fc3f7; color:#04202e; border:2px solid #fff; border-radius:50%; cursor:pointer; font:700 13px/18px Arial; text-align:center; padding:0; }
+        .ra-img .gira { display:none; position:absolute; left:50%; top:-34px; width:16px; height:16px; margin-left:-8px; background:#fff; border:2px solid #4fc3f7; border-radius:50%; cursor:grab; }
+        .ra-img .gira::after { content:''; position:absolute; left:5px; top:12px; width:2px; height:18px; background:#4fc3f7; }
+        .ra-img.sel .alca, .ra-img.sel .del, .ra-img.sel .g90, .ra-img.sel .gira { display:block; }
         .ra-aviso { padding:10px 14px; border-radius:10px; font-size:.82rem; }
         .ra-aviso.amarelo { background:rgba(241,196,15,.1); border:1px solid rgba(241,196,15,.4); color:#f1c40f; }
         .ra-dica { font-size:.75rem; color:var(--cor-texto-secundario); }
@@ -1154,7 +1157,7 @@
         (S.atual.imagens || []).forEach((i) => {
             const d = document.createElement('div'); d.className = 'ra-img'; d.dataset.id = i.id;
             const src = i.url_remota || i.url;
-            d.innerHTML = `<img src="${esc(src)}" alt="" crossorigin="anonymous">` + (S.somenteLeitura ? '' : '<button class="del" type="button" title="Remover imagem">×</button><span class="alca"></span>');
+            d.innerHTML = `<img src="${esc(src)}" alt="" crossorigin="anonymous">` + (S.somenteLeitura ? '' : '<button class="del" type="button" title="Remover imagem">×</button><button class="g90" type="button" title="Girar 90°">↻</button><span class="gira" title="Arraste para girar (segure Alt para girar livre)"></span><span class="alca"></span>');
             c.appendChild(d);
             if (!S.somenteLeitura) ligarImagem(d, i);
         });
@@ -1163,7 +1166,7 @@
     function posicionarImagens() {
         document.querySelectorAll('#ra-imgs .ra-img').forEach((d) => {
             const i = (S.atual.imagens || []).find((x) => x.id === d.dataset.id); if (!i) return;
-            d.style.left = i.x + 'px'; d.style.top = (i.page * PG.P + i.y) + 'px'; d.style.width = i.w + 'px'; d.style.height = i.h + 'px';
+            d.style.left = i.x + 'px'; d.style.top = (i.page * PG.P + i.y) + 'px'; d.style.width = i.w + 'px'; d.style.height = i.h + 'px'; d.style.transform = i.rot ? 'rotate(' + i.rot + 'deg)' : '';
         });
     }
     function fecharSelecaoImg(e) {
@@ -1185,8 +1188,25 @@
 
     function ligarImagem(d, i) {
         d.addEventListener('pointerdown', (e) => {
-            if (e.target.classList.contains('del')) return;
+            if (e.target.classList.contains('del') || e.target.classList.contains('g90')) return;
             e.preventDefault(); e.stopPropagation();
+            if (e.target.classList.contains('gira')) {
+                document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); d.classList.add('sel'); S.imgSel = i.id;
+                d.setPointerCapture(e.pointerId);
+                const girar = (ev) => {
+                    const r = d.getBoundingClientRect(); const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                    let a = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI + 90;
+                    a = ((a % 360) + 360) % 360;
+                    limparGuias();
+                    if (!ev.altKey) { const q = Math.round(a / 15) * 15; if (Math.abs(q - a) <= 5) a = q; }
+                    a = Math.round(a * 10) / 10; if (a >= 359.95) a = 0;
+                    i.rot = a; posicionarImagens();
+                    etiqueta(i.x + i.w + 8, i.page * PG.P + i.y - 24, Math.round(a) + '°');
+                };
+                const fim = () => { limparGuias(); d.removeEventListener('pointermove', girar); d.removeEventListener('pointerup', fim); d.removeEventListener('pointercancel', fim); sujo(); };
+                d.addEventListener('pointermove', girar); d.addEventListener('pointerup', fim); d.addEventListener('pointercancel', fim);
+                return;
+            }
             document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); d.classList.add('sel'); S.imgSel = i.id;
             const redim = e.target.classList.contains('alca');
             const x0 = e.clientX, y0 = e.clientY, ix = i.x, iy = i.page * PG.P + i.y, iw = i.w, ih = i.h, ratio = iw / ih;
@@ -1235,6 +1255,8 @@
             const soltar = () => { limparGuias(); d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); sujo(); paginar(); };
             d.addEventListener('pointermove', mover); d.addEventListener('pointerup', soltar); d.addEventListener('pointercancel', soltar);
         });
+        const g90 = d.querySelector('.g90');
+        if (g90) g90.addEventListener('click', (e) => { e.stopPropagation(); i.rot = (((i.rot || 0) + 90) % 360); posicionarImagens(); sujo(); });
         const del = d.querySelector('.del');
         if (del) del.addEventListener('click', (e) => { e.stopPropagation(); S.atual.imagens = S.atual.imagens.filter((x) => x.id !== i.id); desenharImagens(); sujo(); paginar(); });
     }
@@ -1257,7 +1279,7 @@
     function payload(r) {
         return {
             gestor_id: idGestor(), gestor_nome: nomeGestor(), titulo: r.titulo, mes_referencia: r.mes_referencia, unidade: r.unidade, conteudo_html: r.conteudo_html, ...(r.cargo !== undefined && !S.semColunaCargo ? { cargo: r.cargo } : {}),
-            imagens: (r.imagens || []).map((i) => ({ id: i.id, url: i.url_remota || i.url, page: i.page, x: i.x, y: i.y, w: i.w, h: i.h })),
+            imagens: (r.imagens || []).map((i) => ({ id: i.id, url: i.url_remota || i.url, page: i.page, x: i.x, y: i.y, w: i.w, h: i.h, ...(i.rot ? { rot: i.rot } : {}) })),
             atualizado_em: new Date().toISOString()
         };
     }
@@ -1319,7 +1341,7 @@
                 janela.appendChild(copia); pag.appendChild(janela);
                 imgs.filter((i) => i.page === n).forEach((i) => {
                     const im = document.createElement('img'); im.crossOrigin = 'anonymous'; im.src = i.url_remota || i.url;
-                    im.style.cssText = 'position:absolute; left:' + i.x + 'px; top:' + i.y + 'px; width:' + i.w + 'px; height:' + i.h + 'px; z-index:10;';
+                    im.style.cssText = 'position:absolute; left:' + i.x + 'px; top:' + i.y + 'px; width:' + i.w + 'px; height:' + i.h + 'px; z-index:10;' + (i.rot ? 'transform:rotate(' + i.rot + 'deg);' : '');
                     pag.appendChild(im);
                 });
                 palco.appendChild(pag);
