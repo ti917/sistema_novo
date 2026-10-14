@@ -602,25 +602,17 @@
         ed.querySelectorAll('span[style*="font-size: xxx-large"],span[style*="font-size:xxx-large"]').forEach((s) => { s.style.fontSize = px + 'px'; });
         sujo(); agendarPaginacao();
     }
+    // "Nova página": só acrescenta uma página em branco no FIM do documento. Não mexe em nada do que já foi escrito.
     function quebra() {
-        const ed = $('ra-ed'); if (!ed) return;
-        // vê onde está o cursor ANTES de focar (focar sem cursor joga o cursor para o começo do texto)
+        const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
         const sel = window.getSelection();
-        const dentro = !!(sel && sel.rangeCount && ed.contains(sel.getRangeAt(0).startContainer) && sel.getRangeAt(0).startContainer !== ed.parentNode);
-        const salvo = dentro ? sel.getRangeAt(0).cloneRange() : null;
+        const brk = document.createElement('div'); brk.className = 'ra-pgbreak'; brk.setAttribute('contenteditable', 'false'); brk.textContent = 'quebra de página';
+        const np = document.createElement('p'); np.innerHTML = '<br>';
+        ed.appendChild(brk); ed.appendChild(np);
         ed.focus();
-        if (salvo) { sel.removeAllRanges(); sel.addRange(salvo); }
-        else {
-            // sem cursor no texto: a nova página entra no FIM do documento (como no Word)
-            const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); sel.removeAllRanges(); sel.addRange(r);
-        }
-        document.execCommand('insertHTML', false, '<div class="ra-pgbreak" contenteditable="false" data-novo="1">quebra de página</div><p data-novo-p="1"><br></p>');
-        // cursor direto no parágrafo novo, já na página nova
-        const nb = ed.querySelector('.ra-pgbreak[data-novo]'); if (nb) nb.removeAttribute('data-novo');
-        const np = ed.querySelector('p[data-novo-p]');
-        if (np) { np.removeAttribute('data-novo-p'); const r = document.createRange(); r.setStart(np, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
+        const r = document.createRange(); r.setStart(np, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
         sujo(); agendarPaginacao();
-        setTimeout(() => { const u = ed.lastElementChild; if (u) u.scrollIntoView({ block: 'nearest' }); }, 150);
+        setTimeout(() => { const cena = $('ra-cena'); if (!cena) return; const n = Math.max(0, (S.paginas || 1) - 1); cena.scrollTo({ top: Math.max(0, n * PG.P * S.escala - 10), behavior: 'smooth' }); }, 220);
     }
 
     // ---------------------------------------------------------------- Tabelas
