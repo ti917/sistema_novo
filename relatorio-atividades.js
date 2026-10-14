@@ -174,8 +174,8 @@
         .ra-imgs { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:10; }
         .ra-img { position:absolute; pointer-events:auto; cursor:move; touch-action:none; box-sizing:border-box; }
         .ra-img img { width:100%; height:100%; display:block; user-select:none; -webkit-user-drag:none; object-fit:fill; pointer-events:none; }
-        .ra-img.sel { outline:2px solid #4fc3f7; }
-        .ra-img.igual { outline:2px dashed #ffb300; }
+        .ra-img.sel img { outline:2px solid #4fc3f7; }   /* o contorno acompanha a figura girada; os botões ficam fixos na moldura */
+        .ra-img.igual img { outline:2px dashed #ffb300; }
         .ra-guia { position:absolute; pointer-events:none; background:#ff4081; z-index:20; }
         .ra-guia.v { width:1px; top:0; } .ra-guia.h { height:1px; left:0; width:${PG.W}px; }
         .ra-guia-tag { position:absolute; pointer-events:none; z-index:21; background:#ffb300; color:#000; font:700 11px Arial,sans-serif; padding:2px 7px; border-radius:6px; white-space:nowrap; }
