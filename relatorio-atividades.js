@@ -1243,7 +1243,24 @@
             const i = (S.atual.imagens || []).find((x) => x.id === d.dataset.id); if (!i) return;
             d.style.left = i.x + 'px'; d.style.top = (i.page * PG.P + i.y) + 'px'; d.style.width = i.w + 'px'; d.style.height = i.h + 'px'; d.style.transform = '';
             const im = d.querySelector('img'); if (im) im.style.transform = i.rot ? 'rotate(' + i.rot + 'deg)' : '';   // só a figura gira; moldura e botões ficam sempre no mesmo lugar
+            posicionarBotoesImg(d, i);
         });
+    }
+    // os botões acompanham a borda da figura girada, sempre nas mesmas posições da tela: canto superior esquerdo (↻ 90°), superior direito (X) e inferior direito (redimensionar)
+    function posicionarBotoesImg(d, i) {
+        const w = i.w, h = i.h, t = (i.rot || 0) * Math.PI / 180, co = Math.cos(t), si = Math.sin(t);
+        const pt = (x, y) => ({ x: w / 2 + x * co - y * si, y: h / 2 + x * si + y * co });
+        const cantos = [pt(-w / 2, -h / 2), pt(w / 2, -h / 2), pt(w / 2, h / 2), pt(-w / 2, h / 2)];
+        const melhor = (f, fora) => cantos.filter((c) => !fora.includes(c)).reduce((a, c) => (f(c) > f(a) ? c : a));   // cada botão num canto diferente
+        const iD = melhor((c) => c.x + c.y, []), sD = melhor((c) => c.x - c.y, [iD]), sE = melhor((c) => -(c.x + c.y), [iD, sD]);
+        const por = (sel, c, r) => { const e = d.querySelector(sel); if (!e) return; e.style.left = (c.x - r) + 'px'; e.style.top = (c.y - r) + 'px'; e.style.right = 'auto'; e.style.bottom = 'auto'; e.style.marginLeft = '0'; };
+        por('.g90', sE, 12); por('.del', sD, 12); por('.alca', iD, 7.5);
+        // bolinha de girar: no meio da borda que ficou mais alta, um pouco para fora
+        const meios = [{ x: 0, y: -h / 2 }, { x: w / 2, y: 0 }, { x: 0, y: h / 2 }, { x: -w / 2, y: 0 }].map((m) => ({ m, p: pt(m.x, m.y) }));
+        const topo = meios.reduce((a, c) => (c.p.y < a.p.y ? c : a));
+        const ox = topo.p.x - w / 2, oy = topo.p.y - h / 2, n = Math.hypot(ox, oy) || 1;
+        const g = d.querySelector('.gira');
+        if (g) { g.style.left = (topo.p.x + ox / n * 26 - 8) + 'px'; g.style.top = (topo.p.y + oy / n * 26 - 8) + 'px'; g.style.marginLeft = '0'; g.style.transform = 'rotate(' + (Math.atan2(oy, ox) * 180 / Math.PI + 90) + 'deg)'; }
     }
     function fecharSelecaoImg(e) {
         if (e.target.closest && (e.target.closest('.ra-img') || e.target.closest('#ra-barra'))) return;
