@@ -208,10 +208,17 @@
         const raiz = $('ra-raiz');
         raiz.innerHTML = '<div class="glass-card"><i class="fa-solid fa-spinner fa-spin"></i> Carregando seus relatórios...</div>';
         const consulta = (cols) => supabaseClient.from('relatorios_atividades').select(cols).eq('gestor_id', idGestor()).order('atualizado_em', { ascending: false }).limit(500);
-        const base = 'id,titulo,mes_referencia,unidade,cargo,status,pdf_url,enviado_em,atualizado_em,criado_em';
-        let { data, error } = await consulta(base + ',motivo_devolucao,devolvido_em,devolvido_por');
-        if (error && /(motivo_devolucao|devolvido_)/i.test(error.message || '') && /(column|schema cache|coluna)/i.test(error.message || '')) ({ data, error } = await consulta(base));
-        if (error && /cargo/i.test(error.message || '') && /(column|schema cache|coluna)/i.test(error.message || '')) { S.semColunaCargo = true; ({ data, error } = await consulta('id,titulo,mes_referencia,unidade,status,pdf_url,enviado_em,atualizado_em,criado_em')); }
+        // tenta com todas as colunas e vai tirando só a que o banco ainda não tem (cargo e/ou colunas da devolução), uma de cada vez
+        let cols = ['id', 'titulo', 'mes_referencia', 'unidade', 'cargo', 'status', 'pdf_url', 'enviado_em', 'atualizado_em', 'criado_em', 'motivo_devolucao', 'devolvido_em', 'devolvido_por'];
+        let { data, error } = await consulta(cols.join(','));
+        for (let t = 0; t < 4 && error && /(column|schema cache|coluna)/i.test(error.message || ''); t++) {
+            const msg = error.message || '';
+            const falta = cols.filter((c) => ['cargo', 'motivo_devolucao', 'devolvido_em', 'devolvido_por'].includes(c) && new RegExp('\\b' + c + '\\b', 'i').test(msg));
+            if (!falta.length) break;
+            if (falta.includes('cargo')) S.semColunaCargo = true;
+            cols = cols.filter((c) => !falta.includes(c));
+            ({ data, error } = await consulta(cols.join(',')));
+        }
         if (error) {
             raiz.innerHTML = '<div class="glass-card">' + (erroTabela(error) ? avisoTabela() : '<div class="ra-aviso amarelo">Erro ao carregar: ' + esc(error.message) + '</div>') + '</div>';
             return;
