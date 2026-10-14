@@ -123,6 +123,7 @@
         .ra-pgdel:hover { opacity:1; }
         .ra-barra button:hover { border-color:#4fc3f7; color:#4fc3f7; }
         .ra-barra input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--cor-borda); border-radius:7px; background:none; cursor:pointer; }
+        .ra-cena, .ra-cena * { overflow-anchor:none; }   /* o navegador não pode "corrigir" a rolagem sozinho enquanto a paginação mede o texto */
         .ra-cena { overflow:auto; background:rgba(0,0,0,.18); border:1px solid var(--cor-borda); border-radius:12px; padding:18px 10px 30px; max-height:calc(100vh - 225px - var(--aviso-offset, 0px)); }
         [data-theme="light"] .ra-cena { background:#e5e9f0; }
         .ra-escala { margin:0 auto; position:relative; }
@@ -594,7 +595,7 @@
         const total = Math.max(1, S.paginas || 1);
         if (rel < PG.TOP) y = pg * PG.P + PG.TOP + 3;                                        // cabeçalho
         else if (rel > PG.TOP + PG.CH) y = (pg + 1 < total ? (pg + 1) * PG.P + PG.TOP + 3 : pg * PG.P + PG.TOP + PG.CH - 3);   // rodapé / vão entre páginas
-        e.preventDefault(); ed.focus();
+        e.preventDefault(); ed.focus({ preventScroll: true });
         garantirParagrafosDaTabela(ed);
         const reais = Array.from(ed.children).filter((c) => !c.classList.contains('ra-pgmin') && !c.hasAttribute('data-ra-m'));
         const ult = reais[reais.length - 1];
@@ -645,11 +646,11 @@
     function atualizarStatusSalvo() { const el = $('ra-status-salvo'); if (el) el.textContent = S.somenteLeitura ? '' : (S.dirty ? 'Alterações não salvas…' : (S.atual && S.atual.id ? 'Tudo salvo' : '')); }
 
     // ---------------------------------------------------------------- Comandos de formatação
-    function cmd(c) { const ed = $('ra-ed'); if (!ed) return; ed.focus(); document.execCommand(c, false, null); sujo(); agendarPaginacao(); }
-    function bloco(tag) { const ed = $('ra-ed'); if (!ed) return; ed.focus(); document.execCommand('formatBlock', false, tag); sujo(); agendarPaginacao(); }
-    function cor(v) { const ed = $('ra-ed'); if (!ed) return; ed.focus(); document.execCommand('foreColor', false, v); sujo(); }
+    function cmd(c) { const ed = $('ra-ed'); if (!ed) return; ed.focus({ preventScroll: true }); document.execCommand(c, false, null); sujo(); agendarPaginacao(); }
+    function bloco(tag) { const ed = $('ra-ed'); if (!ed) return; ed.focus({ preventScroll: true }); document.execCommand('formatBlock', false, tag); sujo(); agendarPaginacao(); }
+    function cor(v) { const ed = $('ra-ed'); if (!ed) return; ed.focus({ preventScroll: true }); document.execCommand('foreColor', false, v); sujo(); }
     function tamanho(px) {
-        if (!px) return; const ed = $('ra-ed'); ed.focus();
+        if (!px) return; const ed = $('ra-ed'); ed.focus({ preventScroll: true });
         // sem texto selecionado (linha vazia / cursor solto): já deixa o tamanho valendo para o que for digitado a seguir
         const sl = window.getSelection();
         if (sl && sl.rangeCount && sl.isCollapsed && ed.contains(sl.getRangeAt(0).startContainer)) {
@@ -680,7 +681,7 @@
         // cursor no fim do texto (se o texto ainda tem espaço na página, continua escrevendo nela)
         let ult = ed.lastElementChild; while (ult && (ult.classList.contains('ra-pgmin') || ult.hasAttribute('data-ra-m') || ult.classList.contains('ra-pgbreak'))) ult = ult.previousElementSibling;
         if (!ult || ult.tagName === 'TABLE') { const np = document.createElement('p'); np.innerHTML = '<br>'; if (ult) ult.after(np); else ed.prepend(np); ult = np; }
-        ed.focus();
+        ed.focus({ preventScroll: true });
         const r = document.createRange(); r.selectNodeContents(ult); r.collapse(false); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
         sujo(); paginar();
         setTimeout(() => { const cena = $('ra-cena'); if (!cena) return; cena.scrollTo({ top: Math.max(0, (novo - 1) * PG.P * S.escala - 10), behavior: 'smooth' }); }, 220);
@@ -804,7 +805,7 @@
         const apos = document.createElement('p'); apos.innerHTML = '<br>';
         if (ref) { if (vazio) { ref.replaceWith(tb); } else { ref.after(tb); } tb.after(apos); } else { ed.appendChild(tb); ed.appendChild(apos); }
         S.rangeTab = null;
-        const primeira = tb.querySelector('th,td'); ed.focus(); cursorNaCelula(primeira);
+        const primeira = tb.querySelector('th,td'); ed.focus({ preventScroll: true }); cursorNaCelula(primeira);
         sujo(); agendarPaginacao(); atualizarTabbar();
     }
     function tabela(acao) {
@@ -963,6 +964,7 @@
     }
     function paginar() {
         const ed = $('ra-ed'); if (!ed) return;
+        const cenaP = $('ra-cena'), rolaCena = cenaP ? cenaP.scrollTop : 0, rolaJanela = window.scrollY;   // a paginação nunca deve mexer na rolagem
         const cursor = (document.activeElement === ed) ? salvarCursor(ed) : null;
         ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
         garantirParagrafosDaTabela(ed);
@@ -1021,6 +1023,8 @@
         montarPaginas(paginas);
         posicionarImagens();
         restaurarCursor(ed, cursor);
+        if (cenaP && cenaP.scrollTop !== rolaCena) cenaP.scrollTop = rolaCena;
+        if (window.scrollY !== rolaJanela) window.scrollTo(window.scrollX, rolaJanela);
     }
 
     function headerFooterHtml(n, total) {
