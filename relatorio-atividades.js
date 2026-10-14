@@ -1203,7 +1203,18 @@
             if (tipo === 'assinatura') {
                 const cfg = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.assinatura_admin) || {};
                 const temAssin = !!cfg.assinatura_url;
-                if (!temAssin) alerta('Sua assinatura ainda não foi cadastrada (Edição de Documentos › Assinar Documento). Inseri só a linha com o seu nome.', 'aviso');
+                if (!temAssin) {
+                    // aviso com atalho pra cadastrar (ver window.mostrarAvisoAssinaturaNaoCadastrada em index.html)
+                    if (typeof window.mostrarAvisoAssinaturaNaoCadastrada === 'function') {
+                        const escolha = await window.mostrarAvisoAssinaturaNaoCadastrada();
+                        if (escolha === 'cancelar') return;
+                        if (escolha === 'ir') {
+                            try { coletar(); await salvar(false); } catch (e) { /* o rascunho também é salvo automaticamente */ }
+                            if (typeof window.irCadastrarAssinaturaDaEscala === 'function') window.irCadastrarAssinaturaDaEscala();
+                            return;
+                        }
+                    } else alerta('Sua assinatura ainda não foi cadastrada (Edição de Documentos › Assinar Documento). Inseri só a linha com o seu nome.', 'aviso');
+                }
                 // monta, numa imagem só: assinatura + linha + nome (+ cargo da unidade), pronta para arrastar para onde quiser
                 const bloco = await comporBlocoAssinatura(temAssin ? cfg.assinatura_url : null);
                 const w = 300, h = Math.round(w * bloco.h / bloco.w);
