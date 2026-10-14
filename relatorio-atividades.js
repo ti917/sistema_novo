@@ -83,6 +83,7 @@
         .ra-card-meta { font-size:.74rem; color:var(--cor-texto-secundario); display:flex; flex-direction:column; gap:3px; }
         .ra-card-acoes { display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:10px; border-top:1px solid var(--cor-borda); }
         .ra-card-acoes .ra-btn.prim2 { flex:1; justify-content:center; background:rgba(79,195,247,.12); border-color:rgba(79,195,247,.5); color:#4fc3f7; font-weight:700; }
+        .ra-devolvido { padding:9px 11px; border-radius:9px; background:rgba(231,76,60,.1); border:1px solid rgba(231,76,60,.4); color:#ff8f84; font-size:.8rem; line-height:1.4; word-break:break-word; }
         .ra-vazio { padding:46px 20px; text-align:center; color:var(--cor-texto-secundario); border:1px dashed var(--cor-borda); border-radius:14px; }
         .ra-vazio i { font-size:2.4rem; opacity:.45; margin-bottom:8px; display:block; }
         .ra-modal-fundo { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100000; display:flex; align-items:center; justify-content:center; padding:16px; }
@@ -206,7 +207,9 @@
         const raiz = $('ra-raiz');
         raiz.innerHTML = '<div class="glass-card"><i class="fa-solid fa-spinner fa-spin"></i> Carregando seus relatórios...</div>';
         const consulta = (cols) => supabaseClient.from('relatorios_atividades').select(cols).eq('gestor_id', idGestor()).order('atualizado_em', { ascending: false }).limit(500);
-        let { data, error } = await consulta('id,titulo,mes_referencia,unidade,cargo,status,pdf_url,enviado_em,atualizado_em,criado_em');
+        const base = 'id,titulo,mes_referencia,unidade,cargo,status,pdf_url,enviado_em,atualizado_em,criado_em';
+        let { data, error } = await consulta(base + ',motivo_devolucao,devolvido_em,devolvido_por');
+        if (error && /(motivo_devolucao|devolvido_)/i.test(error.message || '') && /(column|schema cache|coluna)/i.test(error.message || '')) ({ data, error } = await consulta(base));
         if (error && /cargo/i.test(error.message || '') && /(column|schema cache|coluna)/i.test(error.message || '')) { S.semColunaCargo = true; ({ data, error } = await consulta('id,titulo,mes_referencia,unidade,status,pdf_url,enviado_em,atualizado_em,criado_em')); }
         if (error) {
             raiz.innerHTML = '<div class="glass-card">' + (erroTabela(error) ? avisoTabela() : '<div class="ra-aviso amarelo">Erro ao carregar: ' + esc(error.message) + '</div>') + '</div>';
@@ -234,17 +237,19 @@
             && (!q || [r.titulo, r.unidade, r.cargo, fmtMes(r.mes_referencia)].join(' ').toLowerCase().includes(q)));
         const cards = lista.map((r) => {
             const env = r.status === 'enviado';
+            const dev = !env && !!r.motivo_devolucao;
             return `
-            <div class="ra-card ${env ? 'env' : ''}">
+            <div class="ra-card ${env ? 'env' : ''}" ${dev ? 'style="border-color:rgba(231,76,60,.6);"' : ''}>
                 <div class="ra-card-topo">
                     <div class="ra-card-titulo">${esc(r.titulo || 'Sem título')}</div>
-                    <span class="ra-badge ${env ? 'env' : 'rasc'}">${env ? 'ENVIADO' : 'RASCUNHO'}</span>
+                    <span class="ra-badge ${env ? 'env' : 'rasc'}" ${dev ? 'style="background:rgba(231,76,60,.15);color:#e74c3c;border-color:rgba(231,76,60,.5);"' : ''}>${env ? 'ENVIADO' : (dev ? 'DEVOLVIDO' : 'RASCUNHO')}</span>
                 </div>
                 <div class="ra-tags">
                     <span class="ra-tag"><i class="fa-regular fa-calendar"></i><span>${esc(fmtMes(r.mes_referencia))}</span></span>
                     ${chipsMulti(r.unidade, 'un', 'fa-building', 'Sem unidade')}
                     ${chipsMulti(r.cargo, 'cg', 'fa-user-tie', '')}
                 </div>
+                ${dev ? `<div class="ra-devolvido"><b><i class="fa-solid fa-rotate-left"></i> Devolvido pelo financeiro${r.devolvido_em ? ' em ' + fmtData(r.devolvido_em) : ''}${r.devolvido_por ? ' (' + esc(r.devolvido_por) + ')' : ''}</b><br>Motivo: ${esc(r.motivo_devolucao)}</div>` : ''}
                 <div class="ra-card-meta">
                     <span><i class="fa-regular fa-clock"></i> Atualizado em ${fmtData(r.atualizado_em)}</span>
                     ${env && r.enviado_em ? `<span style="color:#2ecc71;"><i class="fa-solid fa-paper-plane"></i> Enviado ao financeiro em ${fmtData(r.enviado_em)}</span>` : ''}
@@ -510,6 +515,7 @@
             <div class="ra-topo">
                 <h3><i class="fa-solid fa-file-lines"></i> ${ro ? 'Relatório enviado' : (r.id ? 'Editar relatório' : 'Novo relatório')}</h3>
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    ${ro ? '' : '<span class="ra-dica" id="ra-aviso-assin" style="color:#f1c40f;" title="O botão Enviar só funciona depois de assinar"><i class="fa-solid fa-signature"></i> Falta assinar para enviar</span>'}
                     <span class="ra-dica" id="ra-status-salvo"></span>
                     <button class="ra-btn" onclick="RelAtv.voltar()"><i class="fa-solid fa-arrow-left"></i> Meus relatórios</button>
                     ${ro ? '' : '<button class="ra-btn" onclick="RelAtv.salvar(true)"><i class="fa-solid fa-floppy-disk"></i> Salvar rascunho</button>'}
@@ -523,6 +529,7 @@
                 <div><label>Unidades deste relatório</label>${campoUnidade(r, ro)}</div>
                 <div><label>Cargos (opcional)</label>${campoCargo(r, ro)}</div>
             </div>
+            ${(!ro && r.motivo_devolucao) ? `<div class="ra-devolvido"><b><i class="fa-solid fa-rotate-left"></i> O financeiro devolveu este relatório${r.devolvido_em ? ' em ' + fmtData(r.devolvido_em) : ''}${r.devolvido_por ? ' (' + esc(r.devolvido_por) + ')' : ''}.</b><br>Motivo: ${esc(r.motivo_devolucao)}<br><small>Faça os ajustes, assine e envie novamente.</small></div>` : ''}
             ${ro ? '<div class="ra-aviso amarelo">Este relatório já foi enviado ao financeiro e não pode mais ser editado. Use o botão de copiar na lista para criar uma nova versão.</div>' : ''}
             ${ro ? '' : barraHtml()}
             <div class="ra-cena" id="ra-cena"><div class="ra-escala" id="ra-escala"><div class="ra-stage" id="ra-stage">
@@ -1207,6 +1214,7 @@
             if (!S.somenteLeitura) ligarImagem(d, i);
         });
         posicionarImagens();
+        atualizarBotaoEnviar();
     }
     function posicionarImagens() {
         document.querySelectorAll('#ra-imgs .ra-img').forEach((d) => {
@@ -1324,7 +1332,7 @@
     function payload(r) {
         return {
             gestor_id: idGestor(), gestor_nome: nomeGestor(), titulo: r.titulo, mes_referencia: r.mes_referencia, unidade: r.unidade, conteudo_html: r.conteudo_html, ...(r.cargo !== undefined && !S.semColunaCargo ? { cargo: r.cargo } : {}),
-            imagens: (r.imagens || []).map((i) => ({ id: i.id, url: i.url_remota || i.url, page: i.page, x: i.x, y: i.y, w: i.w, h: i.h, ...(i.rot ? { rot: i.rot } : {}) })),
+            imagens: (r.imagens || []).map((i) => ({ id: i.id, url: i.url_remota || i.url, page: i.page, x: i.x, y: i.y, w: i.w, h: i.h, ...(i.rot ? { rot: i.rot } : {}), ...(i.tipo ? { tipo: i.tipo } : {}) })),
             atualizado_em: new Date().toISOString()
         };
     }
@@ -1437,9 +1445,18 @@
         finally { S.pdfGerando = false; ocupado(false); atualizarStatusSalvo(); }
     }
 
+    function relatorioAssinado() { return (S.atual.imagens || []).some((i) => i.tipo === 'assinatura'); }
+    function atualizarBotaoEnviar() {
+        const b = $('ra-btn-env'); if (!b || S.somenteLeitura) return;
+        const ok = relatorioAssinado();
+        b.style.opacity = ok ? '' : '.55';
+        b.title = ok ? 'Gera o PDF e envia ao financeiro' : 'Só é possível enviar depois de assinar o relatório (botão "Assinatura")';
+        const h = $('ra-aviso-assin'); if (h) h.style.display = ok ? 'none' : '';
+    }
     async function enviar() {
         if (S.pdfGerando || S.somenteLeitura) return;
         if (!valoresMulti('ra-unidade').length) return alerta('Selecione a unidade deste relatório antes de enviar ao financeiro.', 'aviso');
+        if (!relatorioAssinado()) return alerta('Para enviar ao financeiro o relatório precisa estar <b>assinado</b>. Clique em "Assinatura" na barra de edição e posicione a sua assinatura no documento.', 'aviso', 'Falta assinar');
         const ok = typeof window.mostrarConfirmacao === 'function'
             ? await window.mostrarConfirmacao('Enviar este relatório ao financeiro? Depois de enviado ele não poderá mais ser editado (você pode criar uma cópia).', 'Enviar ao financeiro')
             : confirm('Enviar este relatório ao financeiro?');
@@ -1450,7 +1467,7 @@
             const blob = await gerarPdfBlob();
             const url = await subirPdf(blob);
             const { error } = await supabaseClient.from('relatorios_atividades')
-                .update({ pdf_url: url, status: 'enviado', enviado_em: new Date().toISOString(), atualizado_em: new Date().toISOString() })
+                .update({ pdf_url: url, status: 'enviado', enviado_em: new Date().toISOString(), atualizado_em: new Date().toISOString(), ...('motivo_devolucao' in S.atual ? { motivo_devolucao: null } : {}) })
                 .eq('id', S.atual.id).eq('gestor_id', idGestor());
             if (error) throw error;
             alerta('Relatório enviado ao financeiro!', 'sucesso');
