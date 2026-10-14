@@ -396,8 +396,7 @@
             + (unidade ? '<p><b>' + (separar(unidade).length > 1 ? 'Unidades' : 'Unidade') + ':</b> ' + esc(unidade) + '</p>' : '')
             + (cargo ? '<p><b>' + (separar(cargo).length > 1 ? 'Cargos' : 'Cargo') + ':</b> ' + esc(cargo) + '</p>' : '')
             + '<p><br></p><h2>1. Atividades realizadas</h2><p><br></p>'
-            + '<h2>2. Ocorrências e pontos de atenção</h2><p><br></p>'
-            + '<h2>3. Observações</h2><p><br></p>';
+            + '<h2>2. Observações</h2><p><br></p>';
     }
 
     // ---------------------------------------------------------------- Editor
@@ -529,6 +528,7 @@
         if (!ro) ligarEditor(ed);
         desenharImagens();
         ajustarEscala();
+        ajustarBarraFixa();
         paginar();
         recarregarCargos(separar(S.atual.unidade), separar(S.atual.cargo));
         S.dirty = false;
@@ -630,7 +630,7 @@
         const c = n && n.closest ? n.closest('td,th') : null;
         return c && ed.contains(c) ? c : null;
     }
-    function atualizarTabbar() { const b = $('ra-tabbar'); if (b) b.classList.toggle('on', !!celulaAtual() && !S.somenteLeitura); }
+    function atualizarTabbar() { const b = $('ra-tabbar'); if (b) { b.classList.toggle('on', !!celulaAtual() && !S.somenteLeitura); agendarBarraFixa(); } }
     function cursorNaCelula(c, fim) { const r = document.createRange(); r.selectNodeContents(c); r.collapse(!fim); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); }
     function irCelula(cel, dir) {
         const tb = cel.closest('table'); const cels = Array.from(tb.querySelectorAll('td,th')); const i = cels.indexOf(cel) + dir;
@@ -924,6 +924,18 @@
         $('ra-escala').style.height = (altura * S.escala) + 'px';
         $('ra-escala').style.width = (PG.W * S.escala) + 'px';
     }
+
+    // a barra de edição fica presa logo abaixo do cabeçalho fixo do sistema (a altura dele é lida na hora, sem chutar)
+    function ajustarBarraFixa() {
+        const bar = $('ra-barra'); if (!bar) return;
+        const h = document.querySelector('.top-header');
+        const base = h ? Math.max(0, h.getBoundingClientRect().bottom) : 0;
+        const top = Math.ceil(base + 6);
+        if (bar.dataset.t !== String(top)) { bar.style.top = top + 'px'; bar.dataset.t = String(top); }
+        const cena = $('ra-cena');
+        if (cena) { const mh = Math.max(320, window.innerHeight - top - bar.offsetHeight - 24) + 'px'; if (cena.style.maxHeight !== mh) cena.style.maxHeight = mh; }
+    }
+    function agendarBarraFixa() { if (S.rafBarra) return; S.rafBarra = requestAnimationFrame(() => { S.rafBarra = 0; ajustarBarraFixa(); }); }
 
     function ajustarEscala() {
         const cena = $('ra-cena'); if (!cena) return;
@@ -1315,6 +1327,8 @@
     }
     document.addEventListener('mousedown', fecharSelecaoImg, true);
     document.addEventListener('mousedown', (e) => { document.querySelectorAll('details.ra-ms[open]').forEach((d) => { if (!d.contains(e.target)) d.removeAttribute('open'); }); }, true);
+    window.addEventListener('scroll', agendarBarraFixa, true);
+    window.addEventListener('resize', agendarBarraFixa);
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
