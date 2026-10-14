@@ -226,6 +226,8 @@
             <button type="button" title="Quebra de página" onmousedown="event.preventDefault()" onclick="RelAtv.quebra()"><i class="fa-solid fa-file-circle-plus"></i> Nova página</button>
             <button type="button" title="Excluir a página onde está o cursor" onmousedown="event.preventDefault()" onclick="RelAtv.excluirPagina()"><i class="fa-solid fa-file-circle-minus"></i> Excluir página</button>
             <button type="button" title="Inserir imagem (pode arrastar depois)" onclick="document.getElementById('ra-file').click()" id="ra-btn-img"><i class="fa-solid fa-image"></i> Imagem</button>
+            <button type="button" title="Inserir a sua assinatura digital (a mesma de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('assinatura')" id="ra-btn-assin"><i class="fa-solid fa-signature"></i> Assinatura</button>
+            <button type="button" title="Inserir o carimbo da empresa (o mesmo de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('carimbo')" id="ra-btn-carimbo"><i class="fa-solid fa-stamp"></i> Carimbo</button>
             <input type="file" id="ra-file" accept="image/*" multiple style="display:none" onchange="RelAtv.imagens(this.files); this.value=''">
             <span class="sep"></span>
             <select title="Zoom" onchange="RelAtv.zoom(this.value)" id="ra-zoom"><option value="auto">Ajustar à tela</option><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select>
@@ -318,20 +320,37 @@
     function cor(v) { const ed = $('ra-ed'); if (!ed) return; ed.focus(); document.execCommand('foreColor', false, v); sujo(); }
     function tamanho(px) {
         if (!px) return; const ed = $('ra-ed'); ed.focus();
+        // sem texto selecionado (linha vazia / cursor solto): já deixa o tamanho valendo para o que for digitado a seguir
+        const sl = window.getSelection();
+        if (sl && sl.rangeCount && sl.isCollapsed && ed.contains(sl.getRangeAt(0).startContainer)) {
+            const sp = document.createElement('span'); sp.style.fontSize = px + 'px'; sp.setAttribute('data-ra-tam', '1');
+            const t = document.createTextNode('\u200b'); sp.appendChild(t);
+            const r = sl.getRangeAt(0); r.insertNode(sp);
+            const n = document.createRange(); n.setStart(t, 1); n.collapse(true); sl.removeAllRanges(); sl.addRange(n);
+            sujo(); agendarPaginacao(); return;
+        }
         document.execCommand('fontSize', false, '7');
         ed.querySelectorAll('font[size="7"]').forEach((f) => { const s = document.createElement('span'); s.style.fontSize = px + 'px'; while (f.firstChild) s.appendChild(f.firstChild); f.replaceWith(s); });
         ed.querySelectorAll('span[style*="font-size: xxx-large"],span[style*="font-size:xxx-large"]').forEach((s) => { s.style.fontSize = px + 'px'; });
         sujo(); agendarPaginacao();
     }
     function quebra() {
-        const ed = $('ra-ed'); if (!ed) return; ed.focus();
+        const ed = $('ra-ed'); if (!ed) return;
+        // vê onde está o cursor ANTES de focar (focar sem cursor joga o cursor para o começo do texto)
         const sel = window.getSelection();
-        const dentro = sel && sel.rangeCount && ed.contains(sel.getRangeAt(0).startContainer) && sel.getRangeAt(0).startContainer !== ed.parentNode;
-        if (!dentro || !S.caretValido) {
+        const dentro = !!(sel && sel.rangeCount && ed.contains(sel.getRangeAt(0).startContainer) && sel.getRangeAt(0).startContainer !== ed.parentNode);
+        const salvo = dentro ? sel.getRangeAt(0).cloneRange() : null;
+        ed.focus();
+        if (salvo) { sel.removeAllRanges(); sel.addRange(salvo); }
+        else {
             // sem cursor no texto: a nova página entra no FIM do documento (como no Word)
             const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); sel.removeAllRanges(); sel.addRange(r);
         }
-        document.execCommand('insertHTML', false, '<div class="ra-pgbreak" contenteditable="false">quebra de página</div><p><br></p>');
+        document.execCommand('insertHTML', false, '<div class="ra-pgbreak" contenteditable="false" data-novo="1">quebra de página</div><p data-novo-p="1"><br></p>');
+        // cursor direto no parágrafo novo, já na página nova
+        const nb = ed.querySelector('.ra-pgbreak[data-novo]'); if (nb) nb.removeAttribute('data-novo');
+        const np = ed.querySelector('p[data-novo-p]');
+        if (np) { np.removeAttribute('data-novo-p'); const r = document.createRange(); r.setStart(np, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }
         sujo(); agendarPaginacao();
         setTimeout(() => { const u = ed.lastElementChild; if (u) u.scrollIntoView({ block: 'nearest' }); }, 150);
     }
@@ -383,22 +402,24 @@
     function agendarPaginacao() { clearTimeout(S.timerPag); S.timerPag = setTimeout(paginar, 90); }
     function topoRel(el, base) { return (el.getBoundingClientRect().top - base) / S.escala; }
 
-    // cursor <-> deslocamento de texto (para não perder o cursor quando os espaçadores são refeitos)
+    // o cursor é guardado com marcadores invisíveis (um no início e outro no fim da seleção) e devolvido depois de refazer a paginação
     function salvarCursor(ed) {
         const sl = window.getSelection(); if (!sl || !sl.rangeCount) return null;
         const r = sl.getRangeAt(0); if (!ed.contains(r.startContainer) || !ed.contains(r.endContainer)) return null;
-        const med = (n, o) => { const x = document.createRange(); x.selectNodeContents(ed); x.setEnd(n, o); return x.toString().length; };
-        return { a: med(r.startContainer, r.startOffset), b: med(r.endContainer, r.endOffset) };
+        const mk = (id) => { const m = document.createElement('span'); m.setAttribute('data-ra-m', id); m.style.cssText = 'display:inline;width:0;height:0;'; return m; };
+        const fim = r.cloneRange(); fim.collapse(false); const mf = mk('f'); fim.insertNode(mf);
+        const ini = r.cloneRange(); ini.collapse(true); const mi = mk('i'); ini.insertNode(mi);
+        return { mi, mf };
     }
     function restaurarCursor(ed, c) {
         if (!c) return;
-        const achar = (alvo) => {
-            const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement && n.parentElement.closest('.ra-sp') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
-            let acc = 0, n, ult = null;
-            while ((n = w.nextNode())) { const l = n.nodeValue.length; if (acc + l >= alvo) return [n, alvo - acc]; acc += l; ult = n; }
-            return ult ? [ult, ult.nodeValue.length] : [ed, ed.childNodes.length];
-        };
-        try { const [n1, o1] = achar(c.a), [n2, o2] = achar(c.b); const r = document.createRange(); r.setStart(n1, o1); r.setEnd(n2, o2); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); } catch (e) { /* ok */ }
+        try {
+            const r = document.createRange();
+            if (c.mi.parentNode) r.setStartBefore(c.mi); else return;
+            if (c.mf.parentNode) r.setEndBefore(c.mf); else r.collapse(true);
+            c.mi.remove(); c.mf.remove();
+            const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r);
+        } catch (e) { /* ok */ }
     }
 
     // primeira linha de texto do bloco cujo fundo passa de "limite" (px relativos ao editor); devolve {no, pos, topo} ou null
@@ -429,6 +450,7 @@
         const base = ed.getBoundingClientRect().top;
         const blocos = [];
         Array.from(ed.children).forEach((c) => {
+            if (c.hasAttribute('data-ra-m')) return;
             if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else blocos.push(c);
         });
         let forcarPag = null, ultimoFim = 0;
@@ -569,6 +591,40 @@
         }
     }
 
+    // ---------------------------------------------------------------- Assinatura / carimbo (os mesmos de "Assinar Documento")
+    function medirImagem(src) {
+        return new Promise((res, rej) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 }); im.onerror = () => rej(new Error('não consegui carregar a imagem')); im.src = src; });
+    }
+    async function assinar(tipo) {
+        if (S.somenteLeitura) return;
+        try {
+            const cena = $('ra-cena'); const visTop = cena ? cena.scrollTop / S.escala : 0;
+            const pg = Math.max(0, Math.min((S.paginas || 1) - 1, Math.floor((visTop + 300) / PG.P)));
+            let reg;
+            if (tipo === 'assinatura') {
+                const cfg = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.assinatura_admin) || {};
+                if (!cfg.assinatura_url) return alerta('Você ainda não cadastrou a sua assinatura. Cadastre em Edição de Documentos › Assinar Documento (se essa aba não aparecer para você, peça ao Admin para liberar).', 'aviso');
+                const m = await medirImagem(cfg.assinatura_url);
+                const w = 200, h = Math.round(w * m.h / m.w);
+                reg = { id: novoId(), url: cfg.assinatura_url, url_remota: cfg.assinatura_url, page: pg, x: PG.W - PG.RIGHT - w - 10, y: PG.TOP + PG.CH - h - 20, w, h, tipo: 'assinatura' };
+            } else {
+                if (typeof window._gerarImagemCarimboPadrao !== 'function' || typeof window._empresaCarimboPadrao !== 'function') return alerta('O carimbo não está disponível nesta tela.', 'aviso');
+                if (typeof window._resolverNomeCarimboAdmin === 'function') await window._resolverNomeCarimboAdmin();
+                const empresa = window._empresaCarimboPadrao();
+                const dataUrl = empresa ? window._gerarImagemCarimboPadrao(empresa) : null;
+                if (!dataUrl) return alerta('Não encontrei um carimbo cadastrado para a sua empresa.', 'aviso');
+                const w = 250, h = Math.round(w * 190 / 480);
+                const blob = await (await fetch(dataUrl)).blob();
+                reg = { id: novoId(), url: URL.createObjectURL(blob), page: pg, x: PG.LEFT + 10, y: PG.TOP + PG.CH - h - 20, w, h, subindo: true, tipo: 'carimbo' };
+                S.atual.imagens.push(reg); desenharImagens(); paginar(); sujo();
+                const urls = await subirDocumentos(pastaGestor(), [new File([blob], 'carimbo.png', { type: 'image/png' })]);
+                reg.url_remota = urls[0]; delete reg.subindo; sujo();
+                return;
+            }
+            S.atual.imagens.push(reg); desenharImagens(); paginar(); sujo();
+        } catch (e) { alerta('Não consegui inserir: ' + e.message, 'erro'); }
+    }
+
     function desenharImagens() {
         const c = $('ra-imgs'); if (!c) return;
         c.innerHTML = '';
@@ -619,7 +675,7 @@
     // ---------------------------------------------------------------- Salvar
     function html() {
         const ed = $('ra-ed'); const c = ed.cloneNode(true);
-        c.querySelectorAll('.ra-sp').forEach((x) => x.remove());
+        c.querySelectorAll('.ra-sp,[data-ra-m]').forEach((x) => x.remove());
         c.querySelectorAll('[data-ra]').forEach((b) => { b.style.paddingTop = ''; b.removeAttribute('data-ra'); if (!b.getAttribute('style')) b.removeAttribute('style'); });
         c.normalize();
         return c.innerHTML;
@@ -786,5 +842,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
