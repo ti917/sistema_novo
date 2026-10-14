@@ -15000,11 +15000,44 @@ window.atualizarCacheAfastamentosAbertosAviso = async function() {
     }
 };
 
+// =========================================================================
+// 🔒 ADMISSÃO AINDA NÃO APROVADA PELO RH NÃO É COLABORADOR
+// A ficha enviada pelo Gestor entra no banco com status 'Ativo' + status_aprovacao
+// 'Pendente' (ou 'Aguardando Liberação de Vaga'). Enquanto o RH não aprovar, ela NÃO pode
+// aparecer na escala, nas listas de lançamento nem nas contagens. Ficha devolvida
+// (status 'Devolvido') já sai por não ser 'Ativo'.
+// Se o registro não trouxe status_aprovacao no select, usa uma lista de IDs mantida em cache.
+// =========================================================================
+window.STATUS_ADMISSAO_NAO_APROVADA = ['Pendente', 'Aguardando Liberação de Vaga'];
+window._idsAdmissaoNaoAprovada = window._idsAdmissaoNaoAprovada || new Set();
+window._idsAdmissaoNaoAprovadaEm = window._idsAdmissaoNaoAprovadaEm || 0;
+window.atualizarIdsAdmissaoNaoAprovada = async function() {
+    window._idsAdmissaoNaoAprovadaEm = Date.now();
+    try {
+        const { data, error } = await supabaseClient.from('perfis').select('id').in('status_aprovacao', window.STATUS_ADMISSAO_NAO_APROVADA);
+        if (!error && data) window._idsAdmissaoNaoAprovada = new Set(data.map(x => x.id));
+    } catch (e) { /* mantém o cache anterior */ }
+};
+window.admissaoNaoAprovada = function(c) {
+    if (!c) return false;
+    if (c.status_aprovacao !== undefined && c.status_aprovacao !== null) {
+        return window.STATUS_ADMISSAO_NAO_APROVADA.includes(c.status_aprovacao);
+    }
+    return window._idsAdmissaoNaoAprovada.has(c.id);
+};
+window.removerAdmissaoNaoAprovada = function(lista) {
+    return (lista || []).filter(c => !window.admissaoNaoAprovada(c));
+};
+
 window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
     const hoje = new Date();
     hoje.setHours(0,0,0,0);
 
+    // Atualiza o cache de "não aprovados" em segundo plano (no máx. a cada 15s)
+    if (Date.now() - window._idsAdmissaoNaoAprovadaEm > 15000) window.atualizarIdsAdmissaoNaoAprovada();
+
     return colaboradores.filter(c => {
+        if (window.admissaoNaoAprovada(c)) return false;
         if (c.status === 'Ativo') return true;
 
         // Se estiver Desligado, checa se o último dia + carência ainda não passou
@@ -22128,6 +22161,9 @@ window.presenceChannel = null;
 async function escutarTempoReal() {
     if (!usuarioAtual) return;
 
+    // Carrega logo no login a lista de fichas ainda não aprovadas pelo RH (não contam como colaborador)
+    if (typeof window.atualizarIdsAdmissaoNaoAprovada === 'function') window.atualizarIdsAdmissaoNaoAprovada();
+
     // 🆕 Já carrega a contagem de mensagens não lidas do Chat da Clara aqui no
     // login — assim o badge aparece certo mesmo se a pessoa ainda não abriu a
     // aba WhatsApp RH nessa sessão (o Realtime mais abaixo mantém atualizado
@@ -22261,6 +22297,7 @@ async function escutarTempoReal() {
             })
             // Escuta Perfis (Admissão, Rescisão e Mudanças de Horário)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'perfis' }, (payload) => {
+                if (typeof window.atualizarIdsAdmissaoNaoAprovada === 'function') window.atualizarIdsAdmissaoNaoAprovada();
                 if (payload.new && window.idsIgnoradosRealtime && window.idsIgnoradosRealtime.has(String(payload.new.id))) return; // 🛡️ Escudo Anti-Piscar
 
                 window.cacheColaboradoresEscala = {}; // Invalida cache da Escala (dado mudou)
@@ -22796,6 +22833,7 @@ async function escutarTempoReal() {
                 }
             })
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'perfis' }, (payload) => {
+                if (typeof window.atualizarIdsAdmissaoNaoAprovada === 'function') window.atualizarIdsAdmissaoNaoAprovada();
                 if (payload.new && window.idsIgnoradosRealtime && window.idsIgnoradosRealtime.has(String(payload.new.id))) return; // 🛡️ Escudo
 
                 window.cacheColaboradoresEscala = {}; // Invalida cache da Escala (dado mudou)
@@ -60388,7 +60426,7 @@ window.carregarConfigVRUnidade = async function() {
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome').eq('unidade', unidade).eq('status', 'Ativo').order('nome');
     
     let optColab = '<option value="">Selecione...</option>';
-    if (colabs) colabs.forEach(c => optColab += `<option value="${c.id}">${c.nome}</option>`);
+    if (colabs) window.removerAdmissaoNaoAprovada(colabs).forEach(c => optColab += `<option value="${c.id}">${c.nome}</option>`);
     selectColab.innerHTML = optColab;
 
     const config = configsVRGlobais.find(c => c.unidade === unidade);
@@ -62005,7 +62043,7 @@ window.carregarConfigVAUnidade = async function() {
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome').eq('unidade', unidade).eq('status', 'Ativo').order('nome');
     
     let optColab = '<option value="">Selecione...</option>';
-    if (colabs) colabs.forEach(c => optColab += `<option value="${c.id}">${c.nome}</option>`);
+    if (colabs) window.removerAdmissaoNaoAprovada(colabs).forEach(c => optColab += `<option value="${c.id}">${c.nome}</option>`);
     selectColab.innerHTML = optColab;
 
     const config = configsVAGlobais.find(c => c.unidade === unidade);
@@ -66592,7 +66630,7 @@ window.abrirModalNovaSaida = async function() {
     // Busca os colaboradores vivos dessa unidade para a entrega
     const { data: colabs } = await supabaseClient.from('perfis').select('id, nome').eq('unidade', unidade).eq('status', 'Ativo');
     let optionsColabs = '<option value="">Selecione o colaborador...</option>';
-    if (colabs) colabs.sort((a,b)=>a.nome.localeCompare(b.nome)).forEach(c => optionsColabs += `<option value="${c.id}">${c.nome}</option>`);
+    if (colabs) window.removerAdmissaoNaoAprovada(colabs).sort((a,b)=>a.nome.localeCompare(b.nome)).forEach(c => optionsColabs += `<option value="${c.id}">${c.nome}</option>`);
 
     const html = `
     <div id="modal-est-saida" class="modal-arquivo-overlay" style="z-index: 10050; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -69990,7 +70028,11 @@ window.carregarDashboardInicio = async function() {
                 // banco continua intacto, isso é só contagem e exibição)
                 if (window.colaboradorForaDoEscopo(c)) return;
 
-                if (c.status === 'Ativo' || c.status === 'Aguardando ASO' || taNoAvisoAinda) {
+                // Ficha ainda não aprovada pelo RH (Pendente / aguardando vaga) ou devolvida não conta como colaborador
+                const admNaoAprovadaDash = window.admissaoNaoAprovada(c);
+                const contaComoColaboradorDash = !admNaoAprovadaDash && (c.status === 'Ativo' || c.status === 'Aguardando ASO' || taNoAvisoAinda);
+
+                if (contaComoColaboradorDash) {
                     countAtivosGeral++;
 
                     
@@ -70019,7 +70061,7 @@ window.carregarDashboardInicio = async function() {
                 }
                 
                 const dAdm = adm.jornada?.data_inicio || adm.data_inicio;
-                if (dAdm && dAdm.startsWith(`${anoAtual}-${mesAtualStr}`)) {
+                if (contaComoColaboradorDash && dAdm && dAdm.startsWith(`${anoAtual}-${mesAtualStr}`)) {
                     countAdmissoesMes++;
                     window.dadosDetalhesDash.admissoes.push({ nome: c.nome, unidade: c.unidade, detalhe: formatarDataBR(dAdm) });
                 }
