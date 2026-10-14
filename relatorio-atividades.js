@@ -1162,6 +1162,7 @@
         let im = null;
         if (urlAssin) {
             im = await new Promise((res) => { const x = new Image(); x.crossOrigin = 'anonymous'; x.onload = () => res(x); x.onerror = () => res(null); x.src = urlAssin; });
+            if (!im) throw new Error('não consegui carregar a imagem da sua assinatura. Tente de novo em instantes.');
         }
         const nome = String(nomeGestor() || '').toUpperCase();
         const un = juntar(valoresMulti('ra-unidade')) || String((S.atual && S.atual.unidade) || '');
@@ -1190,7 +1191,7 @@
         const paraBlob = (c) => new Promise((res, rej) => { try { c.toBlob((b) => b ? res(b) : rej(new Error('falha')), 'image/png'); } catch (e) { rej(e); } });
         let blob;
         try { blob = await paraBlob(montar(true)); }
-        catch (e) { blob = await paraBlob(montar(false)); alerta('Não consegui incorporar a imagem da assinatura (bloqueio do navegador). Inseri só a linha com o seu nome.', 'aviso'); }
+        catch (e) { throw new Error('não consegui incorporar a imagem da sua assinatura (bloqueio do navegador). Tente de novo.'); }
         return { blob, w: W, h: H };
     }
 
@@ -1207,13 +1208,12 @@
                     // aviso com atalho pra cadastrar (ver window.mostrarAvisoAssinaturaNaoCadastrada em index.html)
                     if (typeof window.mostrarAvisoAssinaturaNaoCadastrada === 'function') {
                         const escolha = await window.mostrarAvisoAssinaturaNaoCadastrada();
-                        if (escolha === 'cancelar') return;
                         if (escolha === 'ir') {
                             try { coletar(); await salvar(false); } catch (e) { /* o rascunho também é salvo automaticamente */ }
                             if (typeof window.irCadastrarAssinaturaDaEscala === 'function') window.irCadastrarAssinaturaDaEscala();
-                            return;
                         }
-                    } else alerta('Sua assinatura ainda não foi cadastrada (Edição de Documentos › Assinar Documento). Inseri só a linha com o seu nome.', 'aviso');
+                    } else alerta('Sua assinatura ainda não foi cadastrada. Cadastre em Edição de Documentos › Assinar Documento e tente de novo.', 'aviso');
+                    return;   // sem assinatura cadastrada não insere nada (nem só a linha com o nome)
                 }
                 // monta, numa imagem só: assinatura + linha + nome (+ cargo da unidade), pronta para arrastar para onde quiser
                 const bloco = await comporBlocoAssinatura(temAssin ? cfg.assinatura_url : null);
