@@ -79,11 +79,25 @@
         .ra-ed p, .ra-ed h1, .ra-ed h2, .ra-ed h3, .ra-ed ul, .ra-ed ol, .ra-ed li { margin:0; }
         .ra-ed p { margin:0 0 6px; } .ra-ed h1 { font-size:24px; margin:6px 0 8px; line-height:1.25; } .ra-ed h2 { font-size:19px; margin:6px 0 6px; line-height:1.3; } .ra-ed h3 { font-size:16px; margin:4px 0 4px; line-height:1.3; }
         .ra-ed ul, .ra-ed ol { padding-left:26px; margin:0 0 6px; }
+        .ra-ed table { border-collapse:collapse; width:100%; table-layout:fixed; margin:4px 0 8px; }
+        .ra-ed td, .ra-ed th { border:1px solid #555; padding:4px 7px; vertical-align:top; color:#111; font:inherit; word-wrap:break-word; overflow-wrap:anywhere; min-height:22px; }
+        .ra-ed th { background:#eef1f5; font-weight:700; }
+        .ra-ed.ra-colrs, .ra-ed.ra-colrs td, .ra-ed.ra-colrs th { cursor:col-resize; }
+        .ra-tabbar { display:none; gap:6px; align-items:center; flex-wrap:wrap; width:100%; padding-top:6px; margin-top:4px; border-top:1px dashed var(--cor-borda); font-size:.78rem; }
+        .ra-tabbar.on { display:flex; }
+        .ra-tabpop { display:none; position:absolute; z-index:60; top:36px; left:0; padding:12px; background:var(--cor-fundo-cartao, #12263a); border:1px solid var(--cor-borda); border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.4); min-width:210px; text-align:left; }
+        .ra-tabpop.on { display:block; }
+        .ra-tabpop label { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:.8rem; margin-bottom:8px; }
+        .ra-tabpop input { width:64px; }
         .ra-pgbreak { display:block; margin:0; height:16px; line-height:16px; text-align:center; font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:#9aa3b2; border-top:1px dashed #b6bdc9; user-select:none; }
         .ra-imgs { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:10; }
         .ra-img { position:absolute; pointer-events:auto; cursor:move; touch-action:none; box-sizing:border-box; }
         .ra-img img { width:100%; height:100%; display:block; user-select:none; -webkit-user-drag:none; object-fit:fill; pointer-events:none; }
         .ra-img.sel { outline:2px solid #4fc3f7; }
+        .ra-img.igual { outline:2px dashed #ffb300; }
+        .ra-guia { position:absolute; pointer-events:none; background:#ff4081; z-index:20; }
+        .ra-guia.v { width:1px; top:0; } .ra-guia.h { height:1px; left:0; width:${PG.W}px; }
+        .ra-guia-tag { position:absolute; pointer-events:none; z-index:21; background:#ffb300; color:#000; font:700 11px Arial,sans-serif; padding:2px 7px; border-radius:6px; white-space:nowrap; }
         .ra-img .alca { display:none; position:absolute; right:-7px; bottom:-7px; width:15px; height:15px; background:#4fc3f7; border:2px solid #fff; border-radius:50%; cursor:nwse-resize; }
         .ra-img .del { display:none; position:absolute; right:-10px; top:-12px; width:24px; height:24px; background:#e74c3c; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer; font:700 13px/20px Arial; text-align:center; padding:0; }
         .ra-img.sel .alca, .ra-img.sel .del { display:block; }
@@ -228,9 +242,30 @@
             <button type="button" title="Inserir imagem (pode arrastar depois)" onclick="document.getElementById('ra-file').click()" id="ra-btn-img"><i class="fa-solid fa-image"></i> Imagem</button>
             <button type="button" title="Inserir a sua assinatura digital (a mesma de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('assinatura')" id="ra-btn-assin"><i class="fa-solid fa-signature"></i> Assinatura</button>
             <button type="button" title="Inserir o carimbo da empresa (o mesmo de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('carimbo')" id="ra-btn-carimbo"><i class="fa-solid fa-stamp"></i> Carimbo</button>
+            <span style="position:relative; display:inline-block;">
+                <button type="button" title="Inserir tabela" onmousedown="event.preventDefault()" onclick="RelAtv.abrirTabela()" id="ra-btn-tabela"><i class="fa-solid fa-table"></i> Tabela</button>
+                <div class="ra-tabpop" id="ra-tabpop" onmousedown="event.stopPropagation()">
+                    <label>Linhas <input type="number" id="ra-tab-l" min="1" max="60" value="3" class="modern-input" style="padding:4px 8px;"></label>
+                    <label>Colunas <input type="number" id="ra-tab-c" min="1" max="12" value="3" class="modern-input" style="padding:4px 8px;"></label>
+                    <label style="justify-content:flex-start;"><input type="checkbox" id="ra-tab-cab" checked style="width:auto;"> Primeira linha é cabeçalho</label>
+                    <button type="button" class="btn-success" style="padding:7px 14px; font-size:.8rem; width:100%;" onclick="RelAtv.inserirTabela()">Inserir tabela</button>
+                </div>
+            </span>
             <input type="file" id="ra-file" accept="image/*" multiple style="display:none" onchange="RelAtv.imagens(this.files); this.value=''">
             <span class="sep"></span>
             <select title="Zoom" onchange="RelAtv.zoom(this.value)" id="ra-zoom"><option value="auto">Ajustar à tela</option><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select>
+            <div class="ra-tabbar" id="ra-tabbar">
+                <strong style="color:#4fc3f7;"><i class="fa-solid fa-table"></i> Tabela:</strong>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('linhaDepois')">+ Linha abaixo</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('linhaAntes')">+ Linha acima</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('colDepois')">+ Coluna à direita</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('colAntes')">+ Coluna à esquerda</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delLinha')">− Linha</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delCol')">− Coluna</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('cabecalho')">Cabeçalho on/off</button>
+                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delTabela')" style="border-color:#e74c3c; color:#e74c3c;">Excluir tabela</button>
+                <span style="color:var(--cor-texto-secundario);">Dica: arraste a borda entre as colunas para mudar a largura. Tab pula de célula (na última cria linha nova).</span>
+            </div>
         </div>`;
     }
 
@@ -277,7 +312,8 @@
 
     function ligarEditor(ed) {
         ed.addEventListener('input', () => { sujo(); agendarPaginacao(); });
-        document.addEventListener('selectionchange', () => { const sl = window.getSelection(); if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) S.caretValido = true; });
+        document.addEventListener('selectionchange', () => { const sl = window.getSelection(); if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) S.caretValido = true; atualizarTabbar(); });
+        ligarColunas(ed);
         ed.addEventListener('paste', (e) => {
             const cd = e.clipboardData; if (!cd) return;
             const arqs = Array.from(cd.files || []).filter((f) => /^image\//.test(f.type));
@@ -287,7 +323,12 @@
             document.execCommand('insertHTML', false, html ? limparHtml(html) : esc(txt).replace(/\n/g, '<br>'));
         });
         ed.addEventListener('keydown', (e) => {
-            if (e.key === 'Tab') { e.preventDefault(); document.execCommand('insertText', false, '    '); }
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const cel = celulaAtual();
+                if (cel) { irCelula(cel, e.shiftKey ? -1 : 1); return; }
+                document.execCommand('insertText', false, '    ');
+            }
         });
     }
 
@@ -295,7 +336,7 @@
     function limparHtml(html) {
         const d = document.createElement('div'); d.innerHTML = html;
         d.querySelectorAll('script,style,meta,link,xml,o\\:p,img,iframe,object').forEach((n) => n.remove());
-        const ok = new Set(['P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'DIV', 'SPAN']);
+        const ok = new Set(['P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'DIV', 'SPAN', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH']);
         const walk = (n) => {
             Array.from(n.childNodes).forEach((c) => {
                 if (c.nodeType === 1) {
@@ -355,6 +396,111 @@
         setTimeout(() => { const u = ed.lastElementChild; if (u) u.scrollIntoView({ block: 'nearest' }); }, 150);
     }
 
+    // ---------------------------------------------------------------- Tabelas
+    function celulaAtual() {
+        const ed = $('ra-ed'); const sl = window.getSelection(); if (!ed || !sl || !sl.rangeCount) return null;
+        let n = sl.getRangeAt(0).startContainer; n = n.nodeType === 1 ? n : n.parentElement;
+        const c = n && n.closest ? n.closest('td,th') : null;
+        return c && ed.contains(c) ? c : null;
+    }
+    function atualizarTabbar() { const b = $('ra-tabbar'); if (b) b.classList.toggle('on', !!celulaAtual() && !S.somenteLeitura); }
+    function cursorNaCelula(c, fim) { const r = document.createRange(); r.selectNodeContents(c); r.collapse(!fim); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); }
+    function irCelula(cel, dir) {
+        const tb = cel.closest('table'); const cels = Array.from(tb.querySelectorAll('td,th')); const i = cels.indexOf(cel) + dir;
+        if (i < 0) return;
+        if (i >= cels.length) { tabela('linhaDepois'); const novas = Array.from(tb.querySelectorAll('td,th')); cursorNaCelula(novas[i]); return; }
+        cursorNaCelula(cels[i]);
+    }
+    function abrirTabela() {
+        const pop = $('ra-tabpop'); if (!pop) return;
+        const sl = window.getSelection(); S.rangeTab = (sl && sl.rangeCount && $('ra-ed').contains(sl.getRangeAt(0).startContainer)) ? sl.getRangeAt(0).cloneRange() : null;
+        pop.classList.toggle('on');
+    }
+    function igualarColunas(tb) {
+        const n = Math.max.apply(null, Array.from(tb.rows).map((r) => r.cells.length));
+        let cg = tb.querySelector('colgroup'); if (cg) cg.remove();
+        cg = document.createElement('colgroup');
+        for (let i = 0; i < n; i++) { const c = document.createElement('col'); c.style.width = (100 / n).toFixed(3) + '%'; cg.appendChild(c); }
+        tb.insertBefore(cg, tb.firstChild);
+    }
+    function inserirTabela() {
+        const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
+        const L = Math.max(1, Math.min(60, parseInt($('ra-tab-l').value, 10) || 3)), C = Math.max(1, Math.min(12, parseInt($('ra-tab-c').value, 10) || 3));
+        const cab = $('ra-tab-cab').checked;
+        $('ra-tabpop').classList.remove('on');
+        const tb = document.createElement('table');
+        const tbody = document.createElement('tbody');
+        for (let r = 0; r < L; r++) {
+            const tr = document.createElement('tr');
+            for (let c = 0; c < C; c++) { const td = document.createElement(cab && r === 0 ? 'th' : 'td'); td.innerHTML = '<br>'; tr.appendChild(td); }
+            tbody.appendChild(tr);
+        }
+        tb.appendChild(tbody); igualarColunas(tb);
+        // onde entra: logo depois do bloco onde está o cursor (ou no fim do texto)
+        let ref = null;
+        if (S.rangeTab) { let n = S.rangeTab.startContainer; while (n && n.parentNode !== ed) n = n.parentNode; ref = n && n.parentNode === ed ? n : null; }
+        const vazio = ref && ref.tagName === 'P' && !(ref.textContent || '').trim() && !ref.querySelector('img,table');
+        if (ref && ref.tagName === 'TABLE') { /* depois da tabela */ }
+        const apos = document.createElement('p'); apos.innerHTML = '<br>';
+        if (ref) { if (vazio) { ref.replaceWith(tb); } else { ref.after(tb); } tb.after(apos); } else { ed.appendChild(tb); ed.appendChild(apos); }
+        S.rangeTab = null;
+        const primeira = tb.querySelector('th,td'); ed.focus(); cursorNaCelula(primeira);
+        sujo(); agendarPaginacao(); atualizarTabbar();
+    }
+    function tabela(acao) {
+        const ed = $('ra-ed'); const cel = celulaAtual(); if (!ed || !cel || S.somenteLeitura) return;
+        const tr = cel.parentElement, tb = cel.closest('table'), idx = cel.cellIndex;
+        const novaCel = (modelo) => { const c = document.createElement(modelo && modelo.tagName === 'TH' ? 'th' : 'td'); c.innerHTML = '<br>'; return c; };
+        if (acao === 'linhaDepois' || acao === 'linhaAntes') {
+            const nr = document.createElement('tr'); Array.from(tr.cells).forEach((c) => nr.appendChild(novaCel(acao === 'linhaDepois' && c.tagName === 'TH' ? { tagName: 'TD' } : c)));
+            if (acao === 'linhaDepois') tr.after(nr); else tr.before(nr);
+            cursorNaCelula(nr.cells[Math.min(idx, nr.cells.length - 1)]);
+        } else if (acao === 'colDepois' || acao === 'colAntes') {
+            Array.from(tb.rows).forEach((r) => { if (r.classList.contains('ra-sp')) return; const ref = r.cells[Math.min(idx, r.cells.length - 1)]; const nc = novaCel(ref); if (acao === 'colDepois') ref.after(nc); else ref.before(nc); });
+            igualarColunas(tb); cursorNaCelula(tr.cells[acao === 'colDepois' ? idx + 1 : idx]);
+        } else if (acao === 'delLinha') {
+            const prox = tr.nextElementSibling || tr.previousElementSibling;
+            const reais = Array.from(tb.rows).filter((r) => !r.classList.contains('ra-sp'));
+            if (reais.length <= 1) return tabela('delTabela');
+            tr.remove(); if (prox && prox.cells) cursorNaCelula(prox.cells[Math.min(idx, prox.cells.length - 1)]);
+        } else if (acao === 'delCol') {
+            if (tr.cells.length <= 1) return tabela('delTabela');
+            Array.from(tb.rows).forEach((r) => { if (r.cells[idx]) r.cells[idx].remove(); });
+            igualarColunas(tb); cursorNaCelula(tr.cells[Math.min(idx, tr.cells.length - 1)]);
+        } else if (acao === 'cabecalho') {
+            const linha = tb.rows[0]; const ehTh = linha.cells[0].tagName === 'TH';
+            Array.from(linha.cells).forEach((c) => { const n = document.createElement(ehTh ? 'td' : 'th'); n.innerHTML = c.innerHTML; c.replaceWith(n); });
+        } else if (acao === 'delTabela') {
+            const prox = tb.nextElementSibling || tb.previousElementSibling; tb.remove();
+            if (!ed.children.length) ed.innerHTML = '<p><br></p>';
+            if (prox) { const r = document.createRange(); r.selectNodeContents(prox); r.collapse(true); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); }
+        }
+        sujo(); agendarPaginacao(); atualizarTabbar();
+    }
+    // arrastar a borda entre colunas para mudar a largura
+    function ligarColunas(ed) {
+        const naBorda = (e) => { const td = e.target.closest && e.target.closest('td,th'); if (!td || !td.nextElementSibling) return null; return (td.getBoundingClientRect().right - e.clientX <= 5 && td.getBoundingClientRect().right - e.clientX >= -3) ? td : null; };
+        ed.addEventListener('mousemove', (e) => { if (S.arrCol) return; ed.classList.toggle('ra-colrs', !!naBorda(e)); });
+        ed.addEventListener('mousedown', (e) => {
+            const td = naBorda(e); if (!td) return;
+            e.preventDefault();
+            const tb = td.closest('table'), i = td.cellIndex;
+            if (!tb.querySelector('colgroup')) igualarColunas(tb);
+            const ref = Array.from(tb.rows).find((r) => !r.classList.contains('ra-sp') && r.cells.length > i + 1) || tb.rows[0];
+            const larg = Array.from(ref.cells).map((c) => c.getBoundingClientRect().width / S.escala);
+            const total = larg.reduce((a, b) => a + b, 0), x0 = e.clientX;
+            const cols = tb.querySelectorAll('col');
+            S.arrCol = true;
+            const mover = (ev) => {
+                const d = (ev.clientX - x0) / S.escala; const a = Math.max(36, Math.min(larg[i] + larg[i + 1] - 36, larg[i] + d)), b = larg[i] + larg[i + 1] - a;
+                if (cols[i]) cols[i].style.width = (a / total * 100).toFixed(3) + '%'; if (cols[i + 1]) cols[i + 1].style.width = (b / total * 100).toFixed(3) + '%';
+                paginar();
+            };
+            const soltar = () => { document.removeEventListener('mousemove', mover); document.removeEventListener('mouseup', soltar); S.arrCol = false; sujo(); agendarPaginacao(); };
+            document.addEventListener('mousemove', mover); document.addEventListener('mouseup', soltar);
+        });
+    }
+
     // ---------------------------------------------------------------- Excluir página
     async function excluirPagina(nPedida) {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
@@ -376,7 +522,7 @@
         if (!ok) return;
         const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
         const blocos = [];
-        Array.from(ed.children).forEach((c) => { if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else blocos.push(c); });
+        Array.from(ed.children).forEach((c) => { if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
         blocos.forEach((b) => {
             const t = topo(b), h = b.getBoundingClientRect().height / S.escala;
             const p0 = pgDe(t + parseFloat(b.style.paddingTop || 0)), p1 = pgDe(t + h - 1);
@@ -393,6 +539,7 @@
         });
         ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
         ed.querySelectorAll('ul:empty,ol:empty').forEach((x) => x.remove());
+        ed.querySelectorAll('table').forEach((t) => { if (!t.querySelector('tr')) t.remove(); });
         if (!ed.children.length) ed.innerHTML = '<p><br></p>';
         S.atual.imagens = (S.atual.imagens || []).filter((i) => i.page !== n).map((i) => (i.page > n ? { ...i, page: i.page - 1 } : i));
         desenharImagens(); sujo(); paginar();
@@ -451,7 +598,9 @@
         const blocos = [];
         Array.from(ed.children).forEach((c) => {
             if (c.hasAttribute('data-ra-m')) return;
-            if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else blocos.push(c);
+            if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li));
+            else if (c.tagName === 'TABLE') Array.from(c.rows).forEach((tr) => blocos.push(tr));
+            else blocos.push(c);
         });
         let forcarPag = null, ultimoFim = 0;
         for (const b of blocos) {
@@ -460,11 +609,15 @@
             let h = b.getBoundingClientRect().height / S.escala;
             let pg = Math.floor((top + 0.5) / PG.P);
             let alvo = null;
-            const ehTexto = !b.classList.contains('ra-pgbreak') && !/^H[1-6]$/.test(b.tagName) && (b.textContent || '').trim().length > 0;
+            const ehTexto = b.tagName !== 'TR' && !b.classList.contains('ra-pgbreak') && !/^H[1-6]$/.test(b.tagName) && (b.textContent || '').trim().length > 0;
             if (top > pg * PG.P + PG.CH - 1) alvo = (pg + 1) * PG.P;                           // começou na faixa de rodapé/cabeçalho
             else if (top + h > pg * PG.P + PG.CH + 0.5 && !ehTexto && h < PG.CH) alvo = (pg + 1) * PG.P;   // título/bloco sem texto que não cabe: vai pra próxima
             if (forcarPag !== null && (alvo === null ? top : alvo) < forcarPag * PG.P) alvo = forcarPag * PG.P;
-            if (alvo !== null && alvo > top + 0.5) { b.style.paddingTop = Math.round(alvo - top) + 'px'; b.setAttribute('data-ra', '1'); top = alvo; pg = Math.round(alvo / PG.P); h = b.getBoundingClientRect().height / S.escala; }
+            if (alvo !== null && alvo > top + 0.5 && b.tagName === 'TR') {
+                const sr = document.createElement('tr'); sr.className = 'ra-sp'; sr.setAttribute('contenteditable', 'false');
+                const td = document.createElement('td'); td.colSpan = Math.max(1, b.cells.length); td.style.cssText = 'border:none !important;padding:0 !important;background:none !important;height:' + Math.round(alvo - top) + 'px;';
+                sr.appendChild(td); b.parentNode.insertBefore(sr, b); top = alvo; pg = Math.round(alvo / PG.P); h = b.getBoundingClientRect().height / S.escala;
+            } else if (alvo !== null && alvo > top + 0.5) { b.style.paddingTop = Math.round(alvo - top) + 'px'; b.setAttribute('data-ra', '1'); top = alvo; pg = Math.round(alvo / PG.P); h = b.getBoundingClientRect().height / S.escala; }
             forcarPag = null;
             // parágrafo que atravessa o fim da página: o texto continua na página seguinte, linha a linha (como no Word)
             if (ehTexto) {
@@ -647,6 +800,19 @@
         if (e.target.closest && (e.target.closest('.ra-img') || e.target.closest('#ra-barra'))) return;
         document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); S.imgSel = null;
     }
+    // ---- guias inteligentes (como nos editores): alinhar ao centro da página, às margens e às outras imagens; igualar tamanhos
+    const LIMIAR = 6;
+    function limparGuias() { document.querySelectorAll('#ra-imgs .ra-guia, #ra-imgs .ra-guia-tag').forEach((g) => g.remove()); document.querySelectorAll('.ra-img.igual').forEach((x) => x.classList.remove('igual')); }
+    function guiaV(x) { const c = $('ra-imgs'); const g = document.createElement('div'); g.className = 'ra-guia v'; g.style.left = Math.round(x) + 'px'; g.style.height = '100%'; c.appendChild(g); }
+    function guiaH(y) { const c = $('ra-imgs'); const g = document.createElement('div'); g.className = 'ra-guia h'; g.style.top = Math.round(y) + 'px'; c.appendChild(g); }
+    function etiqueta(x, y, t) { const c = $('ra-imgs'); const g = document.createElement('div'); g.className = 'ra-guia-tag'; g.style.left = Math.round(x) + 'px'; g.style.top = Math.round(y) + 'px'; g.textContent = t; c.appendChild(g); }
+    // melhor ajuste: cand = posições da imagem que está sendo movida; alvos = [{v, tipo}]; devolve {delta, alvo}
+    function melhorAjuste(cand, alvos) {
+        let melhor = null;
+        cand.forEach((c) => alvos.forEach((a) => { const dlt = a.v - c; if (Math.abs(dlt) <= LIMIAR && (!melhor || Math.abs(dlt) < Math.abs(melhor.delta))) melhor = { delta: dlt, alvo: a.v }; }));
+        return melhor;
+    }
+
     function ligarImagem(d, i) {
         d.addEventListener('pointerdown', (e) => {
             if (e.target.classList.contains('del')) return;
@@ -657,15 +823,46 @@
             d.setPointerCapture(e.pointerId);
             const mover = (ev) => {
                 const dx = (ev.clientX - x0) / S.escala, dy = (ev.clientY - y0) / S.escala;
-                if (redim) { i.w = Math.max(30, Math.min(PG.W - i.x, iw + dx)); i.h = i.w / ratio; }
-                else {
+                const snap = !ev.altKey;   // segurar Alt desliga o "ímã"
+                limparGuias();
+                if (redim) {
+                    i.w = Math.max(30, Math.min(PG.W - i.x, iw + dx)); i.h = i.w / ratio;
+                    if (snap) {
+                        const outros = (S.atual.imagens || []).filter((o) => o.id !== i.id && o.page === i.page);
+                        // mesmo tamanho que outra imagem (largura ou altura)
+                        let igual = null;
+                        outros.forEach((o) => {
+                            if (Math.abs(o.w - i.w) <= LIMIAR && (!igual || Math.abs(o.w - i.w) < Math.abs(igual.novoW - i.w))) igual = { o, novoW: o.w, tipo: 'largura' };
+                            const wPelaAltura = o.h * ratio; if (Math.abs(wPelaAltura - i.w) <= LIMIAR && (!igual || Math.abs(wPelaAltura - i.w) < Math.abs(igual.novoW - i.w))) igual = { o, novoW: wPelaAltura, tipo: 'altura' };
+                        });
+                        const direita = melhorAjuste([i.x + i.w], [{ v: PG.W / 2 }, { v: PG.W - PG.RIGHT }].concat(outros.map((o) => ({ v: o.x + o.w }))));
+                        if (igual) { i.w = igual.novoW; i.h = i.w / ratio; }
+                        else if (direita) { i.w += direita.delta; i.h = i.w / ratio; guiaV(direita.alvo); }
+                        if (igual) {
+                            const el = document.querySelector('#ra-imgs .ra-img[data-id="' + igual.o.id + '"]'); if (el) el.classList.add('igual'); d.classList.add('igual');
+                            etiqueta(i.x + i.w + 8, i.page * PG.P + i.y, '= mesmo tamanho (' + igual.tipo + ')');
+                        }
+                    }
+                    i.w = Math.round(i.w); i.h = Math.round(i.w / ratio);
+                } else {
                     let nx = Math.max(0, Math.min(PG.W - i.w, ix + dx)), ny = iy + dy;
                     const pg = Math.max(0, Math.min(Math.max(S.paginas, 1) - 1, Math.floor((ny + i.h / 2) / PG.P)));
-                    i.page = pg; i.x = Math.round(nx); i.y = Math.round(Math.max(0, Math.min(PG.H - i.h, ny - pg * PG.P)));
+                    let rel = Math.max(0, Math.min(PG.H - i.h, ny - pg * PG.P));
+                    if (snap) {
+                        const outros = (S.atual.imagens || []).filter((o) => o.id !== i.id && o.page === pg);
+                        const ax = melhorAjuste([nx, nx + i.w / 2, nx + i.w], [{ v: PG.W / 2 }, { v: PG.LEFT }, { v: PG.W - PG.RIGHT }].concat(outros.reduce((a, o) => a.concat([{ v: o.x }, { v: o.x + o.w / 2 }, { v: o.x + o.w }]), [])));
+                        if (ax) { nx += ax.delta; guiaV(ax.alvo); }
+                        const ay = melhorAjuste([rel, rel + i.h / 2, rel + i.h], [{ v: PG.H / 2 }, { v: PG.TOP }, { v: PG.TOP + PG.CH }].concat(outros.reduce((a, o) => a.concat([{ v: o.y }, { v: o.y + o.h / 2 }, { v: o.y + o.h }]), [])));
+                        if (ay) { rel += ay.delta; guiaH(pg * PG.P + ay.alvo); }
+                        // mesmo tamanho que a vizinha: só avisa
+                        const gemea = outros.find((o) => Math.abs(o.w - i.w) < 2 && Math.abs(o.h - i.h) < 2);
+                        if (gemea) { d.classList.add('igual'); const el = document.querySelector('#ra-imgs .ra-img[data-id="' + gemea.id + '"]'); if (el) el.classList.add('igual'); }
+                    }
+                    i.page = pg; i.x = Math.round(nx); i.y = Math.round(rel);
                 }
                 posicionarImagens();
             };
-            const soltar = () => { d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); sujo(); paginar(); };
+            const soltar = () => { limparGuias(); d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); sujo(); paginar(); };
             d.addEventListener('pointermove', mover); d.addEventListener('pointerup', soltar); d.addEventListener('pointercancel', soltar);
         });
         const del = d.querySelector('.del');
@@ -842,5 +1039,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
