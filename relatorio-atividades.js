@@ -138,13 +138,16 @@
         .ra-ms > summary::-webkit-details-marker { display:none; }
         .ra-ms > summary::after { content:'▾'; position:absolute; right:10px; top:50%; transform:translateY(-50%); opacity:.7; }
         .ra-ms[data-ro] > summary { opacity:.6; pointer-events:none; }
-        .ra-ms-lista { max-height:210px; overflow:auto; padding:6px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; }
+        .ra-ms-lista { max-height:210px; overflow-y:auto; overflow-x:hidden; padding:6px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; }
         .ra-ms > .ra-ms-lista { position:absolute; z-index:50; left:0; right:0; top:100%; margin-top:4px; box-shadow:0 10px 26px rgba(0,0,0,.5); min-width:240px; }
         [data-theme="light"] .ra-ms-lista { background:#fff; }
         .ra-ms-lista.fixa { margin-bottom:12px; }
-        .ra-ms-op { display:flex; align-items:flex-start; gap:8px; padding:6px 8px; border-radius:7px; cursor:pointer; font-size:.82rem; line-height:1.3; }
+        .ra-ms-op { display:flex !important; align-items:flex-start; gap:10px; margin:0 !important; padding:7px 10px; border-radius:7px; cursor:pointer; font-size:.84rem !important; font-weight:500 !important; line-height:1.3; color:var(--cor-texto-principal) !important; }
         .ra-ms-op:hover { background:rgba(79,195,247,.1); }
-        .ra-ms-op input { margin-top:2px; accent-color:#4fc3f7; flex:0 0 auto; }
+        .ra-ms-op input[type=checkbox], .ra-tabpop input[type=checkbox] { width:16px !important; height:16px !important; min-width:16px !important; padding:0 !important; margin:1px 0 0 !important; flex:0 0 16px; border-radius:3px; accent-color:#4fc3f7; background:none; cursor:pointer; }
+        .ra-ms-op span { flex:1 1 auto; min-width:0; text-align:left; word-break:break-word; white-space:normal; }
+        .ra-tabpop label { display:flex !important; margin-bottom:8px !important; color:var(--cor-texto-principal) !important; }
+        .ra-tabpop input[type=number] { padding:4px 8px !important; width:70px !important; }
         .ra-ms-vazio { padding:8px; font-size:.78rem; color:var(--cor-texto-secundario); }
         .ra-pgbreak { display:block; margin:0; height:16px; line-height:16px; text-align:center; font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:#9aa3b2; border-top:1px dashed #b6bdc9; user-select:none; }
         .ra-imgs { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:10; }
