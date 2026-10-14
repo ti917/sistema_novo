@@ -57,7 +57,10 @@
         [data-theme="light"] .ra-barra { background:#fff; }
         .ra-barra .sep { width:1px; height:22px; background:var(--cor-borda); margin:0 4px; }
         .ra-barra button, .ra-barra select { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-principal); border-radius:7px; padding:6px 9px; cursor:pointer; font-size:.82rem; min-width:32px; }
-        .ra-barra select { background:var(--cor-fundo-cartao, transparent); }
+        .ra-barra select { background:var(--cor-fundo-cartao, transparent); width:auto !important; min-width:0; max-width:190px; flex:0 0 auto; }
+        .ra-pgbtns { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:12; }
+        .ra-pgdel { position:absolute; right:14px; pointer-events:auto; background:rgba(231,76,60,.95); color:#fff; border:none; border-radius:999px; padding:5px 12px; font:600 11px Arial,sans-serif; cursor:pointer; opacity:.85; box-shadow:0 2px 8px rgba(0,0,0,.25); }
+        .ra-pgdel:hover { opacity:1; }
         .ra-barra button:hover { border-color:#4fc3f7; color:#4fc3f7; }
         .ra-barra input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--cor-borda); border-radius:7px; background:none; cursor:pointer; }
         .ra-cena { overflow:auto; background:rgba(0,0,0,.18); border:1px solid var(--cor-borda); border-radius:12px; padding:18px 10px 30px; max-height:calc(100vh - 230px); }
@@ -334,7 +337,7 @@
     }
 
     // ---------------------------------------------------------------- Excluir página
-    async function excluirPagina() {
+    async function excluirPagina(nPedida) {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
         paginar();
         const base = ed.getBoundingClientRect().top, P = PG.P;
@@ -342,7 +345,8 @@
         // página do cursor (se não houver cursor no texto, a última)
         let n = S.paginas - 1;
         const sl = window.getSelection();
-        if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) {
+        if (typeof nPedida === 'number') n = Math.min(S.paginas - 1, Math.max(0, nPedida));
+        else if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) {
             const rg = sl.getRangeAt(0).cloneRange(); rg.collapse(true);
             let rc = rg.getClientRects()[0];
             if (!rc) { let el = rg.startContainer; el = el.nodeType === 1 ? el : el.parentElement; rc = el && el !== ed ? el.getBoundingClientRect() : null; }
@@ -498,6 +502,18 @@
             }
             cont.dataset.total = String(total);
             ajustarNome(cont);
+            let bt = $('ra-pgbtns'); if (bt) bt.remove();
+            if (!S.somenteLeitura) {
+                bt = document.createElement('div'); bt.id = 'ra-pgbtns'; bt.className = 'ra-pgbtns';
+                for (let n = 0; n < total; n++) {
+                    const x = document.createElement('button'); x.type = 'button'; x.className = 'ra-pgdel'; x.style.top = (n * PG.P + 10) + 'px';
+                    x.title = 'Excluir a página ' + (n + 1); x.innerHTML = '🗑 Excluir página';
+                    x.addEventListener('mousedown', (e) => e.preventDefault());
+                    x.addEventListener('click', () => excluirPagina(n));
+                    bt.appendChild(x);
+                }
+                stage.appendChild(bt);
+            }
         }
         const altura = total * PG.P - PG.GAP;
         stage.style.height = altura + 'px';
