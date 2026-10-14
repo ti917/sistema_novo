@@ -26,10 +26,26 @@
     const $ = (id) => document.getElementById(id);
     const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const alerta = (m, t, ti) => { if (typeof window.mostrarAlerta === 'function') window.mostrarAlerta(m, t || 'sucesso', ti); else console.log(m); };
-    const nomeGestor = () => (window.usuarioAtual && window.usuarioAtual.nome) || (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Gestor';
+    const nomeLogin = () => (window.usuarioAtual && window.usuarioAtual.nome) || (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Gestor';
+    // no documento vai o NOME COMPLETO do colaborador vinculado ao perfil do gestor (o nome do login costuma ser abreviado)
+    const nomeGestor = () => S.nomeCompleto || nomeLogin();
+    async function resolverNomeGestor() {
+        const uid = (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.id : null;
+        if (S.nomeCompleto && S.nomeUid === uid) return S.nomeCompleto;
+        let n = null;
+        try {
+            if (typeof window._resolverNomeCarimboAdmin === 'function') n = await window._resolverNomeCarimboAdmin();
+            else {
+                const vid = usuarioAtual && usuarioAtual.permissoes && usuarioAtual.permissoes.colaborador_vinculado_id;
+                if (vid) { const { data } = await supabaseClient.from('perfis').select('nome').eq('id', vid).maybeSingle(); if (data && data.nome) n = data.nome; }
+            }
+        } catch (e) { /* usa o nome do login */ }
+        S.nomeCompleto = (n && String(n).trim()) || null; S.nomeUid = uid;
+        return nomeGestor();
+    }
     const idGestor = () => (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.id : null;
     const novoId = () => 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-    const pastaGestor = () => 'Relatorios_Atividades/' + (typeof window.formatarNomePasta === 'function' ? window.formatarNomePasta(nomeGestor()) : nomeGestor().replace(/[^a-zA-Z0-9]/g, '_'));
+    const pastaGestor = () => 'Relatorios_Atividades/' + (typeof window.formatarNomePasta === 'function' ? window.formatarNomePasta(nomeLogin()) : nomeLogin().replace(/[^a-zA-Z0-9]/g, '_'));
 
     // ---------------------------------------------------------------- CSS
     function injetarCss() {
@@ -117,6 +133,19 @@
         .ra-tabpop.on { display:block; }
         .ra-tabpop label { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:.8rem; margin-bottom:8px; }
         .ra-tabpop input { width:64px; }
+        .ra-ms { position:relative; }
+        .ra-ms > summary { cursor:pointer; list-style:none; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:26px; position:relative; }
+        .ra-ms > summary::-webkit-details-marker { display:none; }
+        .ra-ms > summary::after { content:'▾'; position:absolute; right:10px; top:50%; transform:translateY(-50%); opacity:.7; }
+        .ra-ms[data-ro] > summary { opacity:.6; pointer-events:none; }
+        .ra-ms-lista { max-height:210px; overflow:auto; padding:6px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; }
+        .ra-ms > .ra-ms-lista { position:absolute; z-index:50; left:0; right:0; top:100%; margin-top:4px; box-shadow:0 10px 26px rgba(0,0,0,.5); min-width:240px; }
+        [data-theme="light"] .ra-ms-lista { background:#fff; }
+        .ra-ms-lista.fixa { margin-bottom:12px; }
+        .ra-ms-op { display:flex; align-items:flex-start; gap:8px; padding:6px 8px; border-radius:7px; cursor:pointer; font-size:.82rem; line-height:1.3; }
+        .ra-ms-op:hover { background:rgba(79,195,247,.1); }
+        .ra-ms-op input { margin-top:2px; accent-color:#4fc3f7; flex:0 0 auto; }
+        .ra-ms-vazio { padding:8px; font-size:.78rem; color:var(--cor-texto-secundario); }
         .ra-pgbreak { display:block; margin:0; height:16px; line-height:16px; text-align:center; font-size:10px; letter-spacing:.2em; text-transform:uppercase; color:#9aa3b2; border-top:1px dashed #b6bdc9; user-select:none; }
         .ra-imgs { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:10; }
         .ra-img { position:absolute; pointer-events:auto; cursor:move; touch-action:none; box-sizing:border-box; }
@@ -165,6 +194,12 @@
     const fmtData = (iso) => { if (!iso) return '-'; const d = new Date(iso); return isNaN(d) ? '-' : d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); };
     const fmtMes = (m) => { if (!m) return '-'; const p = String(m).split('-'); return p.length === 2 ? p[1] + '/' + p[0] : m; };
 
+    function chipsMulti(valor, cls, icone, vazio) {
+        const v = separar(valor);
+        if (!v.length) return vazio ? `<span class="ra-tag ${cls}" style="opacity:.6;"><i class="fa-solid ${icone}"></i><span>${vazio}</span></span>` : '';
+        const vis = v.slice(0, 2).map((x) => `<span class="ra-tag ${cls}" title="${esc(x)}"><i class="fa-solid ${icone}"></i><span>${esc(x)}</span></span>`).join('');
+        return vis + (v.length > 2 ? `<span class="ra-tag ${cls}" title="${esc(v.slice(2).join(', '))}"><span>+${v.length - 2}</span></span>` : '');
+    }
     function desenharLista() {
         const raiz = $('ra-raiz');
         const todos = S.lista || [];
@@ -182,8 +217,8 @@
                 </div>
                 <div class="ra-tags">
                     <span class="ra-tag"><i class="fa-regular fa-calendar"></i><span>${esc(fmtMes(r.mes_referencia))}</span></span>
-                    ${r.cargo ? `<span class="ra-tag cg" title="${esc(r.cargo)}"><i class="fa-solid fa-user-tie"></i><span>${esc(r.cargo)}</span></span>` : ''}
-                    ${r.unidade ? `<span class="ra-tag un" title="${esc(r.unidade)}"><i class="fa-solid fa-building"></i><span>${esc(r.unidade)}</span></span>` : '<span class="ra-tag un" style="opacity:.6;"><i class="fa-solid fa-building"></i><span>Sem unidade</span></span>'}
+                    ${chipsMulti(r.unidade, 'un', 'fa-building', 'Sem unidade')}
+                    ${chipsMulti(r.cargo, 'cg', 'fa-user-tie', '')}
                 </div>
                 <div class="ra-card-meta">
                     <span><i class="fa-regular fa-clock"></i> Atualizado em ${fmtData(r.atualizado_em)}</span>
@@ -231,74 +266,120 @@
         const bruto = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.unidade) ? [].concat(usuarioAtual.unidade).join(',') : '';
         return Array.from(new Set(bruto.split(',').map((u) => u.trim()).filter(Boolean)));
     }
-    // cargos cadastrados para a unidade (mesma base usada nas admissões); só o nome do cargo, sem valores
-    async function cargosDaUnidade(unidade) {
-        if (!unidade) return [];
+    // ---- seleção múltipla (unidades e cargos): guardados no banco como texto "A, B, C"
+    const separar = (t) => Array.from(new Set(String(t || '').split(',').map((x) => x.trim()).filter(Boolean)));
+    const juntar = (arr) => (arr || []).join(', ');
+    const rotuloMulti = (arr, sing, plur, vazio) => !arr.length ? vazio : (arr.length === 1 ? arr[0] : arr.length + ' ' + plur + ' selecionad' + (plur.endsWith('s') && /^unidade/.test(plur) ? 'as' : 'os'));
+    function marcadosEm(raiz) { return raiz ? Array.from(raiz.querySelectorAll('input[type=checkbox][data-v]:checked')).map((i) => i.dataset.v) : []; }
+    function valoresMulti(id) { const el = $(id); if (!el) return []; return el.tagName === 'INPUT' && el.type === 'text' ? separar(el.value) : marcadosEm(el); }
+    // lista de caixinhas (usada no modal e no editor)
+    function listaCaixas(valores, marcados, onchange, vazioTxt) {
+        if (!valores.length) return `<div class="ra-ms-vazio">${esc(vazioTxt || 'Nada disponível')}</div>`;
+        return valores.map((v) => `<label class="ra-ms-op"><input type="checkbox" data-v="${esc(v)}" ${marcados.includes(v) ? 'checked' : ''} onchange="${onchange}"> <span>${esc(v)}</span></label>`).join('');
+    }
+
+    // cargos cadastrados nas unidades escolhidas (mesma base usada nas admissões); só o nome do cargo, sem valores
+    async function cargosDasUnidades(unidades) {
+        const un = (unidades || []).filter(Boolean); if (!un.length) return [];
         S.cacheCargos = S.cacheCargos || {};
-        if (S.cacheCargos[unidade]) return S.cacheCargos[unidade];
+        const chave = un.slice().sort().join('|');
+        if (S.cacheCargos[chave]) return S.cacheCargos[chave];
         try {
-            const { data, error } = await supabaseClient.from('salarios_base').select('cargo').eq('unidade', unidade);
+            const { data, error } = await supabaseClient.from('salarios_base').select('cargo').in('unidade', un);
             if (error) return [];
             const lista = Array.from(new Set((data || []).map((x) => (x.cargo || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'));
-            S.cacheCargos[unidade] = lista; return lista;
+            S.cacheCargos[chave] = lista; return lista;
         } catch (e) { return []; }
     }
-    const opcoesCargo = (lista, sel) => '<option value="">Sem cargo específico (opcional)</option>' + lista.map((c) => `<option value="${esc(c)}" ${c === sel ? 'selected' : ''}>${esc(c)}</option>`).join('');
 
     function escolherUnidade(unidades) {
         return new Promise((resolve) => {
             const fundo = document.createElement('div'); fundo.className = 'ra-modal-fundo';
             fundo.innerHTML = `<div class="ra-modal">
                 <h4><i class="fa-solid fa-building"></i> Para qual unidade é este relatório?</h4>
-                <p>Escolha a unidade a que as atividades se referem. Você pode trocar depois, dentro do relatório.</p>
-                <select class="modern-input" id="ra-sel-un" style="width:100%; margin-bottom:12px;">
-                    <option value="">Selecione a unidade...</option>${unidades.map((u) => `<option value="${esc(u)}">${esc(u)}</option>`).join('')}
-                </select>
-                <label style="font-size:.74rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px;">Cargo (opcional — os cargos da unidade escolhida)</label>
-                <select class="modern-input" id="ra-sel-cg" style="width:100%; margin-bottom:16px;" disabled><option value="">Escolha a unidade primeiro</option></select>
-                <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <p>Marque uma ou mais unidades a que as atividades se referem. Você pode mudar depois, dentro do relatório.</p>
+                <div class="ra-ms-lista fixa" id="ra-mod-un">${listaCaixas(unidades, unidades.length === 1 ? unidades : [], 'RelAtv._modalUnidades()')}</div>
+                ${unidades.length > 1 ? '<div style="margin:-6px 0 10px;"><button type="button" class="ra-chip" id="ra-mod-todas">Marcar todas</button></div>' : ''}
+                <label style="font-size:.74rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px;">Cargos (opcional — os cargos das unidades marcadas; pode marcar vários)</label>
+                <div class="ra-ms-lista fixa" id="ra-mod-cg"><div class="ra-ms-vazio">Marque a unidade primeiro</div></div>
+                <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
                     <button class="ra-btn" id="ra-un-cancel">Cancelar</button>
                     <button class="ra-btn prim" id="ra-un-ok"><i class="fa-solid fa-arrow-right"></i> Criar relatório</button>
                 </div></div>`;
             document.body.appendChild(fundo);
-            const fim = (v) => { fundo.remove(); resolve(v); };
-            fundo.querySelector('#ra-sel-un').onchange = async (e) => {
-                const cg = fundo.querySelector('#ra-sel-cg'); cg.disabled = true; cg.innerHTML = '<option value="">Buscando cargos...</option>';
-                const lista = await cargosDaUnidade(e.target.value);
-                cg.innerHTML = opcoesCargo(lista, ''); cg.disabled = !e.target.value;
-                if (e.target.value && !lista.length) cg.innerHTML = '<option value="">Nenhum cargo cadastrado nesta unidade (opcional)</option>';
+            const fim = (v) => { window.RelAtv._modalUnidades = null; fundo.remove(); resolve(v); };
+            const atualizarCargos = async () => {
+                const un = marcadosEm(fundo.querySelector('#ra-mod-un')), cgBox = fundo.querySelector('#ra-mod-cg');
+                const antes = marcadosEm(cgBox);
+                if (!un.length) { cgBox.innerHTML = '<div class="ra-ms-vazio">Marque a unidade primeiro</div>'; return; }
+                cgBox.innerHTML = '<div class="ra-ms-vazio">Buscando cargos...</div>';
+                const lista = await cargosDasUnidades(un);
+                cgBox.innerHTML = listaCaixas(lista, antes.filter((c) => lista.includes(c)), '', 'Nenhum cargo cadastrado nestas unidades (opcional)');
             };
+            window.RelAtv._modalUnidades = atualizarCargos;
+            const todas = fundo.querySelector('#ra-mod-todas');
+            if (todas) todas.onclick = () => { const cx = fundo.querySelectorAll('#ra-mod-un input'); const tudo = Array.from(cx).every((c) => c.checked); cx.forEach((c) => { c.checked = !tudo; }); todas.textContent = tudo ? 'Marcar todas' : 'Desmarcar todas'; atualizarCargos(); };
+            if (unidades.length === 1) atualizarCargos();
             fundo.querySelector('#ra-un-cancel').onclick = () => fim(null);
             fundo.addEventListener('mousedown', (e) => { if (e.target === fundo) fim(null); });
-            fundo.querySelector('#ra-un-ok').onclick = () => { const v = fundo.querySelector('#ra-sel-un').value; if (!v) { alerta('Selecione a unidade do relatório.', 'aviso'); return; } fim({ unidade: v, cargo: fundo.querySelector('#ra-sel-cg').value || '' }); };
+            fundo.querySelector('#ra-un-ok').onclick = () => {
+                const un = marcadosEm(fundo.querySelector('#ra-mod-un'));
+                if (!un.length) { alerta('Marque pelo menos uma unidade para o relatório.', 'aviso'); return; }
+                fim({ unidade: juntar(un), cargo: juntar(marcadosEm(fundo.querySelector('#ra-mod-cg'))) });
+            };
         });
     }
-    async function recarregarCargos(unidade, atual) {
-        const sel = $('ra-cargo'); if (!sel) return;
-        const lista = await cargosDaUnidade(unidade);
-        const l2 = atual && !lista.includes(atual) ? [atual].concat(lista) : lista;
-        sel.innerHTML = opcoesCargo(l2, atual || '');
-        if (unidade && !lista.length && !atual) sel.innerHTML = '<option value="">Nenhum cargo cadastrado nesta unidade (opcional)</option>';
+
+    // ---- campos do editor
+    function resumoMulti(arr, vazio, plural) { return !arr.length ? vazio : (arr.length === 1 ? arr[0] : arr.length + ' ' + plural); }
+    function campoUnidade(r, ro) {
+        const unids = unidadesDoGestor();
+        if (!unids.length) return `<input class="modern-input" type="text" id="ra-unidade" value="${esc(r.unidade || '')}" placeholder="Nome da unidade" ${ro ? 'disabled' : ''} oninput="RelAtv.mudarUnidade()">`;
+        const marc = separar(r.unidade);
+        const lista = unids.concat(marc.filter((u) => !unids.includes(u)));
+        return `<details class="ra-ms" ${ro ? 'data-ro="1"' : ''}><summary class="modern-input" id="ra-un-resumo">${esc(resumoMulti(marc, 'Selecione a unidade...', 'unidades'))}</summary>
+            <div class="ra-ms-lista" id="ra-unidade">${listaCaixas(lista, marc, 'RelAtv.mudarUnidade()')}</div></details>`;
     }
-    function linhaDoDocumento(rotulo, valor, depoisDe) {
+    function campoCargo(r, ro) {
+        const marc = separar(r.cargo);
+        return `<details class="ra-ms" ${ro ? 'data-ro="1"' : ''}><summary class="modern-input" id="ra-cg-resumo">${esc(resumoMulti(marc, 'Sem cargo específico (opcional)', 'cargos'))}</summary>
+            <div class="ra-ms-lista" id="ra-cargo">${listaCaixas(marc, marc, 'RelAtv.mudarCargo()')}</div></details>`;
+    }
+    async function recarregarCargos(unidades, atuais) {
+        const box = $('ra-cargo'); if (!box) return;
+        const lista = await cargosDasUnidades(unidades);
+        const manter = (atuais || []).filter((c) => lista.includes(c) || !unidades.length);
+        const todos = lista.concat(manter.filter((c) => !lista.includes(c)));
+        box.innerHTML = listaCaixas(todos, manter, 'RelAtv.mudarCargo()', unidades.length ? 'Nenhum cargo cadastrado nestas unidades (opcional)' : 'Escolha a unidade primeiro');
+        atualizarResumos();
+        return manter;
+    }
+    function atualizarResumos() {
+        const u = $('ra-un-resumo'), c = $('ra-cg-resumo');
+        if (u) u.textContent = resumoMulti(valoresMulti('ra-unidade'), 'Selecione a unidade...', 'unidades');
+        if (c) c.textContent = resumoMulti(valoresMulti('ra-cargo'), 'Sem cargo específico (opcional)', 'cargos');
+    }
+    // escreve/atualiza/remove a linha "Unidade(s):" / "Cargo(s):" do texto
+    function linhaDoDocumento(base, plural, valores, depoisDe) {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
         const ps = Array.from(ed.querySelectorAll('p'));
-        const re = new RegExp('^\\s*' + rotulo + ':', 'i');
-        const lu = ps.find((x) => re.test(x.textContent));
-        if (lu) { if (valor) lu.innerHTML = '<b>' + rotulo + ':</b> ' + esc(valor); else lu.remove(); }
-        else if (valor) {
-            const ref = depoisDe.map((r2) => ps.find((x) => new RegExp('^\\s*' + r2 + ':', 'i').test(x.textContent))).find(Boolean);
-            if (ref) ref.insertAdjacentHTML('afterend', '<p><b>' + rotulo + ':</b> ' + esc(valor) + '</p>');
+        const reDe = (b) => new RegExp('^\\s*' + b + 's?:', 'i');
+        const lu = ps.find((x) => reDe(base).test(x.textContent));
+        const rotulo = valores.length > 1 ? plural : base;
+        if (lu) { if (valores.length) lu.innerHTML = '<b>' + rotulo + ':</b> ' + esc(juntar(valores)); else lu.remove(); }
+        else if (valores.length) {
+            const ref = depoisDe.map((r2) => ps.find((x) => reDe(r2).test(x.textContent))).find(Boolean);
+            if (ref) ref.insertAdjacentHTML('afterend', '<p><b>' + rotulo + ':</b> ' + esc(juntar(valores)) + '</p>');
         }
     }
-    function mudarCargo(v) { sujo(); linhaDoDocumento('Cargo', v, ['Unidade', 'Gestor']); agendarPaginacao(); }
-    // troca a unidade e atualiza a linha "Unidade:" do cabeçalho do texto
-    function mudarUnidade(v) {
-        sujo();
-        if (S.somenteLeitura) return;
-        linhaDoDocumento('Unidade', v, ['Gestor']);
-        linhaDoDocumento('Cargo', '', []);          // o cargo anterior pertencia à outra unidade
-        recarregarCargos(v, '');
+    function mudarCargo() { sujo(); if (S.somenteLeitura) return; atualizarResumos(); linhaDoDocumento('Cargo', 'Cargos', valoresMulti('ra-cargo'), ['Unidade', 'Gestor']); agendarPaginacao(); }
+    async function mudarUnidade() {
+        sujo(); if (S.somenteLeitura) return;
+        const un = valoresMulti('ra-unidade');
+        atualizarResumos();
+        linhaDoDocumento('Unidade', 'Unidades', un, ['Gestor']);
+        const mantidos = await recarregarCargos(un, valoresMulti('ra-cargo'));   // cargos de unidades desmarcadas saem
+        linhaDoDocumento('Cargo', 'Cargos', mantidos || [], ['Unidade', 'Gestor']);
         agendarPaginacao();
     }
 
@@ -309,8 +390,8 @@
         return '<h1 style="text-align:center">RELATÓRIO DE ATIVIDADES</h1>'
             + '<p style="text-align:center"><b>Período:</b> ' + esc(mesNome) + '</p>'
             + '<p><b>Gestor:</b> ' + esc(nomeGestor()) + '</p>'
-            + (unidade ? '<p><b>Unidade:</b> ' + esc(unidade) + '</p>' : '')
-            + (cargo ? '<p><b>Cargo:</b> ' + esc(cargo) + '</p>' : '')
+            + (unidade ? '<p><b>' + (separar(unidade).length > 1 ? 'Unidades' : 'Unidade') + ':</b> ' + esc(unidade) + '</p>' : '')
+            + (cargo ? '<p><b>' + (separar(cargo).length > 1 ? 'Cargos' : 'Cargo') + ':</b> ' + esc(cargo) + '</p>' : '')
             + '<p><br></p><h2>1. Atividades realizadas</h2><p><br></p>'
             + '<h2>2. Ocorrências e pontos de atenção</h2><p><br></p>'
             + '<h2>3. Observações</h2><p><br></p>';
@@ -320,8 +401,9 @@
     function mesAtualIso() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
 
     async function novo() {
+        await resolverNomeGestor();
         const unids = unidadesDoGestor();
-        let unidade = unids[0] || '', cargo = '';
+        let unidade = '', cargo = '';
         if (unids.length >= 1) { const esc2 = await escolherUnidade(unids); if (!esc2) return; unidade = esc2.unidade; cargo = esc2.cargo; }
         S.atual = { id: null, titulo: 'Relatório de Atividades', mes_referencia: mesAtualIso(), unidade, cargo, conteudo_html: modeloInicial(mesAtualIso(), unidade, cargo), imagens: [], status: 'rascunho', pdf_url: null };
         S.somenteLeitura = false;
@@ -409,13 +491,6 @@
         </div>`;
     }
 
-    function campoUnidade(r, ro) {
-        const unids = unidadesDoGestor();
-        if (!unids.length) return `<input class="modern-input" id="ra-unidade" value="${esc(r.unidade || '')}" placeholder="Nome da unidade" ${ro ? 'disabled' : ''} oninput="RelAtv.mudarUnidade(this.value)">`;
-        const lista = r.unidade && !unids.includes(r.unidade) ? [r.unidade].concat(unids) : unids;
-        return `<select class="modern-input" id="ra-unidade" ${ro ? 'disabled' : ''} onchange="RelAtv.mudarUnidade(this.value)"><option value="">Selecione a unidade...</option>${lista.map((u) => `<option value="${esc(u)}" ${u === r.unidade ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select>`;
-    }
-
     function desenharEditor() {
         const r = S.atual, ro = S.somenteLeitura;
         $('ra-raiz').innerHTML = `
@@ -433,8 +508,8 @@
             <div class="ra-meta">
                 <div><label>Título do relatório</label><input class="modern-input" id="ra-titulo" value="${esc(r.titulo)}" ${ro ? 'disabled' : ''} oninput="RelAtv.sujo()"></div>
                 <div><label>Mês de referência</label><input class="modern-input" type="month" id="ra-mes" value="${esc(r.mes_referencia || '')}" ${ro ? 'disabled' : ''} oninput="RelAtv.sujo()"></div>
-                <div><label>Unidade deste relatório</label>${campoUnidade(r, ro)}</div>
-                <div><label>Cargo (opcional)</label><select class="modern-input" id="ra-cargo" ${ro ? 'disabled' : ''} onchange="RelAtv.mudarCargo(this.value)"><option value="">${r.cargo ? esc(r.cargo) : 'Sem cargo específico (opcional)'}</option></select></div>
+                <div><label>Unidades deste relatório</label>${campoUnidade(r, ro)}</div>
+                <div><label>Cargos (opcional)</label>${campoCargo(r, ro)}</div>
             </div>
             ${ro ? '<div class="ra-aviso amarelo">Este relatório já foi enviado ao financeiro e não pode mais ser editado. Use o botão de copiar na lista para criar uma nova versão.</div>' : ''}
             ${ro ? '' : barraHtml()}
@@ -452,7 +527,7 @@
         desenharImagens();
         ajustarEscala();
         paginar();
-        recarregarCargos(S.atual.unidade, S.atual.cargo);
+        recarregarCargos(separar(S.atual.unidade), separar(S.atual.cargo));
         S.dirty = false;
         atualizarStatusSalvo();
         clearInterval(S.timerAuto);
@@ -899,13 +974,14 @@
     }
     // desenha: [assinatura] / linha / NOME / Gestor(a) — Unidade (fundo transparente)
     async function comporBlocoAssinatura(urlAssin) {
+        await resolverNomeGestor();
         const E = 3, W = 420, H_ASSIN = urlAssin ? 110 : 50;
         let im = null;
         if (urlAssin) {
             im = await new Promise((res) => { const x = new Image(); x.crossOrigin = 'anonymous'; x.onload = () => res(x); x.onerror = () => res(null); x.src = urlAssin; });
         }
         const nome = String(nomeGestor() || '').toUpperCase();
-        const un = String((($('ra-unidade') || {}).value) || (S.atual && S.atual.unidade) || '');
+        const un = juntar(valoresMulti('ra-unidade')) || String((S.atual && S.atual.unidade) || '');
         const papel = 'Gestor(a) responsável';
         const H = H_ASSIN + 18 + 30 + 26 + (un ? 24 : 0) + 8;
         const montar = (usarImg) => {
@@ -1075,7 +1151,7 @@
     function coletar() {
         const r = S.atual;
         r.titulo = ($('ra-titulo').value || '').trim() || 'Relatório de Atividades';
-        r.mes_referencia = $('ra-mes').value || null; r.unidade = ($('ra-unidade').value || '').trim() || null; r.cargo = ($('ra-cargo') && $('ra-cargo').value || '').trim() || null;
+        r.mes_referencia = $('ra-mes').value || null; r.unidade = juntar(valoresMulti('ra-unidade')) || null; r.cargo = juntar(valoresMulti('ra-cargo')) || null;
         r.conteudo_html = html();
         return r;
     }
@@ -1092,6 +1168,7 @@
         if ((S.atual.imagens || []).some((i) => i.subindo)) { if (mostrar) alerta('Aguarde o envio das imagens terminar.', 'aviso'); return false; }
         S.salvando = true;
         try {
+            await resolverNomeGestor();
             const r = coletar();
             const gravar = async (p) => {
                 if (r.id) return await supabaseClient.from('relatorios_atividades').update(p).eq('id', r.id).eq('gestor_id', idGestor());
@@ -1195,7 +1272,7 @@
 
     async function enviar() {
         if (S.pdfGerando || S.somenteLeitura) return;
-        if (!(($('ra-unidade') || {}).value || '').trim()) return alerta('Selecione a unidade deste relatório antes de enviar ao financeiro.', 'aviso');
+        if (!valoresMulti('ra-unidade').length) return alerta('Selecione a unidade deste relatório antes de enviar ao financeiro.', 'aviso');
         const ok = typeof window.mostrarConfirmacao === 'function'
             ? await window.mostrarConfirmacao('Enviar este relatório ao financeiro? Depois de enviado ele não poderá mais ser editado (você pode criar uma cópia).', 'Enviar ao financeiro')
             : confirm('Enviar este relatório ao financeiro?');
@@ -1234,8 +1311,9 @@
         carregarLista();
     }
     document.addEventListener('mousedown', fecharSelecaoImg, true);
+    document.addEventListener('mousedown', (e) => { document.querySelectorAll('details.ra-ms[open]').forEach((d) => { if (!d.contains(e.target)) d.removeAttribute('open'); }); }, true);
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, _modalUnidades: null, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
