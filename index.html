@@ -57851,16 +57851,249 @@ window.renderizarConfigAssinaturaAdmin = function() {
     if (!temAssinatura) window.abrirFormAssinaturaAdmin();
 };
 
+// =========================================================================
+// ✍️ LIMPEZA AUTOMÁTICA DA FOTO DA ASSINATURA (100% no navegador, sem site externo)
+// Tira o papel, a sombra e as pautas de caderno, deixando só a tinta (PNG transparente).
+// Passos: (1) mede o "papel" ao redor e vê o que é mais escuro que ele; (2) acha as pautas
+// retas e compridas e apaga só uma faixa fina em volta delas; (3) onde a pauta cruzava o
+// traço, fecha a falha pra assinatura continuar inteira; (4) fica só com o bloco principal;
+// (5) recorta e pinta de azul-escuro com borda suave.
+// =========================================================================
+window._assinLimpeza = {};
+(function(NS) {
+    const MAXLADO = 1600;
+
+    // ---- utilidades de matriz ----
+    function boxBlur1D(src, dst, w, h, r, horiz) {
+        const n = horiz ? w : h, m = horiz ? h : w, d = 2 * r + 1;
+        for (let j = 0; j < m; j++) {
+            let acc = 0;
+            const idx = (i) => horiz ? j * w + i : i * w + j;
+            for (let i = -r; i <= r; i++) acc += src[idx(Math.min(n - 1, Math.max(0, i)))];
+            for (let i = 0; i < n; i++) {
+                dst[idx(i)] = acc / d;
+                acc += src[idx(Math.min(n - 1, i + r + 1))] - src[idx(Math.max(0, i - r))];
+            }
+        }
+    }
+    function blur(src, w, h, r, passes) {
+        let a = Float32Array.from(src), b = new Float32Array(src.length);
+        for (let p = 0; p < passes; p++) { boxBlur1D(a, b, w, h, r, true); boxBlur1D(b, a, w, h, r, false); }
+        return a;
+    }
+    function morfo1D(src, dst, w, h, r, horiz, usarMax) {
+        const n = horiz ? w : h, m = horiz ? h : w;
+        for (let j = 0; j < m; j++) {
+            for (let i = 0; i < n; i++) {
+                let v = usarMax ? -1e9 : 1e9;
+                const a = Math.max(0, i - r), z = Math.min(n - 1, i + r);
+                for (let k = a; k <= z; k++) {
+                    const x = src[horiz ? j * w + k : k * w + j];
+                    if (usarMax ? x > v : x < v) v = x;
+                }
+                dst[horiz ? j * w + i : i * w + j] = v;
+            }
+        }
+    }
+    function dilatar(src, w, h, r, usarMax) { // quadrado (2r+1), separável
+        const t = new Float32Array(src.length), o = new Float32Array(src.length);
+        morfo1D(src, t, w, h, r, true, usarMax); morfo1D(t, o, w, h, r, false, usarMax);
+        return o;
+    }
+    function rotulos(bin, w, h) { // componentes conexos (8 vizinhos) com caixa e área
+        const lab = new Int32Array(w * h), caixas = [null];
+        let n = 0; const pilha = [];
+        for (let s = 0; s < w * h; s++) {
+            if (!bin[s] || lab[s]) continue;
+            n++; const c = { x0: w, y0: h, x1: 0, y1: 0, area: 0 };
+            lab[s] = n; pilha.push(s);
+            while (pilha.length) {
+                const p = pilha.pop(), x = p % w, y = (p / w) | 0;
+                c.area++; if (x < c.x0) c.x0 = x; if (x > c.x1) c.x1 = x; if (y < c.y0) c.y0 = y; if (y > c.y1) c.y1 = y;
+                for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+                    const nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const q = ny * w + nx;
+                    if (bin[q] && !lab[q]) { lab[q] = n; pilha.push(q); }
+                }
+            }
+            caixas.push(c);
+        }
+        return { lab, caixas, n };
+    }
+    function ajustePoli3(ts, ps) { // mínimos quadrados grau 3 (resolve 4x4)
+        const A = Array.from({ length: 4 }, () => new Float64Array(5));
+        const tm = ts.reduce((a, b) => a + b, 0) / ts.length;
+        for (let i = 0; i < ts.length; i++) {
+            const t = (ts[i] - tm) / 500, pw = [1, t, t * t, t * t * t];
+            for (let r = 0; r < 4; r++) { for (let c = 0; c < 4; c++) A[r][c] += pw[r] * pw[c]; A[r][4] += pw[r] * ps[i]; }
+        }
+        for (let i = 0; i < 4; i++) {
+            let mx = i; for (let r = i + 1; r < 4; r++) if (Math.abs(A[r][i]) > Math.abs(A[mx][i])) mx = r;
+            [A[i], A[mx]] = [A[mx], A[i]];
+            if (Math.abs(A[i][i]) < 1e-12) return null;
+            for (let r = i + 1; r < 4; r++) { const f = A[r][i] / A[i][i]; for (let c = i; c < 5; c++) A[r][c] -= f * A[i][c]; }
+        }
+        const x = [0, 0, 0, 0];
+        for (let i = 3; i >= 0; i--) { let s = A[i][4]; for (let c = i + 1; c < 4; c++) s -= A[i][c] * x[c]; x[i] = s / A[i][i]; }
+        return (t0) => { const t = (t0 - tm) / 500; return x[0] + x[1] * t + x[2] * t * t + x[3] * t * t * t; };
+    }
+
+    // ---- 1) mapa de "escuridão" relativo ao papel ----
+    function mapaEscuro(gray, w, h) {
+        const f = 4, sw = Math.ceil(w / f), sh = Math.ceil(h / f);
+        let s = new Float32Array(sw * sh);
+        for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+            let acc = 0, n = 0;
+            for (let j = 0; j < f; j++) for (let i = 0; i < f; i++) {
+                const xx = x * f + i, yy = y * f + j; if (xx < w && yy < h) { acc += gray[yy * w + xx]; n++; }
+            }
+            s[y * sw + x] = acc / n;
+        }
+        s = dilatar(s, sw, sh, 4, true); s = dilatar(s, sw, sh, 4, false); // fechamento: apaga a tinta, fica o papel
+        s = blur(s, sw, sh, 3, 3);
+        const dark = new Float32Array(w * h);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            const fx = Math.min(sw - 1.001, x / f), fy = Math.min(sh - 1.001, y / f);
+            const x0 = fx | 0, y0 = fy | 0, tx = fx - x0, ty = fy - y0;
+            const bg = (s[y0 * sw + x0] * (1 - tx) + s[y0 * sw + x0 + 1] * tx) * (1 - ty) + (s[(y0 + 1) * sw + x0] * (1 - tx) + s[(y0 + 1) * sw + x0 + 1] * tx) * ty;
+            const v = 1 - gray[y * w + x] / Math.max(bg, 1);
+            dark[y * w + x] = v < 0 ? 0 : v > 1 ? 1 : v;
+        }
+        return dark;
+    }
+
+    // ---- 2) pautas: retas longas, quase verticais ou horizontais ----
+    function acharPautas(dark, mask, w, h) {
+        const band = new Uint8Array(w * h);
+        const L = Math.round(40 * Math.min(w, h) / 1000) + 10;
+        // vertical: colunas com muitas sequências longas de pixels escuros
+        const cs = new Int32Array(w);
+        for (let x = 0; x < w; x++) {
+            let run = 0;
+            for (let y = 0; y <= h; y++) {
+                if (y < h && mask[y * w + x]) run++;
+                else { if (run >= L) cs[x] += run; run = 0; }
+            }
+        }
+        const cols = []; for (let x = 0; x < w; x++) if (cs[x] > 0.5 * h) cols.push(x);
+        const grupos = []; cols.forEach(x => { const g = grupos[grupos.length - 1]; if (g && x - g[g.length - 1] <= 6) g.push(x); else grupos.push([x]); });
+        const ds = blur(dark, w, h, 1, 1);
+        for (const g of grupos) {
+            let x0 = g[0]; for (const x of g) if (cs[x] > cs[x0]) x0 = x;
+            const pts = [];
+            for (const dir of [1, -1]) {
+                let x = x0, slope = 0;
+                for (let y = (dir === 1 ? (h >> 1) : (h >> 1) - 1); y >= 0 && y < h; y += dir) {
+                    const pred = x + slope, pc = Math.round(pred);
+                    let best = -1, bv = 0.06;
+                    for (let d = -2; d <= 2; d++) { const xx = pc + d; if (xx >= 0 && xx < w && ds[y * w + xx] > bv) { bv = ds[y * w + xx]; best = xx; } }
+                    if (best >= 0) { let l = best, r = best; while (l > 0 && ds[y * w + l - 1] > 0.06 && best - l < 12) l--; while (r < w - 1 && ds[y * w + r + 1] > 0.06 && r - best < 12) r++; if (r - l + 1 > 10) best = -1; }
+                    if (best >= 0) {
+                        const novo = 0.8 * pred + 0.2 * best;
+                        slope = 0.95 * slope + 0.05 * (novo - x); x = novo; pts.push([y, best]);
+                        continue;
+                    }
+                    x = pred;
+                }
+            }
+            if (pts.length < h * 0.2) continue;
+            let ts = pts.map(p => p[0]), ps = pts.map(p => p[1]), fn = null;
+            for (let it = 0; it < 4; it++) {
+                fn = ajustePoli3(ts, ps); if (!fn) break;
+                const nt = [], np = [];
+                pts.forEach(p => { if (Math.abs(fn(p[0]) - p[1]) < 2.5) { nt.push(p[0]); np.push(p[1]); } });
+                if (nt.length < 20) break; ts = nt; ps = np;
+            }
+            if (!fn) continue;
+            for (let y = 0; y < h; y++) {
+                const cx = Math.round(fn(y));
+                for (let i = cx - 5; i <= cx + 5; i++) if (i >= 0 && i < w) band[y * w + i] = 1;
+            }
+        }
+        return band;
+    }
+    function transpor(a, w, h) { const o = new a.constructor(a.length); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o[x * h + y] = a[y * w + x]; return o; }
+
+    // ---- processamento principal (recebe pixels RGBA, devolve RGBA transparente recortado) ----
+    NS.processar = function(rgba, w, h, forca) {
+        forca = forca || 1;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+        const dark = mapaEscuro(gray, w, h);
+        const tLo = 0.09 / forca, tHi = 0.20 / forca;
+        const mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = dark[i] > tLo ? 1 : 0;
+        // pautas verticais e horizontais (guardadas separadas: o preenchimento é medido ao longo de cada uma)
+        const bandV = acharPautas(dark, mask, w, h);
+        const bandH = transpor(acharPautas(transpor(dark, w, h), transpor(mask, w, h), h, w), h, w);
+        const band = new Uint8Array(w * h); for (let i = 0; i < band.length; i++) band[i] = (bandV[i] || bandH[i]) ? 1 : 0;
+        // histerese: mantém "lo" só quando ligado a algum "hi"
+        const R = rotulos(mask, w, h), tem = new Uint8Array(R.n + 1);
+        for (let i = 0; i < w * h; i++) if (dark[i] > tHi && R.lab[i]) tem[R.lab[i]] = 1;
+        const inkFora = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) inkFora[i] = (R.lab[i] && tem[R.lab[i]] && !band[i]) ? 1 : 0;
+        // fecha a falha onde a pauta cruzava o traço, SÓ em trechos curtos (largura de um traço):
+        // um vão comprido ao longo da pauta não é traço cruzando, é só tinta dos dois lados.
+        const fech = dilatar(dilatar(inkFora, w, h, 6, true), w, h, 6, false);
+        const ink = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) ink[i] = inkFora[i] ? 1 : 0;
+        const limTrecho = Math.max(10, Math.round(Math.max(w, h) * 0.01));
+        [[bandV, true], [bandH, false]].forEach(([bd, vert]) => {
+            const f = new Uint8Array(w * h); for (let i = 0; i < f.length; i++) f[i] = (bd[i] && fech[i] && !inkFora[i]) ? 1 : 0;
+            const F = rotulos(f, w, h);
+            for (let i = 0; i < f.length; i++) {
+                if (!F.lab[i]) continue; const c = F.caixas[F.lab[i]];
+                const ext = vert ? (c.y1 - c.y0 + 1) : (c.x1 - c.x0 + 1);
+                if (ext <= limTrecho) ink[i] = 1;
+            }
+        });
+        // sobras de pauta (finas e compridas) e ruídos pequenos saem; fica o bloco principal
+        let C = rotulos(ink, w, h); const lado = Math.max(w, h);
+        const limComp = lado * 0.08;
+        const ok = new Uint8Array(C.n + 1);
+        for (let k = 1; k <= C.n; k++) {
+            const c = C.caixas[k], cw = c.x1 - c.x0 + 1, ch = c.y1 - c.y0 + 1;
+            const comp = Math.max(cw, ch), fino = Math.min(cw, ch);
+            ok[k] = (c.area >= 25 && !(comp > limComp && comp >= 10 * fino)) ? 1 : 0;
+        }
+        let semente = 0, melhor = 0; for (let k = 1; k <= C.n; k++) if (ok[k] && C.caixas[k].area > melhor) { melhor = C.caixas[k].area; semente = k; }
+        if (!semente) return null;
+        const marg = Math.round(lado * 0.02), inc = new Uint8Array(C.n + 1); inc[semente] = 1;
+        let box = { ...C.caixas[semente] }, mudou = true;
+        while (mudou) {
+            mudou = false;
+            for (let k = 1; k <= C.n; k++) {
+                if (!ok[k] || inc[k]) continue;
+                const c = C.caixas[k];
+                if (c.x0 <= box.x1 + marg && c.x1 >= box.x0 - marg && c.y0 <= box.y1 + marg && c.y1 >= box.y0 - marg) {
+                    inc[k] = 1; mudou = true;
+                    box.x0 = Math.min(box.x0, c.x0); box.y0 = Math.min(box.y0, c.y0); box.x1 = Math.max(box.x1, c.x1); box.y1 = Math.max(box.y1, c.y1);
+                }
+            }
+        }
+        const fin = new Float32Array(w * h); for (let i = 0; i < w * h; i++) fin[i] = (C.lab[i] && inc[C.lab[i]]) ? 1 : 0;
+        const alfa = blur(fin, w, h, 1, 1);
+        const pad = 8, x0 = Math.max(0, box.x0 - pad), y0 = Math.max(0, box.y0 - pad), x1 = Math.min(w - 1, box.x1 + pad), y1 = Math.min(h - 1, box.y1 + pad);
+        const ow = x1 - x0 + 1, oh = y1 - y0 + 1, out = new Uint8ClampedArray(ow * oh * 4);
+        for (let y = 0; y < oh; y++) for (let x = 0; x < ow; x++) {
+            const a = Math.min(1, alfa[(y + y0) * w + (x + x0)] * 1.35), o = (y * ow + x) * 4;
+            out[o] = 0; out[o + 1] = 35; out[o + 2] = 71; out[o + 3] = Math.round(a * 255);
+        }
+        return { data: out, w: ow, h: oh };
+    };
+})(window._assinLimpeza);
+
 window.abrirFormAssinaturaAdmin = function() {
     const form = document.getElementById('form-assinatura-admin');
     if (!form) return;
     form.classList.remove('hidden');
+    window._assinEstado = { origem: null, giro: 0, forca: 1, usarOriginal: false, blob: null };
     form.innerHTML = `
         ${window._blocoDicaRemoveBg()}
         <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top: 10px;">
             <div>
-                <label style="font-size:0.78rem; color: var(--cor-texto-secundario); display:block; margin-bottom:4px;">Assinatura (PNG/JPG)</label>
-                <input type="file" id="input-nova-assinatura-admin" accept="image/*" style="max-width: 220px; font-size: 0.78rem;">
+                <label style="font-size:0.78rem; color: var(--cor-texto-secundario); display:block; margin-bottom:4px;">Foto da assinatura (PNG/JPG)</label>
+                <input type="file" id="input-nova-assinatura-admin" accept="image/*" style="max-width: 220px; font-size: 0.78rem;" onchange="window._assinAoEscolher(this)">
             </div>
             <div style="display:flex; align-items:flex-end;">
                 <button type="button" class="btn-success" style="padding: 8px 14px; font-size: 0.8rem;" onclick="window.salvarAssinaturaAdmin()">
@@ -57868,23 +58101,109 @@ window.abrirFormAssinaturaAdmin = function() {
                 </button>
             </div>
         </div>
+        <div id="assin-previa" class="hidden" style="margin-top:12px;">
+            <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:stretch;">
+                <div style="flex:1; min-width:200px;">
+                    <div style="font-size:0.72rem; color:var(--cor-texto-secundario); margin-bottom:4px;">Foto original</div>
+                    <div style="border:1px solid var(--cor-borda, rgba(128,128,128,0.3)); border-radius:8px; background:#fff; height:150px; display:flex; align-items:center; justify-content:center; overflow:hidden;"><img id="assin-img-orig" style="max-width:100%; max-height:100%;"></div>
+                </div>
+                <div style="flex:1; min-width:200px;">
+                    <div style="font-size:0.72rem; color:var(--cor-texto-secundario); margin-bottom:4px;">Como vai ficar no documento (fundo transparente)</div>
+                    <div style="border:1px solid var(--cor-borda, rgba(128,128,128,0.3)); border-radius:8px; height:150px; display:flex; align-items:center; justify-content:center; overflow:hidden; background-color:#fff; background-image:linear-gradient(45deg,#e4e4e4 25%,transparent 25%,transparent 75%,#e4e4e4 75%),linear-gradient(45deg,#e4e4e4 25%,transparent 25%,transparent 75%,#e4e4e4 75%); background-size:16px 16px; background-position:0 0,8px 8px;"><img id="assin-img-res" style="max-width:100%; max-height:100%;"></div>
+                </div>
+            </div>
+            <div id="assin-msg" style="font-size:0.78rem; margin-top:8px;"></div>
+            <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:8px; font-size:0.78rem; color:var(--cor-texto-secundario);">
+                <button type="button" class="btn-secondary" style="padding:5px 12px; font-size:0.76rem;" onclick="window._assinGirar()"><i class="fa-solid fa-rotate-right"></i> Girar 90°</button>
+                <label style="display:flex; align-items:center; gap:6px;">Mais suave
+                    <input type="range" id="assin-forca" min="0.6" max="1.8" step="0.1" value="1" style="width:120px;" onchange="window._assinForca(this.value)">
+                    Mais forte</label>
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="assin-orig-chk" onchange="window._assinUsarOriginal(this.checked)"> Usar a foto original (sem limpeza)</label>
+            </div>
+        </div>
     `;
 };
 
-// 👇 Dica com link direto pro remove.bg — tira o fundo da foto da assinatura e devolve
-// um PNG transparente, prontinho pra ficar bonito em cima do documento (sem aquele
-// fundo branco/quadrado por trás da assinatura). Abre em outra aba, não sai do sistema.
+// 👇 Dica de como tirar a foto. A limpeza do fundo agora é feita pelo próprio sistema
+// (window._assinLimpeza). O link do remove.bg fica como alternativa opcional.
 window._blocoDicaRemoveBg = function() {
     return `
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding: 8px 12px; margin-top: 8px; background: rgba(79,195,247,0.06); border: 1px solid rgba(79,195,247,0.2); border-radius: 8px; font-size: 0.78rem; color: var(--cor-texto-secundario);">
-            <i class="fa-solid fa-wand-magic-sparkles" style="color:#4fc3f7;"></i>
-            <span>Dica: se a foto da sua assinatura vier com fundo (papel, sombra), dá pra deixar o fundo transparente (PNG) de graça nesse site:</span>
-            <a href="https://www.remove.bg/pt-br/upload" target="_blank" rel="noopener noreferrer" class="btn-secondary" style="padding: 5px 12px; font-size: 0.76rem; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
-                <i class="fa-solid fa-up-right-from-square"></i> Abrir remove.bg
+        <div style="display:flex; align-items:flex-start; gap:10px; padding: 8px 12px; margin-top: 8px; background: rgba(79,195,247,0.06); border: 1px solid rgba(79,195,247,0.2); border-radius: 8px; font-size: 0.78rem; color: var(--cor-texto-secundario);">
+            <i class="fa-solid fa-wand-magic-sparkles" style="color:#4fc3f7; margin-top:2px;"></i>
+            <span>O sistema tira o fundo da foto sozinho (fica PNG transparente). Para sair perfeito: assine com <b>caneta escura</b> em uma <b>folha branca lisa</b>, com boa luz e sem sombra, e tire a foto bem de frente. Dá pra conferir e ajustar antes de salvar.</span>
+            <a href="https://www.remove.bg/pt-br/upload" target="_blank" rel="noopener noreferrer" class="btn-secondary" style="padding: 5px 12px; font-size: 0.76rem; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;" title="Alternativa, caso a limpeza automática não fique boa">
+                <i class="fa-solid fa-up-right-from-square"></i> remove.bg
             </a>
         </div>
     `;
 };
+
+window._assinAoEscolher = function(inp) {
+    const f = inp.files && inp.files[0];
+    const prev = document.getElementById('assin-previa');
+    if (!f) { if (prev) prev.classList.add('hidden'); return; }
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = function() {
+        const M = 1600, e = Math.min(1, M / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * e); c.height = Math.round(img.naturalHeight * e);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        const st = window._assinEstado || (window._assinEstado = {});
+        st.origem = c; st.giro = 0; st.usarOriginal = false; st.blob = null; st.arquivoOriginal = f;
+        const chk = document.getElementById('assin-orig-chk'); if (chk) chk.checked = false;
+        document.getElementById('assin-img-orig').src = c.toDataURL('image/jpeg', 0.7);
+        if (prev) prev.classList.remove('hidden');
+        window._assinRodar(true);
+    };
+    img.onerror = function() { URL.revokeObjectURL(url); mostrarAlerta("Não consegui abrir essa imagem. Use PNG ou JPG.", "erro"); };
+    img.src = url;
+};
+
+window._assinGirarCanvas = function(c, graus) {
+    if (!graus) return c;
+    const r = document.createElement('canvas'), q = graus % 180 !== 0;
+    r.width = q ? c.height : c.width; r.height = q ? c.width : c.height;
+    const x = r.getContext('2d'); x.translate(r.width / 2, r.height / 2); x.rotate(graus * Math.PI / 180);
+    x.drawImage(c, -c.width / 2, -c.height / 2);
+    return r;
+};
+
+// roda a limpeza com o giro/intensidade atuais; auto = escolhe sozinho girar quando sai muito "em pé"
+window._assinRodar = function(auto) {
+    const st = window._assinEstado; if (!st || !st.origem) return;
+    const msg = document.getElementById('assin-msg'), res = document.getElementById('assin-img-res');
+    const tentar = (graus) => {
+        const c = window._assinGirarCanvas(st.origem, graus);
+        const id = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+        const r = window._assinLimpeza.processar(id.data, c.width, c.height, st.forca);
+        return r;
+    };
+    let r = null;
+    try {
+        r = tentar(st.giro);
+        if (auto && r && r.h > r.w * 1.4) { // assinatura quase sempre é mais larga que alta: tenta girar
+            const r2 = tentar(270);
+            if (r2 && r2.w > r2.h) { st.giro = 270; r = r2; }
+        }
+    } catch (e) { console.error('Limpeza da assinatura falhou:', e); r = null; }
+    if (!r) {
+        st.blob = null; st.usarOriginal = true;
+        const chk = document.getElementById('assin-orig-chk'); if (chk) chk.checked = true;
+        res.src = '';
+        if (msg) { msg.style.color = '#ffc107'; msg.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Não consegui separar a assinatura do fundo. Tire outra foto (papel branco liso, boa luz) ou use a foto original.'; }
+        return;
+    }
+    const o = document.createElement('canvas'); o.width = r.w; o.height = r.h;
+    o.getContext('2d').putImageData(new ImageData(r.data, r.w, r.h), 0, 0);
+    res.src = o.toDataURL('image/png');
+    if (msg) { msg.style.color = '#28a745'; msg.innerHTML = '<i class="fa-solid fa-circle-check"></i> Fundo removido. Se cortou algum pedaço ou sobrou risco, mexa na intensidade; se estiver deitada, use Girar 90°.'; }
+    o.toBlob(b => { st.blob = b; }, 'image/png');
+};
+window._assinGirar = function() { const st = window._assinEstado; if (!st) return; st.giro = (st.giro + 90) % 360; window._assinRodar(false); };
+window._assinForca = function(v) { const st = window._assinEstado; if (!st) return; st.forca = parseFloat(v) || 1; window._assinRodar(false); };
+window._assinUsarOriginal = function(v) { const st = window._assinEstado; if (st) st.usarOriginal = !!v; };
 
 window.salvarAssinaturaAdmin = async function() {
     const inputAssin = document.getElementById('input-nova-assinatura-admin');
@@ -57899,7 +58218,12 @@ window.salvarAssinaturaAdmin = async function() {
         const caminhoBase = `Assinaturas_Admin/${formatarNomePasta(usuarioAtual.nome)}`;
         const novaCfg = { ...cfgAtual };
 
-        const urls = await subirDocumentos(caminhoBase, inputAssin.files, 'Assinatura');
+        // 👇 Se a limpeza deu certo (e a pessoa não pediu a original), sobe o PNG transparente
+        const st = window._assinEstado || {};
+        let arquivos = inputAssin.files;
+        if (st.blob && !st.usarOriginal) arquivos = [new File([st.blob], 'assinatura.png', { type: 'image/png' })];
+
+        const urls = await subirDocumentos(caminhoBase, arquivos, 'Assinatura');
         novaCfg.assinatura_url = urls[0];
         novaCfg.atualizado_em = new Date().toISOString();
 
