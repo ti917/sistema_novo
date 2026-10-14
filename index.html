@@ -57921,22 +57921,22 @@ window._assinLimpeza = {};
         }
         return { lab, caixas, n };
     }
-    function ajustePoli3(ts, ps) { // mínimos quadrados grau 3 (resolve 4x4)
-        const A = Array.from({ length: 4 }, () => new Float64Array(5));
+    function ajustePoli(ts, ps, g) { // mínimos quadrados de grau g (0..3)
+        const n = g + 1, A = Array.from({ length: n }, () => new Float64Array(n + 1));
         const tm = ts.reduce((a, b) => a + b, 0) / ts.length;
         for (let i = 0; i < ts.length; i++) {
-            const t = (ts[i] - tm) / 500, pw = [1, t, t * t, t * t * t];
-            for (let r = 0; r < 4; r++) { for (let c = 0; c < 4; c++) A[r][c] += pw[r] * pw[c]; A[r][4] += pw[r] * ps[i]; }
+            const t = (ts[i] - tm) / 500, pw = []; for (let k = 0; k < n; k++) pw.push(Math.pow(t, k));
+            for (let r = 0; r < n; r++) { for (let c = 0; c < n; c++) A[r][c] += pw[r] * pw[c]; A[r][n] += pw[r] * ps[i]; }
         }
-        for (let i = 0; i < 4; i++) {
-            let mx = i; for (let r = i + 1; r < 4; r++) if (Math.abs(A[r][i]) > Math.abs(A[mx][i])) mx = r;
+        for (let i = 0; i < n; i++) {
+            let mx = i; for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[mx][i])) mx = r;
             [A[i], A[mx]] = [A[mx], A[i]];
             if (Math.abs(A[i][i]) < 1e-12) return null;
-            for (let r = i + 1; r < 4; r++) { const f = A[r][i] / A[i][i]; for (let c = i; c < 5; c++) A[r][c] -= f * A[i][c]; }
+            for (let r = i + 1; r < n; r++) { const f = A[r][i] / A[i][i]; for (let c = i; c <= n; c++) A[r][c] -= f * A[i][c]; }
         }
-        const x = [0, 0, 0, 0];
-        for (let i = 3; i >= 0; i--) { let s = A[i][4]; for (let c = i + 1; c < 4; c++) s -= A[i][c] * x[c]; x[i] = s / A[i][i]; }
-        return (t0) => { const t = (t0 - tm) / 500; return x[0] + x[1] * t + x[2] * t * t + x[3] * t * t * t; };
+        const x = new Array(n).fill(0);
+        for (let i = n - 1; i >= 0; i--) { let s = A[i][n]; for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c]; x[i] = s / A[i][i]; }
+        return (t0) => { const t = (t0 - tm) / 500; let v = 0; for (let k = 0; k < n; k++) v += x[k] * Math.pow(t, k); return v; };
     }
 
     // ---- 1) mapa de "escuridão" relativo ao papel ----
@@ -57978,34 +57978,65 @@ window._assinLimpeza = {};
         }
         const cols = []; for (let x = 0; x < w; x++) if (cs[x] > 0.5 * h) cols.push(x);
         const grupos = []; cols.forEach(x => { const g = grupos[grupos.length - 1]; if (g && x - g[g.length - 1] <= 6) g.push(x); else grupos.push([x]); });
-        const ds = blur(dark, w, h, 1, 1);
+        const ds = dark, retas = [];
         for (const g of grupos) {
             let x0 = g[0]; for (const x of g) if (cs[x] > cs[x0]) x0 = x;
             const pts = [];
+            // devolve o centro da faixa escura estreita perto de xc na linha y (ou -1)
+            const achar = (y, xc, jan) => {
+                let best = -1, bv = 0.06;
+                for (let d = -jan; d <= jan; d++) { const xx = xc + d; if (xx >= 0 && xx < w && ds[y * w + xx] > bv) { bv = ds[y * w + xx]; best = xx; } }
+                if (best < 0) return -1;
+                const meio = bv * 0.5; let l = best, r = best;
+                while (l > 0 && ds[y * w + l - 1] > meio && best - l < 12) l--;
+                while (r < w - 1 && ds[y * w + r + 1] > meio && r - best < 12) r++;
+                return (r - l + 1 > 8) ? -1 : best;
+            };
+            // ponto de partida: o trecho "limpo" (pauta estreita) mais perto do meio da imagem
+            let yIni = -1;
+            for (let d = 0; d < h && yIni < 0; d++) {
+                for (const yy of [(h >> 1) + d, (h >> 1) - d]) if (yy >= 0 && yy < h && achar(yy, x0, 3) >= 0) { yIni = yy; break; }
+            }
+            if (yIni < 0) continue;
             for (const dir of [1, -1]) {
-                let x = x0, slope = 0;
-                for (let y = (dir === 1 ? (h >> 1) : (h >> 1) - 1); y >= 0 && y < h; y += dir) {
+                let x = achar(yIni, x0, 3), slope = 0, perdidos = 0;
+                for (let y = yIni; y >= 0 && y < h; y += dir) {
                     const pred = x + slope, pc = Math.round(pred);
-                    let best = -1, bv = 0.06;
-                    for (let d = -2; d <= 2; d++) { const xx = pc + d; if (xx >= 0 && xx < w && ds[y * w + xx] > bv) { bv = ds[y * w + xx]; best = xx; } }
-                    if (best >= 0) { let l = best, r = best; while (l > 0 && ds[y * w + l - 1] > 0.06 && best - l < 12) l--; while (r < w - 1 && ds[y * w + r + 1] > 0.06 && r - best < 12) r++; if (r - l + 1 > 10) best = -1; }
+                    const best = achar(y, pc, 2 + Math.min(2, perdidos >> 4));
                     if (best >= 0) {
                         const novo = 0.8 * pred + 0.2 * best;
-                        slope = 0.95 * slope + 0.05 * (novo - x); x = novo; pts.push([y, best]);
+                        slope = 0.95 * slope + 0.05 * (novo - x); x = novo; perdidos = 0; pts.push([y, best]);
                         continue;
                     }
-                    x = pred;
+                    perdidos++; x = pred;
                 }
             }
             if (pts.length < h * 0.2) continue;
             let ts = pts.map(p => p[0]), ps = pts.map(p => p[1]), fn = null;
-            for (let it = 0; it < 4; it++) {
-                fn = ajustePoli3(ts, ps); if (!fn) break;
+            for (const [g, lim] of [[1, 6], [1, 4], [2, 3.5], [3, 3], [3, 2.5], [3, 2.5]]) {
+                if (ts.length < 20) break;
+                const f2 = ajustePoli(ts, ps, g); if (!f2) break; fn = f2;
                 const nt = [], np = [];
-                pts.forEach(p => { if (Math.abs(fn(p[0]) - p[1]) < 2.5) { nt.push(p[0]); np.push(p[1]); } });
+                for (let i = 0; i < ts.length; i++) if (Math.abs(fn(ts[i]) - ps[i]) < lim) { nt.push(ts[i]); np.push(ps[i]); }
                 if (nt.length < 20) break; ts = nt; ps = np;
             }
-            if (!fn) continue;
+            if (fn && ts.length >= 20) fn = ajustePoli(ts, ps, 3) || fn;
+            retas.push({ x0, fn, bom: !!fn && ts.length >= 0.6 * h });
+        }
+        // pauta que cruza a assinatura (rastreio ruim): as pautas são paralelas e espaçadas parecido,
+        // então a posição dela sai da média entre as vizinhas bem rastreadas
+        retas.sort((p, q) => p.x0 - q.x0);
+        const finais = [];
+        retas.forEach((r, i) => {
+            if (r.bom) { finais.push(r.fn); return; }
+            let ant = null, pro = null;
+            for (let k = i - 1; k >= 0; k--) if (retas[k].bom) { ant = retas[k]; break; }
+            for (let k = i + 1; k < retas.length; k++) if (retas[k].bom) { pro = retas[k]; break; }
+            if (ant && pro) { const t = (r.x0 - ant.x0) / (pro.x0 - ant.x0); finais.push(y => ant.fn(y) + t * (pro.fn(y) - ant.fn(y))); }
+            else if (ant || pro) { const v = ant || pro; finais.push(y => v.fn(y) + (r.x0 - v.x0)); }
+            else if (r.fn) finais.push(r.fn);
+        });
+        for (const fn of finais) {
             for (let y = 0; y < h; y++) {
                 const cx = Math.round(fn(y));
                 for (let i = cx - 5; i <= cx + 5; i++) if (i >= 0 && i < w) band[y * w + i] = 1;
@@ -58022,11 +58053,28 @@ window._assinLimpeza = {};
         for (let i = 0; i < w * h; i++) gray[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
         const dark = mapaEscuro(gray, w, h);
         const tLo = 0.09 / forca, tHi = 0.20 / forca;
-        const mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = dark[i] > tLo ? 1 : 0;
-        // pautas verticais e horizontais (guardadas separadas: o preenchimento é medido ao longo de cada uma)
-        const bandV = acharPautas(dark, mask, w, h);
-        const bandH = transpor(acharPautas(transpor(dark, w, h), transpor(mask, w, h), h, w), h, w);
-        const band = new Uint8Array(w * h); for (let i = 0; i < band.length; i++) band[i] = (bandV[i] || bandH[i]) ? 1 : 0;
+        // tinta colorida (caneta azul): a pauta é cinza e a tinta tem cor — separa só pela cor,
+        // então a pauta nem entra e a assinatura não precisa ser "cortada" em lugar nenhum
+        const azul = new Float32Array(w * h); let fortes = 0;
+        for (let i = 0; i < w * h; i++) {
+            const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+            const v = b - Math.max(r, g); azul[i] = v;
+            if (v > 30 && dark[i] > 0.3) fortes++;
+        }
+        const modoAzul = fortes >= Math.max(150, 0.0002 * w * h);
+        const mask = new Uint8Array(w * h);
+        let band;
+        if (modoAzul) {
+            const lim = 8;
+            for (let i = 0; i < w * h; i++) mask[i] = (dark[i] > tLo && azul[i] > lim) ? 1 : 0;
+            band = new Uint8Array(w * h);
+        } else {
+            for (let i = 0; i < w * h; i++) mask[i] = dark[i] > tLo ? 1 : 0;
+        }
+        // pautas verticais e horizontais (só no modo de tinta escura/cinza)
+        const bandV = modoAzul ? band : acharPautas(dark, mask, w, h);
+        const bandH = modoAzul ? band : transpor(acharPautas(transpor(dark, w, h), transpor(mask, w, h), h, w), h, w);
+        band = new Uint8Array(w * h); for (let i = 0; i < band.length; i++) band[i] = (bandV[i] || bandH[i]) ? 1 : 0;
         // histerese: mantém "lo" só quando ligado a algum "hi"
         const R = rotulos(mask, w, h), tem = new Uint8Array(R.n + 1);
         for (let i = 0; i < w * h; i++) if (dark[i] > tHi && R.lab[i]) tem[R.lab[i]] = 1;
