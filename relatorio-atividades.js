@@ -221,6 +221,7 @@
             ${b('undo', 'fa-rotate-left', 'Desfazer')}${b('redo', 'fa-rotate-right', 'Refazer')}
             <span class="sep"></span>
             <button type="button" title="Quebra de página" onmousedown="event.preventDefault()" onclick="RelAtv.quebra()"><i class="fa-solid fa-file-circle-plus"></i> Nova página</button>
+            <button type="button" title="Excluir a página onde está o cursor" onmousedown="event.preventDefault()" onclick="RelAtv.excluirPagina()"><i class="fa-solid fa-file-circle-minus"></i> Excluir página</button>
             <button type="button" title="Inserir imagem (pode arrastar depois)" onclick="document.getElementById('ra-file').click()" id="ra-btn-img"><i class="fa-solid fa-image"></i> Imagem</button>
             <input type="file" id="ra-file" accept="image/*" multiple style="display:none" onchange="RelAtv.imagens(this.files); this.value=''">
             <span class="sep"></span>
@@ -271,6 +272,7 @@
 
     function ligarEditor(ed) {
         ed.addEventListener('input', () => { sujo(); agendarPaginacao(); });
+        document.addEventListener('selectionchange', () => { const sl = window.getSelection(); if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) S.caretValido = true; });
         ed.addEventListener('paste', (e) => {
             const cd = e.clipboardData; if (!cd) return;
             const arqs = Array.from(cd.files || []).filter((f) => /^image\//.test(f.type));
@@ -320,16 +322,105 @@
     }
     function quebra() {
         const ed = $('ra-ed'); if (!ed) return; ed.focus();
+        const sel = window.getSelection();
+        const dentro = sel && sel.rangeCount && ed.contains(sel.getRangeAt(0).startContainer) && sel.getRangeAt(0).startContainer !== ed.parentNode;
+        if (!dentro || !S.caretValido) {
+            // sem cursor no texto: a nova página entra no FIM do documento (como no Word)
+            const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); sel.removeAllRanges(); sel.addRange(r);
+        }
         document.execCommand('insertHTML', false, '<div class="ra-pgbreak" contenteditable="false">quebra de página</div><p><br></p>');
         sujo(); agendarPaginacao();
+        setTimeout(() => { const u = ed.lastElementChild; if (u) u.scrollIntoView({ block: 'nearest' }); }, 150);
+    }
+
+    // ---------------------------------------------------------------- Excluir página
+    async function excluirPagina() {
+        const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
+        paginar();
+        const base = ed.getBoundingClientRect().top, P = PG.P;
+        const pgDe = (y) => Math.floor((y + 0.5) / P);
+        // página do cursor (se não houver cursor no texto, a última)
+        let n = S.paginas - 1;
+        const sl = window.getSelection();
+        if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) {
+            const rg = sl.getRangeAt(0).cloneRange(); rg.collapse(true);
+            let rc = rg.getClientRects()[0];
+            if (!rc) { let el = rg.startContainer; el = el.nodeType === 1 ? el : el.parentElement; rc = el && el !== ed ? el.getBoundingClientRect() : null; }
+            if (rc) n = Math.min(S.paginas - 1, Math.max(0, pgDe((rc.top - base) / S.escala + 2)));
+        }
+        const txt = 'Excluir a página ' + (n + 1) + ' (texto e imagens dela)? Não dá para desfazer.';
+        const ok = typeof window.mostrarConfirmacao === 'function' ? await window.mostrarConfirmacao(txt, 'Excluir página') : confirm(txt);
+        if (!ok) return;
+        const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
+        const blocos = [];
+        Array.from(ed.children).forEach((c) => { if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else blocos.push(c); });
+        blocos.forEach((b) => {
+            const t = topo(b), h = b.getBoundingClientRect().height / S.escala;
+            const p0 = pgDe(t + parseFloat(b.style.paddingTop || 0)), p1 = pgDe(t + h - 1);
+            const sps = Array.from(b.querySelectorAll('.ra-sp')).map((sp) => ({ sp, pg: pgDe(topo(sp) + sp.getBoundingClientRect().height / S.escala + 1) }));
+            if (p1 < n || p0 > n) return;
+            if (p0 === n && p1 === n) { b.remove(); return; }
+            // bloco que atravessa páginas: apaga só o pedaço que cai na página n
+            const rg = document.createRange();
+            const ini = sps.find((x) => x.pg === n), fim = sps.find((x) => x.pg === n + 1);
+            if (p0 === n) rg.setStartBefore(b.firstChild || b); else if (ini) rg.setStartAfter(ini.sp); else return;
+            if (fim) rg.setEndBefore(fim.sp); else rg.setEndAfter(b.lastChild || b);
+            rg.deleteContents();
+            if (!(b.textContent || '').trim() && !b.querySelector('br,img')) b.remove();
+        });
+        ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
+        ed.querySelectorAll('ul:empty,ol:empty').forEach((x) => x.remove());
+        if (!ed.children.length) ed.innerHTML = '<p><br></p>';
+        S.atual.imagens = (S.atual.imagens || []).filter((i) => i.page !== n).map((i) => (i.page > n ? { ...i, page: i.page - 1 } : i));
+        desenharImagens(); sujo(); paginar();
     }
 
     // ---------------------------------------------------------------- Paginação
     function agendarPaginacao() { clearTimeout(S.timerPag); S.timerPag = setTimeout(paginar, 90); }
     function topoRel(el, base) { return (el.getBoundingClientRect().top - base) / S.escala; }
 
+    // cursor <-> deslocamento de texto (para não perder o cursor quando os espaçadores são refeitos)
+    function salvarCursor(ed) {
+        const sl = window.getSelection(); if (!sl || !sl.rangeCount) return null;
+        const r = sl.getRangeAt(0); if (!ed.contains(r.startContainer) || !ed.contains(r.endContainer)) return null;
+        const med = (n, o) => { const x = document.createRange(); x.selectNodeContents(ed); x.setEnd(n, o); return x.toString().length; };
+        return { a: med(r.startContainer, r.startOffset), b: med(r.endContainer, r.endOffset) };
+    }
+    function restaurarCursor(ed, c) {
+        if (!c) return;
+        const achar = (alvo) => {
+            const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement && n.parentElement.closest('.ra-sp') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+            let acc = 0, n, ult = null;
+            while ((n = w.nextNode())) { const l = n.nodeValue.length; if (acc + l >= alvo) return [n, alvo - acc]; acc += l; ult = n; }
+            return ult ? [ult, ult.nodeValue.length] : [ed, ed.childNodes.length];
+        };
+        try { const [n1, o1] = achar(c.a), [n2, o2] = achar(c.b); const r = document.createRange(); r.setStart(n1, o1); r.setEnd(n2, o2); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); } catch (e) { /* ok */ }
+    }
+
+    // primeira linha de texto do bloco cujo fundo passa de "limite" (px relativos ao editor); devolve {no, pos, topo} ou null
+    function primeiraLinhaQueNaoCabe(bloco, base, limite, proxima) {
+        const w = document.createTreeWalker(bloco, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement && n.parentElement.closest('.ra-sp') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+        const r = document.createRange(); let n;
+        while ((n = w.nextNode())) {
+            const len = n.nodeValue.length; if (!len) continue;
+            r.setStart(n, len - 1); r.setEnd(n, len);
+            const rs = r.getClientRects(); const ult = rs.length ? rs[rs.length - 1] : null;
+            if (ult && (ult.bottom - base) / S.escala <= limite + 0.5) continue;      // esse trecho cabe inteiro
+            for (let i = 0; i < len; i++) {
+                r.setStart(n, i); r.setEnd(n, i + 1);
+                const q = r.getClientRects(); if (!q.length) continue;
+                const k = q[0]; if (k.height < 1) continue;
+                if ((k.bottom - base) / S.escala > limite + 0.5 && (k.top - base) / S.escala < proxima - 3) return { no: n, pos: i, topo: (k.top - base) / S.escala };
+            }
+        }
+        return null;
+    }
+
     function paginar() {
         const ed = $('ra-ed'); if (!ed) return;
+        const cursor = (document.activeElement === ed) ? salvarCursor(ed) : null;
+        ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
+        ed.normalize();
         ed.querySelectorAll('[data-ra]').forEach((b) => { b.style.paddingTop = ''; b.removeAttribute('data-ra'); if (!b.getAttribute('style')) b.removeAttribute('style'); });
         const base = ed.getBoundingClientRect().top;
         const blocos = [];
@@ -339,14 +430,34 @@
         let forcarPag = null, ultimoFim = 0;
         for (const b of blocos) {
             let top = topoRel(b, base);
-            const cs = getComputedStyle(b), mb = parseFloat(cs.marginBottom) || 0, h = b.getBoundingClientRect().height / S.escala;
+            const cs = getComputedStyle(b), mb = parseFloat(cs.marginBottom) || 0;
+            let h = b.getBoundingClientRect().height / S.escala;
             let pg = Math.floor((top + 0.5) / PG.P);
             let alvo = null;
+            const ehTexto = !b.classList.contains('ra-pgbreak') && !/^H[1-6]$/.test(b.tagName) && (b.textContent || '').trim().length > 0;
             if (top > pg * PG.P + PG.CH - 1) alvo = (pg + 1) * PG.P;                           // começou na faixa de rodapé/cabeçalho
-            else if (top + h > pg * PG.P + PG.CH + 0.5 && h < PG.CH) alvo = (pg + 1) * PG.P;   // não cabe: vai pra próxima
+            else if (top + h > pg * PG.P + PG.CH + 0.5 && !ehTexto && h < PG.CH) alvo = (pg + 1) * PG.P;   // título/bloco sem texto que não cabe: vai pra próxima
             if (forcarPag !== null && (alvo === null ? top : alvo) < forcarPag * PG.P) alvo = forcarPag * PG.P;
-            if (alvo !== null && alvo > top + 0.5) { b.style.paddingTop = Math.round(alvo - top) + 'px'; b.setAttribute('data-ra', '1'); top = alvo; pg = Math.round(alvo / PG.P); }
+            if (alvo !== null && alvo > top + 0.5) { b.style.paddingTop = Math.round(alvo - top) + 'px'; b.setAttribute('data-ra', '1'); top = alvo; pg = Math.round(alvo / PG.P); h = b.getBoundingClientRect().height / S.escala; }
             forcarPag = null;
+            // parágrafo que atravessa o fim da página: o texto continua na página seguinte, linha a linha (como no Word)
+            if (ehTexto) {
+                for (let guarda = 0; guarda < 40; guarda++) {
+                    top = topoRel(b, base); h = b.getBoundingClientRect().height / S.escala;
+                    const k = Math.floor((top + 0.5) / PG.P);
+                    let kk = k, limite = kk * PG.P + PG.CH, achou = null;
+                    // procura a primeira página (a partir da do início do bloco) cujo limite o bloco ultrapassa
+                    while (top + h > limite + 0.5 && !(achou = primeiraLinhaQueNaoCabe(b, base, limite, (kk + 1) * PG.P))) { kk++; limite = kk * PG.P + PG.CH; if (kk > k + 60) break; }
+                    if (!achou) break;
+                    if (kk === k && achou.topo <= top + 2) {                                    // nem a primeira linha cabe: bloco inteiro vai pra próxima
+                        b.style.paddingTop = Math.round((k + 1) * PG.P - top) + 'px'; b.setAttribute('data-ra', '1'); continue;
+                    }
+                    const sp = document.createElement('span'); sp.className = 'ra-sp'; sp.setAttribute('contenteditable', 'false');
+                    sp.style.cssText = 'display:block;height:' + Math.max(1, Math.round((kk + 1) * PG.P - achou.topo)) + 'px;margin:0;padding:0;';
+                    const rg = document.createRange(); rg.setStart(achou.no, achou.pos); rg.collapse(true); rg.insertNode(sp);
+                }
+                top = topoRel(b, base); h = b.getBoundingClientRect().height / S.escala;
+            }
             if (b.classList.contains('ra-pgbreak')) forcarPag = Math.floor((top + 0.5) / PG.P) + 1;
             ultimoFim = Math.max(ultimoFim, top + h + mb);
         }
@@ -355,6 +466,7 @@
         S.paginas = paginas;
         montarPaginas(paginas);
         posicionarImagens();
+        restaurarCursor(ed, cursor);
     }
 
     function headerFooterHtml(n, total) {
@@ -491,7 +603,9 @@
     // ---------------------------------------------------------------- Salvar
     function html() {
         const ed = $('ra-ed'); const c = ed.cloneNode(true);
+        c.querySelectorAll('.ra-sp').forEach((x) => x.remove());
         c.querySelectorAll('[data-ra]').forEach((b) => { b.style.paddingTop = ''; b.removeAttribute('data-ra'); if (!b.getAttribute('style')) b.removeAttribute('style'); });
+        c.normalize();
         return c.innerHTML;
     }
     function coletar() {
@@ -656,5 +770,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, imagens, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
