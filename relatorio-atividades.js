@@ -715,7 +715,7 @@
     function posicionarFlut() {
         const f = $('ra-flut'), ed = $('ra-ed');
         if (!f) return;
-        if (!ed || S.somenteLeitura) { f.classList.remove('on'); return; }
+        if (!ed || S.somenteLeitura || S.arrastando) { f.classList.remove('on'); return; }
         const sl = window.getSelection();
         if (!sl || !sl.rangeCount || !ed.contains(sl.getRangeAt(0).startContainer)) { if (!f.contains(document.activeElement)) f.classList.remove('on'); return; }
         const r = sl.getRangeAt(0);
@@ -731,11 +731,29 @@
         const minTop = Math.max(S.barraTopo || 0, 8), fh = f.offsetHeight, fw = f.offsetWidth;
         const cena = $('ra-cena'); const cr = cena ? cena.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
         if (rect.bottom < Math.max(minTop, cr.top) || rect.top > Math.min(window.innerHeight, cr.bottom)) { f.classList.remove('on'); return; }
-        let top = rect.top - fh - 8;
-        if (top < minTop) top = rect.bottom + 8;
-        top = Math.min(top, window.innerHeight - fh - 8);
-        f.style.top = Math.round(top) + 'px';
-        f.style.left = Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - fw - 8))) + 'px';
+        // preferência: encostar o painel na lateral da folha (área cinza), para nunca cobrir o texto nem o que vai ser clicado
+        const pag = document.querySelector('#ra-stage .ra-pagina'); const pr = pag ? pag.getBoundingClientRect() : null;
+        const limD = cr.right - 10, limE = cr.left + 10;
+        f.style.maxWidth = '';
+        if (pr) {
+            const livreD = limD - pr.right - 12, livreE = pr.left - 12 - limE;
+            const lado = livreD >= 230 && livreD >= livreE ? 'd' : (livreE >= 230 ? 'e' : null);
+            if (lado) {
+                f.style.maxWidth = Math.min(560, lado === 'd' ? livreD : livreE) + 'px';
+                const fh2 = f.offsetHeight, fw2 = f.offsetWidth;
+                let t2 = Math.max(minTop, Math.min(rect.top - 4, window.innerHeight - fh2 - 8));
+                f.style.top = Math.round(t2) + 'px';
+                f.style.left = Math.round(lado === 'd' ? pr.right + 12 : pr.left - 12 - fw2) + 'px';
+                return;
+            }
+        }
+        // sem espaço na lateral: fica na borda de cima ou de baixo da área visível (a que estiver mais longe de onde você clicou)
+        const slotTopo = Math.max(minTop, cr.top + 6), slotBase = Math.min(window.innerHeight, cr.bottom) - fh - 8;
+        const distTopo = Math.abs(rect.top - (slotTopo + fh)), distBase = Math.abs(slotBase - rect.bottom);
+        const top = (rect.bottom < slotTopo + fh + 6 || distBase >= distTopo) && slotBase > slotTopo + fh ? slotBase : slotTopo;
+        f.style.top = Math.round(Math.max(minTop, top)) + 'px';
+        const cx = pr ? pr.left + (pr.width - fw) / 2 : rect.left;
+        f.style.left = Math.round(Math.max(8, Math.min(cx, window.innerWidth - fw - 8))) + 'px';
     }
 
     // ---------------------------------------------------------------- Tabelas
@@ -1263,7 +1281,7 @@
             document.querySelectorAll('.ra-img.sel').forEach((x) => x.classList.remove('sel')); d.classList.add('sel'); S.imgSel = i.id;
             const redim = e.target.classList.contains('alca');
             const x0 = e.clientX, y0 = e.clientY, ix = i.x, iy = i.page * PG.P + i.y, iw = i.w, ih = i.h, ratio = iw / ih;
-            limparGuias();
+            limparGuias(); S.arrastando = true; agendarFlut();
             d.setPointerCapture(e.pointerId);
             // posição do mouse em coordenadas da folha (considera rolagem e zoom a cada movimento)
             const noPalco = (ev) => { const r = $('ra-stage').getBoundingClientRect(); return { x: (ev.clientX - r.left) / S.escala, y: (ev.clientY - r.top) / S.escala }; };
@@ -1323,7 +1341,7 @@
                 raf = requestAnimationFrame(auto);
             };
             const soltar = () => {
-                cancelAnimationFrame(raf); limparGuias();
+                cancelAnimationFrame(raf); limparGuias(); S.arrastando = false;
                 d.removeEventListener('pointermove', mover); d.removeEventListener('pointerup', soltar); d.removeEventListener('pointercancel', soltar); d.removeEventListener('lostpointercapture', soltar);
                 cenaEl.removeEventListener('scroll', rolou); window.removeEventListener('scroll', rolou);
                 sujo();
