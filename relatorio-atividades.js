@@ -96,12 +96,27 @@
         .ra-btn:disabled { opacity:.5; cursor:not-allowed; }
         .ra-meta { display:grid; grid-template-columns: 1.6fr .8fr 1.4fr 1.2fr; gap:10px; }
         .ra-meta label { font-size:.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px; }
-        .ra-barra { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; position:sticky; top:calc(var(--aviso-offset, 0px) + 86px); z-index:40; box-shadow:0 6px 14px rgba(0,0,0,.35); }
+        .ra-barra { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border:1px solid var(--cor-borda); border-radius:10px; background:#00152b; position:relative; z-index:40; box-shadow:0 6px 14px rgba(0,0,0,.35); box-sizing:border-box; }
+        .ra-barra.presa { position:fixed; margin:0; }
         [data-theme="light"] .ra-barra { background:#fff; }
-        @media (max-width:1024px){ .ra-barra { top:calc(var(--aviso-offset, 0px) + 66px); } }
         .ra-barra .sep { width:1px; height:22px; background:var(--cor-borda); margin:0 4px; }
         .ra-barra button, .ra-barra select { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-principal); border-radius:7px; padding:6px 9px; cursor:pointer; font-size:.82rem; min-width:32px; }
         .ra-barra select { background:var(--cor-fundo-cartao, transparent); width:auto !important; min-width:0; max-width:190px; flex:0 0 auto; }
+        .ra-sp, .ra-sp td { user-select:none; -webkit-user-select:none; }
+        .ra-sp ::selection, .ra-sp::selection { background:transparent; }
+        .ra-area { position:absolute; left:${PG.LEFT}px; top:${PG.TOP}px; width:${PG.CW}px; height:${PG.CH}px; box-sizing:border-box; border:1px dashed rgba(60,140,220,.55); pointer-events:none; z-index:1; }
+        .ra-area::before { content:'início da área de texto'; position:absolute; left:0; top:-14px; font:9px Arial,sans-serif; color:rgba(60,140,220,.8); letter-spacing:.04em; }
+        .ra-area::after { content:'fim da área de texto'; position:absolute; left:0; bottom:-14px; font:9px Arial,sans-serif; color:rgba(60,140,220,.8); letter-spacing:.04em; }
+        .ra-flut { position:fixed; z-index:850; display:none; flex-wrap:wrap; gap:5px; align-items:center; max-width:min(560px, calc(100vw - 16px)); padding:7px 8px; background:#00152b; border:1px solid #4fc3f7; border-radius:10px; box-shadow:0 10px 28px rgba(0,0,0,.55); }
+        .ra-flut.on { display:flex; }
+        [data-theme="light"] .ra-flut { background:#fff; }
+        .ra-flut .gr { display:flex; flex-wrap:wrap; gap:4px; align-items:center; width:100%; }
+        .ra-flut .gr + .gr { border-top:1px dashed var(--cor-borda); padding-top:5px; }
+        .ra-flut .gr > strong { font-size:.72rem; color:#4fc3f7; margin-right:2px; }
+        .ra-flut button, .ra-flut select { border:1px solid var(--cor-borda); background:transparent; color:var(--cor-texto-principal); border-radius:7px; padding:5px 8px; cursor:pointer; font-size:.78rem; min-width:28px; width:auto !important; margin:0 !important; }
+        .ra-flut select { padding:5px 4px; background:var(--cor-fundo-cartao, #12263a); }
+        .ra-flut button:hover { border-color:#4fc3f7; color:#4fc3f7; }
+        .ra-flut input[type=color] { width:28px !important; height:28px; padding:0 !important; border:1px solid var(--cor-borda); border-radius:7px; background:none; cursor:pointer; }
         .ra-pgbtns { position:absolute; left:0; top:0; width:${PG.W}px; height:100%; pointer-events:none; z-index:12; }
         .ra-pgdel { position:absolute; right:14px; pointer-events:auto; background:rgba(231,76,60,.95); color:#fff; border:none; border-radius:999px; padding:5px 12px; font:600 11px Arial,sans-serif; cursor:pointer; opacity:.85; box-shadow:0 2px 8px rgba(0,0,0,.25); }
         .ra-pgdel:hover { opacity:1; }
@@ -444,7 +459,7 @@
     function barraHtml() {
         const b = (cmd, ic, tit) => `<button type="button" title="${tit}" onmousedown="event.preventDefault()" onclick="RelAtv.cmd('${cmd}')"><i class="fa-solid ${ic}"></i></button>`;
         return `
-        <div class="ra-barra" id="ra-barra">
+        <div id="ra-barra-ph"><div class="ra-barra" id="ra-barra">
             <select title="Estilo do texto" onchange="RelAtv.bloco(this.value); this.value='p'">
                 <option value="p">Parágrafo</option><option value="h1">Título 1</option><option value="h2">Título 2</option><option value="h3">Título 3</option>
             </select>
@@ -461,7 +476,7 @@
             <span class="sep"></span>
             ${b('undo', 'fa-rotate-left', 'Desfazer')}${b('redo', 'fa-rotate-right', 'Refazer')}
             <span class="sep"></span>
-            <button type="button" title="Quebra de página" onmousedown="event.preventDefault()" onclick="RelAtv.quebra()"><i class="fa-solid fa-file-circle-plus"></i> Nova página</button>
+            <button type="button" title="Acrescenta uma página em branco no fim" onmousedown="event.preventDefault()" onclick="RelAtv.quebra()"><i class="fa-solid fa-file-circle-plus"></i> Nova página</button>
             <button type="button" title="Excluir a página onde está o cursor" onmousedown="event.preventDefault()" onclick="RelAtv.excluirPagina()"><i class="fa-solid fa-file-circle-minus"></i> Excluir página</button>
             <button type="button" title="Inserir imagem (pode arrastar depois)" onclick="document.getElementById('ra-file').click()" id="ra-btn-img"><i class="fa-solid fa-image"></i> Imagem</button>
             <button type="button" title="Inserir a sua assinatura digital (a mesma de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('assinatura')" id="ra-btn-assin"><i class="fa-solid fa-signature"></i> Assinatura</button>
@@ -478,19 +493,7 @@
             <input type="file" id="ra-file" accept="image/*" multiple style="display:none" onchange="RelAtv.imagens(this.files); this.value=''">
             <span class="sep"></span>
             <select title="Zoom" onchange="RelAtv.zoom(this.value)" id="ra-zoom"><option value="auto">Ajustar à tela</option><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select>
-            <div class="ra-tabbar" id="ra-tabbar">
-                <strong style="color:#4fc3f7;"><i class="fa-solid fa-table"></i> Tabela:</strong>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('linhaDepois')">+ Linha abaixo</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('linhaAntes')">+ Linha acima</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('colDepois')">+ Coluna à direita</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('colAntes')">+ Coluna à esquerda</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delLinha')">− Linha</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delCol')">− Coluna</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('cabecalho')">Cabeçalho on/off</button>
-                <button type="button" onmousedown="event.preventDefault()" onclick="RelAtv.tab('delTabela')" style="border-color:#e74c3c; color:#e74c3c;">Excluir tabela</button>
-                <span style="color:var(--cor-texto-secundario);">Dica: arraste a borda entre as colunas para mudar a largura. Tab pula de célula (na última cria linha nova).</span>
-            </div>
-        </div>`;
+        </div></div>`;
     }
 
     function desenharEditor() {
@@ -522,6 +525,7 @@
             </div></div></div>
             ${ro ? '' : '<div class="ra-dica">Dica: as imagens ficam por cima do texto. Clique numa imagem para arrastar, puxar a bolinha azul para mudar o tamanho ou o X vermelho para remover. Para o texto não ficar por baixo da imagem, deixe linhas em branco onde ela vai ficar.</div>'}
         </div>`;
+        criarFlut();
         const ed = $('ra-ed');
         ed.innerHTML = r.conteudo_html || '<p><br></p>';
         try { document.execCommand('defaultParagraphSeparator', false, 'p'); document.execCommand('styleWithCSS', false, true); } catch (e) { /* ok */ }
@@ -539,7 +543,10 @@
 
     function ligarEditor(ed) {
         ed.addEventListener('input', () => { sujo(); agendarPaginacao(); });
-        document.addEventListener('selectionchange', () => { const sl = window.getSelection(); if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) S.caretValido = true; atualizarTabbar(); });
+        document.addEventListener('selectionchange', () => { const sl = window.getSelection(); if (sl && sl.rangeCount && ed.contains(sl.getRangeAt(0).startContainer)) S.caretValido = true; agendarFlut(); });
+        ed.addEventListener('mouseup', agendarFlut); ed.addEventListener('keyup', agendarFlut);
+        // clicar na área vazia do editor (abaixo do último bloco) leva o cursor para o fim, sempre num parágrafo
+        ed.addEventListener('mousedown', (e) => { if (e.target !== ed) return; const u = ed.lastElementChild; if (u && u.tagName !== 'P' || !u) { garantirParagrafosDaTabela(ed); } });
         ligarColunas(ed);
         ed.addEventListener('paste', (e) => {
             const cd = e.clipboardData; if (!cd) return;
@@ -602,17 +609,78 @@
         ed.querySelectorAll('span[style*="font-size: xxx-large"],span[style*="font-size:xxx-large"]').forEach((s) => { s.style.fontSize = px + 'px'; });
         sujo(); agendarPaginacao();
     }
-    // "Nova página": só acrescenta uma página em branco no FIM do documento. Não mexe em nada do que já foi escrito.
+    // "Nova página": só acrescenta uma página em branco no fim. Não é uma quebra: o texto continua normalmente (na página anterior, se ainda houver espaço, e depois nesta).
+    function paginasMinimas(ed) { const m = ed.querySelector(':scope > .ra-pgmin'); return m ? (parseInt(m.getAttribute('data-n'), 10) || 1) : 1; }
+    function definirPaginasMinimas(ed, n) {
+        let m = ed.querySelector(':scope > .ra-pgmin');
+        if (n <= 1) { if (m) m.remove(); return; }
+        if (!m) { m = document.createElement('div'); m.className = 'ra-pgmin'; m.setAttribute('contenteditable', 'false'); m.style.display = 'none'; ed.appendChild(m); }
+        m.setAttribute('data-n', String(n));
+    }
     function quebra() {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
-        const sel = window.getSelection();
-        const brk = document.createElement('div'); brk.className = 'ra-pgbreak'; brk.setAttribute('contenteditable', 'false'); brk.textContent = 'quebra de página';
-        const np = document.createElement('p'); np.innerHTML = '<br>';
-        ed.appendChild(brk); ed.appendChild(np);
+        paginar();
+        const novo = Math.max(S.paginas || 1, paginasMinimas(ed)) + 1;
+        definirPaginasMinimas(ed, novo);
+        // cursor no fim do texto (se o texto ainda tem espaço na página, continua escrevendo nela)
+        let ult = ed.lastElementChild; while (ult && (ult.classList.contains('ra-pgmin') || ult.hasAttribute('data-ra-m') || ult.classList.contains('ra-pgbreak'))) ult = ult.previousElementSibling;
+        if (!ult || ult.tagName === 'TABLE') { const np = document.createElement('p'); np.innerHTML = '<br>'; if (ult) ult.after(np); else ed.prepend(np); ult = np; }
         ed.focus();
-        const r = document.createRange(); r.setStart(np, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
-        sujo(); agendarPaginacao();
-        setTimeout(() => { const cena = $('ra-cena'); if (!cena) return; const n = Math.max(0, (S.paginas || 1) - 1); cena.scrollTo({ top: Math.max(0, n * PG.P * S.escala - 10), behavior: 'smooth' }); }, 220);
+        const r = document.createRange(); r.selectNodeContents(ult); r.collapse(false); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        sujo(); paginar();
+        setTimeout(() => { const cena = $('ra-cena'); if (!cena) return; cena.scrollTo({ top: Math.max(0, (novo - 1) * PG.P * S.escala - 10), behavior: 'smooth' }); }, 220);
+    }
+
+    // ---------------------------------------------------------------- Janela de opções que aparece onde se clica
+    function flutHtml() {
+        const b = (cmd, ic, tit) => `<button type="button" title="${tit}" onmousedown="event.preventDefault()" onclick="RelAtv.cmd('${cmd}')"><i class="fa-solid ${ic}"></i></button>`;
+        const t = (a, txt, tit, extra) => `<button type="button" title="${tit}" onmousedown="event.preventDefault()" onclick="RelAtv.tab('${a}')" ${extra || ''}>${txt}</button>`;
+        return `<div class="gr" id="ra-flut-txt">
+                <select title="Estilo do texto" onchange="RelAtv.bloco(this.value); this.value='p'"><option value="p">Parágrafo</option><option value="h1">Título 1</option><option value="h2">Título 2</option><option value="h3">Título 3</option></select>
+                <select title="Tamanho da letra" onchange="RelAtv.tamanho(this.value); this.value=''"><option value="">Tamanho</option>${[11, 12, 13, 14, 15, 16, 18, 20, 24, 28].map((n) => `<option value="${n}">${n}</option>`).join('')}</select>
+                ${b('bold', 'fa-bold', 'Negrito')}${b('italic', 'fa-italic', 'Itálico')}${b('underline', 'fa-underline', 'Sublinhado')}
+                <input type="color" value="#111111" title="Cor do texto" onchange="RelAtv.cor(this.value)">
+                ${b('justifyLeft', 'fa-align-left', 'Esquerda')}${b('justifyCenter', 'fa-align-center', 'Centralizar')}${b('justifyRight', 'fa-align-right', 'Direita')}${b('justifyFull', 'fa-align-justify', 'Justificar')}
+                ${b('insertUnorderedList', 'fa-list-ul', 'Marcadores')}${b('insertOrderedList', 'fa-list-ol', 'Numeração')}
+            </div>
+            <div class="gr" id="ra-flut-tab" style="display:none;">
+                <strong><i class="fa-solid fa-table"></i> Tabela:</strong>
+                ${t('linhaDepois', '+ Linha abaixo', 'Nova linha abaixo')}${t('linhaAntes', '+ Linha acima', 'Nova linha acima')}${t('colDepois', '+ Coluna dir.', 'Nova coluna à direita')}${t('colAntes', '+ Coluna esq.', 'Nova coluna à esquerda')}
+                ${t('delLinha', '− Linha', 'Excluir a linha')}${t('delCol', '− Coluna', 'Excluir a coluna')}${t('cabecalho', 'Cabeçalho', 'Liga/desliga a linha de cabeçalho')}${t('delTabela', 'Excluir tabela', 'Excluir a tabela inteira', 'style="border-color:#e74c3c;color:#e74c3c;"')}
+            </div>`;
+    }
+    function criarFlut() {
+        const v = $('ra-flut'); if (v) v.remove();
+        if (S.somenteLeitura) return;
+        const d = document.createElement('div'); d.id = 'ra-flut'; d.className = 'ra-flut'; d.innerHTML = flutHtml();
+        d.addEventListener('mousedown', (e) => { if (!/^(SELECT|INPUT|OPTION)$/.test(e.target.tagName)) e.preventDefault(); });
+        document.body.appendChild(d);
+    }
+    function agendarFlut() { if (S.rafFlut) return; S.rafFlut = requestAnimationFrame(() => { S.rafFlut = 0; posicionarFlut(); }); }
+    function posicionarFlut() {
+        const f = $('ra-flut'), ed = $('ra-ed');
+        if (!f) return;
+        if (!ed || S.somenteLeitura) { f.classList.remove('on'); return; }
+        const sl = window.getSelection();
+        if (!sl || !sl.rangeCount || !ed.contains(sl.getRangeAt(0).startContainer)) { if (!f.contains(document.activeElement)) f.classList.remove('on'); return; }
+        const r = sl.getRangeAt(0);
+        const cel = celulaAtual();
+        let rect = cel ? cel.getBoundingClientRect() : null;
+        if (!rect) {
+            const rs = r.getClientRects(); rect = rs.length && rs[0].height ? rs[0] : null;
+            if (!rect) { let n = r.startContainer; n = n.nodeType === 1 ? n : n.parentElement; if (n && n !== ed) rect = n.getBoundingClientRect(); }
+        }
+        if (!rect || !rect.height) { f.classList.remove('on'); return; }
+        $('ra-flut-tab').style.display = cel ? 'flex' : 'none';
+        f.classList.add('on');
+        const minTop = Math.max(S.barraTopo || 0, 8), fh = f.offsetHeight, fw = f.offsetWidth;
+        const cena = $('ra-cena'); const cr = cena ? cena.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+        if (rect.bottom < Math.max(minTop, cr.top) || rect.top > Math.min(window.innerHeight, cr.bottom)) { f.classList.remove('on'); return; }
+        let top = rect.top - fh - 8;
+        if (top < minTop) top = rect.bottom + 8;
+        top = Math.min(top, window.innerHeight - fh - 8);
+        f.style.top = Math.round(top) + 'px';
+        f.style.left = Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - fw - 8))) + 'px';
     }
 
     // ---------------------------------------------------------------- Tabelas
@@ -622,7 +690,7 @@
         const c = n && n.closest ? n.closest('td,th') : null;
         return c && ed.contains(c) ? c : null;
     }
-    function atualizarTabbar() { const b = $('ra-tabbar'); if (b) { b.classList.toggle('on', !!celulaAtual() && !S.somenteLeitura); agendarBarraFixa(); } }
+    function atualizarTabbar() { agendarFlut(); }
     function cursorNaCelula(c, fim) { const r = document.createRange(); r.selectNodeContents(c); r.collapse(!fim); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); }
     function irCelula(cel, dir) {
         const tb = cel.closest('table'); const cels = Array.from(tb.querySelectorAll('td,th')); const i = cels.indexOf(cel) + dir;
@@ -741,7 +809,7 @@
         if (!ok) return;
         const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
         const blocos = [];
-        Array.from(ed.children).forEach((c) => { if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
+        Array.from(ed.children).forEach((c) => { if (c.classList.contains('ra-pgmin')) return; if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
         blocos.forEach((b) => {
             const t = topo(b), h = b.getBoundingClientRect().height / S.escala;
             const p0 = pgDe(t + parseFloat(b.style.paddingTop || 0)), p1 = pgDe(t + h - 1);
@@ -759,7 +827,8 @@
         ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
         ed.querySelectorAll('ul:empty,ol:empty').forEach((x) => x.remove());
         ed.querySelectorAll('table').forEach((t) => { if (!t.querySelector('tr')) t.remove(); });
-        if (!ed.children.length) ed.innerHTML = '<p><br></p>';
+        definirPaginasMinimas(ed, Math.max(1, paginasMinimas(ed) - 1));
+        if (!Array.from(ed.children).some((c) => !c.classList.contains('ra-pgmin'))) ed.insertAdjacentHTML('afterbegin', '<p><br></p>');
         S.atual.imagens = (S.atual.imagens || []).filter((i) => i.page !== n).map((i) => (i.page > n ? { ...i, page: i.page - 1 } : i));
         desenharImagens(); sujo(); paginar();
     }
@@ -807,16 +876,29 @@
         return null;
     }
 
+    // sempre tem que existir um parágrafo antes e depois de cada tabela (senão o cursor não consegue sair dela para escrever)
+    function garantirParagrafosDaTabela(ed) {
+        const novoP = () => { const p = document.createElement('p'); p.innerHTML = '<br>'; return p; };
+        const ehMarca = (n) => n && n.hasAttribute && (n.hasAttribute('data-ra-m') || n.classList.contains('ra-pgmin'));
+        Array.from(ed.children).forEach((c) => {
+            if (c.tagName !== 'TABLE') return;
+            let prox = c.nextElementSibling; while (ehMarca(prox)) prox = prox.nextElementSibling;
+            if (!prox || prox.tagName === 'TABLE') c.after(novoP());
+            let ant = c.previousElementSibling; while (ehMarca(ant)) ant = ant.previousElementSibling;
+            if (!ant) c.before(novoP());
+        });
+    }
     function paginar() {
         const ed = $('ra-ed'); if (!ed) return;
         const cursor = (document.activeElement === ed) ? salvarCursor(ed) : null;
         ed.querySelectorAll('.ra-sp').forEach((x) => x.remove());
+        garantirParagrafosDaTabela(ed);
         ed.normalize();
         ed.querySelectorAll('[data-ra]').forEach((b) => { b.style.paddingTop = ''; b.removeAttribute('data-ra'); if (!b.getAttribute('style')) b.removeAttribute('style'); });
         const base = ed.getBoundingClientRect().top;
         const blocos = [];
         Array.from(ed.children).forEach((c) => {
-            if (c.hasAttribute('data-ra-m')) return;
+            if (c.hasAttribute('data-ra-m') || c.classList.contains('ra-pgmin')) return;
             if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li));
             else if (c.tagName === 'TABLE') Array.from(c.rows).forEach((tr) => blocos.push(tr));
             else blocos.push(c);
@@ -860,6 +942,7 @@
             ultimoFim = Math.max(ultimoFim, top + h + mb);
         }
         let paginas = Math.max(1, Math.floor(Math.max(ultimoFim - 1, 0) / PG.P) + 1);
+        paginas = Math.max(paginas, paginasMinimas(ed));
         (S.atual.imagens || []).forEach((i) => { paginas = Math.max(paginas, (i.page || 0) + 1); });
         S.paginas = paginas;
         montarPaginas(paginas);
@@ -868,7 +951,7 @@
     }
 
     function headerFooterHtml(n, total) {
-        return `<img class="ra-marca" src="${MARCA}" alt="">
+        return `<div class="ra-area"></div><img class="ra-marca" src="${MARCA}" alt="">
             <img class="ra-hdr-logo" src="${LOGO}" alt="">
             <div class="ra-hdr-nome">SOUL SEGURANÇA E FACILITIES</div>
             <div class="ra-rodape"><div class="a">SOUL SEGURANÇA E FACILITES LTDA</div><div class="b">CNPJ: 48.052.632/0001-25</div>
@@ -919,13 +1002,22 @@
 
     // a barra de edição fica presa logo abaixo do cabeçalho fixo do sistema (a altura dele é lida na hora, sem chutar)
     function ajustarBarraFixa() {
-        const bar = $('ra-barra'); if (!bar) return;
+        const bar = $('ra-barra'), ph = $('ra-barra-ph'); if (!bar || !ph) return;
         const h = document.querySelector('.top-header');
-        const base = h ? Math.max(0, h.getBoundingClientRect().bottom) : 0;
-        const top = Math.ceil(base + 6);
-        if (bar.dataset.t !== String(top)) { bar.style.top = top + 'px'; bar.dataset.t = String(top); }
+        const limite = Math.ceil((h ? Math.max(0, h.getBoundingClientRect().bottom) : 0) + 6);
+        const natural = bar.classList.contains('presa') ? (parseFloat(ph.style.height) || bar.offsetHeight) : bar.offsetHeight;
+        const pr = ph.getBoundingClientRect();
+        const presa = pr.top < limite && !S.somenteLeitura;
+        if (presa) {
+            ph.style.height = natural + 'px';
+            bar.classList.add('presa'); bar.style.top = limite + 'px'; bar.style.left = pr.left + 'px'; bar.style.width = pr.width + 'px';
+        } else {
+            bar.classList.remove('presa'); bar.style.top = bar.style.left = bar.style.width = ''; ph.style.height = '';
+        }
+        S.barraTopo = presa ? limite + bar.offsetHeight + 8 : limite;
         const cena = $('ra-cena');
-        if (cena) { const mh = Math.max(320, window.innerHeight - top - bar.offsetHeight - 24) + 'px'; if (cena.style.maxHeight !== mh) cena.style.maxHeight = mh; }
+        if (cena) { const mh = Math.max(320, window.innerHeight - limite - natural - 24) + 'px'; if (cena.style.maxHeight !== mh) cena.style.maxHeight = mh; }
+        agendarFlut();
     }
     function agendarBarraFixa() { if (S.rafBarra) return; S.rafBarra = requestAnimationFrame(() => { S.rafBarra = 0; ajustarBarraFixa(); }); }
 
@@ -1219,6 +1311,7 @@
             for (let n = 0; n < total; n++) {
                 const pag = document.createElement('div'); pag.className = 'ra-pagina'; pag.style.cssText = 'position:relative; top:0; left:0; box-shadow:none; width:' + PG.W + 'px; height:' + PG.H + 'px;';
                 pag.innerHTML = headerFooterHtml(n, total);
+                pag.querySelectorAll('.ra-area').forEach((a) => a.remove());
                 const janela = document.createElement('div'); janela.style.cssText = 'position:absolute; left:' + PG.LEFT + 'px; top:' + PG.TOP + 'px; width:' + PG.CW + 'px; height:' + PG.CH + 'px; overflow:hidden;';
                 const copia = ed.cloneNode(true); copia.removeAttribute('contenteditable'); copia.removeAttribute('id');
                 copia.style.cssText = 'position:absolute; left:0; top:' + (-n * PG.P) + 'px; width:' + PG.CW + 'px; height:auto;';
@@ -1305,7 +1398,7 @@
             const ok = typeof window.mostrarConfirmacao === 'function' ? await window.mostrarConfirmacao('Você tem alterações não salvas. Salvar antes de sair?', 'Alterações não salvas') : confirm('Salvar antes de sair?');
             if (ok) { coletar(); await salvar(false); }
         }
-        clearInterval(S.timerAuto); S.atual = null; S.dirty = false;
+        clearInterval(S.timerAuto); S.atual = null; S.dirty = false; const fl = $('ra-flut'); if (fl) fl.remove();
         carregarLista();
     }
 
@@ -1320,6 +1413,8 @@
     document.addEventListener('mousedown', fecharSelecaoImg, true);
     document.addEventListener('mousedown', (e) => { document.querySelectorAll('details.ra-ms[open]').forEach((d) => { if (!d.contains(e.target)) d.removeAttribute('open'); }); }, true);
     window.addEventListener('scroll', agendarBarraFixa, true);
+    window.addEventListener('scroll', agendarFlut, true);
+    window.addEventListener('resize', agendarFlut);
     window.addEventListener('resize', agendarBarraFixa);
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
