@@ -1241,7 +1241,8 @@
     function posicionarImagens() {
         document.querySelectorAll('#ra-imgs .ra-img').forEach((d) => {
             const i = (S.atual.imagens || []).find((x) => x.id === d.dataset.id); if (!i) return;
-            d.style.left = i.x + 'px'; d.style.top = (i.page * PG.P + i.y) + 'px'; d.style.width = i.w + 'px'; d.style.height = i.h + 'px'; d.style.transform = i.rot ? 'rotate(' + i.rot + 'deg)' : '';
+            d.style.left = i.x + 'px'; d.style.top = (i.page * PG.P + i.y) + 'px'; d.style.width = i.w + 'px'; d.style.height = i.h + 'px'; d.style.transform = '';
+            const im = d.querySelector('img'); if (im) im.style.transform = i.rot ? 'rotate(' + i.rot + 'deg)' : '';   // só a figura gira; moldura e botões ficam sempre no mesmo lugar
         });
     }
     function fecharSelecaoImg(e) {
