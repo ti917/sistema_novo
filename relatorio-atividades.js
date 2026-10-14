@@ -141,6 +141,9 @@
         .ra-ed table { border-collapse:collapse; width:100%; table-layout:fixed; margin:4px 0 8px; }
         .ra-ed td, .ra-ed th { border:1px solid #555; padding:4px 7px; vertical-align:top; color:#111; font:inherit; word-wrap:break-word; overflow-wrap:anywhere; min-height:22px; }
         .ra-ed th { background:#eef1f5; font-weight:700; }
+        .ra-ed table tr { background:transparent !important; transition:none !important; }
+        .ra-ed td, .ra-ed th { text-align:left; text-transform:none !important; letter-spacing:normal !important; }
+        .ra-ed tr.ra-sp, .ra-ed tr.ra-sp td { background:none !important; border:none !important; padding:0 !important; }
         .ra-ed.ra-colrs, .ra-ed.ra-colrs td, .ra-ed.ra-colrs th { cursor:col-resize; }
         .ra-tabbar { display:none; gap:6px; align-items:center; flex-wrap:wrap; width:100%; padding-top:6px; margin-top:4px; border-top:1px dashed var(--cor-borda); font-size:.78rem; }
         .ra-tabbar.on { display:flex; }
@@ -149,7 +152,8 @@
         .ra-tabpop label { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:.8rem; margin-bottom:8px; }
         .ra-tabpop input { width:64px; }
         .ra-ms { position:relative; }
-        .ra-ms > summary { cursor:pointer; list-style:none; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:26px; position:relative; }
+        .ra-ms > summary { cursor:pointer; list-style:none; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; position:relative; box-sizing:border-box; width:100%; padding:12px 34px 12px 15px; border:1px solid var(--cor-borda); border-radius:8px; background-color:var(--cor-fundo-input, rgba(255,255,255,.05)); color:var(--cor-texto-principal); font-size:1rem; line-height:1.3; transition:border-color .2s; }
+        .ra-ms > summary:hover, .ra-ms[open] > summary { border-color:#4fc3f7; }
         .ra-ms > summary::-webkit-details-marker { display:none; }
         .ra-ms > summary::after { content:'▾'; position:absolute; right:10px; top:50%; transform:translateY(-50%); opacity:.7; }
         .ra-ms[data-ro] > summary { opacity:.6; pointer-events:none; }
@@ -551,6 +555,7 @@
         // clicar na área vazia do editor (abaixo do último bloco) leva o cursor para o fim, sempre num parágrafo
         ed.addEventListener('mousedown', (e) => { if (e.target !== ed) return; const u = ed.lastElementChild; if (u && u.tagName !== 'P' || !u) { garantirParagrafosDaTabela(ed); } });
         ligarColunas(ed);
+        const stg = $('ra-stage'); if (stg) stg.addEventListener('mousedown', cliqueLivre);
         ed.addEventListener('paste', (e) => {
             const cd = e.clipboardData; if (!cd) return;
             const arqs = Array.from(cd.files || []).filter((f) => /^image\//.test(f.type));
@@ -567,6 +572,46 @@
                 document.execCommand('insertText', false, '    ');
             }
         });
+    }
+
+    // Clicar em qualquer ponto da página (margens, espaço vazio embaixo do texto, outra página) coloca o cursor ali:
+    // se o ponto está depois do fim do texto, cria as linhas em branco necessárias até aquele ponto.
+    function cliqueLivre(e) {
+        const ed = $('ra-ed'), stage = $('ra-stage'); if (!ed || !stage || S.somenteLeitura || e.button !== 0) return;
+        const t = e.target;
+        if (t.closest && t.closest('.ra-img, .ra-pgdel, #ra-flut')) return;
+        if (t !== ed && ed.contains(t)) return;                    // clique em cima de texto/tabela: o navegador resolve sozinho
+        const sr = stage.getBoundingClientRect(), esc = S.escala || 1;
+        let y = (e.clientY - sr.top) / esc;
+        const pg = Math.max(0, Math.floor(y / PG.P)), rel = y - pg * PG.P;
+        const total = Math.max(1, S.paginas || 1);
+        if (rel < PG.TOP) y = pg * PG.P + PG.TOP + 3;                                        // cabeçalho
+        else if (rel > PG.TOP + PG.CH) y = (pg + 1 < total ? (pg + 1) * PG.P + PG.TOP + 3 : pg * PG.P + PG.TOP + PG.CH - 3);   // rodapé / vão entre páginas
+        e.preventDefault(); ed.focus();
+        garantirParagrafosDaTabela(ed);
+        const reais = Array.from(ed.children).filter((c) => !c.classList.contains('ra-pgmin') && !c.hasAttribute('data-ra-m'));
+        const ult = reais[reais.length - 1];
+        const er = ed.getBoundingClientRect();
+        const fimStage = ult ? PG.TOP + (ult.getBoundingClientRect().bottom - er.top) / esc : PG.TOP;
+        const util = (ys) => { const k = Math.max(0, Math.floor((ys - 0.5) / PG.P)); return k * PG.CH + Math.max(0, Math.min(PG.CH, ys - k * PG.P - PG.TOP)); };
+        const sel = window.getSelection();
+        if (y <= fimStage - 2) {
+            // dentro do texto: pega a posição de texto mais próxima daquele ponto
+            const cx = Math.max(er.left + 3, Math.min(er.right - 3, e.clientX)), cy = sr.top + y * esc;
+            let rg = document.caretRangeFromPoint ? document.caretRangeFromPoint(cx, cy) : null;
+            if (!rg || !ed.contains(rg.startContainer)) { rg = document.createRange(); rg.selectNodeContents(ult || ed); rg.collapse(false); }
+            sel.removeAllRanges(); sel.addRange(rg); agendarFlut(); return;
+        }
+        const linha = 29.25;
+        let n = Math.max(1, Math.min(60, Math.ceil((util(y) - util(fimStage)) / linha)));
+        const ultVazio = ult && ult.tagName === 'P' && !(ult.textContent || '').trim() && !ult.querySelector('img,table');
+        let alvo = ultVazio ? ult : null, ref = ult;
+        if (ultVazio) n -= 1;
+        for (let i = 0; i < n; i++) { const np = document.createElement('p'); np.innerHTML = '<br>'; if (ref) ref.after(np); else ed.prepend(np); ref = np; alvo = np; }
+        if (!alvo) { alvo = document.createElement('p'); alvo.innerHTML = '<br>'; ed.appendChild(alvo); }
+        const rg = document.createRange(); rg.selectNodeContents(alvo); rg.collapse(true); sel.removeAllRanges(); sel.addRange(rg);
+        if (n > 0) { sujo(); paginar(); }
+        agendarFlut();
     }
 
     // sanitiza HTML colado (Word/Web): só estrutura básica
