@@ -1555,6 +1555,18 @@
                 .eq('id', S.atual.id).eq('gestor_id', idGestor());
             if (error) throw error;
             alerta('Relatório enviado ao financeiro!', 'sucesso');
+            // tira do sino o lembrete "Relatório de Atividades para fazer" deste mês (só some quando é enviado)
+            try {
+                const mr = String(S.atual.mes_referencia || '');
+                if (/^\d{4}-\d{2}$/.test(mr)) {
+                    const nomeAv = 'Relatório de Atividades (' + mr.slice(5) + '/' + mr.slice(0, 4) + ')';
+                    const { error: errDel } = await supabaseClient.from('notificacoes').delete()
+                        .eq('colaborador_id', idGestor()).eq('tipo', 'Relatorio_Pendente').eq('nome', nomeAv);
+                    if (errDel) await supabaseClient.from('notificacoes').update({ lida: true, lida_por: nomeLogin() })
+                        .eq('colaborador_id', idGestor()).eq('tipo', 'Relatorio_Pendente').eq('nome', nomeAv);
+                    if (typeof atualizarContador === 'function') atualizarContador();
+                }
+            } catch (eN) { /* não bloqueia o envio */ }
             S.dirty = false; clearInterval(S.timerAuto);
             carregarLista();
         } catch (e) { alerta('Erro ao enviar: ' + (e.message || e), 'erro'); }
