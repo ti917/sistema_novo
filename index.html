@@ -82173,7 +82173,11 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
         // maior que a carência em si (2 dias úteis) porque feriado prolongado / fim de
         // semana comem dias de calendário sem contar como dia útil.
         const DIAS_CARENCIA_RETORNO = 2; // dias ÚTEIS (não corridos) após o retorno
-        const BUFFER_BUSCA_RETORNO_DIAS = 10; // margem de calendário só pra garantir que a busca traga o registro
+        // 👇 Esse mesmo buffer agora também serve pra trazer os afastamentos/férias de
+        // TODO o ciclo de avaliação (que pode passar de 85, 92 dias ou até mais se
+        // tiver atrasado), não só os recentes da carência de retorno — por isso é bem
+        // maior que os 2 dias úteis de carência. Cobre até ~1 ano de ciclo atrasado.
+        const BUFFER_BUSCA_RETORNO_DIAS = 400; // margem de calendário pra cobrir o ciclo inteiro de avaliação
         const dataLimiteGraciaObj = new Date(hojeObj);
         dataLimiteGraciaObj.setDate(dataLimiteGraciaObj.getDate() - BUFFER_BUSCA_RETORNO_DIAS);
         const dataLimiteGraciaIso = dataLimiteGraciaObj.toISOString().split('T')[0];
@@ -82319,15 +82323,40 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
             // continua respeitando a folga dele hoje (deveBloquearEsseCara só ativa com
             // !taAfastadoHoje).
 
-            const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho; 
+            const ultimaDataAvaliacaoStr = adm.ultima_aval_desempenho;
             let taAtrasado = false;
             let diasAtraso = diffDiasEmpresa;
-            
+
+            // 👇 NOVO (desconta do ciclo os dias de atestado/afastamento/férias): o
+            // relógio da avaliação só deve andar enquanto a pessoa está de fato
+            // trabalhando. Soma, sem contar o mesmo dia duas vezes (atestado e férias
+            // sobrepostos, por exemplo), quantos dias dentro do ciclo atual (desde a
+            // última avaliação, ou desde a admissão se for a primeira) caíram em
+            // período de afastamento ou férias aprovado.
+            function somarDiasNoIntervalo(periodos, campoIni, campoFim, inicioCicloStr) {
+                const diasMarcados = new Set();
+                const inicioCiclo = new Date(inicioCicloStr + 'T00:00:00');
+                periodos.forEach(p => {
+                    let ini = new Date(p[campoIni] + 'T00:00:00');
+                    let fim = new Date(p[campoFim] + 'T00:00:00');
+                    if (ini < inicioCiclo) ini = new Date(inicioCiclo);
+                    if (fim > hojeObj) fim = new Date(hojeObj);
+                    for (let d = new Date(ini); d <= fim; d.setDate(d.getDate() + 1)) {
+                        diasMarcados.add(d.toISOString().split('T')[0]);
+                    }
+                });
+                return diasMarcados.size;
+            }
+
+            const inicioCicloStr = ultimaDataAvaliacaoStr || dataInicioStr;
+            const diasDescontadosCiclo = somarDiasNoIntervalo(ausColab, 'data_inicio', 'data_fim', inicioCicloStr)
+                + somarDiasNoIntervalo(ferColab, 'data_inicio_ferias', 'data_fim_ferias', inicioCicloStr);
+
             if (ultimaDataAvaliacaoStr) {
                 // É UMA AVALIAÇÃO DE CICLO TRIMESTRAL
                 const dUltima = new Date(ultimaDataAvaliacaoStr + 'T00:00:00');
-                const diffDiasDesdeUltima = Math.floor((hojeObj - dUltima) / (1000 * 60 * 60 * 24));
-                
+                const diffDiasDesdeUltima = Math.max(0, Math.floor((hojeObj - dUltima) / (1000 * 60 * 60 * 24)) - diasDescontadosCiclo);
+
                 // 👇 A MÁGICA 2: O cronômetro dos ciclos seguintes também apita aos 85 dias!
                 if (diffDiasDesdeUltima >= 85) {
                     taAtrasado = true;
@@ -82335,8 +82364,14 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
                 }
             } else {
                 // PRIMEIRA AVALIAÇÃO DA VIDA DO COLABORADOR
-                // Como já barramos lá em cima quem tem menos de 85 dias, se chegar aqui ele ativa o alerta!
-                taAtrasado = true;
+                // Como já barramos lá em cima quem tem menos de 85 dias corridos desde
+                // a admissão, mas aqui descontamos quem passou parte desse tempo
+                // afastado/de férias — só ativa o alerta se, mesmo com o desconto, já
+                // bateu os 85 dias efetivamente trabalhados.
+                diasAtraso = Math.max(0, diffDiasEmpresa - diasDescontadosCiclo);
+                if (diasAtraso >= 85) {
+                    taAtrasado = true;
+                }
             }
 
             if (taAtrasado || mapaAndamento[c.id]) {
