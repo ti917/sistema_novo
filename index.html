@@ -68925,6 +68925,20 @@ window.reenviarPendentesMassa = async function() {
 // ==========================================
 let arquivosLoteValidados = [];
 
+// 🔒 PROTEÇÃO ANTI-DUPLICIDADE: calcula o mes_ano no mesmo formato usado pra salvar em
+// documentos_mensais, a partir do que está selecionado agora nos campos do formulário.
+// Usado tanto no preview (pra já avisar) quanto no disparo (pra travar de verdade).
+window._calcularMesAnoLoteDocs = function(tipoDoc) {
+    if (tipoDoc === 'Informe de Rendimentos') {
+        const ano = (document.getElementById('doc-lote-ano') || {}).value;
+        return ano || null;
+    }
+    const mesAnoInput = (document.getElementById('doc-lote-mes') || {}).value;
+    if (!mesAnoInput) return null;
+    const partes = mesAnoInput.split('-');
+    return `${partes[1]}/${partes[0]}`;
+};
+
 // Apenas limpa a tela e sincroniza a empresa ao clicar na aba principal
 document.querySelector('[data-target="tela-holerites"]')?.addEventListener('click', () => {
     limparLoteDocs();
@@ -69107,6 +69121,19 @@ window.analisarArquivosLote = async function(input) {
         } catch (err) { console.error(err); }
     }
 
+    // 🔒 PROTEÇÃO ANTI-DUPLICIDADE (preview): descobre quem desse lote já tem esse mesmo
+    // tipo+mês registrado em documentos_mensais — esses não entram como "Pronto", aparecem
+    // avisando que já foi enviado e não vão pra fila de disparo.
+    const mesAnoPreview = window._calcularMesAnoLoteDocs(tipo);
+    let idsJaEnviadosLote = new Set();
+    if (mesAnoPreview) {
+        const idsComOcorrencia = colabsOrdenados.filter(c => c.ocorrencias.length > 0).map(c => c.id);
+        if (idsComOcorrencia.length > 0) {
+            const { data: jaEnviados } = await supabaseClient.from('documentos_mensais').select('colaborador_id').eq('tipo_documento', tipo).eq('mes_ano', mesAnoPreview).in('colaborador_id', idsComOcorrencia);
+            idsJaEnviadosLote = new Set((jaEnviados || []).map(e => String(e.colaborador_id)));
+        }
+    }
+
     // 👇 Agora sim: pra cada colaborador com 1+ ocorrências, monta o PDF final juntando as
     // páginas de TODOS os arquivos em que ele apareceu (na ordem em que os arquivos foram
     // anexados). Se ele só apareceu em 1 arquivo, o resultado é idêntico a antes; se apareceu
@@ -69134,7 +69161,24 @@ window.analisarArquivosLote = async function(input) {
             : '';
 
         const fone = c.dados_admissao?.telefone;
-        if (fone) {
+        const jaFoiEnviadoEsteMes = idsJaEnviadosLote.has(String(c.id));
+
+        if (jaFoiEnviadoEsteMes) {
+            // 🔒 Já existe esse tipo+mês pra esse colaborador — não entra na fila, não tem
+            // como disparar de novo por aqui (a trava real é no disparo, isso é só o aviso).
+            htmlAvisos += `
+            <tr style="background: rgba(220, 53, 69, 0.05); box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <td style="padding: 12px; border-radius: 8px 0 0 8px; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-left: 4px solid var(--cor-perigo);">
+                    <span style="color: var(--cor-texto-secundario); font-size: 0.85rem;"><i class="fa-solid fa-file-pdf"></i> ${descricaoPaginas}</span>
+                </td>
+                <td style="padding: 12px; color: var(--cor-perigo); font-weight: bold; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2);">
+                    <i class="fa-solid fa-ban"></i> ${c.nome}
+                </td>
+                <td style="padding: 12px; text-align: right; border-radius: 0 8px 8px 0; border-top: 1px solid rgba(220, 53, 69, 0.2); border-bottom: 1px solid rgba(220, 53, 69, 0.2); border-right: 1px solid rgba(220, 53, 69, 0.2);">
+                    <span class="badge desligado" title="Já existe um envio desse tipo/mês para este colaborador">Já enviado neste mês</span>
+                </td>
+            </tr>`;
+        } else if (fone) {
             // 👇 MÁGICA: Geramos um ID único para este item do lote
             const itemLoteId = `lote_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -69248,10 +69292,29 @@ window.iniciarDisparoEmLote = async function() {
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Subindo PDFs e disparando no Zap (Modo Turbo)...';
 
+    // 🔒 TRAVA FINAL ANTI-DUPLICIDADE: revalida bem na hora de disparar (o mês pode ter sido
+    // trocado depois do preview, ou pode ter corrido outro disparo nesse intervalo). Quem já
+    // tiver esse tipo+mês gravado em documentos_mensais NÃO é disparado — sem exceção, sem
+    // botão de "mandar assim mesmo".
+    let idsBloqueadosDisparo = new Set();
+    try {
+        const idsLoteFinal = arquivosLoteValidados.map(item => item.colab?.id).filter(Boolean);
+        if (idsLoteFinal.length > 0) {
+            const { data: jaEnviadosFinal, error: errCheck } = await supabaseClient.from('documentos_mensais').select('colaborador_id').eq('tipo_documento', tipo).eq('mes_ano', mesFormatado).in('colaborador_id', idsLoteFinal);
+            if (errCheck) throw errCheck;
+            idsBloqueadosDisparo = new Set((jaEnviadosFinal || []).map(e => String(e.colaborador_id)));
+        }
+    } catch (e) {
+        console.error('Erro ao verificar duplicidade antes do disparo:', e);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-brands fa-whatsapp fa-lg"></i> Iniciar Recorte e Disparo Automático (WhatsApp)';
+        return mostrarAlerta("Não foi possível verificar se já existe envio para este mês/tipo. Disparo cancelado por segurança — tente novamente.", "erro");
+    }
+
     let enviados = 0;
     let falhas = 0;
     const listaFalhas = []; // 👈 quem NÃO recebeu: { nome, unidade, motivo } — vira o popup no final
-    
+
     const formatarNomePastaLocal = (str) => {
         if (!str || str === 'undefined') return 'INFORMACAO_AUSENTE';
         return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '_').toUpperCase();
@@ -69265,6 +69328,9 @@ window.iniciarDisparoEmLote = async function() {
         
         const promessasLote = loteAtual.map(async (item) => {
             if (!item.valido) return { ok: false, nome: item.colab?.nome, unidade: item.colab?.unidade, motivo: 'Documento não validado no lote' };
+            if (idsBloqueadosDisparo.has(String(item.colab?.id))) {
+                return { ok: false, nome: item.colab?.nome, unidade: item.colab?.unidade, motivo: 'Já existe um envio desse tipo/mês para este colaborador — bloqueado para evitar duplicidade.' };
+            }
             const c = item.colab;
 
             try {
