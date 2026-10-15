@@ -21575,6 +21575,7 @@ window.atualizarContador = async function() {
         tiposPermitidos.push('Relatorio_Devolvido');   // financeiro devolveu um Relatório de Atividades do gestor
         tiposPermitidos.push('Relatorio_Pendente');    // lembrete (a partir do dia 25) de fazer o Relatório de Atividades do mês
         tiposPermitidos.push('Desligamento_Programado'); // Admin/Gestor Global programou o desligamento de um colaborador avaliado
+        tiposPermitidos.push('Desligamento_Cancelado');  // ...e depois desistiu: avisa o gestor
         if (p.includes('AvaliacaoDesempenho')) tiposPermitidos.push('Avaliacao_Desempenho_Aprovada');
         if (p.includes('Alteracao')) tiposPermitidos.push('Alteração_Concluída', 'Alteração_Recusada');
         // 👇 'Ocorrencia_Ponto' (justificativa de ponto) é exclusiva do RH/Admin --
@@ -21634,7 +21635,7 @@ if (isAdmin || podeAprovar) {
     }
 
     // 👇 Desligamento programado: se o aviso tem um gestor-alvo, só ele vê (referencia_id = id do gestor)
-    notifsAprovadas = notifsAprovadas.filter(n => n.tipo !== 'Desligamento_Programado' || !n.referencia_id || n.referencia_id === usuarioAtual.id);
+    notifsAprovadas = notifsAprovadas.filter(n => (n.tipo !== 'Desligamento_Programado' && n.tipo !== 'Desligamento_Cancelado') || !n.referencia_id || n.referencia_id === usuarioAtual.id);
     if (typeof window.atualizarFaixaDesligamentoProgramado === 'function') {
         try { window.atualizarFaixaDesligamentoProgramado(notifsAprovadas.filter(n => n.tipo === 'Desligamento_Programado' && !n.lida)); } catch (eF) { console.warn(eF); }
     }
@@ -21821,6 +21822,7 @@ if (isAdmin || podeAprovar) {
                 else if (item.tipo === 'Ferias_Processo_Gestor') { textoTitulo = 'Processo de Férias Liberado!'; textoAcao = 'tem o processo de férias deste período pronto para baixar e colher assinatura.'; corTema = '#ffd54f'; bgCor = 'rgba(255,213,79,0.08)'; icone = 'fa-file-signature'; }
                 else if (item.tipo === 'Ferias_Processo_Admin') { textoTitulo = 'Processo de Férias Assinado!'; textoAcao = 'teve o processo de férias deste período assinado e devolvido pelo gestor.'; corTema = 'var(--cor-sucesso)'; bgCor = 'rgba(40,167,69,0.05)'; icone = 'fa-file-circle-check'; }
                 else if (item.tipo === 'Ferias_Devolvida_Gestor') { textoTitulo = 'Assinatura Devolvida!'; textoAcao = 'teve a assinatura das férias recusada pelo RH — veja o motivo e assine de novo.'; corTema = 'var(--cor-perigo)'; bgCor = 'rgba(220,53,69,0.05)'; icone = 'fa-rotate-left'; }
+                else if (item.tipo === 'Desligamento_Cancelado') { textoTitulo = 'Desligamento cancelado!'; textoAcao = 'não será mais desligado — a rescisão programada foi cancelada.'; corTema = '#20c997'; bgCor = 'rgba(32,201,151,0.07)'; icone = 'fa-rotate-left'; }
                 else if (item.tipo === 'Desligamento_Programado') { textoTitulo = 'Desligamento programado!'; textoAcao = 'teve o desligamento programado após a avaliação de desempenho — envie a rescisão.'; corTema = '#ff9800'; bgCor = 'rgba(255,152,0,0.08)'; icone = 'fa-user-clock'; }
                 else if (item.tipo === 'Relatorio_Pendente') { textoTitulo = 'Relatório de Atividades para fazer!'; textoAcao = 'ainda não foi enviado — faça e envie ao financeiro para não ficar pendente neste mês.'; corTema = '#4fc3f7'; bgCor = 'rgba(79,195,247,0.07)'; icone = 'fa-file-lines'; }
                 else if (item.tipo === 'Relatorio_Devolvido') { textoTitulo = 'Relatório Devolvido!'; textoAcao = 'foi devolvido pelo financeiro — abra o relatório, veja o motivo e corrija.'; corTema = '#f1c40f'; bgCor = 'rgba(241,196,15,0.07)'; icone = 'fa-rotate-left'; }
@@ -64193,6 +64195,46 @@ window.reempilharTarjasTopo = function() {
 // ========================================================
 // DESLIGAMENTO VINDO DA AVALIAÇÃO DE EXPERIÊNCIA
 // ========================================================
+// Cancela um desligamento programado (só Gestor Global, na aba Desempenho): tira a marcação, some com o aviso/faixa
+// do gestor e manda um aviso "Desligamento cancelado". A avaliação já arquivada continua no Arquivo Digital.
+window.cancelarDesligamentoProgramado = async function(idColab) {
+    const item = (window.desligamentosProgramados || []).find(it => String(it.colab.id) === String(idColab));
+    const nome = item ? item.colab.nome : 'este colaborador';
+    const confirmado = await mostrarConfirmacao(`Cancelar o desligamento programado de <b>${nome}</b>?<br><br>Ele volta ao ciclo normal de avaliações, o aviso e a faixa do gestor somem e o gestor recebe um aviso de "Desligamento cancelado". A avaliação já arquivada continua no Arquivo Digital.`, 'Cancelar Desligamento');
+    if (!confirmado) return;
+    try {
+        const { data: perfil, error: errP } = await supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao').eq('id', idColab).single();
+        if (errP || !perfil) throw new Error('Colaborador não encontrado.');
+        let adm = perfil.dados_admissao || {};
+        if (typeof adm === 'string') { try { adm = JSON.parse(adm); } catch (e) { adm = {}; } }
+        delete adm.desligamento_programado;
+        const { data: gravou, error: errU } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab).select('id');
+        if (errU) throw errU;
+        if (!gravou || gravou.length === 0) throw new Error('O sistema não gravou o cancelamento (sem permissão). Nada foi alterado.');
+
+        // Descobre o gestor-alvo do aviso anterior e some com ele (sino + faixa)
+        let alvo = null;
+        try {
+            const { data: antigos } = await supabaseClient.from('notificacoes').select('id, referencia_id').eq('tipo', 'Desligamento_Programado').eq('colaborador_id', idColab).eq('lida', false);
+            alvo = (antigos || []).map(n => n.referencia_id).find(Boolean) || null;
+            await supabaseClient.from('notificacoes').update({ lida: true, lida_por: usuarioAtual.nome }).eq('tipo', 'Desligamento_Programado').eq('colaborador_id', idColab);
+            const unidColab = String(perfil.unidade || '').split(',').map(u => u.trim()).filter(Boolean);
+            await supabaseClient.from('notificacoes').insert([{
+                colaborador_id: idColab, nome: perfil.nome, unidade: unidColab[0] || null, lida: false,
+                tipo: 'Desligamento_Cancelado', referencia_id: alvo
+            }]);
+        } catch (eN) { console.warn('Aviso de cancelamento não foi criado:', eN); }
+
+        mostrarAlerta(`Desligamento de <b>${perfil.nome}</b> cancelado. O gestor foi avisado.`, 'sucesso');
+        if (typeof window.checarPendenciasDesempenho === 'function') await window.checarPendenciasDesempenho(true);
+        if (typeof window.filtrarDesempenhoPendentes === 'function') window.filtrarDesempenhoPendentes();
+        if (typeof atualizarContador === 'function') atualizarContador();
+    } catch (e) {
+        console.error(e);
+        mostrarAlerta('Erro ao cancelar o desligamento: ' + (e.message || e), 'erro');
+    }
+};
+
 // Desligamento programado pelo Admin/Gestor Global: abre a Nova Solicitação já com unidade, tipo e colaborador.
 window.irParaRescisaoProgramada = async function(idColab) {
     try {
@@ -82354,6 +82396,7 @@ window.renderizarListaDesempenhoPendentes = function() {
     const termoProg = window.removerAcentos(String((document.getElementById('busca-desempenho-pendentes') || {}).value || '').toLowerCase());
     const programados = (window.desligamentosProgramados || []).filter(it =>
         !termoProg || window.removerAcentos(String(it.colab.nome || '').toLowerCase()).includes(termoProg) || window.removerAcentos(String(it.colab.unidade || '').toLowerCase()).includes(termoProg));
+    const souGestorGlobalDes = usuarioAtual.perfil === 'Gestor' && usuarioAtual.permissoes?.escala_global === true;
     programados.forEach(it => {
         const quando = it.info && it.info.em ? new Date(it.info.em).toLocaleDateString('pt-BR') : '';
         const quem = it.info && it.info.por ? ` por ${String(it.info.por).replace(/</g, '&lt;')}` : '';
@@ -82367,9 +82410,12 @@ window.renderizarListaDesempenhoPendentes = function() {
                     </span>
                     <span style="font-size: 0.8rem; color: #ff9800; display: block; margin-top: 5px;"><i class="fa-solid fa-circle-info"></i> Sem cobrança de avaliação — envie a rescisão para concluir.</span>
                 </div>
-                <button class="btn-success" style="background: #ff9800; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="window.irParaRescisaoProgramada('${it.colab.id}')">
-                    <i class="fa-solid fa-user-slash"></i> Fazer Rescisão
-                </button>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn-success" style="background: #ff9800; color: #000; border: none; font-weight: bold; padding: 10px 20px;" onclick="window.irParaRescisaoProgramada('${it.colab.id}')">
+                        <i class="fa-solid fa-user-slash"></i> Fazer Rescisão
+                    </button>
+                    ${souGestorGlobalDes ? `<button class="btn-secondary" style="border-color: #6c757d; color: var(--cor-texto-principal); font-weight: bold; padding: 10px 20px;" onclick="window.cancelarDesligamentoProgramado('${it.colab.id}')"><i class="fa-solid fa-rotate-left"></i> Cancelar Desligamento</button>` : ''}
+                </div>
             </div>`;
     });
 
