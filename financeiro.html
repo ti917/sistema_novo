@@ -920,6 +920,14 @@
             <span>Notas a Receber</span>
         </div>
 
+        <!-- ========================================== -->
+        <!-- NOVO BOTÃO: ALMOXARIFADO                    -->
+        <!-- ========================================== -->
+        <div class="sidebar-item" data-target="tela-almoxarifado">
+            <i class="fa-solid fa-boxes-stacked"></i>
+            <span>Almoxarifado</span>
+        </div>
+
         <!-- ============ NOVO: DRE GERENCIAL ============ -->
         <div class="sidebar-item" data-target="tela-dre">
             <i class="fa-solid fa-scale-balanced"></i>
@@ -1868,6 +1876,38 @@
     </div>
 </section>
 
+            <!-- ============================================================ -->
+            <!-- NOVA TELA: ALMOXARIFADO                                      -->
+            <!-- ============================================================ -->
+            <section id="tela-almoxarifado" class="view-section hidden">
+
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
+                    <div>
+                        <h2 style="margin: 0; color: var(--cor-texto-principal);"><i class="fa-solid fa-boxes-stacked" style="color: var(--cor-acento);"></i> Almoxarifado</h2>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-top: 5px;">Lance a nota de compra do almoxarifado por unidade. A quantidade e o valor de cada item vão automaticamente para o Estoque da unidade (não gera lançamento no Centro de Custo por enquanto).</p>
+                    </div>
+                    <button class="btn-primary" style="background: var(--cor-acento); color:#000; border:none; font-weight:bold; padding: 12px 20px; border-radius: 8px; cursor:pointer;" onclick="abrirModalNotaAlmoxarifado()"><i class="fa-solid fa-plus"></i> Lançar Nota de Almoxarifado</button>
+                </div>
+
+                <div class="glass-card" style="padding: 0; overflow-x: auto; margin-top: 10px;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                        <thead>
+                            <tr style="background: rgba(0, 51, 40, 0.8); color: var(--cor-texto-secundario); font-size: 0.8rem; text-transform: uppercase;">
+                                <th style="padding: 15px;">Unidade</th>
+                                <th style="padding: 15px;">Fornecedor</th>
+                                <th style="padding: 15px;">Nº NF</th>
+                                <th style="padding: 15px;">Data</th>
+                                <th style="padding: 15px;">Itens</th>
+                                <th style="padding: 15px;">Valor Total</th>
+                                <th style="padding: 15px; text-align: center; width: 140px;">Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="lista-almoxarifado-body">
+                            <tr><td colspan="7" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
 
             <!-- ============================================================ -->
             <!-- NOVA TELA: DRE GERENCIAL                                     -->
@@ -3775,6 +3815,7 @@ let jurosDaParcela = lanc.juros || 0;
             'tela-rescisoes': 'rescisoes',
             'tela-ferias-fin': 'ferias',
             'tela-notas-receber': 'notas-a-receber',
+            'tela-almoxarifado': 'almoxarifado',
             'tela-dre': 'dre',
             'tela-auditoria': 'auditoria',
             'tela-centro-custos': 'centros-de-custo',
@@ -3856,6 +3897,8 @@ let jurosDaParcela = lanc.juros || 0;
                     // 🆕 NOVO: tela de Solicitações Abertas (Ordens de Serviço de manutenção)
                     if (btn.dataset.target === 'tela-ordens-servico') { renderizarOrdensServico(); }
                     if (btn.dataset.target === 'tela-relatorios-atividades') { carregarRelatoriosAtividadesFin(); }
+                    // NOVO: tela de Almoxarifado (compras por unidade, conecta com Estoque do RH)
+                    if (btn.dataset.target === 'tela-almoxarifado') { carregarAlmoxarifado(); }
 
                     // Atualiza o link (#) no topo do navegador pra essa aba
                     if (window.MAPA_HASH_TELAS[btn.dataset.target]) {
@@ -8747,6 +8790,322 @@ window.sincronizarBaixaNotaComCentroCusto = async function(notaObj) {
         }
     } catch (e) {
         console.error("Erro ao sincronizar baixa com Centro de Custo:", e);
+    }
+};
+
+// ==========================================
+// MÓDULO: ALMOXARIFADO (Notas de Compra por Unidade, ligadas ao Estoque do RH)
+// ==========================================
+window.almoxarifadoNotasEmMemoria = [];
+window.almoxarifadoItensTemp = []; // itens da nota aberta no modal (antes de salvar)
+
+const CATEGORIAS_ALMOX = ['EPIs e Uniformes', 'Produtos de Limpeza', 'Material de Escritório', 'Ferramentas', 'Outros'];
+const MEDIDAS_ALMOX = ['Unidade(s)', 'Par(es)', 'Litro(s)', 'Pacote(s)', 'Caixa(s)', 'Metro(s)'];
+
+window.carregarAlmoxarifado = async function() {
+    const tbody = document.getElementById('lista-almoxarifado-body');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr>';
+    if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
+
+    let q = supabaseClient.from('almoxarifado_notas').select('*, almoxarifado_itens(*)').order('data_compra', { ascending: false });
+    if (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas') q = q.eq('empresa', empresaFinanceiraSelecionada);
+    const { data, error } = await q;
+    if (error) { tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-perigo);">Erro ao carregar: ${error.message}</td></tr>`; return; }
+
+    window.almoxarifadoNotasEmMemoria = data || [];
+    renderizarListaAlmoxarifado();
+};
+
+function renderizarListaAlmoxarifado() {
+    const tbody = document.getElementById('lista-almoxarifado-body');
+    if (!tbody) return;
+    const lista = window.almoxarifadoNotasEmMemoria;
+    if (!lista.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota de almoxarifado lançada ainda.</td></tr>'; return; }
+
+    tbody.innerHTML = lista.map(n => {
+        const cc = todosCentrosCustoGlobais.find(c => c.id === n.centro_custo_id);
+        const qtdItens = (n.almoxarifado_itens || []).length;
+        const dataFmt = n.data_compra ? new Date(n.data_compra + 'T00:00:00').toLocaleDateString('pt-BR') : '-';
+        return `<tr>
+            <td style="padding:12px;">${cc ? cc.nome_unidade : '<i style="color:var(--cor-perigo);">Unidade removida</i>'}</td>
+            <td style="padding:12px;">${n.fornecedor || '-'}</td>
+            <td style="padding:12px;">${n.numero_nf || '-'}</td>
+            <td style="padding:12px;">${dataFmt}</td>
+            <td style="padding:12px;">${qtdItens} ${qtdItens === 1 ? 'item' : 'itens'}</td>
+            <td style="padding:12px; font-weight:bold; color: var(--cor-acento);">R$ ${(n.valor_total || 0).toLocaleString('pt-BR', {minimumFractionDigits:2})}</td>
+            <td style="padding:12px; text-align:center;">
+                ${n.anexo_nf ? `<a href="${n.anexo_nf}" target="_blank" class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-radius:6px; border-color:#3498db; color:#3498db; text-decoration:none; margin-right:5px;" title="Ver Nota Fiscal"><i class="fa-solid fa-file-pdf"></i></a>` : ''}
+                <button class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-radius:6px; border-color:#f1c40f; color:#f1c40f;" onclick="abrirModalNotaAlmoxarifado('${n.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                <button class="btn-danger-mini" style="padding:6px 10px; font-size:0.78rem; border-radius:6px;" onclick="excluirNotaAlmoxarifado('${n.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+window.abrirModalNotaAlmoxarifado = async function(id = null) {
+    if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
+    const modalAntigo = document.getElementById('modal-almoxarifado');
+    if (modalAntigo) modalAntigo.remove();
+
+    let nota = { centro_custo_id: '', fornecedor: '', numero_nf: '', data_compra: new Date().toISOString().substring(0,10), anexo_nf: null };
+    window.almoxarifadoItensTemp = [];
+    let tituloModal = '<i class="fa-solid fa-plus"></i> Lançar Nota de Almoxarifado';
+
+    if (id) {
+        const found = window.almoxarifadoNotasEmMemoria.find(n => n.id === id);
+        if (found) {
+            nota = { ...found };
+            window.almoxarifadoItensTemp = (found.almoxarifado_itens || []).map(i => ({ ...i }));
+        }
+        tituloModal = '<i class="fa-solid fa-pen"></i> Editar Nota de Almoxarifado';
+    } else {
+        window.almoxarifadoItensTemp.push({ produto: '', categoria: 'EPIs e Uniformes', quantidade: '', medida: 'Unidade(s)', valor_unitario: '' });
+    }
+
+    let optionsUnidades = '<option value="">Selecione a Unidade...</option>';
+    todosCentrosCustoGlobais.forEach(cc => {
+        optionsUnidades += `<option value="${cc.id}" ${nota.centro_custo_id === cc.id ? 'selected' : ''}>${cc.nome_unidade}</option>`;
+    });
+
+    const modalHtml = `
+    <div id="modal-almoxarifado" class="modal-overlay" style="z-index: 100050;">
+        <div class="glass-card" style="width: 100%; max-width: 800px; border-top: 4px solid var(--cor-acento); position: relative; padding: 25px; max-height: 90vh; overflow-y: auto;">
+            <button type="button" onclick="document.getElementById('modal-almoxarifado').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.5rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h2 style="color: var(--cor-acento); margin-top: 0; margin-bottom: 6px;">${tituloModal}</h2>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.82rem; margin-bottom: 20px;">Ao salvar, gera automaticamente 1 entrada no Estoque da unidade pra cada item (ainda não lança despesa no Centro de Custo).</p>
+
+            <form id="form-almoxarifado">
+                <input type="hidden" id="almox-id" value="${id || ''}">
+                <div style="display:flex; gap:15px; margin-bottom:15px; flex-wrap: wrap;">
+                    <div style="flex:2; min-width:220px;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Unidade (Centro de Custo) <span style="color: var(--cor-perigo);">*</span></label>
+                        <select id="almox-unidade" required>${optionsUnidades}</select>
+                    </div>
+                    <div style="flex:1; min-width:150px;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Fornecedor</label>
+                        <input type="text" id="almox-fornecedor" class="modern-input" value="${nota.fornecedor || ''}" placeholder="Ex: Casa do EPI">
+                    </div>
+                </div>
+                <div style="display:flex; gap:15px; margin-bottom:15px; flex-wrap: wrap;">
+                    <div style="flex:1; min-width:150px;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Nº da Nota Fiscal</label>
+                        <input type="text" id="almox-numero-nf" class="modern-input" value="${nota.numero_nf || ''}">
+                    </div>
+                    <div style="flex:1; min-width:150px;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Data da Compra <span style="color: var(--cor-perigo);">*</span></label>
+                        <input type="date" id="almox-data" class="modern-input" required value="${nota.data_compra || ''}" onclick="this.showPicker()">
+                    </div>
+                    <div style="flex:1; min-width:180px;">
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Anexar Nota Fiscal</label>
+                        <input type="file" id="almox-anexo" accept="image/*,.pdf" class="modern-input" style="padding:8px;">
+                        ${nota.anexo_nf ? `<a href="${nota.anexo_nf}" target="_blank" style="font-size:0.75rem; color:#3498db;">Ver anexo atual</a>` : ''}
+                    </div>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; margin: 20px 0 10px;">
+                    <h4 style="color: var(--cor-acento); margin:0;"><i class="fa-solid fa-boxes-stacked"></i> Itens da Nota</h4>
+                    <button type="button" class="btn-secondary" style="border-color:var(--cor-acento); color:var(--cor-acento);" onclick="adicionarItemAlmoxarifado()"><i class="fa-solid fa-plus"></i> Adicionar item</button>
+                </div>
+                <div id="almox-itens-lista"></div>
+
+                <div style="text-align:right; margin: 15px 0; font-size: 1.1rem; font-weight: bold; color: var(--cor-acento);">
+                    Total da Nota: <span id="almox-total-geral">R$ 0,00</span>
+                </div>
+
+                <button type="submit" id="btn-salvar-almoxarifado" class="btn-success" style="width: 100%; height: 50px; background: var(--cor-acento); color: #000; border: none; font-weight: bold;"><i class="fa-solid fa-check"></i> Salvar Nota</button>
+            </form>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    renderizarItensAlmoxarifado();
+
+    document.getElementById('form-almoxarifado').addEventListener('submit', salvarNotaAlmoxarifado);
+};
+
+window.adicionarItemAlmoxarifado = function() {
+    window.almoxarifadoItensTemp.push({ produto: '', categoria: 'EPIs e Uniformes', quantidade: '', medida: 'Unidade(s)', valor_unitario: '' });
+    renderizarItensAlmoxarifado();
+};
+
+window.removerItemAlmoxarifado = function(idx) {
+    window.almoxarifadoItensTemp.splice(idx, 1);
+    renderizarItensAlmoxarifado();
+};
+
+window.atualizarItemAlmoxarifado = function(idx, campo, valor) {
+    window.almoxarifadoItensTemp[idx][campo] = valor;
+    if (campo === 'quantidade' || campo === 'valor_unitario') recalcularTotalAlmoxarifado();
+};
+
+function recalcularTotalAlmoxarifado() {
+    let total = 0;
+    window.almoxarifadoItensTemp.forEach((it, idx) => {
+        const q = parseFloat(it.quantidade) || 0;
+        const v = parseFloat(it.valor_unitario) || 0;
+        const tot = q * v;
+        const el = document.getElementById(`almox-item-total-${idx}`);
+        if (el) el.textContent = 'R$ ' + tot.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+        total += tot;
+    });
+    const elGeral = document.getElementById('almox-total-geral');
+    if (elGeral) elGeral.textContent = 'R$ ' + total.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+}
+
+function renderizarItensAlmoxarifado() {
+    const cont = document.getElementById('almox-itens-lista');
+    if (!cont) return;
+    cont.innerHTML = window.almoxarifadoItensTemp.map((it, idx) => `
+        <div style="display:flex; gap:10px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap; padding:10px; background: rgba(255,255,255,0.03); border-radius:8px;">
+            <div style="flex:2; min-width:160px;">
+                <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:3px;">Produto</label>
+                <input type="text" class="modern-input" value="${it.produto || ''}" oninput="atualizarItemAlmoxarifado(${idx}, 'produto', this.value)" placeholder="Ex: Bota de Segurança" required>
+            </div>
+            <div style="flex:1; min-width:140px;">
+                <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:3px;">Categoria</label>
+                <select onchange="atualizarItemAlmoxarifado(${idx}, 'categoria', this.value)">
+                    ${CATEGORIAS_ALMOX.map(c => `<option value="${c}" ${it.categoria === c ? 'selected' : ''}>${c}</option>`).join('')}
+                </select>
+            </div>
+            <div style="flex:0 0 90px;">
+                <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:3px;">Qtd</label>
+                <input type="number" class="modern-input" min="0.01" step="any" value="${it.quantidade || ''}" oninput="atualizarItemAlmoxarifado(${idx}, 'quantidade', this.value)" required>
+            </div>
+            <div style="flex:1; min-width:120px;">
+                <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:3px;">Medida</label>
+                <select onchange="atualizarItemAlmoxarifado(${idx}, 'medida', this.value)">
+                    ${MEDIDAS_ALMOX.map(m => `<option value="${m}" ${it.medida === m ? 'selected' : ''}>${m}</option>`).join('')}
+                </select>
+            </div>
+            <div style="flex:0 0 120px;">
+                <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:3px;">Valor Unit. (R$)</label>
+                <input type="number" class="modern-input" min="0" step="0.01" value="${it.valor_unitario || ''}" oninput="atualizarItemAlmoxarifado(${idx}, 'valor_unitario', this.value)" required>
+            </div>
+            <div style="flex:0 0 110px; font-weight:bold; color: var(--cor-acento); padding-bottom:10px;" id="almox-item-total-${idx}">R$ 0,00</div>
+            <button type="button" class="btn-danger-mini" style="height:38px;" onclick="removerItemAlmoxarifado(${idx})" title="Remover item" ${window.almoxarifadoItensTemp.length <= 1 ? 'disabled' : ''}><i class="fa-solid fa-trash"></i></button>
+        </div>
+    `).join('');
+    recalcularTotalAlmoxarifado();
+}
+
+async function salvarNotaAlmoxarifado(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btn-salvar-almoxarifado');
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Salvando...';
+
+    try {
+        const idNota = document.getElementById('almox-id').value;
+        const itensValidos = window.almoxarifadoItensTemp.filter(it => it.produto && parseFloat(it.quantidade) > 0);
+        if (itensValidos.length === 0) throw new Error('Adicione pelo menos 1 item com produto e quantidade.');
+
+        const centroCustoId = document.getElementById('almox-unidade').value;
+        if (!centroCustoId) throw new Error('Selecione a unidade.');
+        const cc = todosCentrosCustoGlobais.find(c => c.id === centroCustoId);
+
+        let anexoUrl = null;
+        if (idNota) {
+            const existente = window.almoxarifadoNotasEmMemoria.find(n => n.id === idNota);
+            anexoUrl = existente ? existente.anexo_nf : null;
+        }
+        const fileInput = document.getElementById('almox-anexo');
+        if (fileInput && fileInput.files.length > 0) {
+            const file = fileInput.files[0];
+            const ext = file.name.split('.').pop();
+            const fileName = `ALMOX_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+            const { error: errUp } = await supabaseClient.storage.from('anexos_financeiro').upload(fileName, file);
+            if (errUp) throw new Error('Falha no upload do anexo: ' + errUp.message);
+            const { data: pub } = supabaseClient.storage.from('anexos_financeiro').getPublicUrl(fileName);
+            anexoUrl = pub.publicUrl;
+        }
+
+        const itensComTotal = itensValidos.map(it => ({
+            produto: it.produto.trim().toUpperCase(),
+            categoria: it.categoria,
+            quantidade: parseFloat(it.quantidade),
+            medida: it.medida,
+            valor_unitario: parseFloat(it.valor_unitario) || 0,
+            valor_total: (parseFloat(it.quantidade) || 0) * (parseFloat(it.valor_unitario) || 0)
+        }));
+        const valorTotalNota = itensComTotal.reduce((s, it) => s + it.valor_total, 0);
+
+        const payloadNota = {
+            centro_custo_id: centroCustoId,
+            fornecedor: document.getElementById('almox-fornecedor').value.trim() || null,
+            numero_nf: document.getElementById('almox-numero-nf').value.trim() || null,
+            data_compra: document.getElementById('almox-data').value,
+            anexo_nf: anexoUrl,
+            valor_total: valorTotalNota,
+            empresa: (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas') ? empresaFinanceiraSelecionada : (cc ? cc.empresa : null),
+            criado_por: usuarioAtual.nome
+        };
+
+        let notaId = idNota;
+        if (idNota) {
+            const { error } = await supabaseClient.from('almoxarifado_notas').update(payloadNota).eq('id', idNota);
+            if (error) throw error;
+            await supabaseClient.from('almoxarifado_itens').delete().eq('nota_id', idNota);
+        } else {
+            const { data: inserida, error } = await supabaseClient.from('almoxarifado_notas').insert([payloadNota]).select();
+            if (error) throw error;
+            notaId = inserida[0].id;
+        }
+
+        const itensParaInserir = itensComTotal.map(it => ({ ...it, nota_id: notaId }));
+        const { error: errItens } = await supabaseClient.from('almoxarifado_itens').insert(itensParaInserir);
+        if (errItens) throw errItens;
+
+        await window.sincronizarAlmoxarifadoComEstoque({ id: notaId, ...payloadNota }, itensComTotal, cc);
+
+        mostrarAlerta('Nota de almoxarifado salva! Entradas geradas automaticamente no Estoque da unidade.', 'sucesso');
+        document.getElementById('modal-almoxarifado').remove();
+        carregarAlmoxarifado();
+    } catch (err) {
+        mostrarAlerta('Erro ao salvar: ' + err.message, 'erro');
+        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Salvar Nota';
+    }
+}
+
+window.sincronizarAlmoxarifadoComEstoque = async function(notaObj, itens, ccParam) {
+    // 🔖 Por enquanto esse módulo só alimenta o Estoque da unidade — NÃO cria lançamento
+    // de despesa no Centro de Custo (a tabela financeiro_lancamentos não é tocada aqui).
+    // Se um dia precisar que a compra também apareça no Centro de Custo da unidade,
+    // é só adicionar esse pedaço de volta aqui (mesmo padrão do sincronizarBaixaNotaComCentroCusto).
+    try {
+        const cc = ccParam || todosCentrosCustoGlobais.find(c => c.id === notaObj.centro_custo_id);
+        if (!cc) return;
+
+        // Entradas de Estoque (1 por item) — apaga as antigas dessa nota e recria
+        await supabaseClient.from('estoque_entradas').delete().eq('origem_almoxarifado_nota_id', notaObj.id);
+        const entradasEstoque = itens.map(it => ({
+            unidade: cc.nome_unidade,
+            produto: it.produto,
+            categoria: it.categoria,
+            data_entrada: notaObj.data_compra,
+            quantidade: it.quantidade,
+            medida: it.medida,
+            valor_unitario: it.valor_unitario,
+            valor_total: it.valor_total,
+            anexo_nf: notaObj.anexo_nf || null,
+            registrado_por: usuarioAtual ? usuarioAtual.nome : 'Sistema Automático',
+            origem_almoxarifado_nota_id: notaObj.id
+        }));
+        if (entradasEstoque.length > 0) await supabaseClient.from('estoque_entradas').insert(entradasEstoque);
+    } catch (e) {
+        console.error('Erro ao sincronizar Almoxarifado com Estoque:', e);
+    }
+};
+
+window.excluirNotaAlmoxarifado = async function(id) {
+    const ok = await mostrarConfirmacao('Excluir esta Nota de Almoxarifado?<br><br>Isso também remove as entradas correspondentes no Estoque.', 'Excluir Nota');
+    if (!ok) return;
+    try {
+        await supabaseClient.from('estoque_entradas').delete().eq('origem_almoxarifado_nota_id', id);
+        await supabaseClient.from('almoxarifado_notas').delete().eq('id', id); // itens somem junto (cascade)
+        mostrarAlerta('Nota excluída.', 'sucesso');
+        carregarAlmoxarifado();
+    } catch (err) {
+        mostrarAlerta('Erro ao excluir: ' + err.message, 'erro');
     }
 };
 
