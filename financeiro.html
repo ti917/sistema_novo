@@ -8868,11 +8868,16 @@ window.tsAlmoxInsumos = {}; // map idx -> instância TomSelect do campo Insumo d
 const MEDIDAS_ALMOX = ['Unidade(s)', 'Par(es)', 'Litro(s)', 'Pacote(s)', 'Caixa(s)', 'Metro(s)'];
 
 // Categorias de item/produto do Almoxarifado agora vêm do cadastro de Categorias do
-// Financeiro (aba Categorias), igual qualquer outra categoria do sistema — só que com
-// aplicacao = 'Almoxarifado'. Nada mais fica "fixo no código".
+// Financeiro (aba Categorias), igual qualquer outra categoria do sistema — tanto as
+// dedicadas (aplicacao = 'Almoxarifado') quanto as categorias de Despesa já usadas em
+// Centros de Custo (ex: "Materiais de Limpeza"), já que item de Almoxarifado é sempre
+// uma compra/despesa. Nada fica "fixo no código".
 function obterCategoriasAlmoxarifado() {
     if (typeof todasCategoriasGlobais === 'undefined' || !todasCategoriasGlobais) return [];
-    return todasCategoriasGlobais.filter(c => c.aplicacao === 'Almoxarifado');
+    return todasCategoriasGlobais.filter(c =>
+        c.aplicacao === 'Almoxarifado' ||
+        ((c.aplicacao === 'Centros de Custo' || c.aplicacao === 'Ambos') && (c.tipo === 'Despesa' || c.tipo === 'Ambos'))
+    );
 }
 
 // O que a tela chama de "Produto" é, no vocabulário do Financeiro, um Insumo — o mesmo
@@ -9183,9 +9188,6 @@ function renderizarItensAlmoxarifado() {
     const cont = document.getElementById('almox-itens-lista');
     if (!cont) return;
     const categoriasDisponiveis = obterCategoriasAlmoxarifado();
-    const optionsCategoria = categoriasDisponiveis.length > 0
-        ? categoriasDisponiveis.map(c => `<option value="${c.nome}">${c.nome}</option>`).join('')
-        : '<option value="">Sem categorias cadastradas</option>';
     const insumosDisponiveis = obterInsumosDisponiveisAlmoxarifado();
 
     cont.innerHTML = window.almoxarifadoItensTemp.map((it, idx) => `
@@ -9204,9 +9206,11 @@ function renderizarItensAlmoxarifado() {
                     </select>
                 </div>
                 <div>
-                    <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px;">Categoria</label>
-                    <select class="modern-input" onchange="atualizarItemAlmoxarifado(${idx}, 'categoria', this.value)" ${categoriasDisponiveis.length === 0 ? 'disabled' : ''}>
-                        ${optionsCategoria.replace(`value="${it.categoria}"`, `value="${it.categoria}" selected`)}
+                    <label style="font-size:0.72rem; color:var(--cor-texto-secundario); display:block; margin-bottom:4px;">Categoria <span style="font-weight:normal; opacity:0.7;">(do item)</span></label>
+                    <select id="almox-categoria-${idx}" placeholder="Selecione ou digite uma nova...">
+                        <option value="">Selecione...</option>
+                        ${categoriasDisponiveis.map(c => `<option value="${c.nome}" ${it.categoria === c.nome ? 'selected' : ''}>${c.nome}</option>`).join('')}
+                        ${it.categoria && !categoriasDisponiveis.some(c => c.nome === it.categoria) ? `<option value="${it.categoria}" selected>${it.categoria}</option>` : ''}
                     </select>
                 </div>
                 <div>
@@ -9246,6 +9250,25 @@ function renderizarItensAlmoxarifado() {
                 }
             },
             onChange: function(value) { atualizarItemAlmoxarifado(idx, 'produto', value); }
+        });
+    });
+
+    // Mesma coisa pra Categoria: dá pra digitar uma categoria nova na hora do lançamento
+    // (vira automaticamente uma Categoria de aplicação "Almoxarifado" ao salvar a nota).
+    window.tsAlmoxCategorias = {};
+    window.almoxarifadoItensTemp.forEach((it, idx) => {
+        const elSelect = document.getElementById(`almox-categoria-${idx}`);
+        if (!elSelect) return;
+        window.tsAlmoxCategorias[idx] = new TomSelect(elSelect, {
+            create: true,
+            plugins: ['clear_button'],
+            sortField: { field: "text", direction: "asc" },
+            render: {
+                option_create: function(data, escape) {
+                    return '<div class="create" style="padding: 10px; color: var(--cor-acento); font-weight: bold;">Cadastrar categoria nova: <strong>' + escape(data.input) + '</strong>&hellip;</div>';
+                }
+            },
+            onChange: function(value) { atualizarItemAlmoxarifado(idx, 'categoria', value); }
         });
     });
 
@@ -9371,6 +9394,26 @@ window.sincronizarCadastrosAlmoxarifado = async function(cc, nomeFornecedor, ite
         const empresaPadrao = (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas')
             ? empresaFinanceiraSelecionada
             : (cc.empresa || null);
+
+        // 0) Garante cada Categoria de item digitada na hora (vira categoria aplicacao
+        //    "Almoxarifado" no cadastro de Categorias, igual se tivesse sido cadastrada lá)
+        const categoriasExistentes = obterCategoriasAlmoxarifado();
+        const nomesCategoriasDaNota = [...new Set(itens.map(it => (it.categoria || '').trim()).filter(Boolean))];
+        for (const nomeCategoria of nomesCategoriasDaNota) {
+            const jaExiste = categoriasExistentes.some(c => c.nome === nomeCategoria);
+            if (jaExiste) continue;
+            const payloadCategoria = {
+                nome: nomeCategoria,
+                tipo: 'Despesa',
+                aplicacao: 'Almoxarifado',
+                grupo_dre: 'Despesas Operacionais',
+                empresa: empresaPadrao,
+                criado_por: usuarioAtual.nome
+            };
+            const { data: inseridaCategoria, error: errCat } = await supabaseClient.from('financeiro_categorias').insert([payloadCategoria]).select();
+            if (errCat) { console.error('Erro ao auto-cadastrar categoria do Almoxarifado:', errCat); continue; }
+            if (inseridaCategoria && inseridaCategoria[0]) todasCategoriasGlobais.push(inseridaCategoria[0]);
+        }
 
         // 1) Garante cada Insumo no catálogo global (financeiro_insumos)
         const nomesInsumosDaNota = [...new Set(itens.map(it => (it.produto || '').trim()).filter(Boolean))];
