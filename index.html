@@ -10136,6 +10136,12 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
             <i class="fa-solid fa-search" style="color: #00bcd4;"></i>
             <input type="text" id="busca-desempenho-admin" placeholder="Buscar colaborador ou unidade..." oninput="window.renderizarDesempenhoAdmin()" style="width: 100%; padding: 12px 15px 12px 40px; border-radius: 8px; background: var(--cor-fundo-input, rgba(0,0,0,0.2)); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda);">
         </div>
+        <div id="dpa-filtro-periodo" class="hidden" style="margin-bottom: 15px;">
+            <label style="font-size: 0.8rem; color: var(--cor-texto-secundario); display: block; margin-bottom: 5px;"><i class="fa-regular fa-calendar"></i> Período (mês de avaliação)</label>
+            <input type="text" id="dpa-periodo-flatpickr" placeholder="Selecione o período..." readonly style="width: 100%; padding: 12px 15px; border-radius: 8px; background: var(--cor-fundo-input, rgba(0,0,0,0.2)); color: var(--cor-texto-principal); border: 1px solid var(--cor-borda); cursor: pointer;">
+            <input type="hidden" id="dpa-periodo-inicio">
+            <input type="hidden" id="dpa-periodo-fim">
+        </div>
         <div id="lista-desempenho-admin" style="display: flex; flex-direction: column; gap: 12px;"></div>
     </div>
 </div>
@@ -64550,6 +64556,24 @@ window.trocarAbaDesempenhoAdmin = function(aba) {
         b.style.border = ativo ? 'none' : '1px solid var(--cor-borda)';
         b.classList.toggle('active', ativo);
     });
+
+    // O filtro de período (mês de avaliação) só faz sentido na aba de Avaliações
+    // Aprovadas — some nas outras abas.
+    const boxPeriodo = document.getElementById('dpa-filtro-periodo');
+    if (boxPeriodo) boxPeriodo.classList.toggle('hidden', aba !== 'aprovadas');
+
+    if (aba === 'aprovadas' && !window._dpaPeriodoPickerPronto) {
+        window._dpaPeriodoPickerPronto = true;
+        const hoje = new Date();
+        const iniMes = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+        const fimMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0);
+        const fmtIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        document.getElementById('dpa-periodo-inicio').value = fmtIso(iniMes);
+        document.getElementById('dpa-periodo-fim').value = fmtIso(fimMes);
+        window._dpaPeriodoPicker = window.initPeriodoRangePickerComTodos('dpa-periodo-flatpickr', 'dpa-periodo-inicio', 'dpa-periodo-fim', window.renderizarDesempenhoAdmin);
+        if (window._dpaPeriodoPicker) window._dpaPeriodoPicker.setDate([iniMes, fimMes], true); // já mostra o mês atual selecionado, sem precisar abrir o calendário
+    }
+
     window.renderizarDesempenhoAdmin();
 };
 window.carregarDesempenhoAdmin = async function() {
@@ -64561,10 +64585,24 @@ window.carregarDesempenhoAdmin = async function() {
         let qC = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, status_aprovacao, dados_admissao').eq('perfil', 'Colaborador').eq('status', 'Ativo');
         let qA = supabaseClient.from('avaliacoes_desempenho').select('id, colaborador_id, nome_colaborador, unidade, empresa, status, criado_por, created_at, documento, documento_assinado').in('status', ['Aguardando Assinatura', 'Aguardando Feedback', 'Pendente', 'Aprovado', 'Alerta_RH', 'Concluído']).order('created_at', { ascending: false }).limit(400);
         if (filtroEmp) { qC = qC.eq('empresa', filtroEmp); qA = qA.eq('empresa', filtroEmp); }
-        const [rC, rA] = await Promise.all([qC, qA]);
+
+        // 👇 Mesmo ajuste do lado do Gestor: busca afastamentos/atestados e férias aprovados
+        // (incluindo os que já terminaram, dentro de um buffer de ~1 ano) pra poder descontar
+        // do ciclo de "dias pendentes" na aba Pendentes — assim o Admin vê que não é o gestor
+        // que não fez, é o colaborador que tava afastado/de férias.
+        const hojeIsoAdm = new Date().toISOString().split('T')[0];
+        const bufferDataAdm = new Date(); bufferDataAdm.setDate(bufferDataAdm.getDate() - 400);
+        const bufferIsoAdm = bufferDataAdm.toISOString().split('T')[0];
+        // 👇 Sem filtro de empresa aqui (essas tabelas não têm essa coluna garantida) — o
+        // cruzamento por colaborador_id contra a lista de colaboradores (já filtrada por
+        // empresa) na hora de renderizar cuida disso sozinho.
+        const qAus = supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', hojeIsoAdm).gte('data_fim', bufferIsoAdm);
+        const qFer = supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIsoAdm).gte('data_fim_ferias', bufferIsoAdm);
+
+        const [rC, rA, rAus, rFer] = await Promise.all([qC, qA, qAus, qFer]);
         if (rC.error) throw rC.error;
         if (rA.error) throw rA.error;
-        window._dpaDados = { colabs: rC.data || [], avals: rA.data || [] };
+        window._dpaDados = { colabs: rC.data || [], avals: rA.data || [], ausencias: rAus.data || [], ferias: rFer.data || [] };
         window.renderizarDesempenhoAdmin();
     } catch (e) {
         console.error(e);
@@ -64586,6 +64624,34 @@ window.renderizarDesempenhoAdmin = function() {
         const emRescisao = c => ['Rescisão Pendente', 'Aguardando Assinatura', 'Aguardando Aprovação Global'].includes(c.status_aprovacao);
         const emAndamento = new Set(dados.avals.filter(a => ['Aguardando Assinatura', 'Aguardando Feedback'].includes(a.status)).map(a => a.colaborador_id));
         const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+        const hojeIsoDpa = hoje.toISOString().split('T')[0];
+
+        // 👇 Mesmo ajuste do lado do Gestor (window.checarPendenciasDesempenho): desconta do
+        // ciclo só o afastamento/atestado/férias LONGO de verdade (> 15 dias corridos), e
+        // sinaliza quando o colaborador está afastado/de férias HOJE — assim o Admin
+        // entende que um ciclo "vencido" pode ser porque a pessoa tava fora, não porque o
+        // gestor não fez a avaliação.
+        const LIMIAR_DIAS_AFASTAMENTO_LONGO_DPA = 15;
+        const ausenciasPorColab = {}, feriasPorColab = {};
+        (dados.ausencias || []).forEach(a => { (ausenciasPorColab[a.colaborador_id] = ausenciasPorColab[a.colaborador_id] || []).push(a); });
+        (dados.ferias || []).forEach(f => { (feriasPorColab[f.colaborador_id] = feriasPorColab[f.colaborador_id] || []).push(f); });
+
+        function somarDiasNoIntervaloDpa(periodos, campoIni, campoFim, inicioCicloStr) {
+            const diasMarcados = new Set();
+            const inicioCiclo = new Date(inicioCicloStr + 'T00:00:00');
+            periodos.forEach(p => {
+                const iniOriginal = new Date(p[campoIni] + 'T00:00:00');
+                const fimOriginal = new Date(p[campoFim] + 'T00:00:00');
+                const duracaoTotal = Math.floor((fimOriginal - iniOriginal) / 86400000) + 1;
+                if (duracaoTotal <= LIMIAR_DIAS_AFASTAMENTO_LONGO_DPA) return; // atestado curto, conta normal
+                let ini = iniOriginal, fim = fimOriginal;
+                if (ini < inicioCiclo) ini = new Date(inicioCiclo);
+                if (fim > hoje) fim = new Date(hoje);
+                for (let d = new Date(ini); d <= fim; d.setDate(d.getDate() + 1)) diasMarcados.add(d.toISOString().split('T')[0]);
+            });
+            return diasMarcados.size;
+        }
+
         const programados = [], ciclo = [];
         dados.colabs.forEach(c => {
             if (!bate(c.nome, c.unidade) || emRescisao(c)) return;
@@ -64594,8 +64660,18 @@ window.renderizarDesempenhoAdmin = function() {
             const ini = adm.jornada?.data_inicio || adm.data_inicio;
             if (!ini) return;
             const base = adm.ultima_aval_desempenho || ini;
-            const dias = Math.floor((hoje - new Date(base + 'T00:00:00')) / 86400000);
-            if (dias >= 85) ciclo.push({ c, dias, andamento: emAndamento.has(c.id) });
+            const diasBrutos = Math.floor((hoje - new Date(base + 'T00:00:00')) / 86400000);
+
+            const ausColab = ausenciasPorColab[c.id] || [];
+            const ferColab = feriasPorColab[c.id] || [];
+            const diasDescontados = somarDiasNoIntervaloDpa(ausColab, 'data_inicio', 'data_fim', base)
+                + somarDiasNoIntervaloDpa(ferColab, 'data_inicio_ferias', 'data_fim_ferias', base);
+            const dias = Math.max(0, diasBrutos - diasDescontados);
+
+            const afastadoHoje = ausColab.some(a => a.data_inicio <= hojeIsoDpa && a.data_fim >= hojeIsoDpa)
+                || ferColab.some(f => f.data_inicio_ferias <= hojeIsoDpa && f.data_fim_ferias >= hojeIsoDpa);
+
+            if (dias >= 85) ciclo.push({ c, dias, diasBrutos, diasDescontados, afastadoHoje, andamento: emAndamento.has(c.id) });
         });
         ciclo.sort((x, y) => y.dias - x.dias);
         programados.forEach(({ c, info }) => {
@@ -64606,17 +64682,18 @@ window.renderizarDesempenhoAdmin = function() {
                 <button class="btn-secondary" style="border-color:#6c757d; color: var(--cor-texto-principal); font-weight:bold;" onclick="window.cancelarDesligamentoProgramado('${c.id}')"><i class="fa-solid fa-rotate-left"></i> Cancelar Desligamento</button>
             </div>`;
         });
-        ciclo.forEach(({ c, dias, andamento }) => {
+        ciclo.forEach(({ c, dias, diasBrutos, diasDescontados, afastadoHoje, andamento }) => {
             const venc = dias >= 92;
-            const cor = venc ? '#f44336' : '#ff9800';
+            const cor = afastadoHoje ? '#9c27b0' : (venc ? '#f44336' : '#ff9800');
+            const tarjaAfastado = afastadoHoje ? `<span style="background: rgba(156,39,176,0.15); color:#ce93d8; border:1px solid #9c27b0; font-size:0.65rem; font-weight:bold; padding:2px 9px; border-radius:20px; margin-left:4px;"><i class="fa-solid fa-plane-departure"></i> AFASTADO/FÉRIAS HOJE</span>` : '';
             html += `<div class="admissao-card" style="border-left: 4px solid ${cor};">
                 <strong style="color:#00bcd4;"><i class="fa-solid fa-user-tie"></i> ${E(c.nome)}</strong>
-                <span style="background: ${venc ? 'rgba(244,67,54,0.15)' : 'rgba(156,39,176,0.15)'}; color:${venc ? '#f44336' : '#ce93d8'}; border:1px solid ${venc ? '#f44336' : '#9c27b0'}; font-size:0.65rem; font-weight:bold; padding:2px 9px; border-radius:20px; margin-left:8px;">${venc ? 'PRAZO VENCIDO' : 'VENCE EM ' + (92 - dias) + ' DIA(S)'}</span><br>
-                <span style="font-size:0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${E(c.unidade)} | Ciclo: <b style="color:${cor};">${dias} dias</b>${andamento ? ' | <span style="color:#ff9800;">avaliação em andamento (assinatura/feedback)</span>' : ''}</span>
+                <span style="background: ${venc ? 'rgba(244,67,54,0.15)' : 'rgba(156,39,176,0.15)'}; color:${venc ? '#f44336' : '#ce93d8'}; border:1px solid ${venc ? '#f44336' : '#9c27b0'}; font-size:0.65rem; font-weight:bold; padding:2px 9px; border-radius:20px; margin-left:8px;">${venc ? 'PRAZO VENCIDO' : 'VENCE EM ' + (92 - dias) + ' DIA(S)'}</span>${tarjaAfastado}<br>
+                <span style="font-size:0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${E(c.unidade)} | Ciclo: <b style="color:${cor};">${dias} dias</b>${diasDescontados > 0 ? ` <span style="color:#9c27b0;">(${diasBrutos} dias corridos − ${diasDescontados}d de afastamento/férias)</span>` : ''}${andamento ? ' | <span style="color:#ff9800;">avaliação em andamento (assinatura/feedback)</span>' : ''}</span>
             </div>`;
         });
         if (!html) html = vazio('Nenhum colaborador com avaliação pendente.');
-        else html = `<p style="font-size:0.78rem; color: var(--cor-texto-secundario); margin: 0 0 4px;">Contagem simples do ciclo (85 dias). Afastamentos, férias e carência de retorno são considerados só na tela do gestor.</p>` + html;
+        else html = `<p style="font-size:0.78rem; color: var(--cor-texto-secundario); margin: 0 0 4px;">Contagem do ciclo (85 dias) já descontando afastamentos e férias longos (&gt;15 dias) aprovados. Carência de retorno continua só na tela do gestor.</p>` + html;
     } else if (window._dpaAba === 'andamento') {
         const lista = dados.avals.filter(a => ['Aguardando Assinatura', 'Aguardando Feedback'].includes(a.status) && bate(a.nome_colaborador, a.unidade));
         html = lista.map(a => `<div class="admissao-card" style="border-left: 4px solid #ff9800;">
@@ -64625,15 +64702,26 @@ window.renderizarDesempenhoAdmin = function() {
             <span style="font-size:0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${E(a.unidade)} | Gestor: ${E(a.criado_por || '-')} | Criada em ${fmt(a.created_at)}</span>
         </div>`).join('') || vazio('Nenhuma avaliação aguardando assinatura ou feedback.');
     } else {
-        const lista = dados.avals.filter(a => ['Aprovado', 'Alerta_RH', 'Concluído'].includes(a.status) && bate(a.nome_colaborador, a.unidade));
+        const periodoIni = document.getElementById('dpa-periodo-inicio')?.value || '';
+        const periodoFim = document.getElementById('dpa-periodo-fim')?.value || '';
+        const dentroDoPeriodo = (a) => {
+            if (!periodoIni || !periodoFim) return true; // "Todos os Meses": sem filtro
+            if (!a.created_at) return false;
+            const dataAval = String(a.created_at).slice(0, 10);
+            return dataAval >= periodoIni && dataAval <= periodoFim;
+        };
+        const lista = dados.avals.filter(a => ['Aprovado', 'Alerta_RH', 'Concluído'].includes(a.status) && bate(a.nome_colaborador, a.unidade) && dentroDoPeriodo(a));
         html = lista.map(a => {
-            const url = a.documento_assinado && /^https?:/.test(a.documento_assinado) && /\.pdf/i.test(a.documento_assinado) ? a.documento_assinado : (a.documento || '');
             const rot = a.status === 'Alerta_RH' ? 'ALERTA RH' : a.status.toUpperCase();
+            let botoesDocs = `<button type="button" class="btn-secondary" style="border-color:#00bcd4; color:#00bcd4; padding:8px 14px; border-radius:8px; font-weight:bold; cursor:pointer;" onclick="visualizarDesempenhoMontado('${a.id}')"><i class="fa-solid fa-file-invoice"></i> Ver Avaliação Completa</button>`;
+            if (a.documento_assinado && /^https?:/.test(a.documento_assinado)) {
+                botoesDocs += ` <a class="btn-secondary" style="border-color:#4fc3f7; color:#4fc3f7; text-decoration:none; padding:8px 14px; border-radius:8px; font-weight:bold; margin-left:6px;" href="${E(a.documento_assinado)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-signature"></i> Termo Assinado</a>`;
+            }
             return `<div class="admissao-card" style="border-left: 4px solid #28a745; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                 <div><strong style="color:#00bcd4;"><i class="fa-solid fa-circle-check"></i> ${E(a.nome_colaborador)}</strong>
                 <span style="background: rgba(40,167,69,0.15); color:#28a745; border:1px solid #28a745; font-size:0.65rem; font-weight:bold; padding:2px 9px; border-radius:20px; margin-left:8px;">${E(rot)}</span><br>
                 <span style="font-size:0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${E(a.unidade)} | Gestor: ${E(a.criado_por || '-')} | ${fmt(a.created_at)}</span></div>
-                ${/^https?:/.test(url) ? `<a class="btn-secondary" style="border-color:#4fc3f7; color:#4fc3f7; text-decoration:none; padding:8px 14px; border-radius:8px; font-weight:bold;" href="${E(url)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i> Ver documento</a>` : ''}
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">${botoesDocs}</div>
             </div>`;
         }).join('') || vazio('Nenhuma avaliação aprovada encontrada.');
     }
@@ -88124,6 +88212,59 @@ function initPeriodoRangePicker(inputId, hiddenInicioId, hiddenFimId, onMudarCal
         }
     });
 }
+
+// =========================================================================
+// MESMO CALENDÁRIO DE PERÍODO ACIMA, só que com um botão extra "Todos os
+// Meses" dentro do próprio calendário — ele NÃO seleciona nenhuma data
+// automaticamente, só fecha o calendário na hora e escreve "Todos os Meses"
+// no campo, deixando claro que a busca vai pegar de todos os períodos.
+// Usa isso quem precisa dar a opção de ver tudo além de filtrar por mês.
+// =========================================================================
+window.initPeriodoRangePickerComTodos = function(inputId, hiddenInicioId, hiddenFimId, onMudarCallback) {
+    const el = document.getElementById(inputId);
+    const hiddenInicio = document.getElementById(hiddenInicioId);
+    const hiddenFim = document.getElementById(hiddenFimId);
+    if (!el || !hiddenInicio || !hiddenFim || typeof flatpickr === 'undefined') return;
+
+    const isMobile = window.innerWidth <= 768;
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const instancia = flatpickr(el, {
+        mode: "range",
+        showMonths: isMobile ? 1 : 2,
+        dateFormat: "Y-m-d",
+        altInput: true,
+        altFormat: "d/m/Y",
+        locale: "pt",
+        position: "auto",
+        theme: document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark',
+        onClose: function(selectedDates) {
+            if (selectedDates.length === 2) {
+                hiddenInicio.value = fmt(selectedDates[0]);
+                hiddenFim.value = fmt(selectedDates[1]);
+                if (typeof onMudarCallback === 'function') onMudarCallback();
+            }
+        },
+        onReady: function(selectedDates, dateStr, fp) {
+            if (fp.calendarContainer.querySelector('.btn-periodo-todos-meses')) return; // já tem, não duplica
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn-periodo-todos-meses';
+            btn.innerHTML = '<i class="fa-solid fa-calendar-days"></i> Todos os Meses';
+            btn.style.cssText = 'display:block; width:calc(100% - 20px); margin:8px 10px 10px; padding:9px; border-radius:8px; border:1px solid #00bcd4; background:rgba(0,188,212,0.12); color:#00bcd4; font-weight:bold; font-size:0.82rem; cursor:pointer;';
+            btn.onclick = function() {
+                hiddenInicio.value = '';
+                hiddenFim.value = '';
+                fp.clear(); // some com qualquer seleção visual, mas NÃO fecha sozinho com uma data escolhida
+                if (fp.altInput) fp.altInput.value = 'Todos os Meses';
+                fp.close();
+                if (typeof onMudarCallback === 'function') onMudarCallback();
+            };
+            fp.calendarContainer.appendChild(btn);
+        }
+    });
+    return instancia;
+};
 
 // =========================================================================
 // 📅 PERÍODO DO BI (mesmo calendário bonitão do Extrato Detalhado)
