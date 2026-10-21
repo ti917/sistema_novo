@@ -7158,7 +7158,13 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         <button type="button" class="btn-secondary" style="border-color: #4fc3f7; color: #4fc3f7; padding: 10px 20px; border-radius: 8px; font-weight: bold; background: rgba(79, 195, 247, 0.1); margin-bottom: 20px; cursor: pointer;" onclick="abrirModalRelatorioAdmissoes()">
             <i class="fa-solid fa-file-lines"></i> Gerar Relatório
         </button>
-        
+
+        <!-- 👇 NOVO BOTÃO: Gerar Etiquetas por Unidade (PDF vetorial, folha Pimaco A4262 -->
+        <button type="button" class="btn-secondary" style="border-color: #ffc107; color: #ffc107; padding: 10px 20px; border-radius: 8px; font-weight: bold; background: rgba(255, 193, 7, 0.1); margin-bottom: 20px; cursor: pointer;" onclick="window.abrirModalEtiquetasPorUnidade()">
+            <i class="fa-solid fa-tags"></i> Gerar Etiquetas por Unidade
+        </button>
+        <!-- 👆 FIM DO NOVO BOTÃO 👆 -->
+
     </div>
     
     <div id="lista-admissoes-container"></div>
@@ -93714,6 +93720,271 @@ window.baixarEtiquetaColaboradorFoto = async function() {
     } finally {
         holder.remove();
         if (btn) { btn.disabled = false; btn.innerHTML = textoOriginalBtn; }
+    }
+};
+
+      // ==========================================================================
+// 🏷️🗂️ ETIQUETAS EM LOTE POR UNIDADE (PDF vetorial, folha Pimaco A4262)
+// Botão em Admissões > Colaboradores Aprovados, do lado do "Gerar Relatório".
+// Gera um PDF só com a etiqueta de TODOS os colaboradores de uma unidade
+// (inclui desligados), já no layout exato da folha Pimaco A4262: 16 etiquetas
+// por página (2 colunas x 8 linhas), 99,0mm x 33,9mm cada. É desenhado direto
+// com jsPDF (texto e imagem vetorial, em posição exata, em milímetros) — sem
+// passar pela caixa de impressão do navegador, que foi o que causava etiqueta
+// saindo torta ou as últimas linhas um pouco deslocadas pra cima.
+// ==========================================================================
+
+// Medidas exatas da folha Pimaco A4262, conferidas direto no editor oficial deles
+// (Dados da etiqueta): etiqueta 99,0mm x 33,9mm; margem esquerda da página 4,7mm;
+// margem superior da página 12,9mm; espaço entre colunas 2,6mm; espaço entre
+// linhas 0mm. Isso dá certinho 2 colunas x 8 linhas = 16 etiquetas por folha A4,
+// com margem direita e inferior simétricas às de cima (confere: 210 - 4,7 - 99*2
+// - 2,6 = 4,7mm; 297 - 12,9 - 33,9*8 = 12,9mm).
+const ETIQUETA_A4262 = {
+    larguraEtiqueta: 99.0,
+    alturaEtiqueta: 33.9,
+    margemEsquerda: 4.7,
+    margemSuperior: 12.9,
+    espacoEntreColunas: 2.6,
+    espacoEntreLinhas: 0,
+    colunas: 2,
+    linhas: 8
+};
+
+// Carrega uma imagem (dataURL) e devolve as dimensões reais dela, pra desenhar
+// a logo no PDF respeitando a proporção original (igual o "object-fit: contain"
+// do CSS faz na etiqueta individual) em vez de esticar/achatar.
+window._dimensoesImagemDataUrl = function(dataUrl) {
+    return new Promise((resolve) => {
+        if (!dataUrl) { resolve(null); return; }
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve(null);
+        img.src = dataUrl;
+    });
+};
+function _tamanhoLogoContido(dim, maxLarg, maxAlt) {
+    if (!dim || !dim.w || !dim.h) return { w: maxLarg, h: maxAlt };
+    const escala = Math.min(maxLarg / dim.w, maxAlt / dim.h);
+    return { w: dim.w * escala, h: dim.h * escala };
+}
+
+window.abrirModalEtiquetasPorUnidade = async function() {
+    const modalAntigo = document.getElementById('modal-etiquetas-unidade');
+    if (modalAntigo) modalAntigo.remove();
+
+    const modalHtml = `
+    <div id="modal-etiquetas-unidade" class="modal-arquivo-overlay" style="z-index: 100010; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 480px; border: 1px solid #ffc107; position: relative; text-align: left;">
+            <button onclick="document.getElementById('modal-etiquetas-unidade').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--cor-texto-secundario); cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+
+            <h3 style="color: #ffc107; margin-bottom: 5px; text-align: center;"><i class="fa-solid fa-tags"></i> Gerar Etiquetas por Unidade</h3>
+            <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 20px; text-align: center;">Gera um único PDF com a etiqueta de todos os colaboradores da unidade (inclui desligados), já no formato da folha Pimaco A4262 — 16 etiquetas por página.</p>
+
+            <div class="form-group" style="margin-bottom: 15px;">
+                <label>Unidade</label>
+                <select id="select-etiquetas-unidade" class="modern-input-file">
+                    <option value="">Carregando unidades...</option>
+                </select>
+            </div>
+
+            <button type="button" class="btn-secondary" style="width: 100%; justify-content: center; border-color: #ffc107; color: #ffc107; margin-bottom: 15px;" onclick="window.buscarColaboradoresEtiquetaUnidade()">
+                <i class="fa-solid fa-magnifying-glass"></i> Buscar Colaboradores
+            </button>
+
+            <div id="resultado-busca-etiquetas-unidade" style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px; min-height: 20px; line-height: 1.5;"></div>
+
+            <button type="button" id="btn-gerar-pdf-etiquetas-unidade" class="btn-primary" style="width: 100%; justify-content: center; background: #ffc107; color: #000; border: none; font-weight: bold; height: 46px;" disabled onclick="window.gerarPdfEtiquetasUnidade()">
+                <i class="fa-solid fa-file-pdf"></i> Gerar PDF de Etiquetas
+            </button>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    window.__etiquetasUnidadeLista = null;
+
+    const select = document.getElementById('select-etiquetas-unidade');
+    try {
+        let query = supabaseClient.from('unidades_oficiais').select('nome, empresa').eq('ativo', true).order('nome');
+        if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') {
+            query = query.eq('empresa', empresaSelecionadaFiltro);
+        }
+        const { data: unidades, error } = await query;
+        if (error) throw error;
+        if (!unidades || unidades.length === 0) {
+            select.innerHTML = '<option value="">Nenhuma unidade encontrada</option>';
+            return;
+        }
+        select.innerHTML = unidades.map(u => `<option value="${(u.nome || '').replace(/"/g, '&quot;')}">${u.nome}</option>`).join('');
+    } catch (e) {
+        select.innerHTML = '<option value="">Erro ao carregar unidades</option>';
+    }
+};
+
+window.buscarColaboradoresEtiquetaUnidade = async function() {
+    const select = document.getElementById('select-etiquetas-unidade');
+    const unidade = select ? select.value : '';
+    const areaResultado = document.getElementById('resultado-busca-etiquetas-unidade');
+    const btnGerar = document.getElementById('btn-gerar-pdf-etiquetas-unidade');
+    if (!unidade) { mostrarAlerta('Selecione uma unidade.', 'aviso'); return; }
+
+    if (areaResultado) areaResultado.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Buscando...';
+    if (btnGerar) btnGerar.disabled = true;
+    window.__etiquetasUnidadeLista = null;
+
+    try {
+        // Mesmo critério de "aprovado" usado na tela de Colaboradores Aprovados — aqui sem
+        // filtrar por 'status' (Ativo/Desligado), já que o pedido foi pra pegar até quem já
+        // foi desligado também.
+        const { data, error } = await supabaseClient
+            .from('perfis')
+            .select('id, nome, empresa, unidade, dados_admissao, token_qr_publico, status')
+            .eq('perfil', 'Colaborador')
+            .eq('unidade', unidade)
+            .in('status_aprovacao', ['Aprovado', 'Rescisão Pendente', 'Aguardando Assinatura', 'Aguardando Aprovação Global'])
+            .order('nome');
+        if (error) throw error;
+
+        const lista = data || [];
+        const semToken = lista.filter(c => !c.token_qr_publico).length;
+        const desligados = lista.filter(c => c.status === 'Desligado').length;
+
+        window.__etiquetasUnidadeLista = lista;
+
+        if (lista.length === 0) {
+            areaResultado.innerHTML = '<span style="color: var(--cor-perigo);"><i class="fa-solid fa-triangle-exclamation"></i> Nenhum colaborador encontrado nessa unidade.</span>';
+            return;
+        }
+
+        const paginas = Math.ceil(lista.length / (ETIQUETA_A4262.colunas * ETIQUETA_A4262.linhas));
+        areaResultado.innerHTML = `
+            <i class="fa-solid fa-circle-check" style="color:#28a745;"></i> <b>${lista.length}</b> colaborador(es) encontrado(s) (${desligados} desligado${desligados === 1 ? '' : 's'})
+            — vai gerar <b>${paginas}</b> página${paginas === 1 ? '' : 's'} (16 etiquetas por página).
+            ${semToken > 0 ? `<br><span style="color:#ffc107;"><i class="fa-solid fa-triangle-exclamation"></i> ${semToken} ainda sem o QR da etiqueta gerado — a etiqueta deles sai sem o QR Code, o resto dos dados sai normal.</span>` : ''}
+        `;
+        if (btnGerar) btnGerar.disabled = false;
+    } catch (e) {
+        if (areaResultado) areaResultado.innerHTML = `<span style="color: var(--cor-perigo);">Erro ao buscar: ${e.message}</span>`;
+    }
+};
+
+window.gerarPdfEtiquetasUnidade = async function() {
+    const lista = window.__etiquetasUnidadeLista;
+    if (!lista || lista.length === 0) { mostrarAlerta('Busque os colaboradores primeiro.', 'aviso'); return; }
+    if (!window.jspdf || !window.jspdf.jsPDF) { mostrarAlerta('A biblioteca de PDF ainda está carregando. Tente de novo em 2 segundos.', 'aviso'); return; }
+
+    const select = document.getElementById('select-etiquetas-unidade');
+    const unidade = select ? select.value : 'Unidade';
+    const btn = document.getElementById('btn-gerar-pdf-etiquetas-unidade');
+    const textoOriginal = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Gerando PDF...'; }
+
+    try {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+        // Pré-carrega as duas logos possíveis (Soul / Villac) uma vez só, em vez de uma vez
+        // por colaborador — bem mais rápido pra listas grandes.
+        const urlLogoSoul = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/logo%20soul.png';
+        const urlLogoVillac = 'https://kefvwdxebzgedugqeimz.supabase.co/storage/v1/object/public/documentos/Logos/LOGO%20VILLAC%20SEM%20FUNDO%20(1)%20(2).png';
+        const [logoSoulDataUrl, logoVillacDataUrl] = await Promise.all([
+            window._imagemParaDataURL(urlLogoSoul),
+            window._imagemParaDataURL(urlLogoVillac)
+        ]);
+        const [dimLogoSoul, dimLogoVillac] = await Promise.all([
+            window._dimensoesImagemDataUrl(logoSoulDataUrl),
+            window._dimensoesImagemDataUrl(logoVillacDataUrl)
+        ]);
+        const tamLogoSoul = _tamanhoLogoContido(dimLogoSoul, 32, 6.5);
+        const tamLogoVillac = _tamanhoLogoContido(dimLogoVillac, 32, 6.5);
+
+        const G = ETIQUETA_A4262;
+        const porPagina = G.colunas * G.linhas;
+        const origemQr = window.location.origin + window.location.pathname.replace('index.html', '');
+
+        // Div escondida fora da tela só pra desenhar o QR code de cada colaborador (via
+        // QRCode.js) e ler o canvas resultante como imagem — some no final, não aparece
+        // pra ninguém na tela.
+        let holderQr = document.getElementById('holder-qr-etiquetas-lote');
+        if (holderQr) holderQr.remove();
+        holderQr = document.createElement('div');
+        holderQr.id = 'holder-qr-etiquetas-lote';
+        holderQr.style.cssText = 'position: fixed; left: -9999px; top: 0;';
+        document.body.appendChild(holderQr);
+
+        for (let i = 0; i < lista.length; i++) {
+            const colab = lista[i];
+            const posNaPagina = i % porPagina;
+            if (i > 0 && posNaPagina === 0) doc.addPage();
+
+            const col = posNaPagina % G.colunas;
+            const linha = Math.floor(posNaPagina / G.colunas);
+            const x = G.margemEsquerda + col * (G.larguraEtiqueta + G.espacoEntreColunas);
+            const y = G.margemSuperior + linha * (G.alturaEtiqueta + G.espacoEntreLinhas);
+
+            const adm = colab.dados_admissao || {};
+            const cpf = adm.cpf ? mascaraCPF(adm.cpf) : 'Não informado';
+            const funcao = adm.cargo || '-';
+            const ehVillac = colab.empresa && colab.empresa.trim().toUpperCase().includes('VILLAC');
+            const logoDataUrl = ehVillac ? logoVillacDataUrl : logoSoulDataUrl;
+            const tamLogo = ehVillac ? tamLogoVillac : tamLogoSoul;
+
+            const padX = x + 3.2;
+            let cursorY = y + 2.2;
+
+            if (logoDataUrl) {
+                try {
+                    doc.addImage(logoDataUrl, 'PNG', padX, cursorY + 4.5, tamLogo.w, tamLogo.h, undefined, 'FAST');
+                } catch (e) { /* segue sem logo se falhar */ }
+            }
+            cursorY += 4.5 + tamLogo.h + 1.3;
+
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(10.5);
+            doc.setTextColor(0, 35, 71);
+            let nomeExibido = colab.nome || '-';
+            const larguraMaxNome = 56;
+            while (doc.getTextWidth(nomeExibido) > larguraMaxNome && nomeExibido.length > 3) {
+                nomeExibido = nomeExibido.slice(0, -1);
+            }
+            if (nomeExibido !== (colab.nome || '-')) nomeExibido = nomeExibido.replace(/\s*$/, '') + '…';
+            doc.text(nomeExibido, padX, cursorY);
+            cursorY += 3.8;
+
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(7);
+            doc.setTextColor(51, 65, 85);
+            doc.text(`CPF: ${cpf}`, padX, cursorY); cursorY += 2.9;
+            doc.text(`Unidade: ${colab.unidade || '-'}`, padX, cursorY); cursorY += 2.9;
+            doc.text(`Função: ${funcao}`, padX, cursorY);
+
+            if (colab.token_qr_publico) {
+                const urlQr = origemQr + 'documentos-colaborador.html?token=' + colab.token_qr_publico;
+                const qrDiv = document.createElement('div');
+                holderQr.appendChild(qrDiv);
+                new QRCode(qrDiv, { text: urlQr, width: 200, height: 200, colorDark: '#000000', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.H });
+                const canvasQr = qrDiv.querySelector('canvas');
+                if (canvasQr) {
+                    const qrDataUrl = canvasQr.toDataURL('image/png');
+                    const tamQr = 25;
+                    const xQr = x + G.larguraEtiqueta - 3.2 - tamQr;
+                    const yQr = y + (G.alturaEtiqueta - tamQr) / 2;
+                    doc.addImage(qrDataUrl, 'PNG', xQr, yQr, tamQr, tamQr, undefined, 'FAST');
+                }
+                qrDiv.remove();
+            }
+        }
+
+        holderQr.remove();
+
+        const nomeArquivo = `Etiquetas_${String(unidade).replace(/[^a-zA-Z0-9]+/g, '_')}.pdf`;
+        doc.save(nomeArquivo);
+        mostrarAlerta(`PDF gerado com ${lista.length} etiqueta(s)!`, 'sucesso');
+    } catch (e) {
+        console.error(e);
+        mostrarAlerta('Erro ao gerar o PDF: ' + e.message, 'erro');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = textoOriginal; }
     }
 };
 
