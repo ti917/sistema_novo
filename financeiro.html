@@ -9468,17 +9468,22 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
         if (xml.querySelector('parsererror')) throw new Error('XML inválido ou corrompido');
 
         const pegar = (seletor) => xml.querySelector(seletor)?.textContent?.trim() || '';
+        const normalizar = (s) => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
 
         const nomeFornecedor = pegar('emit xNome') || pegar('emit xFant');
         const numeroNF = pegar('ide nNF');
         const dataEmissaoRaw = pegar('ide dhEmi') || pegar('ide dEmi');
         const dataEmissao = dataEmissaoRaw ? dataEmissaoRaw.substring(0, 10) : '';
 
+        // 👇 Mesmo cuidado do Insumo: o nome do fornecedor na nota raramente é IDÊNTICO
+        // ao que já está no cadastro (acento, maiúscula, espaço). Compara normalizado
+        // e, se achar o mesmo fornecedor já cadastrado, usa o nome exato dele.
         if (nomeFornecedor && window.tsAlmoxFornecedor) {
-            if (!todosFornecedoresGlobais.find(f => f.nome === nomeFornecedor)) {
-                window.tsAlmoxFornecedor.addOption({ value: nomeFornecedor, text: nomeFornecedor });
-            }
-            window.tsAlmoxFornecedor.setValue(nomeFornecedor);
+            const alvoFornecedor = normalizar(nomeFornecedor);
+            const fornecedorCadastrado = todosFornecedoresGlobais.find(f => normalizar(f.nome) === alvoFornecedor);
+            const nomeFinalFornecedor = fornecedorCadastrado ? fornecedorCadastrado.nome : nomeFornecedor;
+            if (!fornecedorCadastrado) window.tsAlmoxFornecedor.addOption({ value: nomeFinalFornecedor, text: nomeFinalFornecedor });
+            window.tsAlmoxFornecedor.setValue(nomeFinalFornecedor);
         }
         if (numeroNF) document.getElementById('almox-numero-nf').value = numeroNF;
         if (dataEmissao) document.getElementById('almox-data').value = dataEmissao;
@@ -9493,15 +9498,44 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
             return 'Unidade(s)';
         };
 
+        // 👇 Muito fornecedor (principalmente marketplace) vende em "pacote/caixa fechada"
+        // mas descreve isso só no NOME do produto (ex: "CARTAO PVC ... C/100 UNIDADES"),
+        // enquanto o campo de quantidade da nota (qCom) continua valendo "1" (1 pacote).
+        // Pro Estoque o que importa é a quantidade REAL de unidades, então detecta esse
+        // "C/<número> <medida>" no nome e multiplica a quantidade por ele.
+        const detectarMultiplicadorEmbalagem = (nomeProduto) => {
+            const m = nomeProduto.match(/\bC\/?\s*(\d+)\s*(UNIDADES?|UNID\.?|UN\.?|PCS?|PECAS?|PEÇAS?)\b/i)
+                   || nomeProduto.match(/\b(\d+)\s*(UNIDADES?|UNID\.?|UN\.?)\s*(?:POR|\/)?\s*(?:PACOTE|CAIXA|KIT|FARDO)\b/i);
+            if (!m) return null;
+            const qtdEmbalagem = parseInt(m[1], 10);
+            return (qtdEmbalagem > 1) ? qtdEmbalagem : null;
+        };
+
+        // 👇 Reconhece a categoria pelo nome do produto, comparando com as categorias que
+        // JÁ EXISTEM no cadastro (nunca inventa categoria nova). Sem um match com
+        // confiança, deixa em branco — melhor pedir pra você escolher do que chutar
+        // errado (era o que acontecia antes, caindo sempre na primeira categoria da lista).
+        const PALAVRAS_CATEGORIA_ALMOX = [
+            { termos: ['DESCART', 'COPO PLAST', 'GARFO', 'PRATO DESCART', 'GUARDANAPO', 'SACO DE LIXO', 'TOUCA DESCART', 'AVENTAL DESCART'], pista: 'DESCART' },
+            { termos: ['DETERGENTE', 'DESINFETANTE', 'ALCOOL', 'AGUA SANITARIA', 'SABAO', 'SABONETE', 'PANO DE CHAO', 'VASSOURA', 'RODO', 'MULTIUSO', 'LIMPEZA', 'DESODORIZADOR'], pista: 'LIMPEZA' },
+            { termos: ['PAPEL A4', 'CANETA', 'LAPIS', 'GRAMPEADOR', 'CLIPS', 'PASTA ', 'ENVELOPE', 'TONER', 'CARTUCHO', 'POST IT', 'CADERNO'], pista: 'ESCRITORIO' },
+            { termos: ['CRACHA', 'CARTAO PVC', 'CORDAO CRACHA', 'FITA CRACHA'], pista: 'CRACHA' },
+            { termos: ['LUVA', 'MASCARA', 'OCULOS DE PROTECAO', 'PROTETOR AURICULAR', 'CAPACETE', 'BOTINA', 'UNIFORME', ' EPI '], pista: 'EPI' },
+        ];
         const categoriasDisponiveis = obterCategoriasAlmoxarifado();
-        const categoriaPadrao = categoriasDisponiveis.length > 0 ? categoriasDisponiveis[0].nome : '';
+        const encontrarCategoriaPorProduto = (nomeProduto) => {
+            const alvo = normalizar(nomeProduto);
+            const regra = PALAVRAS_CATEGORIA_ALMOX.find(r => r.termos.some(t => alvo.includes(normalizar(t))));
+            if (!regra) return '';
+            const categoriaAchada = categoriasDisponiveis.find(c => normalizar(c.nome).includes(regra.pista));
+            return categoriaAchada ? categoriaAchada.nome : '';
+        };
 
         // 👇 O nome do produto na nota do fornecedor quase nunca é IDÊNTICO ao nome já
         // cadastrado no catálogo de Insumos (ex: "PAPEL HIG FL DUPLA C/30M" na nota vs
         // "Papel Higiênico" no cadastro). Pra não criar insumo duplicado, normaliza
         // (tira acento, maiúscula/minúscula, espaço extra) e, se achar o MESMO nome já
         // cadastrado, usa o nome exato do cadastro em vez do texto cru da nota.
-        const normalizar = (s) => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
         const insumosCadastrados = (typeof todosInsumosGlobais !== 'undefined' ? todosInsumosGlobais : []);
         const encontrarInsumoCadastrado = (nomeDaNota) => {
             const alvo = normalizar(nomeDaNota);
@@ -9514,15 +9548,23 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
             const nomeDaNota = prod.querySelector('xProd')?.textContent?.trim() || '';
             if (!nomeDaNota) return null;
             const insumoCadastrado = encontrarInsumoCadastrado(nomeDaNota);
-            const qtd = parseFloat(prod.querySelector('qCom')?.textContent || '0') || 0;
+            const qtdNota = parseFloat(prod.querySelector('qCom')?.textContent || '0') || 0;
             const unidade = prod.querySelector('uCom')?.textContent || '';
             const valorUnit = parseFloat(prod.querySelector('vUnCom')?.textContent || '0') || 0;
+
+            // Se o nome diz "C/100 UNIDADES" e a nota só contou "1" (o pacote fechado),
+            // usa a quantidade real (qtdNota × 100) e o valor unitário recalculado pelo
+            // total do item ÷ quantidade real — pra não inflar o valor por 100x também.
+            const multiplicador = detectarMultiplicadorEmbalagem(nomeDaNota);
+            const qtdReal = multiplicador ? qtdNota * multiplicador : qtdNota;
+            const valorUnitReal = multiplicador ? (valorUnit * qtdNota) / qtdReal : valorUnit;
+
             return {
                 produto: insumoCadastrado ? insumoCadastrado.nome : nomeDaNota,
-                categoria: categoriaPadrao,
-                quantidade: qtd,
+                categoria: encontrarCategoriaPorProduto(nomeDaNota),
+                quantidade: qtdReal,
                 medida: mapaUnidade(unidade),
-                valor_unitario: valorUnit.toFixed(2),
+                valor_unitario: valorUnitReal.toFixed(2),
                 _novoInsumo: !insumoCadastrado // pra avisar na mensagem final quais vão ser cadastrados na hora
             };
         }).filter(Boolean);
