@@ -5554,10 +5554,10 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
         // =========================================================================
         window.__anexosSelecionados = window.__anexosSelecionados || {};
 
-        window.gerarHtmlZonaAnexo = function(inputId, textoDica = 'Arraste os arquivos aqui ou <b>clique para escolher</b>', classeExtra = '') {
+        window.gerarHtmlZonaAnexo = function(inputId, textoDica = 'Arraste os arquivos aqui ou <b>clique para escolher</b>', classeExtra = '', acceptAttr = '.pdf, image/*') {
             return `
                 <div class="zona-anexo-wrapper" data-input-id="${inputId}">
-                    <input type="file" id="${inputId}" class="${classeExtra}" multiple accept=".pdf, image/*" style="display:none;" onchange="window.adicionarAnexosSelecionados('${inputId}', this.files)">
+                    <input type="file" id="${inputId}" class="${classeExtra}" multiple accept="${acceptAttr}" style="display:none;" onchange="window.adicionarAnexosSelecionados('${inputId}', this.files)">
                     <div class="zona-anexo-dropzone"
                          onclick="document.getElementById('${inputId}').click()"
                          ondragover="event.preventDefault(); event.stopPropagation(); this.classList.add('zona-anexo-dragover');"
@@ -5615,7 +5615,7 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
             if (arquivos.length === 0) { lista.innerHTML = ''; return; }
             lista.innerHTML = arquivos.map((f, idx) => `
                 <div class="zona-anexo-item">
-                    <i class="fa-solid ${/image\//.test(f.type) ? 'fa-file-image' : 'fa-file-pdf'}"></i>
+                    <i class="fa-solid ${/image\//.test(f.type) ? 'fa-file-image' : (/\.xml$/i.test(f.name) ? 'fa-file-code' : 'fa-file-pdf')}"></i>
                     <span class="zona-anexo-nome" title="${f.name}">${f.name}</span>
                     <span class="zona-anexo-tamanho">${(f.size / 1024).toFixed(0)} KB</span>
                     <button type="button" onclick="window.removerAnexoSelecionado('${inputId}', ${idx})" title="Remover"><i class="fa-solid fa-xmark"></i></button>
@@ -9390,7 +9390,8 @@ window.abrirModalNotaAlmoxarifado = async function(id = null) {
                     </div>
                     <div style="flex:1.3; min-width:220px;">
                         <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> Anexar Nota Fiscal</label>
-                        ${window.gerarHtmlZonaAnexo ? window.gerarHtmlZonaAnexo('almox-anexo') : `<input type="file" id="almox-anexo" accept="image/*,.pdf" class="modern-input" style="padding:8px;">`}
+                        ${window.gerarHtmlZonaAnexo ? window.gerarHtmlZonaAnexo('almox-anexo', 'Arraste o <b>XML da NF-e</b> aqui ou <b>clique para escolher</b> — preenche os itens automático', '', '.pdf, image/*, .xml, text/xml') : `<input type="file" id="almox-anexo" accept="image/*,.pdf,.xml" class="modern-input" style="padding:8px;">`}
+                        <p style="font-size:0.7rem; color:var(--cor-texto-secundario); margin:4px 0 0;"><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--cor-acento);"></i> Anexando o <b>XML</b> da nota, os itens são preenchidos sozinhos.</p>
                         ${nota.anexo_nf ? `<a href="javascript:void(0)" onclick="abrirAnexoSeguro('${String(nota.anexo_nf).replace(/'/g, "\\'")}', this)" style="font-size:0.75rem; color:#3498db;">Ver anexo já salvo nesta nota</a>` : ''}
                     </div>
                 </div>
@@ -9435,6 +9436,91 @@ window.abrirModalNotaAlmoxarifado = async function(id = null) {
     renderizarItensAlmoxarifado();
 
     document.getElementById('form-almoxarifado').addEventListener('submit', salvarNotaAlmoxarifado);
+
+    // 🆕 Preenchimento automático: se o arquivo anexado for o XML da NF-e, lê e
+    // preenche Fornecedor/Nº NF/Data + todos os itens sozinho (leitura 100% exata,
+    // sem IA, sem custo — o XML já vem com os dados estruturados pela NF-e).
+    const inputAnexoAlmox = document.getElementById('almox-anexo');
+    if (inputAnexoAlmox) {
+        inputAnexoAlmox.addEventListener('change', function (ev) {
+            const arquivos = ev.target.files;
+            if (!arquivos || arquivos.length === 0) return;
+            const arquivoXml = Array.from(arquivos).find(f => /\.xml$/i.test(f.name));
+            if (arquivoXml) window.preencherAlmoxarifadoPorXmlNFe(arquivoXml);
+        });
+    }
+};
+
+// 🆕 Lê o XML da NF-e (anexado na Nota de Almoxarifado) e preenche Fornecedor, Nº NF,
+// Data e os Itens automaticamente — sem IA, direto do XML estruturado da própria nota
+// (por isso é 100% exato, ao contrário de ler a imagem/PDF). Detecta o encoding
+// declarado no XML (a maioria das NF-e vem em ISO-8859-1, não UTF-8) pra não
+// embaralhar acentuação nos nomes dos produtos.
+window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
+    try {
+        const buffer = await file.arrayBuffer();
+        const trechoInicial = new TextDecoder('utf-8').decode(buffer.slice(0, 200));
+        const matchEncoding = trechoInicial.match(/encoding=["']([\w-]+)["']/i);
+        const encoding = matchEncoding ? matchEncoding[1].toLowerCase() : 'utf-8';
+        const texto = new TextDecoder(encoding).decode(buffer);
+
+        const xml = new DOMParser().parseFromString(texto, 'text/xml');
+        if (xml.querySelector('parsererror')) throw new Error('XML inválido ou corrompido');
+
+        const pegar = (seletor) => xml.querySelector(seletor)?.textContent?.trim() || '';
+
+        const nomeFornecedor = pegar('emit xNome') || pegar('emit xFant');
+        const numeroNF = pegar('ide nNF');
+        const dataEmissaoRaw = pegar('ide dhEmi') || pegar('ide dEmi');
+        const dataEmissao = dataEmissaoRaw ? dataEmissaoRaw.substring(0, 10) : '';
+
+        if (nomeFornecedor && window.tsAlmoxFornecedor) {
+            if (!todosFornecedoresGlobais.find(f => f.nome === nomeFornecedor)) {
+                window.tsAlmoxFornecedor.addOption({ value: nomeFornecedor, text: nomeFornecedor });
+            }
+            window.tsAlmoxFornecedor.setValue(nomeFornecedor);
+        }
+        if (numeroNF) document.getElementById('almox-numero-nf').value = numeroNF;
+        if (dataEmissao) document.getElementById('almox-data').value = dataEmissao;
+
+        const mapaUnidade = (u) => {
+            const s = (u || '').trim().toUpperCase();
+            if (['PAR'].includes(s)) return 'Par(es)';
+            if (['L', 'LT', 'LITRO'].includes(s)) return 'Litro(s)';
+            if (['PCT', 'PC', 'PACOTE'].includes(s)) return 'Pacote(s)';
+            if (['CX', 'CAIXA'].includes(s)) return 'Caixa(s)';
+            if (['M', 'MT', 'METRO'].includes(s)) return 'Metro(s)';
+            return 'Unidade(s)';
+        };
+
+        const categoriasDisponiveis = obterCategoriasAlmoxarifado();
+        const categoriaPadrao = categoriasDisponiveis.length > 0 ? categoriasDisponiveis[0].nome : '';
+
+        const itensDaNota = Array.from(xml.querySelectorAll('det')).map(det => {
+            const prod = det.querySelector('prod');
+            if (!prod) return null;
+            const nome = prod.querySelector('xProd')?.textContent?.trim() || '';
+            if (!nome) return null;
+            const qtd = parseFloat(prod.querySelector('qCom')?.textContent || '0') || 0;
+            const unidade = prod.querySelector('uCom')?.textContent || '';
+            const valorUnit = parseFloat(prod.querySelector('vUnCom')?.textContent || '0') || 0;
+            return { produto: nome, categoria: categoriaPadrao, quantidade: qtd, medida: mapaUnidade(unidade), valor_unitario: valorUnit.toFixed(2) };
+        }).filter(Boolean);
+
+        if (itensDaNota.length === 0) throw new Error('Não encontrei nenhum produto dentro desse XML');
+
+        // Tira as linhas em branco (ex: o item inicial vazio) antes de injetar os da
+        // nota — mas preserva qualquer item que a pessoa já tenha preenchido na mão.
+        window.almoxarifadoItensTemp = window.almoxarifadoItensTemp.filter(it => it.produto || it.quantidade || it.valor_unitario);
+        window.almoxarifadoItensTemp.push(...itensDaNota);
+        renderizarItensAlmoxarifado();
+        recalcularTotalAlmoxarifado();
+
+        mostrarAlerta(`Nota lida com sucesso! ${itensDaNota.length} ite${itensDaNota.length === 1 ? 'm' : 'ns'} preenchido${itensDaNota.length === 1 ? '' : 's'} automaticamente a partir do XML.`, 'sucesso');
+    } catch (err) {
+        console.error('Erro ao ler XML da NF-e:', err);
+        mostrarAlerta('Não consegui ler esse XML automaticamente (' + err.message + '). Pode preencher os campos na mão normalmente.', 'aviso');
+    }
 };
 
 window.adicionarItemAlmoxarifado = function() {
