@@ -19719,7 +19719,8 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                         <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 8px;">${esc(textoMotivo)}</p>
                         <p style="color: var(--cor-texto-secundario); font-size: 0.88rem; margin-bottom: 20px;">Mandamos um código de 6 dígitos para <b style="color: var(--cor-texto-principal);">${esc(emailLogin)}</b>. Sem ele, o sistema não libera o acesso.</p>
                         <input type="text" id="input-codigo-login" maxlength="6" placeholder="------" autocomplete="one-time-code" inputmode="numeric"
-                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 14px;">
+                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 10px;">
+                        <div id="cod-login-expira" style="color: var(--cor-texto-secundario); font-size: 0.78rem; margin-bottom: 14px;"></div>
                         <div id="cod-login-erro" style="display:none; color: var(--cor-perigo); font-size: 0.85rem; margin-bottom: 14px;"></div>
                         <button id="btn-confirmar-codigo-login" class="btn-success" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-check"></i> Confirmar</button>
                         <button id="btn-reenviar-codigo-login" class="btn-secondary" style="width: 100%; margin-bottom: 10px;"><i class="fa-solid fa-rotate"></i> Reenviar código</button>
@@ -19732,6 +19733,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                 const btnReenviar = document.getElementById('btn-reenviar-codigo-login');
                 const btnCancelar = document.getElementById('btn-cancelar-codigo-login');
                 const errorEl = document.getElementById('cod-login-erro');
+                const expiraEl = document.getElementById('cod-login-expira');
                 const mostrarErro = (m) => { errorEl.innerText = m; errorEl.style.display = 'block'; };
                 window.addEventListener('storage', (ev) => { if (ev.key === 'soul_acesso_confirmado') location.reload(); });
 
@@ -19750,6 +19752,31 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                     if (!pinta()) return;
                     timerReenvio = setInterval(() => { falta--; pinta(); }, 1000);
                 };
+
+                // 🆕 Aviso de que o código em si venceu (mesmos 10 minutos de validade usados
+                // no servidor, ver VALIDADE_CODIGO_MS na Edge Function verificar-acesso-login).
+                // Antes só descobria isso ao tentar confirmar e tomar "código inválido ou
+                // expirado" — agora conta visivelmente e já avisa assim que bate os 10min.
+                let timerExpiracao = null;
+                const iniciarContagemExpiracao = () => {
+                    clearInterval(timerExpiracao);
+                    let falta = 600; // 10 minutos
+                    const pinta = () => {
+                        if (!expiraEl) return false;
+                        if (falta <= 0) {
+                            clearInterval(timerExpiracao);
+                            expiraEl.innerHTML = '<span style="color: var(--cor-perigo);"><i class="fa-solid fa-triangle-exclamation"></i> Código expirado — clique em "Reenviar código" pra pedir um novo.</span>';
+                            return false;
+                        }
+                        const m = Math.floor(falta / 60), s = String(falta % 60).padStart(2, '0');
+                        expiraEl.innerHTML = `<i class="fa-regular fa-clock"></i> Código válido por mais ${m}:${s}`;
+                        return true;
+                    };
+                    if (!pinta()) return;
+                    timerExpiracao = setInterval(() => { falta--; pinta(); }, 1000);
+                };
+                const pararContagemExpiracao = () => { clearInterval(timerExpiracao); };
+
                 const enviarCodigo = async () => {
                     errorEl.style.display = 'none';
                     try {
@@ -19763,6 +19790,10 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                         else if (corpo && corpo.proxima_espera_segundos) iniciarContagem(corpo.proxima_espera_segundos);
                         else iniciarContagem(30);
                         if (error || !corpo || corpo.sucesso === false) mostrarErro(msg || 'Não consegui enviar o código. Tente reenviar.');
+                        // Só reinicia a contagem de validade quando um código NOVO de verdade
+                        // foi gerado/enviado agora (não quando caiu na trava de reenvio, caso em
+                        // que o código antigo — e seu prazo — continuam valendo).
+                        if (corpo && corpo.sucesso === true) iniciarContagemExpiracao();
                     } catch (e) { mostrarErro('Não consegui enviar o código. Tente reenviar.'); iniciarContagem(30); }
                 };
                 enviarCodigo();
@@ -19777,6 +19808,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                             body: { acao: 'confirmar', fingerprint: deviceId, codigo: codigoDigitado, descricao: descricaoDispositivo }
                         });
                         if (!error && data && data.sucesso === true) {
+                            pararContagemExpiracao();
                             document.getElementById('modal-codigo-login')?.remove();
                             // avisa outras abas abertas (ex: Financeiro e Comercial ao mesmo tempo) para recarregarem
                             try { localStorage.setItem('soul_acesso_confirmado', String(Date.now())); } catch (_e) {}
@@ -19798,6 +19830,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                     enviarCodigo();
                 });
                 btnCancelar.addEventListener('click', async () => {
+                    pararContagemExpiracao();
                     document.getElementById('modal-codigo-login')?.remove();
                     await supabaseClient.auth.signOut();
                     location.reload();
@@ -19818,7 +19851,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                         console.error("Erro ao gerar código de verificação:", erroInsert);
                         const erroEl = document.getElementById('cod-login-erro');
                         if (erroEl) { erroEl.innerText = "Erro ao gerar o código. Tente novamente."; erroEl.style.display = 'block'; }
-                        return;
+                        return false;
                     }
 
                     supabaseClient.functions.invoke('enviar-email-seguranca-login', {
@@ -19827,6 +19860,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                             codigo, data_hora: new Date().toLocaleString('pt-BR')
                         }
                     }).catch(e => console.warn("Erro ao enviar e-mail do código de verificação:", e));
+                    return true;
                 };
 
                 const modalHtml = `
@@ -19838,7 +19872,8 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                             Já faz mais de 30 dias desde a última confirmação neste navegador. Mandamos um código de 6 dígitos para <b style="color: var(--cor-texto-principal);">${emailLogin}</b>.
                         </p>
                         <input type="text" id="input-codigo-login" maxlength="6" placeholder="------" autocomplete="one-time-code" inputmode="numeric"
-                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 14px;">
+                            style="width: 100%; text-align: center; font-size: 1.8rem; letter-spacing: 10px; padding: 12px; border-radius: 10px; margin-bottom: 10px;">
+                        <div id="cod-login-expira" style="color: var(--cor-texto-secundario); font-size: 0.78rem; margin-bottom: 14px;"></div>
                         <div id="cod-login-erro" style="display:none; color: var(--cor-perigo); font-size: 0.85rem; margin-bottom: 14px;"></div>
                         <button id="btn-confirmar-codigo-login" class="btn-success" style="width: 100%; margin-bottom: 10px;">
                             <i class="fa-solid fa-check"></i> Confirmar
@@ -19853,13 +19888,37 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                 </div>`;
 
                 document.body.insertAdjacentHTML('beforeend', modalHtml);
-                gerarEEnviarCodigo();
 
                 const inputCodigo = document.getElementById('input-codigo-login');
                 const btnConfirmar = document.getElementById('btn-confirmar-codigo-login');
                 const btnReenviar = document.getElementById('btn-reenviar-codigo-login');
                 const btnCancelar = document.getElementById('btn-cancelar-codigo-login');
                 const errorEl = document.getElementById('cod-login-erro');
+                const expiraEl = document.getElementById('cod-login-expira');
+
+                // 🆕 Mesma contagem de validade (10min, igual ao expira_em gravado acima) usada
+                // no outro modal — avisa assim que o código vence, sem precisar tentar confirmar.
+                let timerExpiracao = null;
+                const iniciarContagemExpiracao = () => {
+                    clearInterval(timerExpiracao);
+                    let falta = 600; // 10 minutos
+                    const pinta = () => {
+                        if (!expiraEl) return false;
+                        if (falta <= 0) {
+                            clearInterval(timerExpiracao);
+                            expiraEl.innerHTML = '<span style="color: var(--cor-perigo);"><i class="fa-solid fa-triangle-exclamation"></i> Código expirado — clique em "Reenviar código" pra pedir um novo.</span>';
+                            return false;
+                        }
+                        const m = Math.floor(falta / 60), s = String(falta % 60).padStart(2, '0');
+                        expiraEl.innerHTML = `<i class="fa-regular fa-clock"></i> Código válido por mais ${m}:${s}`;
+                        return true;
+                    };
+                    if (!pinta()) return;
+                    timerExpiracao = setInterval(() => { falta--; pinta(); }, 1000);
+                };
+                const pararContagemExpiracao = () => { clearInterval(timerExpiracao); };
+
+                gerarEEnviarCodigo().then(ok => { if (ok) iniciarContagemExpiracao(); });
 
                 const confirmarCodigo = async () => {
                     const codigoDigitado = (inputCodigo.value || '').trim();
@@ -19896,6 +19955,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                         ultimo_acesso: new Date().toISOString()
                     }).eq('id', dispositivoId);
 
+                    pararContagemExpiracao();
                     document.getElementById('modal-codigo-login')?.remove();
                     location.reload();
                 };
@@ -19906,7 +19966,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                     errorEl.style.display = 'none';
                     btnReenviar.disabled = true;
                     btnReenviar.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Reenviando...';
-                    gerarEEnviarCodigo().finally(() => {
+                    gerarEEnviarCodigo().then(ok => { if (ok) iniciarContagemExpiracao(); }).finally(() => {
                         setTimeout(() => {
                             btnReenviar.disabled = false;
                             btnReenviar.innerHTML = '<i class="fa-solid fa-rotate"></i> Reenviar código';
@@ -19914,6 +19974,7 @@ window.enviarApenasDeclaracaoAssinadaGestor = async function(idColab, nomeColab,
                     });
                 });
                 btnCancelar.addEventListener('click', async () => {
+                    pararContagemExpiracao();
                     document.getElementById('modal-codigo-login')?.remove();
                     await supabaseClient.auth.signOut();
                     location.reload();
