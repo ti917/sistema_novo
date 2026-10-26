@@ -104434,6 +104434,9 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
     const TIT_PONTO = 'ORIENTAÇÃO SOBRE A MARCAÇÃO DE PONTO';
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const fmt = (iso) => { try { return new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (_e) { return ''; } };
+    // 👇 NOVO: Autorização de Imagem entra nesse mesmo combo de "primeiro dia" (Boas-Vindas + Termos).
+    // Ela mora numa tabela própria (autorizacoes_imagem), não em documentos_avulsos, e usa o
+    // template de WhatsApp 'envio_termo_imagem' (o mesmo do disparo em massa da aba Zap > Imagem).
 
     document.getElementById('modal-clara-envio')?.remove();
     const overlay = document.createElement('div');
@@ -104445,12 +104448,13 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
     const fechar = () => overlay.remove();
 
     try {
-        const [rPerfil, rDocs, rLog] = await Promise.all([
+        const [rPerfil, rDocs, rLog, rImg] = await Promise.all([
             supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single(),
             supabaseClient.from('documentos_avulsos').select('titulo_documento, status, created_at').eq('colaborador_id', idColab)
                 .in('titulo_documento', [TIT_REG, 'REGIMENTO INTERNO', TIT_PONTO]).order('created_at', { ascending: false }),
             supabaseClient.from('mensagens_whatsapp_log').select('criado_em, status').eq('colaborador_id', idColab)
-                .eq('template_name', 'boas_vindas_clara').order('criado_em', { ascending: false }).limit(10)
+                .eq('template_name', 'boas_vindas_clara').order('criado_em', { ascending: false }).limit(10),
+            supabaseClient.from('autorizacoes_imagem').select('status, token').eq('colaborador_id', idColab).maybeSingle()
         ]);
         if (rPerfil.error || !rPerfil.data || !rPerfil.data.dados_admissao) throw new Error('Não foi possível carregar o perfil do colaborador.');
         if (rDocs.error) throw new Error('Não foi possível conferir os documentos já enviados: ' + rDocs.error.message);
@@ -104462,6 +104466,7 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
         const docPonto = (rDocs.data || []).find(d => d.titulo_documento === TIT_PONTO);
         const logsBV = (rLog && rLog.data) || [];
         const bvOk = logsBV.find(l => !/falh|erro|fail|rejeit/i.test(String(l.status || '')));
+        const regImagem = (rImg && rImg.data) || null; // já existe disparo (Pendente ou Assinado)?
 
         const linha = (id, titulo, jaEnviado, detalheEnviado, travado) => {
             const cor = jaEnviado ? '#25D366' : '#ff9800';
@@ -104493,6 +104498,7 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
             ${htmlBV}
             ${linha('clara-chk-reg', 'Regimento Interno e Procedimentos', !!docReg, docReg ? `Enviado em ${fmt(docReg.created_at)} (${esc(docReg.status || 'Pendente')})` : '', !!docReg)}
             ${linha('clara-chk-ponto', 'Orientação sobre a Marcação de Ponto', !!docPonto, docPonto ? `Enviado em ${fmt(docPonto.created_at)} (${esc(docPonto.status || 'Pendente')})` : '', !!docPonto)}
+            ${linha('clara-chk-img', 'Autorização de Imagem', !!regImagem, regImagem ? `Já enviada (${esc(regImagem.status || 'Pendente')})` : '', !!regImagem)}
             <div style="display:flex; gap:10px; margin-top:16px;">
                 <button class="btn-secondary" style="flex:1; justify-content:center; height:46px;" onclick="document.getElementById('modal-clara-envio').remove()">Cancelar</button>
                 <button id="btn-clara-enviar-selecionados" class="btn-primary" style="flex:1; justify-content:center; height:46px; background:#25D366; color:#fff; border:none; font-weight:bold;" ${semTelefone ? 'disabled' : ''}>
@@ -104504,7 +104510,7 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
         window._atualizarBotaoModalClara = function() {
             const btn = document.getElementById('btn-clara-enviar-selecionados');
             if (!btn) return;
-            const algum = ['clara-chk-bv', 'clara-chk-reg', 'clara-chk-ponto'].some(i => { const c = document.getElementById(i); return c && c.checked && !c.disabled; });
+            const algum = ['clara-chk-bv', 'clara-chk-reg', 'clara-chk-ponto', 'clara-chk-img'].some(i => { const c = document.getElementById(i); return c && c.checked && !c.disabled; });
             btn.disabled = semTelefone || !algum;
             btn.style.opacity = btn.disabled ? '0.5' : '1';
         };
@@ -104516,7 +104522,8 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
             const titulos = [];
             const cReg = document.getElementById('clara-chk-reg'); if (cReg && cReg.checked && !cReg.disabled) titulos.push(TIT_REG);
             const cPonto = document.getElementById('clara-chk-ponto'); if (cPonto && cPonto.checked && !cPonto.disabled) titulos.push(TIT_PONTO);
-            if (!querBV && titulos.length === 0) return;
+            const cImg = document.getElementById('clara-chk-img'); const querImg = !!(cImg && cImg.checked && !cImg.disabled);
+            if (!querBV && titulos.length === 0 && !querImg) return;
 
             btn.disabled = true;
             btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando...';
@@ -104531,6 +104538,29 @@ window.gerarPDFDetalhesDashboard = function(tipo) {
                 if (titulos.length > 0) {
                     const res = await window.gerarDocumentosAutomaticosPosAso(idColab, nomeColab, empresaColab, unidadeColab, adm, { somenteTitulos: titulos });
                     (res || []).forEach(x => resumo.push({ nome: x.titulo === TIT_REG ? 'Regimento Interno' : 'Orientação de Ponto', ok: x.ok, motivo: x.pulado ? 'Já tinha sido enviado, não reenviado' : x.motivo }));
+                }
+                if (querImg) {
+                    // 👇 Mesma lógica do disparo em massa da aba Zap > Imagem (window.dispararTermosImagemMassa),
+                    // só que para 1 colaborador só: cria a autorização pendente (se ainda não existir) e
+                    // dispara o template 'envio_termo_imagem' no WhatsApp dele.
+                    try {
+                        await new Promise(r2 => setTimeout(r2, 1500));
+                        const tokenImg = crypto.randomUUID();
+                        const cpfImg = adm.cpf || '000.000.000-00';
+                        const { error: errImgDB } = await supabaseClient.from('autorizacoes_imagem').insert([{
+                            colaborador_id: idColab,
+                            nome: nomeColab,
+                            cpf: cpfImg,
+                            unidade: unidadeColab,
+                            empresa: empresaColab,
+                            token: tokenImg
+                        }]);
+                        if (errImgDB) throw new Error(errImgDB.message);
+                        const okImg = await enviarMensagemGraphAPI(telefone, 'envio_termo_imagem', [primeiroNome], null, tokenImg);
+                        resumo.push({ nome: 'Autorização de Imagem', ok: !!okImg, motivo: okImg ? '' : 'Falha no envio' });
+                    } catch (errImg) {
+                        resumo.push({ nome: 'Autorização de Imagem', ok: false, motivo: errImg.message });
+                    }
                 }
             } catch (err) {
                 resumo.push({ nome: 'Envio', ok: false, motivo: err.message });
