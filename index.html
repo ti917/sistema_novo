@@ -112245,6 +112245,22 @@ window.baixarPdfRelatorioAdmin = async function() {
                 normaisFmt: 'H. Normal', he100Fmt: 'HE 100%', noturnoFmt: 'Noturno'
             };
 
+            // 👇 AUDITORIA NO PDF: a célula em tela/impressão guarda o horário já embrulhado em
+            // HTML (<b>...✎</b>) quando foi corrigido pelo RH — mas o AutoTable do PDF baixado
+            // só desenha TEXTO puro, não HTML. Por isso aqui a gente tira o HTML pra pegar o
+            // texto limpo, e marca "em negrito + *" via objeto de célula do próprio AutoTable
+            // (que sim sabe estilizar célula a célula), usando a flag _editadosCampos que foi
+            // calculada junto com cada linha (ver bloco "jornada_espelho" mais acima).
+            const valorCelulaJornadaPdf = function(l, c) {
+                const bruto = l[c.key];
+                const texto = String(bruto ?? '-').replace(/<[^>]*>/g, '').replace(/\s*✎\s*$/, '').trim() || '-';
+                const editado = !!(l._editadosCampos && l._editadosCampos[c.key]);
+                if (editado) {
+                    return { content: texto + ' *', styles: { fontStyle: 'bold', textColor: [14, 125, 165] } };
+                }
+                return texto;
+            };
+
             nomesGrupos.forEach((g, idx) => {
                 if (idx > 0) doc.addPage();
 
@@ -112253,7 +112269,7 @@ window.baixarPdfRelatorioAdmin = async function() {
 
                 doc.autoTable(Object.assign({}, estiloTabela, {
                     head: [colunasSemColaborador.map(c => cabecalhosCurtosPdf[c.key] || c.header)],
-                    body: grupos[g].map(l => colunasSemColaborador.map(c => String(l[c.key] ?? '-'))),
+                    body: grupos[g].map(l => colunasSemColaborador.map(c => valorCelulaJornadaPdf(l, c))),
                     startY: ALTURA_CABECALHO + 7,
                     margin: { left: MARGEM, right: MARGEM, top: ALTURA_CABECALHO, bottom: 14 },
                     styles: Object.assign({}, estiloTabela.styles, { fontSize: 5.8, cellPadding: { top: 0.9, right: 0.9, bottom: 0.9, left: 0.9 }, halign: 'center' }),
@@ -112261,8 +112277,16 @@ window.baixarPdfRelatorioAdmin = async function() {
                     columnStyles: columnStylesJornada
                 }));
 
-                const y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 16;
-                desenharAssinatura(y);
+                let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 6;
+                // Legenda só aparece na página de quem realmente teve algum horário corrigido —
+                // não poluir a folha de quem bateu tudo certinho sem nenhuma correção do RH.
+                const teveCorrecaoNestaPagina = grupos[g].some(l => l._editadosCampos && Object.values(l._editadosCampos).some(Boolean));
+                if (teveCorrecaoNestaPagina) {
+                    doc.setFont('helvetica', 'italic'); doc.setFontSize(6.2); doc.setTextColor(14, 125, 165);
+                    doc.text('* Horário corrigido pelo RH — o horário batido originalmente pelo colaborador continua guardado no sistema.', MARGEM, y);
+                    y += 6;
+                }
+                desenharAssinatura(y + 4);
             });
         } else {
             // Monta o corpo da tabela, com uma linha "faixa" para cada grupo (quando agrupado)
@@ -112861,6 +112885,27 @@ window.gerarRelatorioAdmin = async function() {
                     const ent2 = p ? p.volta_refeicao_hora : null;
                     const sai2 = p ? p.saida_hora : null;
 
+                    // 👇 Pra auditoria: marca quais desses 4 horários foram corrigidos pelo RH
+                    // (existe uma entrada em valores_originais pra aquele campo) — usado pra
+                    // destacar em negrito/azul na tela e na impressão, e em negrito + "*" no
+                    // PDF baixado (que não roda HTML, só texto puro do jsPDF/AutoTable).
+                    const valoresOriginaisDia = (p && p.valores_originais) || {};
+                    const camposEditadosDia = {
+                        ent1: Object.prototype.hasOwnProperty.call(valoresOriginaisDia, 'entrada_hora'),
+                        sai1: Object.prototype.hasOwnProperty.call(valoresOriginaisDia, 'ida_refeicao_hora'),
+                        ent2: Object.prototype.hasOwnProperty.call(valoresOriginaisDia, 'volta_refeicao_hora'),
+                        sai2: Object.prototype.hasOwnProperty.call(valoresOriginaisDia, 'saida_hora'),
+                    };
+                    // Envolve o horário num <b> azul + ✎ quando foi corrigido pelo RH — funciona
+                    // direto na tela (relRenderizarTabela) e na impressão (relMontarConteudoHtml),
+                    // que inserem o valor da célula como HTML. O PDF baixado trata esse HTML à
+                    // parte (ver baixarPdfRelatorioAdmin), porque o AutoTable só aceita texto puro.
+                    const marcarEditadoHtml = function(txt, editado) {
+                        return editado
+                            ? '<b style="color:#0ea5e9;" title="Corrigido pelo RH — o horário batido originalmente continua guardado no sistema">' + txt + ' ✎</b>'
+                            : txt;
+                    };
+
                     const minIntervalo = minutosEntre(sai1, ent2);
                     let minTrabalhados = 0;
                     if (ent1 && sai2) { minTrabalhados = Math.max(0, minutosEntre(ent1, sai2) - minIntervalo); }
@@ -112902,12 +112947,16 @@ window.gerarRelatorioAdmin = async function() {
 
                     linhas.push({
                         colaborador: colab.nome, dataFmt: diasSemanaAbrev[diaObj.getDay()] + ', ' + formatarDataBR(dataIso),
-                        ent1: fmtH(ent1) || '-', sai1: fmtH(sai1) || '-', ent2: fmtH(ent2) || '-', sai2: fmtH(sai2) || '-',
+                        ent1: marcarEditadoHtml(fmtH(ent1) || '-', camposEditadosDia.ent1),
+                        sai1: marcarEditadoHtml(fmtH(sai1) || '-', camposEditadosDia.sai1),
+                        ent2: marcarEditadoHtml(fmtH(ent2) || '-', camposEditadosDia.ent2),
+                        sai2: marcarEditadoHtml(fmtH(sai2) || '-', camposEditadosDia.sai2),
                         creditoFmt: window.relMinToHr(credito), debitoFmt: window.relMinToHr(debito),
                         intervaloFmt: window.relMinToHr(minIntervalo), normaisFmt: window.relMinToHr(normais),
                         he50Fmt: window.relMinToHr(he50), he100Fmt: window.relMinToHr(he100),
                         noturnoFmt: window.relMinToHr(minNoturno), saldoFmt: window.relMinToHr(saldoAcumulado),
                         motivo: motivo || '-',
+                        _editadosCampos: camposEditadosDia,
                         _grupo: colab.nome
                     });
                 });
