@@ -7996,16 +7996,20 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
 </div>
 
         <div id="aba-zap-comunicado" class="conteudo-aba-zap hidden">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+    <div id="zap-comunicado-view-envio">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; flex-wrap: wrap;">
         <h4 style="color: #25D366; margin: 0;">
             <i class="fa-regular fa-image"></i> Envio de Imagens e Comunicados
         </h4>
+        <button type="button" class="btn-secondary" onclick="window.abrirHistoricoComunicados()" style="font-size: 0.82rem; padding: 8px 14px;">
+            <i class="fa-solid fa-chart-simple"></i> Métricas e Histórico
+        </button>
     </div>
-    
+
     <p style="font-size: 0.9rem; color: var(--cor-texto-secundario); margin-bottom: 25px;">
         Envie cartões virtuais, avisos de datas comemorativas ou comunicados gerais. O sistema enviará a imagem junto com a sua mensagem.
     </p>
-                    
+
     <form id="form-zap-comunicado">
         <div class="box-interior" style="border-left: 4px solid #4fc3f7; padding: 20px; display: flex; flex-direction: column; margin-bottom: 20px;">
             <h5 style="color: #4fc3f7; margin-bottom: 15px; font-size: 1rem;"><i class="fa-solid fa-filter"></i> 1. Filtros de Envio</h5>
@@ -8066,6 +8070,22 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
             <i class="fa-solid fa-paper-plane"></i> Iniciar Disparo em Massa
         </button>
     </form>
+    </div>
+
+    <div id="zap-comunicado-view-historico" class="hidden">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 10px; flex-wrap: wrap;">
+            <h4 style="color: #25D366; margin: 0;">
+                <i class="fa-solid fa-chart-simple"></i> Métricas e Histórico de Comunicados
+            </h4>
+            <button type="button" class="btn-secondary" onclick="window.fecharHistoricoComunicados()" style="font-size: 0.82rem; padding: 8px 14px;">
+                <i class="fa-solid fa-arrow-left"></i> Voltar pro envio
+            </button>
+        </div>
+        <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 18px;">
+            Comunicados com o mesmo texto de mensagem aparecem agrupados aqui (somando os envios de todas as unidades/levas).
+        </p>
+        <div id="corpo-historico-comunicados" style="min-height: 80px;"></div>
+    </div>
 </div>
 
       <div id="aba-zap-foto-cracha" class="conteudo-aba-zap hidden">
@@ -73554,6 +73574,25 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
             }
         }
 
+        // Guarda esse disparo no histórico (Métricas e Histórico) — se der erro aqui não
+        // desfaz nem avisa como falha, porque as mensagens já foram enviadas de verdade,
+        // só não ficaria registrado no histórico dessa vez.
+        try {
+            await supabaseClient.from('comunicados_lote_historico').insert([{
+                texto_mensagem: textoMensagem,
+                imagem_url: linkImagem,
+                unidades: unidadesSel,
+                empresa: empresa,
+                genero_filtro: document.getElementById('zap-com-genero').value,
+                enviado_por: (usuarioAtual && usuarioAtual.nome) || 'Desconhecido',
+                total_enviados: sucessos,
+                total_falhas: falhas,
+                falhas_detalhe: listaFalhas
+            }]);
+        } catch (errHist) {
+            console.error('Falha ao salvar histórico do comunicado (o envio em si já foi feito normalmente):', errHist);
+        }
+
         mostrarAlerta(`Disparo concluído!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, falhas > 0 ? "aviso" : "sucesso");
         // 👇 Só aparece popup se alguém falhou — quem recebeu fica só no resumo acima, sem listar nomes.
         window.mostrarFalhasEnvioZap(listaFalhas, {
@@ -73574,6 +73613,106 @@ document.getElementById('form-zap-comunicado').addEventListener('submit', async 
         btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Iniciar Disparo em Massa';
     }
 });
+
+// Troca pra tela de "Métricas e Histórico" dentro da própria aba Comunicados em Lote
+// (não é popup — substitui o conteúdo igual um sub-aba).
+window.abrirHistoricoComunicados = async function() {
+    const viewEnvio = document.getElementById('zap-comunicado-view-envio');
+    const viewHistorico = document.getElementById('zap-comunicado-view-historico');
+    if (viewEnvio) viewEnvio.classList.add('hidden');
+    if (viewHistorico) viewHistorico.classList.remove('hidden');
+    await window.carregarHistoricoComunicados();
+};
+
+window.fecharHistoricoComunicados = function() {
+    const viewEnvio = document.getElementById('zap-comunicado-view-envio');
+    const viewHistorico = document.getElementById('zap-comunicado-view-historico');
+    if (viewHistorico) viewHistorico.classList.add('hidden');
+    if (viewEnvio) viewEnvio.classList.remove('hidden');
+};
+
+// Busca o histórico de comunicados e agrupa por texto da mensagem — quando o mesmo
+// comunicado foi mandado em levas separadas (ex: uma unidade de cada vez), não aparece
+// um card pra cada leva, aparece um card só, somando os totais de todas.
+window.carregarHistoricoComunicados = async function() {
+    const corpo = document.getElementById('corpo-historico-comunicados');
+    if (!corpo) return;
+    corpo.innerHTML = '<p style="color: var(--cor-texto-secundario); text-align:center;"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando...</p>';
+
+    try {
+        const { data, error } = await supabaseClient
+            .from('comunicados_lote_historico')
+            .select('*')
+            .order('criado_em', { ascending: false })
+            .limit(500);
+        if (error) throw new Error(error.message);
+
+        if (!data || data.length === 0) {
+            corpo.innerHTML = '<p style="color: var(--cor-texto-secundario); text-align:center; padding: 20px 0;">Nenhum comunicado enviado ainda.</p>';
+            return;
+        }
+
+        // Agrupa por texto da mensagem (o texto vira o "tema"/título do grupo).
+        const grupos = new Map();
+        data.forEach(reg => {
+            const chave = (reg.texto_mensagem || '').trim();
+            if (!grupos.has(chave)) {
+                grupos.set(chave, {
+                    texto: reg.texto_mensagem || '(sem texto)',
+                    imagem: reg.imagem_url || null,
+                    unidades: new Set(),
+                    enviadosPor: new Set(),
+                    totalEnviados: 0,
+                    totalFalhas: 0,
+                    falhasDetalhe: [],
+                    dataMaisRecente: reg.criado_em,
+                    dataMaisAntiga: reg.criado_em
+                });
+            }
+            const g = grupos.get(chave);
+            (reg.unidades || []).forEach(u => g.unidades.add(u));
+            if (reg.enviado_por) g.enviadosPor.add(reg.enviado_por);
+            g.totalEnviados += reg.total_enviados || 0;
+            g.totalFalhas += reg.total_falhas || 0;
+            if (Array.isArray(reg.falhas_detalhe)) g.falhasDetalhe.push(...reg.falhas_detalhe);
+            if (new Date(reg.criado_em) > new Date(g.dataMaisRecente)) { g.dataMaisRecente = reg.criado_em; g.imagem = reg.imagem_url || g.imagem; }
+            if (new Date(reg.criado_em) < new Date(g.dataMaisAntiga)) g.dataMaisAntiga = reg.criado_em;
+        });
+
+        const listaGrupos = Array.from(grupos.values()).sort((a, b) => new Date(b.dataMaisRecente) - new Date(a.dataMaisRecente));
+        const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        window.__historicoComunicadosGrupos = listaGrupos; // guarda pra botão de "ver falhas" acessar depois
+
+        corpo.innerHTML = listaGrupos.map((g, idx) => {
+            const dataFmt = new Date(g.dataMaisRecente).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+            const maisDeUmaLeva = g.dataMaisAntiga !== g.dataMaisRecente ? ' <span title="Enviado em mais de uma leva/unidade separadamente">(várias levas)</span>' : '';
+            const textoResumo = g.texto.length > 160 ? g.texto.slice(0, 160) + '…' : g.texto;
+            return `
+            <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid var(--cor-borda); border-radius: 10px; margin-bottom: 12px; background: rgba(255,255,255,0.03);">
+                ${g.imagem
+                    ? `<img src="${esc(g.imagem)}" style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; flex-shrink: 0;">`
+                    : `<div style="width:72px;height:72px;border-radius:8px;background:rgba(255,255,255,0.06);flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--cor-texto-secundario);"><i class="fa-solid fa-image"></i></div>`}
+                <div style="flex: 1; min-width: 0;">
+                    <div style="font-weight: 700; color: var(--cor-texto-principal); margin-bottom: 4px; word-break: break-word;">${esc(textoResumo)}</div>
+                    <div style="font-size: 0.76rem; color: var(--cor-texto-secundario); margin-bottom: 8px;">
+                        <i class="fa-solid fa-calendar"></i> ${dataFmt}${maisDeUmaLeva}
+                        &nbsp;·&nbsp; <i class="fa-solid fa-user"></i> ${esc(Array.from(g.enviadosPor).join(', ') || '—')}
+                        &nbsp;·&nbsp; <i class="fa-solid fa-building"></i> ${esc(Array.from(g.unidades).join(', ') || '—')}
+                    </div>
+                    <div style="display: flex; gap: 14px; font-size: 0.85rem; align-items: center;">
+                        <span style="color: #25D366;"><i class="fa-solid fa-check"></i> <b>${g.totalEnviados}</b> enviado${g.totalEnviados === 1 ? '' : 's'}</span>
+                        ${g.totalFalhas > 0
+                            ? `<a href="#" onclick="window.mostrarFalhasEnvioZap(window.__historicoComunicadosGrupos[${idx}].falhasDetalhe, { titulo: 'Quem não recebeu este comunicado', dica: 'Confira o telefone no cadastro do colaborador.' }); return false;" style="color: var(--cor-perigo); text-decoration: underline; cursor: pointer;"><i class="fa-solid fa-triangle-exclamation"></i> <b>${g.totalFalhas}</b> falhou${g.totalFalhas === 1 ? '' : 'ram'}</a>`
+                            : `<span style="color: var(--cor-texto-secundario);">0 falhas</span>`}
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        corpo.innerHTML = `<p style="color: var(--cor-perigo); text-align:center; padding: 20px 0;">Erro ao carregar histórico: ${e.message}</p>`;
+    }
+};
 
         // ==========================================
 // MOTOR UNIVERSAL DE PAGINAÇÃO INTELIGENTE
