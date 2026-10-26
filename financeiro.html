@@ -2884,8 +2884,13 @@
             document.getElementById('user-name-display').innerText = perfil.nome;
             document.getElementById('user-role-badge').innerText = perfil.perfil;
             
-            await montarFiltroEmpresaFinanceiro();
-            
+            // 🐛 PERFORMANCE: antes isso tinha "await" na frente e travava TODO o resto da
+            // inicialização (inclusive o carregarDashboardGeral() logo abaixo) esperando
+            // terminar — mesmo o Dashboard não depender desse resultado pra nada (ele usa
+            // empresaFinanceiraSelecionada, que já começa em 'Todas' por padrão). Agora roda
+            // em paralelo, sem segurar a fila.
+            montarFiltroEmpresaFinanceiro();
+
             // 👇 MÁGICA: INICIA OS CALENDÁRIOS DUPLOS NO DASH E NOS CENTROS DE CUSTO
             const hj = new Date();
             const primeiroDia = new Date(hj.getFullYear(), hj.getMonth(), 1);
@@ -2955,7 +2960,26 @@
 
         async function montarFiltroEmpresaFinanceiro() {
             if (usuarioAtual.perfil === 'Admin') {
-                const { data: empData } = await supabaseClient.from('perfis').select('empresa, perfil, nome').not('empresa', 'is', null);
+                // 🐛 PERFORMANCE: mesma correção do RH (index.html) — essa busca varria a
+                // tabela perfis INTEIRA só pra montar esse dropdown, em todo login. Lista de
+                // empresa quase nunca muda, então cacheia por aba (sessionStorage, 30 min).
+                let empData;
+                const CACHE_KEY_EMPRESAS_FIN = 'rh-cache-empresas-header';
+                const CACHE_TTL_EMPRESAS_FIN_MS = 30 * 60 * 1000;
+                try {
+                    const cacheBruto = sessionStorage.getItem(CACHE_KEY_EMPRESAS_FIN);
+                    const cacheObj = cacheBruto ? JSON.parse(cacheBruto) : null;
+                    if (cacheObj && (Date.now() - cacheObj.ts) < CACHE_TTL_EMPRESAS_FIN_MS) {
+                        empData = cacheObj.dados;
+                    }
+                } catch (eCacheRead) { /* cache corrompido ou indisponível — ignora e busca de novo */ }
+
+                if (!empData) {
+                    const resp = await supabaseClient.from('perfis').select('empresa, perfil, nome').not('empresa', 'is', null);
+                    empData = resp.data || [];
+                    try { sessionStorage.setItem(CACHE_KEY_EMPRESAS_FIN, JSON.stringify({ ts: Date.now(), dados: empData })); } catch (eCacheWrite) { /* sem espaço/indisponível — segue sem cache */ }
+                }
+
                 let empSet = new Set(["SOUL GESTÃO", "VILLAC"]);
                 empData.forEach(e => {
                     if (e.perfil === 'Empresa' && e.nome) empSet.add(e.nome.trim());
