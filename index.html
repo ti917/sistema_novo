@@ -69269,8 +69269,32 @@ window.carregarStatusEPI = async function() {
         .eq('mes_ano', mesAnoFormatado)
         .order('nome');
 
-    window.dadosEpiAtuais = data || [];
-    
+    // 👇 NOVO: cruza com o status atual do colaborador em `perfis` — um recibo de EPI
+    // pendente de alguém que já foi DESLIGADO não deve mais aparecer/contar como
+    // pendência, nem ser cobrado (não faz sentido cobrar assinatura de quem já saiu).
+    // Quem já ASSINOU continua aparecendo normalmente mesmo se desligado depois (é só
+    // histórico). Busca em lotes de 150 IDs (mesmo bug já corrigido em Autorização de
+    // Imagem: um `.in('id', ids)` com centenas de IDs de uma vez o Supabase recusa e a
+    // busca falha calada, deixando todo mundo sem statusColaboradorAtual).
+    const idsColabsEpi = (data || []).map(r => r.colaborador_id).filter(Boolean);
+    let statusPorColabEpi = {};
+    if (idsColabsEpi.length > 0) {
+        const TAMANHO_LOTE_STATUS_EPI = 150;
+        const lotesIdsEpi = [];
+        for (let i = 0; i < idsColabsEpi.length; i += TAMANHO_LOTE_STATUS_EPI) {
+            lotesIdsEpi.push(idsColabsEpi.slice(i, i + TAMANHO_LOTE_STATUS_EPI));
+        }
+        const resultadosLotesEpi = await Promise.all(
+            lotesIdsEpi.map(lote => supabaseClient.from('perfis').select('id, status').in('id', lote))
+        );
+        resultadosLotesEpi.forEach(({ data: perfisStatus, error: erroLoteEpi }) => {
+            if (erroLoteEpi) { console.error('Erro ao buscar status de colaboradores (Recibo de EPI):', erroLoteEpi); return; }
+            (perfisStatus || []).forEach(p => { statusPorColabEpi[p.id] = p.status; });
+        });
+    }
+
+    window.dadosEpiAtuais = (data || []).map(r => ({ ...r, statusColaboradorAtual: statusPorColabEpi[r.colaborador_id] || null }));
+
     // Limpa a busca ao trocar de mês e chama o renderizador
     document.getElementById('busca-epi-status').value = '';
     filtrarStatusEpiVisual();
@@ -69310,10 +69334,14 @@ window.filtrarStatusEpiVisual = function() {
     const statusFiltro = window.filtroStatusEpiAtual || 'Todos';
 
     // MÁGICA AQUI: Filtra pelo nome/unidade E TAMBÉM pela caixa selecionada!
+    // 👇 NOVO: some da lista quem já foi DESLIGADO e ainda tá Pendente — não é mais uma
+    // pendência de verdade (a pessoa não vai voltar pra assinar/ser cobrada). Quem já
+    // Assinou continua aparecendo mesmo se desligado depois (é registro/histórico).
     const filtrados = window.dadosEpiAtuais.filter(r => {
         const bateuTexto = window.removerAcentos(r.nome).includes(termo) || (r.unidade && window.removerAcentos(r.unidade).includes(termo));
         const bateuStatus = statusFiltro === 'Todos' || r.status === statusFiltro;
-        
+        if (r.status !== 'Assinado' && r.statusColaboradorAtual && r.statusColaboradorAtual !== 'Ativo') return false;
+
         return bateuTexto && bateuStatus;
     });
 
@@ -69364,8 +69392,14 @@ window.filtrarStatusEpiVisual = function() {
     lista.innerHTML = html;
 
     // Atualiza os Contadores com base na lista GERAL (Garante que os números da caixa não mudem ao filtrar)
-    const totalGeral = window.dadosEpiAtuais.length;
-    const assinados = window.dadosEpiAtuais.filter(r => r.status === 'Assinado').length;
+    // 👇 NOVO: mesma regra da lista — ignora a busca por nome, mas ignora junto quem já
+    // foi desligado e ainda tava Pendente, pra não contar como pendência quem já saiu.
+    const visiveisEpi = window.dadosEpiAtuais.filter(r => {
+        if (r.status !== 'Assinado' && r.statusColaboradorAtual && r.statusColaboradorAtual !== 'Ativo') return false;
+        return true;
+    });
+    const totalGeral = visiveisEpi.length;
+    const assinados = visiveisEpi.filter(r => r.status === 'Assinado').length;
     const pendentes = totalGeral - assinados;
 
     document.getElementById('count-epi-total').innerText = totalGeral;
@@ -69458,10 +69492,17 @@ window.reenviarReciboEpi = async function(idColaborador, nome, token, mesAnoForm
 window.reenviarPendentesMassa = async function() {
     if (!window.dadosEpiAtuais || window.dadosEpiAtuais.length === 0) return;
 
-    const pendentes = window.dadosEpiAtuais.filter(r => r.status === 'Pendente');
-    
+    // 👇 CORREÇÃO: esse botão "Cobrar" mandava reenvio pra TODO mundo com status
+    // Pendente aqui, sem checar se o colaborador continua na empresa — foi assim que a
+    // Clara cobrou uma colaboradora já DESLIGADA (ela tinha um recibo Pendente de antes
+    // de sair). Agora exige explicitamente statusColaboradorAtual === 'Ativo' antes de
+    // cobrar (defesa em profundidade: mesmo que essa função um dia seja chamada com uma
+    // lista que não passou pelo filtro de desligados da tela, ela não dispara pra quem
+    // não está mais Ativo).
+    const pendentes = window.dadosEpiAtuais.filter(r => r.status === 'Pendente' && r.statusColaboradorAtual === 'Ativo');
+
     if (pendentes.length === 0) {
-        return mostrarAlerta("Não há nenhum recibo pendente de assinatura para reenviar neste mês.", "aviso");
+        return mostrarAlerta("Não há nenhum recibo pendente de assinatura para reenviar neste mês (entre os colaboradores ainda ativos).", "aviso");
     }
 
     const confirmado = await mostrarConfirmacao(`Deseja reenviar a mensagem da Clara no WhatsApp para todos os <b>${pendentes.length}</b> colaboradores que ainda não assinaram o EPI deste mês?`, "Reenviar em Massa");
