@@ -17,6 +17,9 @@
 const https = require("https");
 const zlib = require("zlib");
 const { createClient } = require("@supabase/supabase-js");
+const { extrairChavePemECertPem, enviarCienciaDaOperacao } = require("./manifestacao");
+
+const MAX_CIENCIAS_POR_EXECUCAO = 50; // nao manda mais que isso por rodada
 
 const SEFAZ_HOST = "www1.nfe.fazenda.gov.br";
 const SEFAZ_PATH = "/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx";
@@ -131,6 +134,27 @@ async function main() {
             totalProcessados++;
             try {
                 const xmlDoc = zlib.gunzipSync(Buffer.from(docZipB64, "base64")).toString("utf-8");
+
+                // procNFe = a nota completa (NFe + protocolo de autorizacao),
+                // so fica disponivel depois que a empresa manda "Ciencia da
+                // Operacao" (ver mais abaixo). E' o que precisa pra gerar o
+                // DANFE em PDF de verdade. So atualiza a coluna xml_completo
+                // dessa nota - nao mexe em mais nada da linha que ja existe.
+                if (schema.startsWith("procNFe")) {
+                    const chaveCompleta =
+                        extractTag(xmlDoc, "chNFe") ||
+                        (xmlDoc.match(/Id="NFe(\d{44})"/) || [])[1] ||
+                        "";
+                    if (chaveCompleta) {
+                        const { error: erroXmlCompleto } = await supabase
+                            .from("nfecloud_documentos")
+                            .upsert({ chave_acesso: chaveCompleta, xml_completo: xmlDoc }, { onConflict: "chave_acesso", ignoreDuplicates: false });
+                        if (erroXmlCompleto) console.error("Erro gravando xml completo:", erroXmlCompleto.message);
+                        else totalGravados++;
+                    }
+                    continue;
+                }
+
                 if (!schema.startsWith("resNFe")) continue; // ignora resEvento etc.
                 const chave = extractTag(xmlDoc, "chNFe") || "";
                 const decod = decodificarChave(chave);
@@ -169,6 +193,55 @@ async function main() {
         { onConflict: "cnpj" }
     );
 
+    // Manda "Ciencia da Operacao" pras NFe que ainda nao foram manifestadas -
+    // tanto as novas quanto backlog antigo (ciencia_status comeca nulo pra
+    // notas que ja existiam antes dessa funcionalidade). Em lotes pequenos,
+    // pra nao estourar o tempo nem sobrecarregar nada. Erro numa nota so
+    // marca aquela nota como erro - nunca trava as outras nem mexe em mais
+    // nenhum dado ja gravado.
+    let cienciasEnviadas = 0, cienciasComErro = 0;
+    try {
+        const { data: pendentes, error: erroPendentes } = await supabase
+            .from("nfecloud_documentos")
+            .select("chave_acesso")
+            .eq("tipo", "NFe")
+            .is("ciencia_status", null)
+            .limit(MAX_CIENCIAS_POR_EXECUCAO);
+
+        if (erroPendentes) {
+            console.error("Erro buscando notas pendentes de ciencia:", erroPendentes.message);
+        } else if (pendentes && pendentes.length) {
+            const { keyPem, certPem } = extrairChavePemECertPem(pfxBuffer, senha);
+            for (const doc of pendentes) {
+                const resultado = await enviarCienciaDaOperacao({
+                    chave: doc.chave_acesso,
+                    cnpj,
+                    tpAmb,
+                    keyPem,
+                    certPem,
+                    pfxBuffer,
+                    senha,
+                });
+                if (resultado.ok) cienciasEnviadas++;
+                else cienciasComErro++;
+                const detalhe = resultado.ok || resultado.cStat
+                    ? `${resultado.cStat || ""} - ${resultado.xMotivo || ""}`.trim()
+                    : (resultado.motivo || "erro desconhecido");
+                const { error: erroUpdate } = await supabase
+                    .from("nfecloud_documentos")
+                    .update({
+                        ciencia_status: resultado.ok ? "enviado" : "erro",
+                        ciencia_enviada_em: new Date().toISOString(),
+                        ciencia_detalhe: detalhe.slice(0, 500),
+                    })
+                    .eq("chave_acesso", doc.chave_acesso);
+                if (erroUpdate) console.error("Erro gravando status da ciencia:", doc.chave_acesso, erroUpdate.message);
+            }
+        }
+    } catch (e) {
+        console.error("Erro geral no envio de ciencia da operacao:", e && e.stack ? e.stack : String(e));
+    }
+
     console.log(JSON.stringify({
         ok: true,
         processados: totalProcessados,
@@ -176,6 +249,8 @@ async function main() {
         paginas,
         ultNSU,
         ultimoStatus: `${ultimoCStat} - ${ultimoXMotivo}`,
+        cienciasEnviadas,
+        cienciasComErro,
     }));
 }
 
