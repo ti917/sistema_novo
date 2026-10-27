@@ -243,7 +243,7 @@ async function main() {
                     .update({
                         ciencia_status: resultado.ok ? "enviado" : "erro",
                         ciencia_enviada_em: new Date().toISOString(),
-                        ciencia_detalhe: detalhe.slice(0, 500),
+                        ciencia_detalhe: detalhe.slice(0, 1500),
                     })
                     .eq("chave_acesso", doc.chave_acesso);
                 if (erroUpdate) console.error("Erro gravando status da ciencia:", doc.chave_acesso, erroUpdate.message);

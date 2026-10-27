@@ -172,7 +172,17 @@ async function enviarCienciaDaOperacao({ chave, cnpj, tpAmb, keyPem, certPem, pf
         const envEventoAssinado = montarEnvEventoAssinado(chave, cnpj, tpAmb, keyPem, certPem);
         const resp = await postEventoSoap(envEventoAssinado, pfxBuffer, senha);
         if (resp.status < 200 || resp.status >= 300) {
-            return { ok: false, motivo: `HTTP ${resp.status}: ${resp.texto.slice(0, 300)}` };
+            // Tenta pegar soap:Text/soap:Reason (SOAP 1.2) ou faultstring (SOAP 1.1)
+            // direto - essa e' a parte que explica o motivo de verdade, e um
+            // slice(0,300) cru as vezes corta antes dela chegar.
+            const textoFalha =
+                (resp.texto.match(/<soap:Text[^>]*>([^<]*)<\/soap:Text>/i) ||
+                 resp.texto.match(/<faultstring[^>]*>([^<]*)<\/faultstring>/i) ||
+                 [])[1];
+            const motivo = textoFalha
+                ? `HTTP ${resp.status}: ${textoFalha}`
+                : `HTTP ${resp.status}: ${resp.texto.slice(0, 1500)}`;
+            return { ok: false, motivo };
         }
         // O <cStat> do LOTE (128 = processado) vem antes do <cStat> do
         // EVENTO em si no XML de resposta - o que importa e' o ultimo.
