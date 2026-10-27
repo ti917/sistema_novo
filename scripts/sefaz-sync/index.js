@@ -104,6 +104,13 @@ async function main() {
 
     let totalProcessados = 0, totalGravados = 0, paginas = 0;
     let ultimoCStat = "", ultimoXMotivo = "";
+    // Erro na consulta de notas novas (ex: SEFAZ bloqueando por "Consumo
+    // Indevido" quando a gente testa rapido demais seguidas vezes) NAO deve
+    // impedir o envio de Ciencia da Operacao pras notas que ja estao
+    // pendentes - por isso isso so marca o processo como "deu erro" no final
+    // (process.exitCode), sem interromper o resto do script (process.exit
+    // mataria tudo na hora, inclusive a parte da ciencia logo abaixo).
+    let consultaComErro = false;
 
     while (paginas < MAX_PAGINAS) {
         paginas++;
@@ -111,7 +118,9 @@ async function main() {
         const resp = await postSoap(envelope, pfxBuffer, senha);
         if (resp.status < 200 || resp.status >= 300) {
             console.error("SEFAZ respondeu HTTP", resp.status, resp.texto.slice(0, 500));
-            process.exit(1);
+            consultaComErro = true;
+            process.exitCode = 1;
+            break;
         }
 
         const cStat = extractTag(resp.texto, "cStat") || "";
@@ -123,7 +132,9 @@ async function main() {
         if (cStat === "137") { ultNSU = novoUltNSU; break; } // 137 = nenhum documento novo
         if (cStat !== "138") { // 138 = documentos encontrados
             console.error("SEFAZ recusou a consulta:", cStat, xMotivo, resp.texto.slice(0, 800));
-            process.exit(1);
+            consultaComErro = true;
+            process.exitCode = 1;
+            break;
         }
 
         const docZipRegex = /<docZip[^>]*schema="([^"]+)"[^>]*>([^<]+)<\/docZip>/g;
@@ -243,7 +254,8 @@ async function main() {
     }
 
     console.log(JSON.stringify({
-        ok: true,
+        ok: !consultaComErro,
+        consultaComErro,
         processados: totalProcessados,
         gravados: totalGravados,
         paginas,
