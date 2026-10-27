@@ -9,6 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;700;800;900&family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <!-- Biblioteca TomSelect (Dropdowns Múltiplos) -->
     <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
@@ -2088,13 +2089,17 @@
                 </div>
 
                 <!-- SUB-ABA: NOTAS RECEBIDAS (NFeCloud) — lista só pra revisão, não lança
-                     nada automático. Lido direto da tabela nfecloud_documentos, que é
-                     preenchida pela Edge Function "nfecloud-sync" (roda no servidor, nunca
-                     expõe o token da NFeCloud aqui no navegador). -->
+                     nada automático. A NFeCloud não libera download automático dos documentos
+                     recebidos pelo token de API (só por login na tela deles), então o fluxo é:
+                     baixar o .zip manualmente em NFeCloud > Gestão de Documentos > Baixar Notas,
+                     e soltar aqui — o sistema lê os XMLs de dentro e organiza a lista sozinho. -->
                 <div id="almox-sub-nfecloud" class="hidden">
                     <div style="display:flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
-                        <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin: 0; max-width: 600px;">Documentos fiscais (NFe/NFCe/CTe/NFSe) que chegaram pra alguma das suas unidades, puxados automaticamente da NFeCloud. É só uma lista pra revisão — nada aqui lança nota de Almoxarifado sozinho.</p>
-                        <button class="btn-secondary" id="btn-sync-nfecloud" onclick="window.sincronizarNFeCloud()"><i class="fa-solid fa-rotate"></i> Sincronizar Agora</button>
+                        <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin: 0; max-width: 600px;">Documentos fiscais (NFe/NFCe/CTe/NFSe) que chegaram pra alguma das suas unidades. Baixe o .zip na NFeCloud (Gestão de Documentos &gt; Baixar Notas) e solte aqui — o sistema lê e organiza a lista pra revisão. Nada aqui lança nota de Almoxarifado sozinho.</p>
+                        <div style="display:flex; gap:10px; align-items:center;">
+                            <input type="file" id="input-zip-nfecloud" accept=".zip" style="display:none;" onchange="window.importarZipNFeCloud(this.files)">
+                            <button id="btn-importar-nfecloud" style="background: var(--cor-acento); color:#000; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; white-space: nowrap;" onclick="document.getElementById('input-zip-nfecloud').click()"><i class="fa-solid fa-file-zipper"></i> Importar .zip da NFeCloud</button>
+                        </div>
                     </div>
                     <div class="glass-card" style="padding: 0; overflow-x: auto;">
                         <div class="barra-toolbar">
@@ -2117,7 +2122,7 @@
                                 </tr>
                             </thead>
                             <tbody id="lista-nfecloud-body">
-                                <tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--cor-texto-secundario);">Clique em "Sincronizar Agora" pra buscar as notas recebidas.</td></tr>
+                                <tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--cor-texto-secundario);">Clique em "Importar .zip da NFeCloud" pra carregar as notas baixadas.</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -9722,7 +9727,7 @@ window.carregarNotasRecebidasNFeCloud = async function() {
     setTxt('contador-nfecloud', `${(data || []).length} nota${(data || []).length === 1 ? '' : 's'}`);
 
     if (!data || !data.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota recebida encontrada ainda. Clique em "Sincronizar Agora".</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota recebida encontrada ainda. Clique em "Importar .zip da NFeCloud".</td></tr>';
         return;
     }
 
@@ -9754,39 +9759,141 @@ window.atualizarStatusRevisaoNFeCloud = async function(id, novoStatus) {
     if (error) mostrarAlerta('Não consegui salvar o status dessa nota: ' + error.message, 'erro');
 };
 
-// Chama a Edge Function "nfecloud-sync" (roda no servidor do Supabase — o
-// token da NFeCloud fica só lá, nunca passa por aqui). Precisa dela já
-// implantada no projeto, com o secret NFECLOUD_TOKEN configurado.
-window.sincronizarNFeCloud = async function() {
-    const btn = document.getElementById('btn-sync-nfecloud');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sincronizando...'; }
+// =====================================================================
+// Importação do .zip baixado manualmente na NFeCloud (Gestão de Documentos
+// > Baixar Notas). A NFeCloud não libera esses documentos pelo token de
+// API (só pelo login na tela deles), então em vez de puxar automático,
+// a gente lê o zip que o usuário baixa e solta aqui — tudo processado no
+// navegador, nada de credencial nem servidor externo envolvido.
+// =====================================================================
+function _nfeExtractTag(xml, tag) {
+    const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
+    return m ? m[1].trim() : null;
+}
+function _nfeExtractBlock(xml, tag) {
+    const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
+    return m ? m[1] : null;
+}
+function _nfeSoNumeros(v) {
+    return (v || '').replace(/\D/g, '');
+}
+// Extrai os campos que importam de um XML de NFe/NFCe/CTe (padrão nacional
+// SEFAZ — mesma estrutura <emit>/<dest>/<ide> nos dois). NFSe não tem padrão
+// nacional (cada prefeitura usa um layout), então entra como "melhor esforço".
+function _nfeParseDocumentoXml(xml) {
+    let chave = (xml.match(/Id="(?:NFe|CTe)?(\d{44})"/i) || [])[1]
+        || (xml.match(/<ch(?:NFe|CTe)>(\d{44})<\/ch(?:NFe|CTe)>/i) || [])[1]
+        || null;
+
+    const isCte = /<infCte[\s>]/i.test(xml);
+    const isNfse = !isCte && !/<infNFe[\s>]/i.test(xml);
+
+    if (isNfse) {
+        const emitBlock = _nfeExtractBlock(xml, 'PrestadorServico') || _nfeExtractBlock(xml, 'Prestador') || xml;
+        const destBlock = _nfeExtractBlock(xml, 'TomadorServico') || _nfeExtractBlock(xml, 'Tomador') || xml;
+        return {
+            chave: chave || _nfeExtractTag(xml, 'Numero'),
+            tipo: 'NFSe',
+            numero: _nfeExtractTag(xml, 'Numero'),
+            serie: null,
+            emitenteNome: _nfeExtractTag(emitBlock, 'RazaoSocial') || _nfeExtractTag(emitBlock, 'xNome'),
+            emitenteCnpj: _nfeSoNumeros(_nfeExtractTag(emitBlock, 'Cnpj') || _nfeExtractTag(emitBlock, 'CNPJ')),
+            destinatarioNome: _nfeExtractTag(destBlock, 'RazaoSocial') || _nfeExtractTag(destBlock, 'xNome'),
+            destinatarioCnpj: _nfeSoNumeros(_nfeExtractTag(destBlock, 'Cnpj') || _nfeExtractTag(destBlock, 'CNPJ')),
+            valorTotal: parseFloat(_nfeExtractTag(xml, 'ValorServicos') || _nfeExtractTag(xml, 'ValorLiquidoNfse') || '0') || null,
+            dataEmissao: (_nfeExtractTag(xml, 'DataEmissao') || '').slice(0, 10) || null,
+        };
+    }
+
+    const ideBlock = _nfeExtractBlock(xml, 'ide') || '';
+    const emitBlock = _nfeExtractBlock(xml, 'emit') || '';
+    const destBlock = _nfeExtractBlock(xml, 'dest') || '';
+    const totalBlock = _nfeExtractBlock(xml, isCte ? 'vPrest' : 'ICMSTot') || '';
+    const mod = _nfeExtractTag(ideBlock, 'mod');
+
+    return {
+        chave,
+        tipo: isCte ? 'CTe' : (mod === '65' ? 'NFCe' : 'NFe'),
+        numero: _nfeExtractTag(ideBlock, 'nNF') || _nfeExtractTag(ideBlock, 'nCT'),
+        serie: _nfeExtractTag(ideBlock, 'serie'),
+        emitenteNome: _nfeExtractTag(emitBlock, 'xNome'),
+        emitenteCnpj: _nfeSoNumeros(_nfeExtractTag(emitBlock, 'CNPJ')),
+        destinatarioNome: _nfeExtractTag(destBlock, 'xNome'),
+        destinatarioCnpj: _nfeSoNumeros(_nfeExtractTag(destBlock, 'CNPJ')),
+        valorTotal: parseFloat(_nfeExtractTag(totalBlock, isCte ? 'vTPrest' : 'vNF') || _nfeExtractTag(xml, 'vNF') || '0') || null,
+        dataEmissao: (_nfeExtractTag(ideBlock, 'dhEmi') || _nfeExtractTag(ideBlock, 'dEmi') || '').slice(0, 10) || null,
+    };
+}
+
+window.importarZipNFeCloud = async function(fileList) {
+    const arquivo = fileList && fileList[0];
+    if (!arquivo) return;
+    const btn = document.getElementById('btn-importar-nfecloud');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo o zip...'; }
+
     try {
-        const { data: sessao } = await supabaseClient.auth.getSession();
-        const resp = await fetch(`${SUPABASE_URL}/functions/v1/nfecloud-sync`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${sessao?.session?.access_token || SUPABASE_ANON_KEY}`,
-                'apikey': SUPABASE_ANON_KEY,
-            },
-            body: JSON.stringify({ dias: 7 }),
-        });
-        const resultado = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-            // 👇 Mostra o detalhe de verdade (status + resposta da NFeCloud), não só o
-            // resumo genérico — senão fica difícil saber se é token expirado, sem
-            // permissão, etc. sem precisar abrir o DevTools toda vez.
-            const partes = [resultado.erro || `Erro ${resp.status}`];
-            if (resultado.status) partes.push(`(status NFeCloud: ${resultado.status})`);
-            if (resultado.detalhe) partes.push(`— ${String(resultado.detalhe).slice(0, 300)}`);
-            throw new Error(partes.join(' '));
+        if (typeof JSZip === 'undefined') throw new Error('Biblioteca de zip não carregou — recarregue a página e tente de novo.');
+
+        const zip = await JSZip.loadAsync(arquivo);
+        const arquivosXml = Object.values(zip.files).filter(f => !f.dir && /\.xml$/i.test(f.name));
+        if (!arquivosXml.length) throw new Error('Não achei nenhum arquivo .xml dentro desse zip.');
+
+        const { data: unidades, error: errUnidades } = await supabaseClient.from('financeiro_centros_custo').select('id, cnpj');
+        if (errUnidades) throw new Error('Não consegui carregar os CNPJs das unidades: ' + errUnidades.message);
+        const mapaCnpjUnidade = new Map();
+        (unidades || []).forEach(u => { if (u.cnpj) mapaCnpjUnidade.set(_nfeSoNumeros(u.cnpj), u.id); });
+
+        let processados = 0, recebidos = 0, semCnpjIdentificado = 0, erros = 0;
+        const linhas = [];
+
+        for (const arq of arquivosXml) {
+            try {
+                const xml = await arq.async('string');
+                const doc = _nfeParseDocumentoXml(xml);
+                processados++;
+                if (!doc || !doc.chave) continue;
+
+                const centroCustoId = doc.destinatarioCnpj ? mapaCnpjUnidade.get(doc.destinatarioCnpj) : null;
+                if (!centroCustoId) { semCnpjIdentificado++; continue; }
+
+                recebidos++;
+                linhas.push({
+                    chave_acesso: doc.chave,
+                    tipo: doc.tipo,
+                    numero: doc.numero,
+                    serie: doc.serie,
+                    emitente_nome: doc.emitenteNome,
+                    emitente_cnpj: doc.emitenteCnpj,
+                    destinatario_nome: doc.destinatarioNome,
+                    destinatario_cnpj: doc.destinatarioCnpj,
+                    valor_total: doc.valorTotal,
+                    data_emissao: doc.dataEmissao,
+                    centro_custo_id: centroCustoId,
+                    xml_raw: xml,
+                });
+            } catch (_e) {
+                erros++;
+            }
         }
-        mostrarAlerta(`Sincronizado: ${resultado.recebidos || 0} nota(s) recebida(s) encontrada(s) (de ${resultado.processados || 0} documento(s) verificado(s)).`, 'sucesso');
+
+        if (linhas.length) {
+            const { error: errUpsert } = await supabaseClient
+                .from('nfecloud_documentos')
+                .upsert(linhas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
+            if (errUpsert) throw new Error('Não consegui salvar as notas: ' + errUpsert.message);
+        }
+
+        let msg = `Importado: ${recebidos} nota(s) de ${processados} documento(s) no zip.`;
+        if (semCnpjIdentificado) msg += ` ${semCnpjIdentificado} não bateram com nenhum CNPJ cadastrado nas unidades (ignoradas).`;
+        if (erros) msg += ` ${erros} arquivo(s) com erro ao ler.`;
+        mostrarAlerta(msg, recebidos ? 'sucesso' : 'erro');
         window.carregarNotasRecebidasNFeCloud();
     } catch (e) {
-        mostrarAlerta('Não consegui sincronizar com a NFeCloud: ' + e.message, 'erro');
+        mostrarAlerta('Não consegui importar o zip: ' + e.message, 'erro');
     } finally {
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sincronizar Agora'; }
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-zipper"></i> Importar .zip da NFeCloud'; }
+        const input = document.getElementById('input-zip-nfecloud');
+        if (input) input.value = '';
     }
 };
 
