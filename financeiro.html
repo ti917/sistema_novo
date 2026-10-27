@@ -9698,6 +9698,7 @@ window.trocarSubAbaAlmoxarifado = function(aba) {
     } else if (aba === 'nfecloud') {
         divNfecloud.classList.remove('hidden');
         window.carregarNotasRecebidasNFeCloud();
+        window.atualizarBotaoSincronizarSefaz();
     } else {
         divNotas.classList.remove('hidden');
     }
@@ -10005,19 +10006,61 @@ function _nfeParseDocumentoXml(xml) {
     };
 }
 
+// A própria SEFAZ recusa a consulta ("Consumo Indevido") se a gente
+// perguntar de novo rápido demais sem ter nada novo - ela mesma pede pra
+// esperar 1 hora. Pra ninguém tomar esse bloqueio clicando "Sincronizar
+// Agora" várias vezes seguidas, guarda a hora do último clique (sobrevive a
+// fechar/abrir a página) e trava o botão até completar 1h.
+const SEFAZ_COOLDOWN_MS = 60 * 60 * 1000;
+const SEFAZ_COOLDOWN_CHAVE = 'sefazUltimoSincronizarAgora';
+
+function sefazMsRestantesDeCooldown() {
+    const ultimo = parseInt(localStorage.getItem(SEFAZ_COOLDOWN_CHAVE) || '0', 10);
+    if (!ultimo) return 0;
+    const restante = SEFAZ_COOLDOWN_MS - (Date.now() - ultimo);
+    return restante > 0 ? restante : 0;
+}
+
+window.atualizarBotaoSincronizarSefaz = function() {
+    const btn = document.getElementById('btn-sincronizar-sefaz');
+    if (!btn || btn.dataset.sincronizando === '1') return; // não mexe enquanto está no meio de um disparo
+    const restanteMs = sefazMsRestantesDeCooldown();
+    if (restanteMs > 0) {
+        const min = Math.ceil(restanteMs / 60000);
+        btn.disabled = true;
+        btn.title = 'A SEFAZ pede pra esperar 1 hora entre sincronizações manuais, pra não bloquear a consulta.';
+        btn.innerHTML = `<i class="fa-solid fa-clock"></i> Aguarde ${min} min`;
+        if (!btn.dataset.timerCooldown) {
+            btn.dataset.timerCooldown = '1';
+            setTimeout(() => { btn.dataset.timerCooldown = ''; window.atualizarBotaoSincronizarSefaz(); }, 30000);
+        }
+    } else {
+        btn.disabled = false;
+        btn.title = '';
+        btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sincronizar Agora';
+    }
+};
+
 window.sincronizarSefazAgora = async function() {
     const btn = document.getElementById('btn-sincronizar-sefaz');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sincronizando...'; }
+    if (sefazMsRestantesDeCooldown() > 0) {
+        mostrarAlerta('Calma — a SEFAZ pede pra esperar 1 hora entre sincronizações manuais pra não bloquear a consulta. A sincronização automática continua rodando sozinha de hora em hora normalmente.', 'erro');
+        window.atualizarBotaoSincronizarSefaz();
+        return;
+    }
+    if (btn) { btn.dataset.sincronizando = '1'; btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sincronizando...'; }
     try {
         const { data, error } = await supabaseClient.functions.invoke('trigger-sefaz-sync', { body: {} });
         if (error) throw new Error(error.message || 'Falha ao disparar a sincronização.');
         if (data && data.erro) throw new Error(data.erro);
+        localStorage.setItem(SEFAZ_COOLDOWN_CHAVE, String(Date.now()));
         mostrarAlerta('Sincronização disparada! As notas novas devem aparecer em até 30 segundos — atualize a lista daqui a pouco.', 'sucesso');
         setTimeout(() => { if (typeof window.carregarNotasRecebidasNFeCloud === 'function') window.carregarNotasRecebidasNFeCloud(); }, 20000);
     } catch (e) {
         mostrarAlerta('Erro ao sincronizar: ' + e.message, 'erro');
     } finally {
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sincronizar Agora'; }
+        if (btn) { btn.dataset.sincronizando = ''; }
+        window.atualizarBotaoSincronizarSefaz();
     }
 };
 
