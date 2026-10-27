@@ -9478,6 +9478,26 @@ window.carregarAlmoxarifado = async function() {
     window.filtrarAlmoxarifadoLocal();
 };
 
+// 🩹 CORREÇÃO (10/2026 — pedido do Italo): quando a Busca Livre bate com o NOME de
+// um produto (ex: "luva"), o valor mostrado — tanto linha a linha quanto no KPI —
+// passa a ser só a soma dos itens daquela nota que batem com o produto buscado,
+// não o valor_total da nota inteira (que pode ter outros produtos junto, tipo luva
+// + bota + capacete na mesma NF). Quando a busca está vazia, ou bateu só por
+// fornecedor/Nº NF (nenhum item da nota bate com o texto buscado), continua
+// mostrando o valor_total da nota normalmente — igual já funcionava antes.
+function _normTxtAlmox(t) {
+    return String(t || '').toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+function _itensQueBatemAlmox(n, termoNorm) {
+    if (!termoNorm) return [];
+    return (n.almoxarifado_itens || []).filter(i => _normTxtAlmox(i.produto).includes(termoNorm));
+}
+function _valorRelevanteNotaAlmoxarifado(n, termoNorm) {
+    const itensQueBatem = _itensQueBatemAlmox(n, termoNorm);
+    if (!termoNorm || itensQueBatem.length === 0) return parseFloat(n.valor_total) || 0;
+    return itensQueBatem.reduce((s, i) => s + (Number(i.quantidade || 0) * Number(i.valor_unitario || 0)), 0);
+}
+
 window.filtrarAlmoxarifadoLocal = function() {
     const tbody = document.getElementById('lista-almoxarifado-body');
     if (!tbody) return;
@@ -9508,7 +9528,7 @@ window.filtrarAlmoxarifadoLocal = function() {
 
     // KPIs
     const totalItens = filtrados.reduce((s, n) => s + (n.almoxarifado_itens || []).length, 0);
-    const valorTotal = filtrados.reduce((s, n) => s + (parseFloat(n.valor_total) || 0), 0);
+    const valorTotal = filtrados.reduce((s, n) => s + _valorRelevanteNotaAlmoxarifado(n, termo), 0);
     const unidadesAtendidas = new Set(filtrados.map(n => n.centro_custo_id).filter(Boolean)).size;
 
     const setTxt = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
@@ -9518,8 +9538,8 @@ window.filtrarAlmoxarifadoLocal = function() {
     setTxt('kpi-almox-valor', 'R$ ' + valorTotal.toLocaleString('pt-BR', {minimumFractionDigits:2}));
     setTxt('contador-almoxarifado', `${filtrados.length} nota${filtrados.length === 1 ? '' : 's'}`);
 
-    window._dadosFiltradosAlmoxarifado = filtrados; // 👇 usado pela exportação (Excel/CSV/PDF)
-    renderizarListaAlmoxarifado(filtrados);
+    window._dadosFiltradosAlmoxarifado = filtrados; // 👇 usado pela exportação (Excel/CSV/PDF) — a exportação já lista item a item, então não precisa desse ajuste
+    renderizarListaAlmoxarifado(filtrados, termo);
 };
 
 // =====================================================================
@@ -9556,7 +9576,7 @@ window.exportarAlmoxarifado = function (formato) {
     window.exportarDados('almoxarifado_por_insumo', colunas, linhas, formato, 'Almoxarifado — Relatório por Insumo');
 };
 
-function renderizarListaAlmoxarifado(lista) {
+function renderizarListaAlmoxarifado(lista, termo) {
     const tbody = document.getElementById('lista-almoxarifado-body');
     if (!tbody) return;
     if (!lista || !lista.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota de almoxarifado encontrada neste filtro.</td></tr>'; return; }
@@ -9567,6 +9587,11 @@ function renderizarListaAlmoxarifado(lista) {
         const cc = todosCentrosCustoGlobais.find(c => c.id === n.centro_custo_id);
         const itensNota = n.almoxarifado_itens || [];
         const nomesInsumos = itensNota.map(i => i.produto).filter(Boolean);
+        // 👇 Se a Busca Livre bateu com o nome de algum produto dessa nota, mostra só
+        // o valor somado desses itens (não o valor_total da NF inteira).
+        const itensQueBatemBusca = _itensQueBatemAlmox(n, termo);
+        const mostrandoValorFiltrado = !!termo && itensQueBatemBusca.length > 0 && itensQueBatemBusca.length < itensNota.length;
+        const valorExibido = _valorRelevanteNotaAlmoxarifado(n, termo);
         // 👇 Mostra os nomes dos insumos no lugar da contagem. Até 2 nomes aparece
         // tudo; de 3 pra cima mostra os 2 primeiros + "e mais N", com a lista
         // completa no title (tooltip ao passar o mouse) pra não estourar a linha.
@@ -9586,7 +9611,10 @@ function renderizarListaAlmoxarifado(lista) {
             <td style="padding:12px;">${n.numero_nf || '-'}</td>
             <td style="padding:12px;">${dataFmt}</td>
             <td style="padding:12px;">${celulaItens}</td>
-            <td style="padding:12px; font-weight:bold; color: var(--cor-acento);">R$ ${(n.valor_total || 0).toLocaleString('pt-BR', {minimumFractionDigits:2})}</td>
+            <td style="padding:12px; font-weight:bold; color: var(--cor-acento);">
+                R$ ${valorExibido.toLocaleString('pt-BR', {minimumFractionDigits:2})}
+                ${mostrandoValorFiltrado ? `<span title="Valor somado só dos itens que batem com '${esc(termo)}' — a NF inteira (${(n.valor_total || 0).toLocaleString('pt-BR', {minimumFractionDigits:2})}) tem outros produtos também." style="display:block; font-size:0.7rem; font-weight:normal; color: var(--cor-texto-secundario);">só ${esc(itensQueBatemBusca.map(i => i.produto).join(', '))}</span>` : ''}
+            </td>
             <td style="padding:12px; text-align:center;">
                 ${n.anexo_nf ? `<a href="javascript:void(0)" onclick="abrirAnexoSeguro('${String(n.anexo_nf).replace(/'/g, "\\'")}', this)" class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-radius:6px; border-color:#3498db; color:#3498db; text-decoration:none; margin-right:5px;" title="Ver Nota Fiscal (link temporário e protegido)"><i class="fa-solid fa-file-pdf"></i></a>` : ''}
                 <button class="btn-secondary" style="padding:6px 10px; font-size:0.78rem; border-radius:6px; border-color:#f1c40f; color:#f1c40f;" onclick="abrirModalNotaAlmoxarifado('${n.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
