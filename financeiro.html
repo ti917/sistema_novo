@@ -2119,13 +2119,14 @@
                                     <th style="padding: 15px;">Emitente</th>
                                     <th style="padding: 15px;">Unidade (Destinatário)</th>
                                     <th style="padding: 15px;">Emissão</th>
+                                    <th style="padding: 15px;">Vencimento</th>
                                     <th style="padding: 15px;">Valor</th>
                                     <th style="padding: 15px;">Status</th>
                                     <th style="padding: 15px;">Arquivos</th>
                                 </tr>
                             </thead>
                             <tbody id="lista-nfecloud-body">
-                                <tr><td colspan="8" style="text-align: center; padding: 20px; color: var(--cor-texto-secundario);">Clique em "Importar .zip da NFeCloud" pra carregar as notas baixadas.</td></tr>
+                                <tr><td colspan="9" style="text-align: center; padding: 20px; color: var(--cor-texto-secundario);">Clique em "Importar .zip da NFeCloud" pra carregar as notas baixadas.</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -9714,7 +9715,7 @@ window.trocarSubAbaAlmoxarifado = function(aba) {
 window.carregarNotasRecebidasNFeCloud = async function() {
     const tbody = document.getElementById('lista-nfecloud-body');
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>';
 
     const { data, error } = await supabaseClient
         .from('nfecloud_documentos')
@@ -9723,7 +9724,7 @@ window.carregarNotasRecebidasNFeCloud = async function() {
         .limit(500);
 
     if (error) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:20px; color: var(--cor-perigo);">Não consegui carregar — a tabela "nfecloud_documentos" ainda existe no Supabase? (${error.message})</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; padding:20px; color: var(--cor-perigo);">Não consegui carregar — a tabela "nfecloud_documentos" ainda existe no Supabase? (${error.message})</td></tr>`;
         return;
     }
 
@@ -9731,7 +9732,7 @@ window.carregarNotasRecebidasNFeCloud = async function() {
     setTxt('contador-nfecloud', `${(data || []).length} nota${(data || []).length === 1 ? '' : 's'}`);
 
     if (!data || !data.length) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota recebida encontrada ainda. Clique em "Importar .zip da NFeCloud".</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma nota recebida encontrada ainda. Clique em "Importar .zip da NFeCloud".</td></tr>';
         return;
     }
 
@@ -9743,9 +9744,44 @@ window.carregarNotasRecebidasNFeCloud = async function() {
 
     const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const corStatus = { 'Pendente': '#ff9800', 'Lançada': '#2ecc71', 'Ignorada': '#64748b' };
+    // cSitNFe (resumo da distribuição) usa os mesmos codigos de cStat da SEFAZ:
+    // 100/150 = Autorizada | 101/155 = Cancelada | 110/205/301/302/303 = Denegada.
+    const CSIT_CANCELADA = ['101', '155'];
+    const CSIT_DENEGADA = ['110', '205', '301', '302', '303'];
 
     tbody.innerHTML = data.map(n => {
-        const dataFmt = n.data_emissao ? new Date(n.data_emissao + 'T00:00:00').toLocaleDateString('pt-BR') : '-';
+        // A data/hora de emissão completa (dhEmi tem hora + fuso) não fica
+        // salva como coluna separada no banco - lemos direto do XML resumo
+        // (xml_raw), que toda nota já tem desde a primeira sincronização.
+        const dhEmiRaw = n.xml_raw ? _nfeExtractTag(n.xml_raw, 'dhEmi') : null;
+        const dataFmt = dhEmiRaw
+            ? new Date(dhEmiRaw).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+            : (n.data_emissao ? new Date(n.data_emissao + 'T00:00:00').toLocaleDateString('pt-BR') : '-');
+
+        // Situação real na SEFAZ (cancelada/denegada) - só dá pra saber pelo
+        // resumo (cSitNFe). Separado do status_revisao, que é o fluxo de
+        // trabalho do financeiro (lançou, ignorou etc.)
+        const cSit = n.xml_raw ? _nfeExtractTag(n.xml_raw, 'cSitNFe') : null;
+        let badgeSituacao = '';
+        if (cSit && CSIT_CANCELADA.includes(cSit)) {
+            badgeSituacao = '<div style="margin-top:6px; font-size:0.72rem; font-weight:bold; color:#ff4757; background:rgba(255,71,87,0.12); padding:2px 8px; border-radius:10px; display:inline-block;"><i class="fa-solid fa-ban"></i> CANCELADA</div>';
+        } else if (cSit && CSIT_DENEGADA.includes(cSit)) {
+            badgeSituacao = '<div style="margin-top:6px; font-size:0.72rem; font-weight:bold; color:#ff4757; background:rgba(255,71,87,0.12); padding:2px 8px; border-radius:10px; display:inline-block;"><i class="fa-solid fa-triangle-exclamation"></i> DENEGADA</div>';
+        }
+
+        // Vencimento (cobr/dup/dVenc) só existe no XML completo - a nota
+        // técnica da SEFAZ não manda isso no resumo. Fica "—" até o XML
+        // completo chegar (depois da ciência da operação).
+        let vencFmt = '<span style="color:var(--cor-texto-secundario);" title="Só disponível depois que o XML completo da nota chegar (após a ciência da operação)">—</span>';
+        if (n.xml_completo) {
+            const venc = _nfeExtrairVencimento(n.xml_completo);
+            if (venc) {
+                vencFmt = new Date(venc.primeiro + 'T00:00:00').toLocaleDateString('pt-BR') + (venc.total > 1 ? ` <span style="color:var(--cor-texto-secundario); font-size:0.75rem;">(1ª de ${venc.total})</span>` : '');
+            } else {
+                vencFmt = '<span style="color:var(--cor-texto-secundario);">não informado na nota</span>';
+            }
+        }
+
         const temXml = !!(n.xml_completo || n.xml_raw);
         const temXmlCompleto = !!n.xml_completo;
         const btnXml = temXml
@@ -9757,9 +9793,10 @@ window.carregarNotasRecebidasNFeCloud = async function() {
         return `<tr style="border-bottom: 1px solid var(--cor-borda);">
             <td style="padding:12px;">${esc(n.tipo)}</td>
             <td style="padding:12px;">${esc(n.numero || '-')}${n.serie ? ' / ' + esc(n.serie) : ''}</td>
-            <td style="padding:12px;">${esc(n.emitente_nome || '-')}</td>
+            <td style="padding:12px;">${esc(n.emitente_nome || '-')}${badgeSituacao}</td>
             <td style="padding:12px;">${n.financeiro_centros_custo ? esc(n.financeiro_centros_custo.nome_unidade) : '<i style="color:var(--cor-texto-secundario);">não identificada</i>'}</td>
-            <td style="padding:12px;">${dataFmt}</td>
+            <td style="padding:12px; white-space:nowrap;">${dataFmt}</td>
+            <td style="padding:12px; white-space:nowrap;">${vencFmt}</td>
             <td style="padding:12px; font-weight:bold; color: var(--cor-acento);">${n.valor_total != null ? 'R$ ' + Number(n.valor_total).toLocaleString('pt-BR', {minimumFractionDigits:2}) : '-'}</td>
             <td style="padding:12px;">
                 <select class="modern-input" style="padding:4px 8px; font-size:0.8rem; color:${corStatus[n.status_revisao] || '#fff'}; border-color:${corStatus[n.status_revisao] || 'var(--cor-borda)'};" onchange="window.atualizarStatusRevisaoNFeCloud('${n.id}', this.value)">
@@ -9772,6 +9809,17 @@ window.carregarNotasRecebidasNFeCloud = async function() {
         </tr>`;
     }).join('');
 };
+
+// Extrai a primeira data de vencimento do bloco <cobr><dup>...</dup></cobr>
+// do XML completo (lista de duplicatas/parcelas, se o emitente preencheu).
+// Não existe no resumo (xml_raw) - só no XML completo mesmo.
+function _nfeExtrairVencimento(xmlCompleto) {
+    const cobr = _nfeExtractBlock(xmlCompleto, 'cobr');
+    if (!cobr) return null;
+    const vencs = [...cobr.matchAll(/<dVenc>([^<]+)<\/dVenc>/g)].map(m => m[1]).filter(Boolean).sort();
+    if (!vencs.length) return null;
+    return { primeiro: vencs[0], total: vencs.length };
+}
 
 // Baixa o XML da nota (o completo se já tiver chegado, senão o resumo que
 // a SEFAZ manda na primeira consulta).
