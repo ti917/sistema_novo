@@ -76047,19 +76047,67 @@ window.calcularSimulacaoRescisao = async function() {
         // --- 5. SALDO DE SALÁRIO (dias do mês até a data, descontando as faltas
         // injustificadas (FA) registradas nesse mesmo período — só paga o que foi
         // realmente trabalhado). ---
+        // 🩹 CORREÇÃO (10/2026 — pedido do Italo): numa escala 12x36, "30 dias − faltas"
+        // não é suficiente, porque meio dos dias do mês já são FOLGA (não FA) — e uma
+        // folga só é um "descanso remunerado" de verdade quando o PLANTÃO anterior foi
+        // realmente trabalhado. Se o colaborador faltou o plantão, a folga que viria
+        // depois dele não foi "ganha", então também não deveria entrar no saldo. Por
+        // isso, pra quem é 12x36, a conta vai dia a dia: dia de plantão só paga se não
+        // tiver FA naquele dia; dia de folga só paga se o plantão da véspera foi pago.
+        // Pra quem não é 12x36 (44h etc.), continua o jeito simples de sempre — folga
+        // de fim de semana é paga independente de falta em outro dia.
+        const tipoJornadaSim = adm.jornada?.tipo || '12x36';
         const dataInicioMesStr = `${dataResc.getFullYear()}-${String(dataResc.getMonth() + 1).padStart(2, '0')}-01`;
-        const { data: faltasMesData } = await supabaseClient
+        // Busca um dia a mais pra trás (a véspera do dia 1) só pra conseguir checar se o
+        // plantão anterior ao 1º dia do mês foi faltado, no caso 12x36.
+        const vesperaDoMes = new Date(dataResc.getFullYear(), dataResc.getMonth(), 0);
+        const dataInicioConsultaFaltasStr = `${vesperaDoMes.getFullYear()}-${String(vesperaDoMes.getMonth() + 1).padStart(2, '0')}-${String(vesperaDoMes.getDate()).padStart(2, '0')}`;
+
+        const { data: faltasMesRows } = await supabaseClient
             .from('ausencias')
-            .select('id')
+            .select('data_inicio, data_fim')
             .eq('colaborador_id', colab.id)
             .eq('status', 'Aprovado')
             .eq('sigla', 'FA')
-            .gte('data_inicio', dataInicioMesStr)
+            .gte('data_inicio', dataInicioConsultaFaltasStr)
             .lte('data_fim', dataStr);
-        const totalFaltasMes = faltasMesData?.length || 0;
+
+        // Expande cada registro de falta (que pode cobrir vários dias corridos) num
+        // conjunto de datas ISO individuais, pra conseguir checar dia a dia.
+        const diasFaltaSet = new Set();
+        (faltasMesRows || []).forEach(f => {
+            let cursor = new Date(f.data_inicio + 'T00:00:00');
+            const fim = new Date(f.data_fim + 'T00:00:00');
+            while (cursor <= fim) {
+                diasFaltaSet.add(cursor.toISOString().split('T')[0]);
+                cursor.setDate(cursor.getDate() + 1);
+            }
+        });
+        const totalFaltasMes = [...diasFaltaSet].filter(iso => iso >= dataInicioMesStr && iso <= dataStr).length;
 
         const diasCorridosNoMes = dataResc.getDate();
-        const diasTrabalhadosNoMes = Math.max(0, diasCorridosNoMes - totalFaltasMes);
+        let diasTrabalhadosNoMes;
+        if (tipoJornadaSim === '12x36' && typeof window.horarioPrevistoNaData === 'function') {
+            let pagos = 0;
+            for (let dia = 1; dia <= diasCorridosNoMes; dia++) {
+                const dataDoDia = new Date(dataResc.getFullYear(), dataResc.getMonth(), dia);
+                const isoDoDia = dataDoDia.toISOString().split('T')[0];
+                const previsto = window.horarioPrevistoNaData(adm, isoDoDia);
+                if (previsto && previsto.trabalha === false) {
+                    // Dia de folga programada: só conta como pago se o plantão da véspera não foi FA.
+                    const vespera = new Date(dataDoDia);
+                    vespera.setDate(vespera.getDate() - 1);
+                    const isoVespera = vespera.toISOString().split('T')[0];
+                    if (!diasFaltaSet.has(isoVespera)) pagos++;
+                } else {
+                    // Dia de plantão (ou tipo de jornada não identificado): paga se não tiver FA nele.
+                    if (!diasFaltaSet.has(isoDoDia)) pagos++;
+                }
+            }
+            diasTrabalhadosNoMes = pagos;
+        } else {
+            diasTrabalhadosNoMes = Math.max(0, diasCorridosNoMes - totalFaltasMes);
+        }
         const valorSaldoSalario = (remuneracaoBase / 30) * diasTrabalhadosNoMes;
 
         // --- 6. INDENIZAÇÃO ART. 479 CLT (só no caso de Antecipação de Experiência) ---
@@ -76095,7 +76143,7 @@ window.calcularSimulacaoRescisao = async function() {
             percPericulosidade, valorPericulosidade, remuneracaoBase, diasAviso, anosCompletosAviso,
             avisoCumprido, avisoTrabalhado, avisoIndenizadoValor, saldoFeriasVencidas, diasFeriasProporcionais, mesesCicloFerias,
             diasBaseFerias, totalFaltasFerias, valorFeriasVencidas, valorFeriasProporcionais,
-            meses13, valor13Proporcional, diasCorridosNoMes, totalFaltasMes, diasTrabalhadosNoMes, valorSaldoSalario,
+            meses13, valor13Proporcional, diasCorridosNoMes, totalFaltasMes, diasTrabalhadosNoMes, tipoJornadaSim, valorSaldoSalario,
             valorIndenizacao479, diasRestantesContrato479, dataFimContrato479,
             mesesEmpresaAprox, saldoFgtsEstimado, fgtsSobreVerbasRescisorias, multaFgts40, temMulta40,
             totalEstimado, ehJustaCausa, ehSemJustaCausa, ehAntecipacaoExperiencia, ehPedidoFuncionario,
@@ -76184,7 +76232,14 @@ window.verDetalhesSimulacaoRescisao = function() {
                 <b style="color: #4fc3f7;">Base usada em quase tudo:</b> Remuneração Base = Salário (${formatarMoeda(s.salarioBase)}) + Insalubridade (${formatarMoeda(s.valorInsalubridade)}, ${s.percInsalub}% do salário-mínimo de ${formatarMoeda(window.SALARIO_MINIMO_SIMULADOR_RESCISAO)}) + Periculosidade (${formatarMoeda(s.valorPericulosidade)}, ${s.percPericulosidade}% do salário-base) = <b style="color:#fff;">${formatarMoeda(s.remuneracaoBase)}</b>
             </div>
 
-            ${linhaDetalhe('<i class="fa-solid fa-sack-dollar"></i> Saldo de Salário', `${s.diasCorridosNoMes} dia(s) corridos no mês${s.totalFaltasMes > 0 ? ` − ${s.totalFaltasMes} falta(s) injustificada(s) = ${s.diasTrabalhadosNoMes} dia(s) trabalhados` : ' (sem faltas)'} → (Remuneração Base ÷ 30) × ${s.diasTrabalhadosNoMes} dia(s)`, formatarMoeda(s.valorSaldoSalario), '#4fc3f7')}
+            ${linhaDetalhe(
+                '<i class="fa-solid fa-sack-dollar"></i> Saldo de Salário',
+                s.tipoJornadaSim === '12x36'
+                    ? `Escala 12x36 — conta dia a dia (não só ${s.diasCorridosNoMes} − faltas): ${s.totalFaltasMes > 0 ? `${s.totalFaltasMes} dia(s) de plantão com falta no mês` : 'nenhum plantão com falta'}. Pra cada folga, só conta como paga se o plantão da véspera não teve falta — senão a folga também fica sem pagar. Resultado: ${s.diasTrabalhadosNoMes} de ${s.diasCorridosNoMes} dia(s) pagos → (Remuneração Base ÷ 30) × ${s.diasTrabalhadosNoMes} dia(s)`
+                    : `${s.diasCorridosNoMes} dia(s) corridos no mês${s.totalFaltasMes > 0 ? ` − ${s.totalFaltasMes} falta(s) injustificada(s) = ${s.diasTrabalhadosNoMes} dia(s) trabalhados` : ' (sem faltas)'} → (Remuneração Base ÷ 30) × ${s.diasTrabalhadosNoMes} dia(s)`,
+                formatarMoeda(s.valorSaldoSalario),
+                '#4fc3f7'
+            )}
 
             ${s.ehSemJustaCausa ? linhaDetalhe(
                 '<i class="fa-solid fa-hand-holding-dollar"></i> Aviso Prévio (Lei 12.506/2011)',
@@ -76385,7 +76440,9 @@ window.baixarExcelSimulacoesRescisao = async function() {
             };
 
             addLinhaDet('Remuneração Base', `Salário ${formatarMoeda(item.salarioBase)} + Insalubridade ${formatarMoeda(item.valorInsalubridade)} (${item.percInsalub}% do salário-mínimo) + Periculosidade ${formatarMoeda(item.valorPericulosidade)} (${item.percPericulosidade}% do salário-base)`, item.remuneracaoBase);
-            addLinhaDet('Saldo de Salário', `${item.diasCorridosNoMes} dia(s) corridos no mês${item.totalFaltasMes > 0 ? ` − ${item.totalFaltasMes} falta(s) injustificada(s) = ${item.diasTrabalhadosNoMes} dia(s) trabalhados` : ' (sem faltas)'} → (Remuneração Base ÷ 30) × ${item.diasTrabalhadosNoMes} dia(s)`, item.valorSaldoSalario);
+            addLinhaDet('Saldo de Salário', item.tipoJornadaSim === '12x36'
+                ? `Escala 12x36 — conta dia a dia: folga só paga se o plantão da véspera não teve falta. Resultado: ${item.diasTrabalhadosNoMes} de ${item.diasCorridosNoMes} dia(s) pagos → (Remuneração Base ÷ 30) × ${item.diasTrabalhadosNoMes} dia(s)`
+                : `${item.diasCorridosNoMes} dia(s) corridos no mês${item.totalFaltasMes > 0 ? ` − ${item.totalFaltasMes} falta(s) injustificada(s) = ${item.diasTrabalhadosNoMes} dia(s) trabalhados` : ' (sem faltas)'} → (Remuneração Base ÷ 30) × ${item.diasTrabalhadosNoMes} dia(s)`, item.valorSaldoSalario);
             if (item.ehSemJustaCausa) {
                 addLinhaDet('Aviso Prévio', `30 + 3×${item.anosCompletosAviso} ano(s) = ${item.diasAviso} dias (teto 90). ${item.avisoTrabalhado ? 'Trabalhado — sem custo extra, dias contam no tempo de serviço.' : `Indenizado → (Remuneração Base ÷ 30) × ${item.diasAviso} dias`}`, item.avisoTrabalhado ? 0 : item.avisoIndenizadoValor);
             }
