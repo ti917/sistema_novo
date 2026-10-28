@@ -117,6 +117,12 @@ async function main() {
     const chavesComManifestacaoNaDistribuicao = new Set();
 
     while (paginas < MAX_PAGINAS) {
+        // Pausa pequena entre paginas (pedido do Italo, 28/10/2026 - mesma ideia
+        // da pausa na ciencia logo abaixo): se tiver bastante nota nova pra trazer,
+        // esse loop pode rodar varias paginas seguidas - sem pausa, isso vira uma
+        // rajada de requisicoes pra SEFAZ bem rapido. So' pula a pausa na
+        // primeira pagina (paginas === 0 ainda).
+        if (paginas > 0) await new Promise((r) => setTimeout(r, 400));
         paginas++;
         const envelope = buildEnvelope(cUFAutor, cnpj, tpAmb, ultNSU);
         const resp = await postSoap(envelope, pfxBuffer, senha);
