@@ -145,13 +145,22 @@ function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha) {
                 pfx: pfxBuffer,
                 passphrase: senha,
                 headers: {
-                    // SOAP 1.2 (soap12:Envelope / application/soap+xml) NAO usa o
-                    // header "SOAPAction" separado - isso e' coisa de SOAP 1.1. No
-                    // 1.2 a action tem que vir DENTRO do Content-Type, como
-                    // parametro action="...". Sem isso a SEFAZ devolve HTTP 500
-                    // "Unable to handle request without a valid action parameter" -
-                    // foi exatamente esse erro que a melhoria de log capturou.
+                    // Historico desse header (28/10/2026):
+                    // 1a tentativa: so "SOAPAction" (sem action no Content-Type) -
+                    //   SEFAZ devolvia HTTP 500 "Unable to handle request WITHOUT a
+                    //   valid action parameter" (ou seja, achava que faltava a action).
+                    // 2a tentativa: so action dentro do Content-Type (sem SOAPAction,
+                    //   seguindo a risca a regra de SOAP 1.2) - SEFAZ devolvia HTTP 500
+                    //   "Unable to handle request. The action '...' was NOT
+                    //   RECOGNIZED" (ou seja, essa vez leu uma action, mas nao
+                    //   reconheceu ela sozinha, sem o header classico junto).
+                    // Isso mostra que esse endpoint (NFeRecepcaoEvento4) quer os DOIS
+                    // ao mesmo tempo - diferente do endpoint irmao de consulta
+                    // (NFeDistribuicaoDFe, em index.js) que funciona soo com
+                    // "SOAPAction" e sem action no Content-Type. Mandando os dois
+                    // juntos cobre o que esse endpoint especificamente exige.
                     "Content-Type": `application/soap+xml; charset=utf-8; action="${SOAP_ACTION}"`,
+                    "SOAPAction": SOAP_ACTION,
                     "Content-Length": body.length,
                 },
                 timeout: 30000,
