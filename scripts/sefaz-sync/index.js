@@ -251,7 +251,15 @@ async function main() {
             console.error("Erro buscando notas pendentes de ciencia:", erroPendentes.message);
         } else if (pendentes && pendentes.length) {
             const { keyPem, certPem } = extrairChavePemECertPem(pfxBuffer, senha);
+            let primeiraCiencia = true;
             for (const doc of pendentes) {
+                // Pausa pequena entre cada ciencia (pedido do Italo, 28/10/2026): antes
+                // mandava as ate 50 ciencias uma atras da outra sem nenhum intervalo -
+                // sozinho isso nao e' o suficiente pra estourar o limite da SEFAZ
+                // (600 consultas/5min), mas e' uma precaucao barata enquanto a causa
+                // real do bloqueio 656 recorrente de hoje nao e' confirmada.
+                if (!primeiraCiencia) await new Promise((r) => setTimeout(r, 400));
+                primeiraCiencia = false;
                 const resultado = await enviarCienciaDaOperacao({
                     chave: doc.chave_acesso,
                     cnpj,
