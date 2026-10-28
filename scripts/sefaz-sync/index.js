@@ -111,6 +111,10 @@ async function main() {
     // (process.exitCode), sem interromper o resto do script (process.exit
     // mataria tudo na hora, inclusive a parte da ciencia logo abaixo).
     let consultaComErro = false;
+    // Chaves que a propria consulta de distribuicao revelou que JA TEM
+    // manifestacao registrada na SEFAZ (de qualquer sistema - ver comentario
+    // mais abaixo, onde o resEvento e' lido).
+    const chavesComManifestacaoNaDistribuicao = new Set();
 
     while (paginas < MAX_PAGINAS) {
         paginas++;
@@ -187,7 +191,29 @@ async function main() {
                     continue;
                 }
 
-                if (!schema.startsWith("resNFe")) continue; // ignora resEvento etc.
+                // 👇 Pedido do Italo (28/10/2026): quando a nota JA TEM manifestacao
+                // registrada na SEFAZ (de qualquer sistema - NFeCloud, outro
+                // certificado, etc, nao so o nosso), a propria consulta de
+                // distribuicao devolve um "resEvento" com essa informacao - antes
+                // isso era ignorado e o sistema tentava mandar Ciencia da Operacao
+                // de novo do mesmo jeito, gastando uma requisicao a toa (e, se a
+                // SEFAZ ja tivesse processado o evento, a resposta seria so
+                // "573 - duplicidade", ou seja, a gente ja sabia a resposta antes
+                // de perguntar). Qualquer tipo de manifestacao (210200 Confirmacao,
+                // 210210 Ciencia, 210220 Desconhecimento, 210240 Nao Realizada)
+                // cumpre a obrigacao do destinatario - nao precisa ser
+                // especificamente Ciencia pra poder pular o envio.
+                if (schema.startsWith("resEvento")) {
+                    const chaveEvento = extractTag(xmlDoc, "chNFe") || "";
+                    const tpEvento = extractTag(xmlDoc, "tpEvento") || "";
+                    const TIPOS_MANIFESTACAO = ["210200", "210210", "210220", "210240"];
+                    if (chaveEvento && TIPOS_MANIFESTACAO.includes(tpEvento)) {
+                        chavesComManifestacaoNaDistribuicao.add(chaveEvento);
+                    }
+                    continue;
+                }
+
+                if (!schema.startsWith("resNFe")) continue; // ignora outros schemas desconhecidos
                 const chave = extractTag(xmlDoc, "chNFe") || "";
                 const decod = decodificarChave(chave);
                 if (!chave) continue;
@@ -224,6 +250,28 @@ async function main() {
         { cnpj, ultimo_nsu: ultNSU, atualizado_em: new Date().toISOString() },
         { onConflict: "cnpj" }
     );
+
+    // Antes de tentar mandar Ciencia da Operacao, marca como "ja resolvido"
+    // (sem gastar requisicao nenhuma) qualquer chave que a propria
+    // distribuicao ja revelou ter manifestacao registrada - normalmente
+    // porque o NFeCloud (ou outro sistema) ja manifestou essa nota antes da
+    // gente. So atualiza quem ainda nao estava marcado como enviado, pra nao
+    // sobrescrever um ciencia_detalhe que o nosso proprio envio ja gravou.
+    let jaManifestadasForaDoNossoSistema = 0;
+    if (chavesComManifestacaoNaDistribuicao.size) {
+        const { data: atualizadas, error: erroJaManifestadas } = await supabase
+            .from("nfecloud_documentos")
+            .update({
+                ciencia_status: "enviado",
+                ciencia_enviada_em: new Date().toISOString(),
+                ciencia_detalhe: "Manifestacao ja existia na SEFAZ (detectada na consulta de distribuicao - provavelmente feita pelo NFeCloud ou outro sistema antes da gente)",
+            })
+            .in("chave_acesso", Array.from(chavesComManifestacaoNaDistribuicao))
+            .or("ciencia_status.is.null,ciencia_status.eq.erro")
+            .select("chave_acesso");
+        if (erroJaManifestadas) console.error("Erro marcando notas ja manifestadas:", erroJaManifestadas.message);
+        else jaManifestadasForaDoNossoSistema = (atualizadas || []).length;
+    }
 
     // Manda "Ciencia da Operacao" pras NFe que ainda nao foram manifestadas -
     // tanto as novas quanto backlog antigo (ciencia_status comeca nulo pra
@@ -299,6 +347,7 @@ async function main() {
         ultimoStatus: `${ultimoCStat} - ${ultimoXMotivo}`,
         cienciasEnviadas,
         cienciasComErro,
+        jaManifestadasForaDoNossoSistema,
     }));
 }
 
