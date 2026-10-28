@@ -187,20 +187,36 @@ function buscarCertTextoOpenssl(pem) {
 }
 
 function derParaPem(buf) {
-    // Tenta como certificado X.509 DER puro; se nao der, tenta como PKCS#7
-    // (alguns emissores ICP-Brasil publicam o intermediario em .p7b/.p7c).
+    // Alguns emissores do AIA mandam o certificado ja em PEM (texto, apesar
+    // da extensao .cer/.crt sugerir DER binario) - se for o caso, nao
+    // precisa converter nada.
+    const comoTexto = buf.toString("utf-8");
+    const direto = comoTexto.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+    if (direto && direto.length) return direto;
+
+    // Senao, tenta como certificado X.509 DER puro; se nao der, tenta como
+    // PKCS#7 DER (alguns emissores ICP-Brasil publicam o intermediario em
+    // .p7b/.p7c) - nessa ordem, registrando os dois motivos de falha se
+    // nenhuma das duas formas funcionar (ajuda a diagnosticar se acontecer
+    // de novo).
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sefaz-aia-conv-"));
     const inPath = path.join(tmp, "in.der");
     const outPath = path.join(tmp, "out.pem");
     try {
         fs.writeFileSync(inPath, buf);
         try {
-            execFileSync("openssl", ["x509", "-inform", "DER", "-in", inPath, "-out", outPath]);
+            execFileSync("openssl", ["x509", "-inform", "DER", "-in", inPath, "-out", outPath], { stdio: ["ignore", "pipe", "pipe"] });
             return [fs.readFileSync(outPath, "utf-8")];
-        } catch {
-            execFileSync("openssl", ["pkcs7", "-inform", "DER", "-in", inPath, "-print_certs", "-out", outPath]);
-            const texto = fs.readFileSync(outPath, "utf-8");
-            return texto.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+        } catch (erroX509) {
+            try {
+                execFileSync("openssl", ["pkcs7", "-inform", "DER", "-in", inPath, "-print_certs", "-out", outPath], { stdio: ["ignore", "pipe", "pipe"] });
+                const texto = fs.readFileSync(outPath, "utf-8");
+                return texto.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+            } catch (erroPkcs7) {
+                throw new Error(
+                    `certificado do AIA nao e' PEM nem DER x509 nem PKCS7 DER (${buf.length} bytes, comeca com "${comoTexto.slice(0, 30).replace(/\n/g, "\\n")}")`
+                );
+            }
         }
     } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
