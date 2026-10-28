@@ -28,6 +28,7 @@
 // XML completo quando ele aparece.
 
 const https = require("https");
+const http = require("http");
 const tls = require("tls");
 const { execFileSync } = require("child_process");
 const fs = require("fs");
@@ -153,40 +154,110 @@ function montarEnvEventoAssinado(chave, cnpj, tpAmb, keyPem, certPem) {
 // TLS do servidor. Causa confirmada (mesmo padrao relatado por quem integra
 // com servidores proprios de SEFAZ via bibliotecas que nao fazem "AIA
 // chasing", tipo ACBr/Delphi com erro 12045): o servidor manda so o
-// certificado final, sem os intermediarios da cadeia ICP-Brasil - um
-// navegador busca o intermediario que falta sozinho (AIA), mas o Node
-// nativo (https.request) nao faz isso, entao rejeita.
+// certificado final, sem NENHUM intermediario da cadeia ICP-Brasil.
 //
-// Correcao SEM abrir mao da validacao: antes da chamada real, faz uma
-// conexao TLS "de reconhecimento" pro mesmo host (rejectUnauthorized:false
-// SO nessa etapa, so pra capturar a cadeia que o servidor apresenta) e usa
-// essa cadeia como "ca" trustada na chamada real de verdade - que continua
-// validando normalmente (rejectUnauthorized:true, o padrao do Node). Isso
-// nao e' "desligar a seguranca": a gente ainda confirma que e' o host certo
-// (hostname fixo, hardcoded) e ainda faz a autenticacao mutua via
-// certificado A1 (pfx/passphrase) nos dois sentidos - so para de depender
-// do servidor mandar a cadeia completa, que ele nao manda.
-const cadeiaPorHost = new Map();
-function buscarCadeiaDoServidor(host) {
-    if (cadeiaPorHost.has(host)) return Promise.resolve(cadeiaPorHost.get(host));
+// Primeira tentativa de correcao (so pegar a cadeia que vem no proprio
+// handshake TLS) nao resolveu - confirmado: o servidor realmente nao manda
+// nada alem do certificado final, nem numa conexao de reconhecimento
+// (rejectUnauthorized:false). O erro so mudou de "unable to get LOCAL
+// issuer certificate" pra "unable to get issuer certificate" (sem achar o
+// emissor de jeito nenhum).
+//
+// Correcao de verdade: segue a extensao "Authority Information Access" (CA
+// Issuers) do proprio certificado - e' a URL onde o emissor publica o
+// certificado dele, a mesma forma que o navegador usa pra buscar sozinho o
+// intermediario que falta ("AIA chasing"), so que o Node nativo nao faz
+// isso automaticamente. Sobe a cadeia (emissor do emissor...) ate achar um
+// certificado autoassinado (a raiz) ou esgotar as proximas AIA, usa o
+// openssl (ja usado no resto do projeto) so pra LER o texto do certificado
+// e converter formatos - nenhuma chamada de rede alheia ao proprio dominio
+// oficial da SEFAZ e dos emissores que ela aponta. Ainda valida normalmente
+// (rejectUnauthorized:true, o padrao do Node) e ainda autentica mutuamente
+// via certificado A1 - so para de depender do servidor mandar a cadeia
+// completa, que ele nao manda.
+function buscarCertTextoOpenssl(pem) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sefaz-aia-"));
+    const certPath = path.join(tmp, "c.pem");
+    try {
+        fs.writeFileSync(certPath, pem);
+        return execFileSync("openssl", ["x509", "-in", certPath, "-noout", "-text", "-issuer", "-subject"]).toString("utf-8");
+    } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+function derParaPem(buf) {
+    // Tenta como certificado X.509 DER puro; se nao der, tenta como PKCS#7
+    // (alguns emissores ICP-Brasil publicam o intermediario em .p7b/.p7c).
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sefaz-aia-conv-"));
+    const inPath = path.join(tmp, "in.der");
+    const outPath = path.join(tmp, "out.pem");
+    try {
+        fs.writeFileSync(inPath, buf);
+        try {
+            execFileSync("openssl", ["x509", "-inform", "DER", "-in", inPath, "-out", outPath]);
+            return [fs.readFileSync(outPath, "utf-8")];
+        } catch {
+            execFileSync("openssl", ["pkcs7", "-inform", "DER", "-in", inPath, "-print_certs", "-out", outPath]);
+            const texto = fs.readFileSync(outPath, "utf-8");
+            return texto.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+        }
+    } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+}
+
+function buscarUrl(url) {
     return new Promise((resolve, reject) => {
-        const socket = tls.connect({ host, port: 443, servername: host, rejectUnauthorized: false }, () => {
-            const certs = [];
-            let cert = socket.getPeerCertificate(true);
-            const vistos = new Set();
-            while (cert && cert.raw && !vistos.has(cert.fingerprint256)) {
-                vistos.add(cert.fingerprint256);
-                const b64 = cert.raw.toString("base64").match(/.{1,64}/g).join("\n");
-                certs.push(`-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`);
-                cert = cert.issuerCertificate;
+        const lib = url.startsWith("https:") ? https : http;
+        lib.get(url, { timeout: 15000 }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                res.resume();
+                return resolve(buscarUrl(res.headers.location));
             }
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => resolve(Buffer.concat(chunks)));
+        })
+            .on("error", reject)
+            .on("timeout", function () { this.destroy(new Error("timeout de 15s buscando certificado emissor (AIA)")); });
+    });
+}
+
+const cadeiaPorHost = new Map();
+async function buscarCadeiaDoServidor(host) {
+    if (cadeiaPorHost.has(host)) return cadeiaPorHost.get(host);
+
+    const leafPem = await new Promise((resolve, reject) => {
+        const socket = tls.connect({ host, port: 443, servername: host, rejectUnauthorized: false }, () => {
+            const cert = socket.getPeerCertificate(false);
             socket.end();
-            cadeiaPorHost.set(host, certs);
-            resolve(certs);
+            if (!cert || !cert.raw) return reject(new Error("servidor nao apresentou certificado"));
+            const b64 = cert.raw.toString("base64").match(/.{1,64}/g).join("\n");
+            resolve(`-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`);
         });
         socket.on("error", reject);
-        socket.setTimeout(15000, () => socket.destroy(new Error("timeout de 15s reconhecendo a cadeia de certificado TLS da SEFAZ")));
+        socket.setTimeout(15000, () => socket.destroy(new Error("timeout de 15s reconhecendo o certificado TLS da SEFAZ")));
     });
+
+    const certs = [];
+    let atualPem = leafPem;
+    for (let hop = 0; hop < 5; hop++) {
+        const texto = buscarCertTextoOpenssl(atualPem);
+        const issuer = (texto.match(/^issuer=(.*)$/m) || [])[1];
+        const subject = (texto.match(/^subject=(.*)$/m) || [])[1];
+        const autoAssinado = issuer && subject && issuer.trim() === subject.trim();
+        if (hop > 0) certs.push(atualPem); // nunca adiciona o certificado-folha em si na lista de CAs
+        if (autoAssinado) break; // chegou na raiz
+        const aiaUrl = (texto.match(/CA Issuers - URI:(\S+)/) || [])[1];
+        if (!aiaUrl) break; // sem mais pista de onde buscar o proximo - usa o que conseguiu ate aqui
+        const bytes = await buscarUrl(aiaUrl);
+        const proximosPem = derParaPem(bytes);
+        if (!proximosPem.length) break;
+        atualPem = proximosPem[0];
+    }
+    cadeiaPorHost.set(host, certs);
+    return certs;
 }
 
 async function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
