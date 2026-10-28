@@ -145,8 +145,13 @@ function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha) {
                 pfx: pfxBuffer,
                 passphrase: senha,
                 headers: {
-                    "Content-Type": "application/soap+xml; charset=utf-8",
-                    "SOAPAction": SOAP_ACTION,
+                    // SOAP 1.2 (soap12:Envelope / application/soap+xml) NAO usa o
+                    // header "SOAPAction" separado - isso e' coisa de SOAP 1.1. No
+                    // 1.2 a action tem que vir DENTRO do Content-Type, como
+                    // parametro action="...". Sem isso a SEFAZ devolve HTTP 500
+                    // "Unable to handle request without a valid action parameter" -
+                    // foi exatamente esse erro que a melhoria de log capturou.
+                    "Content-Type": `application/soap+xml; charset=utf-8; action="${SOAP_ACTION}"`,
                     "Content-Length": body.length,
                 },
                 timeout: 30000,
