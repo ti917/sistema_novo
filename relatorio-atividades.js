@@ -1524,7 +1524,14 @@
                     S.atual.pdf_url = url;
                 } catch (e) { alerta('PDF baixado, mas não consegui guardar a cópia no sistema: ' + e.message, 'aviso'); }
             }
-            alerta('PDF gerado e salvo no relatório.', 'sucesso');
+            // 👇 Pedido do Italo (28/10/2026): mensagem antiga era "PDF gerado e
+            // salvo no relatório" - facil demais de confundir com "enviado ao
+            // financeiro" (foi exatamente o que aconteceu com um relatorio da
+            // Natanaelen: ela clicou em Baixar, viu essa mensagem de sucesso e
+            // achou que tinha terminado, mas o status continuou "rascunho" - o
+            // financeiro nunca recebeu). Deixa explicito que isso so' baixou/
+            // guardou uma copia, NAO enviou nada.
+            alerta('PDF baixado. Isso só salva uma cópia aqui - o relatório ainda está como rascunho. Pra mandar pro financeiro, clique em "Enviar ao financeiro".', 'aviso');
         } catch (e) { alerta('Erro ao gerar o PDF: ' + (e.message || e), 'erro'); }
         finally { S.pdfGerando = false; ocupado(false); atualizarStatusSalvo(); }
     }
