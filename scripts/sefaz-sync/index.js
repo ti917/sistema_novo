@@ -157,9 +157,30 @@ async function main() {
                         (xmlDoc.match(/Id="NFe(\d{44})"/) || [])[1] ||
                         "";
                     if (chaveCompleta) {
+                        const decodCompleta = decodificarChave(chaveCompleta);
+                        // Preenche os mesmos campos que o resumo (resNFe) preencheria,
+                        // nao so chave_acesso + xml_completo. Sem isso, pra uma nota
+                        // cujo resumo a gente NUNCA recebeu antes (ex: NSU ja tinha
+                        // passado por ela antes dessa parte do codigo existir), o
+                        // upsert vira um INSERT sem a coluna "tipo" (NOT NULL) e
+                        // quebra. A NFe completa tem os mesmos dados do resumo, entao
+                        // da pra extrair igual - numa linha que ja existe isso so
+                        // reescreve os mesmos valores de novo, sem problema.
                         const { error: erroXmlCompleto } = await supabase
                             .from("nfecloud_documentos")
-                            .upsert({ chave_acesso: chaveCompleta, xml_completo: xmlDoc }, { onConflict: "chave_acesso", ignoreDuplicates: false });
+                            .upsert({
+                                chave_acesso: chaveCompleta,
+                                xml_completo: xmlDoc,
+                                tipo: decodCompleta?.mod === "65" ? "NFCe" : "NFe",
+                                numero: decodCompleta?.numero ? String(parseInt(decodCompleta.numero, 10)) : null,
+                                serie: decodCompleta?.serie ? String(parseInt(decodCompleta.serie, 10)) : null,
+                                emitente_nome: extractTag(xmlDoc, "xNome"),
+                                emitente_cnpj: extractTag(xmlDoc, "CNPJ"),
+                                destinatario_cnpj: cnpj,
+                                valor_total: parseFloat(extractTag(xmlDoc, "vNF") || "0") || null,
+                                data_emissao: (extractTag(xmlDoc, "dhEmi") || "").slice(0, 10) || null,
+                                centro_custo_id: centroCustoId,
+                            }, { onConflict: "chave_acesso", ignoreDuplicates: false });
                         if (erroXmlCompleto) console.error("Erro gravando xml completo:", erroXmlCompleto.message);
                         else totalGravados++;
                     }
