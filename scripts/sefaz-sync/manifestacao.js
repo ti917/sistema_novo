@@ -34,8 +34,25 @@ const os = require("os");
 const path = require("path");
 const { SignedXml } = require("xml-crypto");
 
-const AN_HOST = "www.nfe.fazenda.gov.br";
-const AN_PATH = "/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx";
+// CORRECAO (28/10/2026): diferente do que o comentario antigo dizia, o
+// servico de Recepcao de Eventos (NFeRecepcaoEvento4 - usado pela Ciencia da
+// Operacao) NAO e' centralizado no Ambiente Nacional pra todo mundo. Cada UF
+// que roda autorizador proprio (caso de SP) tem o SEU PROPRIO endereco pra
+// esse servico - confirmado na pagina oficial da SEFAZ-SP
+// (portal.fazenda.sp.gov.br/servicos/nfe/Paginas/URL-WEBSERVICES.aspx), que
+// lista tres enderecos diferentes com nome parecido (SP, SVC-AN e Ambiente
+// Nacional) - cada UF usa o seu, nao o nacional generico. Isso e' diferente
+// da consulta de distribuicao (NFeDistribuicaoDFe, em index.js), que essa
+// sim e' sempre centralizada no Ambiente Nacional pra qualquer UF - foi essa
+// diferenca que explicava o erro "action ... was NOT RECOGNIZED": a gente
+// mandava a ciencia pro servidor nacional generico, que nao reconhecia essa
+// action porque quem atende esse servico pra empresas de SP e' o servidor
+// proprio da SEFAZ-SP, nao o nacional.
+const SEFAZ_AMBIENTE_PARA_HOST_SP = {
+    "1": "nfe.fazenda.sp.gov.br", // producao
+    "2": "homologacao.nfe.fazenda.sp.gov.br", // homologacao
+};
+const AN_PATH = "/ws/NFeRecepcaoEvento4.asmx";
 const SOAP_ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento";
 const TP_EVENTO_CIENCIA = "210210";
 
@@ -128,8 +145,9 @@ function montarEnvEventoAssinado(chave, cnpj, tpAmb, keyPem, certPem) {
     return sig.getSignedXml();
 }
 
-function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha) {
+function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
     return new Promise((resolve, reject) => {
+        const host = SEFAZ_AMBIENTE_PARA_HOST_SP[tpAmb] || SEFAZ_AMBIENTE_PARA_HOST_SP["1"];
         const soapBody =
             `<?xml version="1.0" encoding="utf-8"?>` +
             `<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">` +
@@ -139,26 +157,22 @@ function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha) {
         const body = Buffer.from(soapBody, "utf-8");
         const req = https.request(
             {
-                host: AN_HOST,
+                host,
                 path: AN_PATH,
                 method: "POST",
                 pfx: pfxBuffer,
                 passphrase: senha,
                 headers: {
-                    // Historico desse header (28/10/2026):
-                    // 1a tentativa: so "SOAPAction" (sem action no Content-Type) -
-                    //   SEFAZ devolvia HTTP 500 "Unable to handle request WITHOUT a
-                    //   valid action parameter" (ou seja, achava que faltava a action).
-                    // 2a tentativa: so action dentro do Content-Type (sem SOAPAction,
-                    //   seguindo a risca a regra de SOAP 1.2) - SEFAZ devolvia HTTP 500
-                    //   "Unable to handle request. The action '...' was NOT
-                    //   RECOGNIZED" (ou seja, essa vez leu uma action, mas nao
-                    //   reconheceu ela sozinha, sem o header classico junto).
-                    // Isso mostra que esse endpoint (NFeRecepcaoEvento4) quer os DOIS
-                    // ao mesmo tempo - diferente do endpoint irmao de consulta
-                    // (NFeDistribuicaoDFe, em index.js) que funciona soo com
-                    // "SOAPAction" e sem action no Content-Type. Mandando os dois
-                    // juntos cobre o que esse endpoint especificamente exige.
+                    // Historico desse header (28/10/2026): tentamos so
+                    // "SOAPAction", so "action" no Content-Type, e os dois juntos -
+                    // nenhuma combinacao resolveu sozinha o erro "action ... was
+                    // NOT RECOGNIZED". O motivo real nao era o header: era o
+                    // HOST (ver comentario de SEFAZ_AMBIENTE_PARA_HOST_SP acima -
+                    // a gente mandava pro Ambiente Nacional generico, e quem
+                    // atende esse servico pra SP e' o servidor proprio da
+                    // SEFAZ-SP). Mantemos os dois headers juntos porque nao faz
+                    // mal nenhum e cobre qualquer variacao de exigencia entre
+                    // SOAP 1.1/1.2 dos diferentes servidores da SEFAZ.
                     "Content-Type": `application/soap+xml; charset=utf-8; action="${SOAP_ACTION}"`,
                     "SOAPAction": SOAP_ACTION,
                     "Content-Length": body.length,
@@ -184,7 +198,7 @@ function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha) {
 async function enviarCienciaDaOperacao({ chave, cnpj, tpAmb, keyPem, certPem, pfxBuffer, senha }) {
     try {
         const envEventoAssinado = montarEnvEventoAssinado(chave, cnpj, tpAmb, keyPem, certPem);
-        const resp = await postEventoSoap(envEventoAssinado, pfxBuffer, senha);
+        const resp = await postEventoSoap(envEventoAssinado, pfxBuffer, senha, tpAmb);
         if (resp.status < 200 || resp.status >= 300) {
             // Tenta pegar soap:Text/soap:Reason (SOAP 1.2) ou faultstring (SOAP 1.1)
             // direto - essa e' a parte que explica o motivo de verdade, e um
