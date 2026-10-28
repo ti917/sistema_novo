@@ -233,11 +233,18 @@ async function main() {
     // nenhum dado ja gravado.
     let cienciasEnviadas = 0, cienciasComErro = 0;
     try {
+        // Pega tanto quem nunca tentou (null) quanto quem tentou e deu erro
+        // (erro) - antes so pegava "null", entao uma nota que falhasse uma
+        // vez ficava travada pra sempre, mesmo depois de um bug ser
+        // corrigido (foi exatamente o que aconteceu com ~140 notas presas
+        // pelo bug do SOAPAction, corrigido em 28/10/2026 - precisou de um
+        // UPDATE manual no banco pra desempacar, porque o codigo nunca ia
+        // tentar de novo sozinho).
         const { data: pendentes, error: erroPendentes } = await supabase
             .from("nfecloud_documentos")
             .select("chave_acesso")
             .eq("tipo", "NFe")
-            .is("ciencia_status", null)
+            .or("ciencia_status.is.null,ciencia_status.eq.erro")
             .limit(MAX_CIENCIAS_POR_EXECUCAO);
 
         if (erroPendentes) {
