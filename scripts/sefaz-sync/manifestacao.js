@@ -28,6 +28,7 @@
 // XML completo quando ele aparece.
 
 const https = require("https");
+const tls = require("tls");
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -145,9 +146,53 @@ function montarEnvEventoAssinado(chave, cnpj, tpAmb, keyPem, certPem) {
     return sig.getSignedXml();
 }
 
-function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
+// CORRECAO (28/10/2026): primeiro teste real do host proprio de SP (depois
+// de varios dias so batendo bloqueio 656 antes de chegar nessa etapa) deu
+// "unable to get local issuer certificate" nas 50 tentativas. Isso NAO e'
+// bloqueio nem duplicidade - e' o Node rejeitando a cadeia de certificado
+// TLS do servidor. Causa confirmada (mesmo padrao relatado por quem integra
+// com servidores proprios de SEFAZ via bibliotecas que nao fazem "AIA
+// chasing", tipo ACBr/Delphi com erro 12045): o servidor manda so o
+// certificado final, sem os intermediarios da cadeia ICP-Brasil - um
+// navegador busca o intermediario que falta sozinho (AIA), mas o Node
+// nativo (https.request) nao faz isso, entao rejeita.
+//
+// Correcao SEM abrir mao da validacao: antes da chamada real, faz uma
+// conexao TLS "de reconhecimento" pro mesmo host (rejectUnauthorized:false
+// SO nessa etapa, so pra capturar a cadeia que o servidor apresenta) e usa
+// essa cadeia como "ca" trustada na chamada real de verdade - que continua
+// validando normalmente (rejectUnauthorized:true, o padrao do Node). Isso
+// nao e' "desligar a seguranca": a gente ainda confirma que e' o host certo
+// (hostname fixo, hardcoded) e ainda faz a autenticacao mutua via
+// certificado A1 (pfx/passphrase) nos dois sentidos - so para de depender
+// do servidor mandar a cadeia completa, que ele nao manda.
+const cadeiaPorHost = new Map();
+function buscarCadeiaDoServidor(host) {
+    if (cadeiaPorHost.has(host)) return Promise.resolve(cadeiaPorHost.get(host));
     return new Promise((resolve, reject) => {
-        const host = SEFAZ_AMBIENTE_PARA_HOST_SP[tpAmb] || SEFAZ_AMBIENTE_PARA_HOST_SP["1"];
+        const socket = tls.connect({ host, port: 443, servername: host, rejectUnauthorized: false }, () => {
+            const certs = [];
+            let cert = socket.getPeerCertificate(true);
+            const vistos = new Set();
+            while (cert && cert.raw && !vistos.has(cert.fingerprint256)) {
+                vistos.add(cert.fingerprint256);
+                const b64 = cert.raw.toString("base64").match(/.{1,64}/g).join("\n");
+                certs.push(`-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`);
+                cert = cert.issuerCertificate;
+            }
+            socket.end();
+            cadeiaPorHost.set(host, certs);
+            resolve(certs);
+        });
+        socket.on("error", reject);
+        socket.setTimeout(15000, () => socket.destroy(new Error("timeout de 15s reconhecendo a cadeia de certificado TLS da SEFAZ")));
+    });
+}
+
+async function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
+    const host = SEFAZ_AMBIENTE_PARA_HOST_SP[tpAmb] || SEFAZ_AMBIENTE_PARA_HOST_SP["1"];
+    const ca = await buscarCadeiaDoServidor(host);
+    return new Promise((resolve, reject) => {
         const soapBody =
             `<?xml version="1.0" encoding="utf-8"?>` +
             `<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">` +
@@ -162,6 +207,7 @@ function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
                 method: "POST",
                 pfx: pfxBuffer,
                 passphrase: senha,
+                ca,
                 headers: {
                     // Historico desse header (28/10/2026): tentamos so
                     // "SOAPAction", so "action" no Content-Type, e os dois juntos -
