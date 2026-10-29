@@ -33384,6 +33384,128 @@ document.getElementById('adm-qtd-dependentes').addEventListener('input', () => w
     if (typeof carregarTabelaUnidades === 'function') carregarTabelaUnidades();
 }
 
+// =========================================================================
+// 🛟 MESCLAGEM NO NAVEGADOR (29/10/2026) — plano B do PDF consolidado.
+// A Edge Function mesclar-documentos-admissao estoura o limite de CPU do Supabase
+// ("CPU Time exceeded", erro 546) em fichas com muitos/pesados documentos. O navegador
+// não tem esse limite, então quando a function falha o consolidado é montado aqui
+// mesmo: mesma ordem de documentos, mesma pasta do Storage, mesmo campo
+// (dados_admissao.documento_consolidado_url) e mesmo formato de retorno da function.
+// PDF normal: copyPages do pdf-lib (mantém texto pesquisável). PDF criptografado de
+// app de scanner (ou que o pdf-lib não abre): renderiza com o pdf.js e cola como imagem.
+// =========================================================================
+window.mesclarDocumentosAdmissaoNoNavegador = async function(idColab) {
+    if (typeof PDFLib === 'undefined') throw new Error('PDFLib não carregou a tempo.');
+    const TIPOS = ['rg', 'carteira-trabalho', 'reservista', 'titulo-eleitor', 'cnh', 'vacinacao-colaborador',
+                   'vacinacao-filhos', 'certidao-filhos', 'conjuge', 'comprovante-endereco', 'outros'];
+
+    const { data: perfil, error: errPerfil } = await supabaseClient
+        .from('perfis').select('nome, empresa, unidade, dados_admissao').eq('id', idColab).single();
+    if (errPerfil) throw errPerfil;
+    if (!perfil) throw new Error('Colaborador não encontrado.');
+
+    const detalhados = perfil.dados_admissao?.documentosDetalhados || {};
+    const urls = [];
+    TIPOS.forEach(id => { if (Array.isArray(detalhados[id])) detalhados[id].forEach(u => { if (u) urls.push(u); }); });
+    if (urls.length === 0) throw new Error('Esse colaborador não tem documentos de admissão anexados pra mesclar.');
+
+    const caminhoBase = `${window.formatarNomePasta(perfil.empresa)}/${window.formatarNomePasta(perfil.unidade)}/${window.formatarNomePasta(perfil.nome)}/Admissoes`;
+
+    const baixar = async (url) => {
+        let ultimoErro;
+        for (let i = 1; i <= 3; i++) {
+            try {
+                const resp = await fetch(url, { cache: 'no-store' });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const bytes = new Uint8Array(await resp.arrayBuffer());
+                if (bytes.byteLength === 0 || new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-') throw new Error('Conteúdo inválido');
+                return bytes;
+            } catch (e) { ultimoErro = e; if (i < 3) await new Promise(r => setTimeout(r, 800 * i)); }
+        }
+        throw ultimoErro;
+    };
+
+    const rasterizar = async (bytes, pdfFinal) => {
+        if (typeof pdfjsLib === 'undefined') throw new Error('pdf.js não carregou a tempo.');
+        const doc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+        let n = 0;
+        for (let p = 1; p <= doc.numPages; p++) {
+            const page = await doc.getPage(p);
+            const viewport = page.getViewport({ scale: 1.4 });
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.round(viewport.width); canvas.height = Math.round(viewport.height);
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            const jpg = await (await fetch(canvas.toDataURL('image/jpeg', 0.8))).arrayBuffer();
+            const img = await pdfFinal.embedJpg(new Uint8Array(jpg));
+            pdfFinal.addPage([canvas.width, canvas.height]).drawImage(img, { x: 0, y: 0, width: canvas.width, height: canvas.height });
+            n++;
+        }
+        return n;
+    };
+
+    const mesclarUm = async (bytes, pdfFinal) => {
+        try {
+            const origem = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+            if (origem.isEncrypted) return await rasterizar(bytes, pdfFinal);
+            // achata atributos herdados da árvore do documento (evita página em branco no copyPages)
+            for (const page of origem.getPages()) {
+                const node = page.node;
+                const res = node.Resources(); if (res) node.set(PDFLib.PDFName.of('Resources'), res);
+                const mb = node.MediaBox(); if (mb) node.set(PDFLib.PDFName.of('MediaBox'), mb);
+                const cb = node.CropBox(); if (cb) node.set(PDFLib.PDFName.of('CropBox'), cb);
+                const rot = node.Rotate(); if (rot) node.set(PDFLib.PDFName.of('Rotate'), rot);
+            }
+            const paginas = await pdfFinal.copyPages(origem, origem.getPageIndices());
+            paginas.forEach(p => pdfFinal.addPage(p));
+            return paginas.length;
+        } catch (e) {
+            return await rasterizar(bytes, pdfFinal);
+        }
+    };
+
+    const pdfFinal = await PDFLib.PDFDocument.create();
+    let totalPaginas = 0;
+    const falhas = [];
+    for (const url of urls) {
+        try {
+            const n = await mesclarUm(await baixar(url), pdfFinal);
+            if (n === 0) throw new Error('PDF sem páginas legíveis.');
+            totalPaginas += n;
+        } catch (e) {
+            console.error('Falha ao mesclar documento no navegador:', url, e);
+            falhas.push(url);
+        }
+    }
+    if (totalPaginas === 0) throw new Error('Nenhum PDF pôde ser lido para mesclagem.');
+
+    const bytesFinais = await pdfFinal.save();
+    const caminhoFinal = `${caminhoBase}/Documentos_Consolidados_${Date.now()}.pdf`;
+    const { error: errUp } = await supabaseClient.storage.from('documentos')
+        .upload(caminhoFinal, new Blob([bytesFinais], { type: 'application/pdf' }), { contentType: 'application/pdf', upsert: true });
+    if (errUp) throw errUp;
+    const urlConsolidado = supabaseClient.storage.from('documentos').getPublicUrl(caminhoFinal).data.publicUrl;
+
+    // grava a URL sem sobrescrever o resto do JSON (relê o registro mais recente antes)
+    const { data: atual, error: errAtual } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+    if (errAtual) throw errAtual;
+    const urlAnterior = atual?.dados_admissao?.documento_consolidado_url;
+    const { error: errUpd } = await supabaseClient.from('perfis')
+        .update({ dados_admissao: { ...(atual?.dados_admissao || {}), documento_consolidado_url: urlConsolidado } }).eq('id', idColab);
+    if (errUpd) throw errUpd;
+
+    // limpeza best-effort do consolidado anterior
+    if (urlAnterior) {
+        const idx = urlAnterior.indexOf('/documentos/');
+        if (idx !== -1) {
+            const antigo = decodeURIComponent(urlAnterior.slice(idx + '/documentos/'.length));
+            if (antigo && antigo !== caminhoFinal) supabaseClient.storage.from('documentos').remove([antigo]).catch(() => {});
+        }
+    }
+    return { success: true, url: urlConsolidado, paginas: totalPaginas, falhas };
+};
+
        // =========================================================================
 // 🩹 REGERAR PDF CONSOLIDADO (02/09/2026) — botão de conserto pra fichas que
 // ficaram com página em branco no "Baixar Tudo em 1 PDF (Consolidado)" por
@@ -33397,9 +33519,22 @@ window.regerarPdfConsolidadoAdmissao = async function(idColab, botao) {
     if (botao) { botao.disabled = true; botao.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Regerando...'; }
 
     try {
-        const { data, error } = await supabaseClient.functions.invoke('mesclar-documentos-admissao', {
+        let { data, error } = await supabaseClient.functions.invoke('mesclar-documentos-admissao', {
             body: { idColab }
         });
+        // 🛟 Plano B (29/10/2026): se a Edge Function falhar (ex: "CPU Time exceeded", 546),
+        // monta o consolidado aqui no navegador. Se o plano B também falhar, segue o fluxo
+        // normal abaixo e mostra o erro original da function.
+        if (error || data?.error) {
+            console.warn('Edge Function falhou — tentando mesclar no navegador.', error || data?.error);
+            if (botao) botao.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Mesclando no navegador...';
+            try {
+                data = await window.mesclarDocumentosAdmissaoNoNavegador(idColab);
+                error = null;
+            } catch (eFallback) {
+                console.error('Plano B (mesclagem no navegador) também falhou:', eFallback);
+            }
+        }
         if (error) {
             // 🩹 CORREÇÃO (08/09/2026): quando a Edge Function responde com erro
             // (400/422/500), o supabase-js só dá a mensagem genérica "Edge Function
