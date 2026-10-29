@@ -28399,9 +28399,8 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
 
             // Fim original do contrato de experiência (45+45 ou 30+30 dias, conforme a data de
             // admissão — mesma regra usada em "Término de Contrato").
-            const regraExpIndeniz = window.obterRegraExperiencia(dataAdmStrIndeniz);
-            const dataFimContrato = new Date(dataAdmIndeniz);
-            dataFimContrato.setDate(dataFimContrato.getDate() + regraExpIndeniz.total - 1);
+            // 🐛 Usa o fim do contrato EM VIGOR (1º período se a prorrogação ainda não foi assinada)
+            const dataFimContrato = window.calcularFimContratoExperienciaVigente(adm, dataAdmStrIndeniz, dataRescIndeniz).dataFim;
 
             const diasRestantes = Math.max(0, Math.round((dataFimContrato - dataRescIndeniz) / (1000 * 3600 * 24)));
             const salarioBase = Number(adm.salario || 0);
@@ -76149,15 +76148,19 @@ window.calcularSimulacaoRescisao = async function() {
                 cursor.setDate(cursor.getDate() + 1);
             }
         });
-        const totalFaltasMes = [...diasFaltaSet].filter(iso => iso >= dataInicioMesStr && iso <= dataStr).length;
+        const inicioSaldoStr = `${dataResc.getFullYear()}-${String(dataResc.getMonth() + 1).padStart(2, '0')}-${String(admNoMesDaResc ? dataAdm.getDate() : 1).padStart(2, '0')}`;
+        const totalFaltasMes = [...diasFaltaSet].filter(iso => iso >= inicioSaldoStr && iso <= dataStr).length;
 
-        const diasCorridosNoMes = dataResc.getDate();
+        // 🐛 Se a admissão foi no MESMO mês da rescisão, o saldo conta só a partir do dia da admissão
+        const admNoMesDaResc = dataAdm.getFullYear() === dataResc.getFullYear() && dataAdm.getMonth() === dataResc.getMonth();
+        const diaInicioSaldo = admNoMesDaResc ? dataAdm.getDate() : 1;
+        const diasCorridosNoMes = Math.max(0, dataResc.getDate() - diaInicioSaldo + 1);
         let diasTrabalhadosNoMes;
         let jornadaMistaNoMes = false;
         if (typeof window.horarioPrevistoNaData === 'function') {
             let pagos = 0;
             let primeiroTipoDoMes = null;
-            for (let dia = 1; dia <= diasCorridosNoMes; dia++) {
+            for (let dia = diaInicioSaldo; dia <= dataResc.getDate(); dia++) {
                 const dataDoDia = new Date(dataResc.getFullYear(), dataResc.getMonth(), dia);
                 const isoDoDia = dataDoDia.toISOString().split('T')[0];
                 // Jornada vigente NESSE DIA específico (não a do mês todo) — pega eventual
@@ -76199,9 +76202,8 @@ window.calcularSimulacaoRescisao = async function() {
         // --- 6. INDENIZAÇÃO ART. 479 CLT (só no caso de Antecipação de Experiência) ---
         let valorIndenizacao479 = 0, diasRestantesContrato479 = 0, dataFimContrato479 = null;
         if (ehAntecipacaoExperiencia && typeof window.obterRegraExperiencia === 'function') {
-            const regraExp = window.obterRegraExperiencia(dataAdmStr);
-            dataFimContrato479 = new Date(dataAdm);
-            dataFimContrato479.setDate(dataFimContrato479.getDate() + regraExp.total - 1);
+            // 🐛 Fim do contrato EM VIGOR: sem prorrogação assinada, vai só até o fim do 1º período (45 dias)
+            dataFimContrato479 = window.calcularFimContratoExperienciaVigente(adm, dataAdmStr, dataResc).dataFim;
             diasRestantesContrato479 = Math.max(0, Math.round((dataFimContrato479 - dataResc) / (1000 * 3600 * 24)));
             valorIndenizacao479 = (remuneracaoBase / 30) * diasRestantesContrato479 * 0.5;
         }
@@ -76209,8 +76211,10 @@ window.calcularSimulacaoRescisao = async function() {
         // --- 7. FGTS (ESTIMATIVA — o sistema não guarda histórico de depósito mês a mês,
         // então isso aqui é uma aproximação assumindo o salário atual constante durante
         // todo o tempo de empresa. O valor real pode ser diferente: confira o extrato). ---
-        const mesesEmpresaAprox = Math.max(1, Math.round((dataProjetada - dataAdm) / (1000 * 3600 * 24 * 30.44)));
-        const saldoFgtsEstimado = 0.08 * remuneracaoBase * mesesEmpresaAprox;
+        const mesesEmpresaExato = (dataProjetada - dataAdm) / (1000 * 3600 * 24 * 30.44);
+        // 🐛 Menos de 1 mês de empresa: proporcional aos dias (antes forçava 1 mês cheio)
+        const mesesEmpresaAprox = mesesEmpresaExato < 1 ? Math.max(0, Math.round(mesesEmpresaExato * 100) / 100) : Math.round(mesesEmpresaExato);
+        const saldoFgtsEstimado = 0.08 * remuneracaoBase * (mesesEmpresaExato < 1 ? Math.max(0, mesesEmpresaExato) : mesesEmpresaAprox);
         const fgtsSobreVerbasRescisorias = 0.08 * (valorSaldoSalario + avisoIndenizadoValor + valor13Proporcional);
         const temMulta40 = ehSemJustaCausa; // Antecipação de experiência também gera multa de 40% sobre o FGTS
         const multaFgts40 = (ehSemJustaCausa || ehAntecipacaoExperiencia) ? 0.40 * (saldoFgtsEstimado + fgtsSobreVerbasRescisorias) : 0;
@@ -101624,6 +101628,27 @@ window.notaVencimentoTerminoPorId = async function(idColab, dataAvisoIso) {
         const dias = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
         return `O contrato (${noP1 ? '1º período, ' + venc.regra.p1 : '2º período, ' + venc.regra.total} dias) vence em ${f(fim)} (${dias[fim.getDay()]}), dia de folga do colaborador, e esse é o último dia. O comunicado foi antecipado para ${f(aj)} (${dias[aj.getDay()]}), último dia de trabalho antes do vencimento.`;
     } catch (e) { return ''; }
+};
+
+// =========================================================================
+// FIM DO CONTRATO DE EXPERIÊNCIA *EM VIGOR* (usado na indenização do Art. 479 CLT)
+// 🐛 CORREÇÃO (10/2026): a indenização usava SEMPRE o prazo total (45+45 = 90 dias),
+// mesmo com a prorrogação ainda não assinada. O Art. 479 é sobre o término do contrato
+// que está valendo: enquanto a prorrogação não existe (doc_prorrogacao vazio) e a
+// rescisão ainda cai dentro do 1º período, o contrato vai só até o fim do 1º período.
+// Vale o prazo total quando a prorrogação já foi assinada OU quando a rescisão já cai
+// depois do fim do 1º período (aí o contrato já está, de fato, no 2º período).
+// =========================================================================
+window.calcularFimContratoExperienciaVigente = function(adm, dataAdmStr, dataResc) {
+    const regra = window.obterRegraExperiencia(dataAdmStr);
+    let strFixa = String(dataAdmStr || '');
+    if (strFixa.includes('/')) { const p = strFixa.split('/'); strFixa = `${p[2]}-${p[1]}-${p[0]}`; }
+    const ini = new Date(strFixa + 'T00:00:00');
+    const fimP1 = new Date(ini); fimP1.setDate(fimP1.getDate() + regra.p1 - 1);
+    const fimTotal = new Date(ini); fimTotal.setDate(fimTotal.getDate() + regra.total - 1);
+    const ctr = (adm && adm.contrato) || {};
+    const prorrogado = !!ctr.doc_prorrogacao || (dataResc && dataResc > fimP1);
+    return { regra, prorrogado, dataFim: prorrogado ? fimTotal : fimP1, fimP1, fimTotal };
 };
 
       // =========================================================================
