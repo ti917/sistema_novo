@@ -71,6 +71,9 @@ const CIENCIA_PRAZO_DIAS = 9;
 // notas antigas sem XML andava devagar). Roda 1 vez a cada ~65 min, entao sao ~14 por hora,
 // abaixo do limite de ~20/h da SEFAZ. Se vier 656 o loop para na hora.
 const RECUPERA_XML_POR_EXECUCAO = 15;
+// Limite da SEFAZ (NT 2014.002): 20 consultas por hora POR CNPJ, contando as paginas
+// da distribuicao (NSU) e as consultas por chave juntas. Estourou = 656 e CNPJ travado 1h.
+const LIMITE_CONSULTAS_HORA = 20;
 const RECUPERA_XML_PAUSA_MS = 3000;
 const RECUPERA_XML_RETENTAR_HORAS = 24;
 const RECUPERA_XML_MAX_DIAS = 89;
@@ -463,11 +466,19 @@ async function main() {
                 // Primeiro as que a gente SABE que ja tem manifestacao
                 // (ciencia "enviado"), depois as outras - mantendo a ordem
                 // de data dentro de cada grupo (sort do JS e' estavel).
+                // NT 2014.002: limite de 20 consultas/hora por CNPJ, SOMANDO as paginas da
+                // distribuicao (por NSU) e as consultas por chave. Entao o que sobra pra
+                // recuperacao e' o limite menos o que a distribuicao ja gastou nesta rodada
+                // (com 2 de folga). Normalmente: 1 pagina + 15 chaves = 16.
+                const orcamentoRecuperacao = Math.max(0, Math.min(RECUPERA_XML_POR_EXECUCAO, LIMITE_CONSULTAS_HORA - 2 - paginas));
                 const fila = (semXml || [])
                     .filter((r) => r.situacao_sefaz !== "cancelada") // cancelada nunca vai ter XML pra baixar
                     .slice()
                     .sort((a, b) => (b.ciencia_status === "enviado") - (a.ciencia_status === "enviado"))
-                    .slice(0, RECUPERA_XML_POR_EXECUCAO);
+                    .slice(0, orcamentoRecuperacao);
+                if (orcamentoRecuperacao < RECUPERA_XML_POR_EXECUCAO) {
+                    console.log(`Recuperacao de XML: orcamento reduzido para ${orcamentoRecuperacao} (a distribuicao ja usou ${paginas} consulta(s) nesta hora; limite da SEFAZ = ${LIMITE_CONSULTAS_HORA}/h somando NSU e chave).`);
+                }
                 for (let i = 0; i < fila.length; i++) {
                     const chave = fila[i].chave_acesso;
                     if (!/^\d{44}$/.test(chave || "")) continue;
