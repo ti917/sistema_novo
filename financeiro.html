@@ -2117,6 +2117,11 @@
                     #tela-notas-fiscais .nf-btn { background:transparent; color: var(--cor-texto-principal); border:1px solid var(--cor-borda); padding:10px 18px; border-radius:8px; font-weight:bold; cursor:pointer; white-space:nowrap; font-size:0.85rem; display:inline-flex; align-items:center; gap:8px; transition:0.15s; }
                     #tela-notas-fiscais .nf-btn:hover { border-color: var(--cor-acento); color: var(--cor-acento); }
                     #tela-notas-fiscais .nf-btn:disabled { opacity:0.5; cursor:wait; }
+                    #tela-notas-fiscais .nf-tipos { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+                    #tela-notas-fiscais .nf-tipo { background: var(--cor-fundo-caixa); color: var(--cor-texto-secundario); border:1px solid var(--cor-borda); padding:9px 18px; border-radius:10px; font-weight:bold; cursor:pointer; font-size:0.85rem; display:flex; align-items:center; gap:8px; transition:0.15s; }
+                    #tela-notas-fiscais .nf-tipo:hover { color: var(--cor-texto-principal); }
+                    #tela-notas-fiscais .nf-tipo.active { border-color: var(--cor-acento); color: var(--cor-acento); box-shadow: 0 0 0 1px var(--cor-acento) inset; }
+                    #tela-notas-fiscais .nf-tipo .nf-tipo-qtd { font-size:0.72rem; background: rgba(128,128,128,0.2); padding:2px 8px; border-radius:20px; }
                     #tela-notas-fiscais .nf-kpis { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap:15px; margin-bottom:20px; }
                     #tela-notas-fiscais .nf-kpi { padding:18px 20px; border-radius:12px; border:1px solid var(--cor-borda); background: var(--cor-fundo-caixa); position:relative; overflow:hidden; }
                     #tela-notas-fiscais .nf-kpi::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background: var(--nf-kpi-cor, var(--cor-acento)); }
@@ -2200,9 +2205,16 @@
                         </div>
                     </div>
 
+                    <div class="nf-tipos" id="nf-tipos">
+                        <button type="button" class="nf-tipo active" data-tipo="" onclick="window.nfTrocarTipo('')"><i class="fa-solid fa-layer-group"></i> Todas <span class="nf-tipo-qtd" id="nf-tipo-qtd-todas">0</span></button>
+                        <button type="button" class="nf-tipo" data-tipo="NFe" onclick="window.nfTrocarTipo('NFe')"><i class="fa-solid fa-boxes-stacked"></i> NF-e (produtos) <span class="nf-tipo-qtd" id="nf-tipo-qtd-nfe">0</span></button>
+                        <button type="button" class="nf-tipo" data-tipo="NFSe" onclick="window.nfTrocarTipo('NFSe')"><i class="fa-solid fa-screwdriver-wrench"></i> NFS-e (serviços) <span class="nf-tipo-qtd" id="nf-tipo-qtd-nfse">0</span></button>
+                        <button type="button" class="nf-tipo" data-tipo="outros" id="nf-tipo-outros" onclick="window.nfTrocarTipo('outros')" style="display:none;"><i class="fa-solid fa-file"></i> Outros <span class="nf-tipo-qtd" id="nf-tipo-qtd-outros">0</span></button>
+                    </div>
+
                     <div class="nf-kpis">
                         <div class="nf-kpi" style="--nf-kpi-cor:#3498db;">
-                            <div class="nf-kpi-rotulo">Notas recebidas <i class="fa-solid fa-file-invoice"></i></div>
+                            <div class="nf-kpi-rotulo" id="nf-kpi-rotulo-total">Notas recebidas <i class="fa-solid fa-file-invoice"></i></div>
                             <div class="nf-kpi-valor" id="nf-kpi-total">—</div>
                             <div class="nf-kpi-sub" id="nf-kpi-total-sub">&nbsp;</div>
                         </div>
@@ -9943,12 +9955,19 @@ window.carregarNotasRecebidasNFeCloud = async function() {
     const btn = document.getElementById('btn-atualizar-nfecloud');
     if (btn) btn.disabled = true;
 
-    const { data, error } = await supabaseClient
-        .from('nfecloud_documentos')
-        .select('*, financeiro_centros_custo(nome_unidade)')
-        .order('data_emissao', { ascending: false })
-        .limit(500);
+    // Uma busca por tipo (até 500 de cada), pra o histórico grande de NFS-e
+    // não empurrar as NF-e pra fora da lista.
+    const buscaTipo = (filtro) => {
+        let q = supabaseClient.from('nfecloud_documentos')
+            .select('*, financeiro_centros_custo(nome_unidade)');
+        q = filtro === 'outros' ? q.not('tipo', 'in', '(NFe,NFSe)') : q.eq('tipo', filtro);
+        return q.order('data_emissao', { ascending: false }).limit(500);
+    };
+    const [rNfe, rNfse, rOutros] = await Promise.all([buscaTipo('NFe'), buscaTipo('NFSe'), buscaTipo('outros')]);
     if (btn) btn.disabled = false;
+    const error = rNfe.error || rNfse.error || rOutros.error;
+    const data = [...(rNfe.data || []), ...(rNfse.data || []), ...(rOutros.data || [])]
+        .sort((a, b) => String(b.data_emissao || '').localeCompare(String(a.data_emissao || '')));
 
     if (error) {
         tbody.innerHTML = `<tr><td colspan="9" class="nf-vazio" style="color: var(--cor-perigo);"><i class="fa-solid fa-triangle-exclamation" style="color: var(--cor-perigo);"></i>Não consegui carregar as notas (${String(error.message).replace(/</g, '&lt;')})</td></tr>`;
@@ -9978,14 +9997,41 @@ window.carregarNotasRecebidasNFeCloud = async function() {
 };
 
 // Cartões de resumo (sobre todas as notas carregadas, não só o filtro).
+window.__nfTipoAtivo = window.__nfTipoAtivo || '';
+window._nfTipoDe = function(n) { return n.tipo === 'NFe' || n.tipo === 'NFSe' ? n.tipo : 'outros'; };
+window.nfTrocarTipo = function(tipo) {
+    window.__nfTipoAtivo = tipo || '';
+    window._nfAtualizarKpis();
+    window.renderizarNotasRecebidas();
+};
+
 window._nfAtualizarKpis = function() {
-    const lista = window.__notasRecebidasLista || [];
+    const todas = window.__notasRecebidasLista || [];
+    const moeda = (v) => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const setTxt = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+    const soma = (arr) => arr.reduce((t, n) => t + (Number(n.valor_total) || 0), 0);
+
+    // Contadores das abas por tipo (sempre sobre tudo)
+    const qtd = { NFe: 0, NFSe: 0, outros: 0 };
+    todas.forEach(n => { qtd[window._nfTipoDe(n)]++; });
+    setTxt('nf-tipo-qtd-todas', String(todas.length));
+    setTxt('nf-tipo-qtd-nfe', String(qtd.NFe));
+    setTxt('nf-tipo-qtd-nfse', String(qtd.NFSe));
+    setTxt('nf-tipo-qtd-outros', String(qtd.outros));
+    const bOutros = document.getElementById('nf-tipo-outros');
+    if (bOutros) bOutros.style.display = qtd.outros ? '' : 'none';
+    if (window.__nfTipoAtivo === 'outros' && !qtd.outros) window.__nfTipoAtivo = '';
+    document.querySelectorAll('#nf-tipos .nf-tipo').forEach(b => b.classList.toggle('active', b.dataset.tipo === window.__nfTipoAtivo));
+
+    // Cartões: só do tipo escolhido
+    const ativo = window.__nfTipoAtivo;
+    const lista = ativo ? todas.filter(n => window._nfTipoDe(n) === ativo) : todas;
     const naoCanceladas = lista.filter(n => n.__situacao.chave !== 'cancelada');
     const canceladas = lista.length - naoCanceladas.length;
     const pendentes = naoCanceladas.filter(n => (n.status_revisao || 'Pendente') === 'Pendente');
-    const soma = (arr) => arr.reduce((t, n) => t + (Number(n.valor_total) || 0), 0);
-    const moeda = (v) => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const setTxt = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+    const nomeTipo = { '': 'Notas recebidas', NFe: 'NF-e recebidas', NFSe: 'NFS-e recebidas', outros: 'Outros documentos' }[ativo];
+    const rotulo = document.getElementById('nf-kpi-rotulo-total');
+    if (rotulo) rotulo.firstChild.textContent = nomeTipo + ' ';
     const comPdf = lista.filter(n => (n.tipo === 'NFe' || n.tipo === 'NFSe') && n.xml_completo).length;
     setTxt('nf-kpi-total', String(lista.length));
     setTxt('nf-kpi-total-sub', `${comPdf} com PDF (DANFE/DANFSe) disponível`);
@@ -9993,7 +10039,7 @@ window._nfAtualizarKpis = function() {
     setTxt('nf-kpi-pendentes', String(pendentes.length));
     setTxt('nf-kpi-pendentes-sub', pendentes.length ? moeda(soma(pendentes)) + ' a conferir' : 'tudo em dia');
     setTxt('nf-kpi-canceladas', String(canceladas));
-    setTxt('nf-aba-contador-recebidas', String(lista.length));
+    setTxt('nf-aba-contador-recebidas', String(todas.length));
 };
 
 window.renderizarNotasRecebidas = function() {
@@ -10009,7 +10055,9 @@ window.renderizarNotasRecebidas = function() {
     const fStatus = document.getElementById('nf-filtro-status')?.value || '';
     const fSituacao = document.getElementById('nf-filtro-situacao')?.value || '';
 
-    const todas = window.__notasRecebidasLista || [];
+    const todasGeral = window.__notasRecebidasLista || [];
+    const tipoAtivo = window.__nfTipoAtivo || '';
+    const todas = tipoAtivo ? todasGeral.filter(n => window._nfTipoDe(n) === tipoAtivo) : todasGeral;
     const lista = todas.filter(n => {
         if (fUnidade && n.financeiro_centros_custo?.nome_unidade !== fUnidade) return false;
         if (fStatus && (n.status_revisao || 'Pendente') !== fStatus) return false;
