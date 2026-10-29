@@ -30,6 +30,8 @@
          de moeda, congelar linha, filtro automático). O SheetJS (xlsx.full.min.js acima)
          continua sendo usado nos outros exportadores (DRE, Auditoria) que não pediram estilo. -->
     <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+    <!-- QR code do DANFSe (PDF da NFS-e). Se não carregar, o PDF sai sem o QR (com a chave escrita). -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
     
     <style>
         /* ========================================================= */
@@ -9984,9 +9986,9 @@ window._nfAtualizarKpis = function() {
     const soma = (arr) => arr.reduce((t, n) => t + (Number(n.valor_total) || 0), 0);
     const moeda = (v) => 'R$ ' + v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const setTxt = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
-    const comPdf = lista.filter(n => n.tipo === 'NFe' && n.xml_completo).length;
+    const comPdf = lista.filter(n => (n.tipo === 'NFe' || n.tipo === 'NFSe') && n.xml_completo).length;
     setTxt('nf-kpi-total', String(lista.length));
-    setTxt('nf-kpi-total-sub', `${comPdf} com PDF (DANFE) disponível`);
+    setTxt('nf-kpi-total-sub', `${comPdf} com PDF (DANFE/DANFSe) disponível`);
     setTxt('nf-kpi-valor', moeda(soma(naoCanceladas)));
     setTxt('nf-kpi-pendentes', String(pendentes.length));
     setTxt('nf-kpi-pendentes-sub', pendentes.length ? moeda(soma(pendentes)) + ' a conferir' : 'tudo em dia');
@@ -10080,6 +10082,8 @@ window.renderizarNotasRecebidas = function() {
             : `<button class="nf-arq" title="Ainda não tem XML dessa nota" disabled><i class="fa-solid fa-file-code"></i> XML</button>`;
         const btnPdf = (n.tipo === 'NFe' && temXmlCompleto)
             ? `<button class="nf-arq pdf" title="Gerar e baixar DANFE em PDF" onclick="window.baixarDanfeNotaNFeCloud('${n.id}')"><i class="fa-solid fa-file-pdf"></i> PDF</button>`
+            : (n.tipo === 'NFSe' && temXmlCompleto)
+            ? `<button class="nf-arq pdf" title="Gerar e baixar DANFSe (PDF da NFS-e)" onclick="window.baixarDanfseNotaNFeCloud('${n.id}')"><i class="fa-solid fa-file-pdf"></i> PDF</button>`
             : `<button class="nf-arq nf-arq-sem-pdf" title="${esc(_nfeMotivoSemPdf(n, sit))}" data-motivo="${esc(_nfeMotivoSemPdf(n, sit))}" aria-disabled="true" onclick="window.avisarSemPdfNFeCloud(this)"><i class="fa-solid fa-file-pdf"></i> PDF</button>`;
 
         const unidade = n.financeiro_centros_custo?.nome_unidade;
@@ -10158,7 +10162,7 @@ window.mostrarSeloAssinaturaNFe = async function(id) {
 // SEFAZ nunca mais vai liberar). Os prazos (9 dias para a ciência, 89 dias de retenção,
 // 48h até a ciência automática) são os mesmos do scripts/sefaz-sync/index.js.
 function _nfeMotivoSemPdf(n, sit) {
-    if (n.tipo === 'NFSe') return 'O PDF da NFS-e ainda não é gerado pelo sistema. Use o botão XML.';
+    if (n.tipo === 'NFSe') return 'Essa NFS-e ainda não tem o XML salvo para gerar o PDF.';
     if (n.tipo !== 'NFe') return 'DANFE não se aplica a NFCe';
     if (sit && sit.chave === 'cancelada') return 'Nota cancelada pelo fornecedor: não há XML completo para gerar o PDF';
     const padrao = 'Aguardando a SEFAZ liberar o XML completo';
@@ -10925,6 +10929,328 @@ window.montarPdfDanfe = function(d, opcoes) {
         pdf.text(`FOLHA ${p}/${totalFolhas}`, pos.x, pos.y, { align: 'center' });
     }
     return pdf;
+};
+
+
+// =====================================================================
+// DANFSe - PDF da NFS-e (padrão NACIONAL), igual ao do Portal Nacional da NFS-e
+// (DANFSe v1.0). Lê o XML salvo (<NFSe><infNFSe>...<DPS><infDPS>) e desenha no navegador.
+// Municípios: o XML só traz o nome do município do emitente (xLocEmi), da prestação
+// (xLocPrestacao) e da incidência (xLocIncid); os demais saem como código IBGE.
+// =====================================================================
+window.gerarDadosDanfseDeXml = function(xmlString) {
+    const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
+    if (doc.getElementsByTagName('parsererror').length) throw new Error('O XML da NFS-e está corrompido.');
+    const prim = (raiz, tag) => { const els = raiz ? raiz.getElementsByTagName(tag) : []; return els.length ? els[0] : null; };
+    const txt = (raiz, tag) => { const el = prim(raiz, tag); return el ? (el.textContent || '').trim() : ''; };
+    const infNFSe = prim(doc, 'infNFSe');
+    if (!infNFSe) throw new Error('Esse XML não é de uma NFS-e do padrão nacional.');
+    const infDPS = prim(infNFSe, 'infDPS') || infNFSe;
+    const emit = prim(infNFSe, 'emit');
+    const prest = prim(infDPS, 'prest');
+    const toma = prim(infDPS, 'toma');
+    const serv = prim(infDPS, 'serv');
+    const valNFSe = Array.from(infNFSe.children).find(c => c.localName === 'valores') || null; // valores da NFS-e (não os do DPS)
+    const valDPS = prim(infDPS, 'valores');
+    const tribMun = prim(valDPS, 'tribMun');
+    const tribFed = prim(valDPS, 'tribFed');
+    const regTrib = prim(prest, 'regTrib');
+    const endEmit = prim(emit, 'enderNac');
+    const endToma = prim(toma, 'end');
+    const cMunEmit = txt(endEmit, 'cMun');
+    const nomeMun = (cMun) => {
+        if (!cMun) return '';
+        if (cMun === cMunEmit && txt(infNFSe, 'xLocEmi')) return txt(infNFSe, 'xLocEmi');
+        if (cMun === txt(infNFSe, 'cLocIncid') && txt(infNFSe, 'xLocIncid')) return txt(infNFSe, 'xLocIncid');
+        if (cMun === txt(serv, 'cLocPrestacao') && txt(infNFSe, 'xLocPrestacao')) return txt(infNFSe, 'xLocPrestacao');
+        return 'IBGE ' + cMun;
+    };
+    const chave = ((infNFSe.getAttribute('Id') || '').match(/(\d{50})/) || [])[1] || '';
+    const endereco = (end) => [txt(end, 'xLgr'), txt(end, 'nro'), txt(end, 'xCpl'), txt(end, 'xBairro')].filter(Boolean).join(', ');
+    return {
+        chave,
+        numero: txt(infNFSe, 'nNFSe'),
+        competencia: txt(infDPS, 'dCompet'),
+        dhEmissao: txt(infNFSe, 'dhProc') || txt(infDPS, 'dhEmi'),
+        nDPS: txt(infDPS, 'nDPS'),
+        serieDPS: txt(infDPS, 'serie'),
+        dhEmissaoDPS: txt(infDPS, 'dhEmi'),
+        emit: {
+            cnpjCpf: txt(emit, 'CNPJ') || txt(emit, 'CPF') || txt(emit, 'NIF'),
+            im: txt(emit, 'IM') || txt(prest, 'IM'),
+            fone: txt(emit, 'fone') || txt(prest, 'fone'),
+            nome: txt(emit, 'xNome'),
+            email: txt(emit, 'email') || txt(prest, 'email'),
+            endereco: endereco(endEmit),
+            municipio: [nomeMun(cMunEmit), txt(endEmit, 'UF')].filter(Boolean).join(' - '),
+            cep: txt(endEmit, 'CEP'),
+            opSimpNac: txt(regTrib, 'opSimpNac'),
+            regApTribSN: txt(regTrib, 'regApTribSN'),
+            regEspTrib: txt(regTrib, 'regEspTrib'),
+        },
+        toma: {
+            cnpjCpf: txt(toma, 'CNPJ') || txt(toma, 'CPF') || txt(toma, 'NIF'),
+            im: txt(toma, 'IM'),
+            fone: txt(toma, 'fone'),
+            nome: txt(toma, 'xNome'),
+            email: txt(toma, 'email'),
+            endereco: endereco(endToma),
+            municipio: nomeMun(txt(endToma, 'cMun')),
+            cep: txt(endToma, 'CEP'),
+        },
+        interm: prim(infDPS, 'interm') ? { cnpjCpf: txt(prim(infDPS, 'interm'), 'CNPJ') || txt(prim(infDPS, 'interm'), 'CPF'), nome: txt(prim(infDPS, 'interm'), 'xNome') } : null,
+        servico: {
+            cTribNac: txt(serv, 'cTribNac'),
+            xTribNac: txt(infNFSe, 'xTribNac'),
+            cTribMun: txt(serv, 'cTribMun'),
+            localPrestacao: nomeMun(txt(serv, 'cLocPrestacao')),
+            descricao: txt(serv, 'xDescServ'),
+        },
+        trib: {
+            tribISSQN: txt(tribMun, 'tribISSQN'),
+            municipioIncidencia: txt(infNFSe, 'xLocIncid') || nomeMun(txt(infNFSe, 'cLocIncid')),
+            tpImunidade: txt(tribMun, 'tpImunidade'),
+            exigSusp: txt(tribMun, 'tpSusp'),
+            nProcSusp: txt(tribMun, 'nProcesso'),
+            nBM: txt(tribMun, 'nBM'),
+            vServ: txt(valDPS, 'vServ'),
+            vDescIncond: txt(valDPS, 'vDescIncond'),
+            vDescCond: txt(valDPS, 'vDescCond'),
+            vDR: txt(valDPS, 'vDR') || txt(valNFSe, 'vCalcDR'),
+            vCalcBM: txt(valNFSe, 'vCalcBM'),
+            vBC: txt(valNFSe, 'vBC'),
+            pAliq: txt(valNFSe, 'pAliqAplic') || txt(tribMun, 'pAliq'),
+            tpRetISSQN: txt(tribMun, 'tpRetISSQN'),
+            vISSQN: txt(valNFSe, 'vISSQN'),
+            vRetIRRF: txt(tribFed, 'vRetIRRF'),
+            vRetCP: txt(tribFed, 'vRetCP'),
+            vRetCSLL: txt(tribFed, 'vRetCSLL'),
+            vPis: txt(tribFed, 'vPis'),
+            vCofins: txt(tribFed, 'vCofins'),
+            tpRetPisCofins: txt(tribFed, 'tpRetPisCofins'),
+            vLiq: txt(valNFSe, 'vLiq'),
+            pTotTribFed: txt(valDPS, 'pTotTribFed'),
+            pTotTribEst: txt(valDPS, 'pTotTribEst'),
+            pTotTribMun: txt(valDPS, 'pTotTribMun'),
+        },
+        infCompl: txt(infDPS, 'xInfComp'),
+    };
+};
+
+window.montarPdfDanfse = function(d) {
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    const L = 5.8, X2 = 48, X3 = 98.4, X4 = 148.5, XD = 204; // colunas (mm) e borda direita do texto
+    const so = (v) => String(v || '').replace(/\D/g, '');
+    const trac = (v) => (v === '' || v === null || v === undefined) ? '-' : String(v);
+    const money = (v) => (v === '' || v === null || v === undefined || isNaN(parseFloat(v))) ? '-' : 'R$ ' + parseFloat(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const moneyZero = (v) => 'R$ ' + (parseFloat(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const pct = (v) => (parseFloat(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' %';
+    const doc = (v) => {
+        const s = so(v);
+        if (s.length === 14) return s.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+        if (s.length === 11) return s.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+        return v || '-';
+    };
+    const cep = (v) => { const s = so(v); return s.length === 8 ? s.replace(/^(\d{5})(\d{3})$/, '$1-$2') : (v || '-'); };
+    const fone = (v) => {
+        const s = so(v);
+        if (s.length === 10) return s.replace(/^(\d{2})(\d{4})(\d{4})$/, '($1) $2-$3');
+        if (s.length === 11) return s.replace(/^(\d{2})(\d{5})(\d{4})$/, '($1) $2-$3');
+        return v || ''; // sem telefone: fica em branco, como no DANFSe oficial
+    };
+    const data = (v) => { const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : '-'; };
+    const dataHora = (v) => { const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : data(v); };
+    const cTribFmt = (c) => { const s = so(c); return s.length === 6 ? s.replace(/^(\d{2})(\d{2})(\d{2})$/, '$1.$2.$3') : (c || ''); };
+
+    const negrito = (t, x, y, tam, opc) => { pdf.setFont('helvetica', 'bold'); pdf.setFontSize(tam || 7); pdf.text(t, x, y, opc); };
+    const normal = (t, x, y, tam, opc) => { pdf.setFont('helvetica', 'normal'); pdf.setFontSize(tam || 8); pdf.text(t, x, y, opc); };
+    const ajusta = (t, larg, tam) => { // corta com "..." se passar da coluna
+        pdf.setFont('helvetica', 'normal'); pdf.setFontSize(tam || 8);
+        let s = String(t == null ? '' : t);
+        if (pdf.getTextWidth(s) <= larg) return s;
+        while (s.length > 1 && pdf.getTextWidth(s + '...') > larg) s = s.slice(0, -1);
+        return s + '...';
+    };
+    const campo = (x, y, rotulo, valor, larg) => { // rótulo em negrito + valor embaixo
+        negrito(rotulo, x, y, 7);
+        if (valor !== undefined && valor !== null) {
+            // valor comprido: diminui a letra (8 -> 6) antes de cortar com "..."
+            const lim = larg || (XD - x);
+            let tam = 8;
+            pdf.setFont('helvetica', 'normal');
+            for (const t of [8, 7, 6.5, 6]) { pdf.setFontSize(t); tam = t; if (pdf.getTextWidth(String(valor)) <= lim) break; }
+            normal(ajusta(valor, lim, tam), x, y + 3.9, tam);
+        }
+    };
+    const linha = (y) => { pdf.setLineWidth(0.25); pdf.line(2, y, 208, y); };
+
+    // ---- moldura e cabeçalho ----
+    pdf.setLineWidth(0.25);
+    pdf.rect(2, 4.6, 206, 288);
+    pdf.setTextColor(0, 140, 70); negrito('NFS-e', 6, 14, 20); pdf.setTextColor(0, 0, 0);
+    pdf.setTextColor(70, 90, 110); normal('Nota Fiscal de', 40, 11.2, 7.5); normal('Serviço eletrônica', 40, 14.4, 7.5); pdf.setTextColor(0, 0, 0);
+    negrito('DANFSe v1.0', 94, 7.7, 10, { align: 'center' });
+    negrito('Documento Auxiliar da NFS-e', 94, 11.7, 10, { align: 'center' });
+    linha(18.1);
+
+    // ---- chave, números, QR ----
+    negrito('Chave de Acesso da NFS-e', L, 22, 7);
+    normal(d.chave || '-', L, 25.8, 8.5);
+    campo(L, 30, 'Número da NFS-e', d.numero || '-');
+    campo(X2, 30, 'Competência da NFS-e', data(d.competencia));
+    campo(X3, 30, 'Data e Hora da emissão da NFS-e', dataHora(d.dhEmissao));
+    campo(L, 38, 'Número da DPS', d.nDPS || '-');
+    campo(X2, 38, 'Série da DPS', d.serieDPS || '-');
+    campo(X3, 38, 'Data e Hora da emissão da DPS', dataHora(d.dhEmissaoDPS));
+    // QR code (aponta pra consulta pública da chave no portal nacional)
+    const urlConsulta = 'https://www.nfse.gov.br/consultapublica?tpc=1&chave=' + d.chave;
+    try {
+        if (typeof qrcode === 'function' && d.chave) {
+            const qr = qrcode(0, 'M'); qr.addData(urlConsulta); qr.make();
+            const n = qr.getModuleCount(), tam = 16, x0 = 166, y0 = 20, m = tam / n;
+            pdf.setFillColor(0, 0, 0);
+            for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) pdf.rect(x0 + c * m, y0 + r * m, m + 0.02, m + 0.02, 'F');
+        }
+    } catch (_e) { /* sem QR: segue só com a chave escrita */ }
+    normal('A autenticidade desta NFS-e pode ser verificada pela', 154, 38.2, 4.6);
+    normal('leitura deste código QR ou pela consulta da chave de', 154, 40.2, 4.6);
+    normal('acesso no portal nacional da NFS-e', 154, 42.2, 4.6);
+    linha(49.2);
+
+    // ---- emitente ----
+    const em = d.emit;
+    campo(L, 53, 'EMITENTE DA NFS-e', 'Prestador do Serviço', 40);
+    campo(X2, 53, 'CNPJ / CPF / NIF', doc(em.cnpjCpf), 48);
+    campo(X3, 53, 'Inscrição Municipal', trac(em.im), 48);
+    campo(X4, 53, 'Telefone', fone(em.fone));
+    campo(L, 61, 'Nome / Nome Empresarial', em.nome || '-', X3 - L - 2);
+    campo(X3, 61, 'E-mail', em.email || '');
+    campo(L, 69, 'Endereço', em.endereco || '-', X3 - L - 2);
+    campo(X3, 69, 'Município', em.municipio || '-', 48);
+    campo(X4, 69, 'CEP', cep(em.cep));
+    const OPSN = { '1': 'Não Optante', '2': 'Optante - Microempresa ou Empresa de Pequeno Porte (ME/EPP)', '3': 'Optante - Microempresa ou Empresa de Pequeno Porte (ME/EPP)' };
+    const REGAP = {
+        '1': 'Regime de apuração dos tributos federais e municipal pelo Simples Nacional',
+        '2': 'Regime de apuração dos tributos federais pelo SN e o ISSQN pela NFS-e conforme legislação municipal',
+        '3': 'Regime de apuração dos tributos federais e municipal pela NFS-e conforme legislações federal e municipal',
+    };
+    normal('Simples Nacional na Data de Competência', L, 77.6, 8);
+    normal('Regime de Apuração Tributária pelo SN', X3, 77.6, 8);
+    normal(ajusta(OPSN[em.opSimpNac] || '-', X3 - L - 2), L, 81.6, 8);
+    normal(ajusta(em.regApTribSN ? (REGAP[em.regApTribSN] || '-') : (em.opSimpNac === '2' || em.opSimpNac === '3' ? REGAP['1'] : '-'), XD - X3), X3, 81.6, 8);
+    linha(84.5);
+
+    // ---- tomador ----
+    const tm = d.toma;
+    campo(L, 88.4, 'TOMADOR DO SERVIÇO', '', 40);
+    campo(X2, 88.4, 'CNPJ / CPF / NIF', doc(tm.cnpjCpf), 48);
+    campo(X3, 88.4, 'Inscrição Municipal', trac(tm.im), 48);
+    campo(X4, 88.4, 'Telefone', fone(tm.fone));
+    campo(L, 96.3, 'Nome / Nome Empresarial', tm.nome || '-', X3 - L - 2);
+    campo(X3, 96.3, 'E-mail', trac(tm.email));
+    campo(L, 104.4, 'Endereço', tm.endereco || '-', X3 - L - 2);
+    campo(X3, 104.4, 'Município', tm.municipio || '-', 48);
+    campo(X4, 104.4, 'CEP', cep(tm.cep));
+    linha(112.5);
+    const ic = d.interm;
+    normal(ic && (ic.nome || ic.cnpjCpf) ? `INTERMEDIÁRIO DO SERVIÇO: ${ic.nome || ''} ${doc(ic.cnpjCpf)}` : 'INTERMEDIÁRIO DO SERVIÇO NÃO IDENTIFICADO NA NFS-e', 105, 115.4, 7.5, { align: 'center' });
+    linha(117);
+
+    // ---- serviço prestado ----
+    const sv = d.servico;
+    negrito('SERVIÇO PRESTADO', L, 120.7, 7);
+    negrito('Código de Tributação Nacional', L, 124.4, 7);
+    negrito('Código de Tributação Municipal', X2, 124.4, 7);
+    negrito('Local da Prestação', X3, 124.4, 7);
+    negrito('País da Prestação', X4, 124.4, 7);
+    normal(ajusta([cTribFmt(sv.cTribNac), sv.xTribNac].filter(Boolean).join(' - ') || '-', X2 - L - 2), L, 128.4, 8);
+    normal(ajusta(sv.cTribMun || '', X3 - X2 - 2), X2, 128.4, 8);
+    normal(ajusta(sv.localPrestacao || '-', X4 - X3 - 2), X3, 128.4, 8);
+    normal('-', X4, 128.4, 8);
+    negrito('Descrição do Serviço', L, 132.6, 7);
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8);
+    let linhasDesc = pdf.splitTextToSize(String(sv.descricao || '-').replace(/\s*[\r\n]+\s*/g, ' '), XD - X2);
+    if (linhasDesc.length > 8) linhasDesc = linhasDesc.slice(0, 8).concat(['(continua no XML da nota)']);
+    linhasDesc.forEach((t, i) => normal(t, X2, 132.6 + i * 4, 8));
+    const dy = Math.max(0, linhasDesc.length - 3) * 4; // quanto a descrição empurra o resto pra baixo
+    linha(142.5 + dy);
+
+    // ---- tributação municipal ----
+    const tb = d.trib, y1 = dy;
+    const TRIBISS = { '1': 'Operação Tributável', '2': 'Imunidade', '3': 'Exportação de Serviço', '4': 'Não Incidência' };
+    const REGESP = { '0': 'Nenhum', '1': 'Ato Cooperado (Cooperativa)', '2': 'Estimativa', '3': 'Microempresa Municipal', '4': 'Notário ou Registrador', '5': 'Profissional Autônomo', '6': 'Sociedade de Profissionais' };
+    const RETISS = { '1': 'Não Retido', '2': 'Retido pelo Tomador', '3': 'Retido pelo Intermediário' };
+    negrito('TRIBUTAÇÃO MUNICIPAL', L, 146.6 + y1, 7);
+    campo(L, 150.6 + y1, 'Tributação do ISSQN', TRIBISS[tb.tribISSQN] || '-', X2 - L - 2);
+    campo(X2, 150.6 + y1, 'País Resultado da Prestação do Serviço', '-', X3 - X2 - 2);
+    campo(X3, 150.6 + y1, 'Município de Incidência do ISSQN', tb.municipioIncidencia || '-', X4 - X3 - 2);
+    campo(X4, 150.6 + y1, 'Regime Especial de Tributação', REGESP[d.emit.regEspTrib] || 'Nenhum');
+    campo(L, 158.5 + y1, 'Tipo de Imunidade', trac(tb.tpImunidade), X2 - L - 2);
+    campo(X2, 158.5 + y1, 'Suspensão da Exigibilidade do ISSQN', tb.exigSusp ? 'Sim' : 'Não', X3 - X2 - 2);
+    campo(X3, 158.5 + y1, 'Número Processo Suspensão', trac(tb.nProcSusp), X4 - X3 - 2);
+    campo(X4, 158.5 + y1, 'Benefício Municipal', trac(tb.nBM));
+    campo(L, 166.4 + y1, 'Valor do Serviço', money(tb.vServ), X2 - L - 2);
+    campo(X2, 166.4 + y1, 'Desconto Incondicionado', money(tb.vDescIncond), X3 - X2 - 2);
+    campo(X3, 166.4 + y1, 'Total Deduções/Reduções', money(tb.vDR), X4 - X3 - 2);
+    campo(X4, 166.4 + y1, 'Cálculo do BM', money(tb.vCalcBM));
+    campo(L, 174.3 + y1, 'BC ISSQN', money(tb.vBC), X2 - L - 2);
+    campo(X2, 174.3 + y1, 'Alíquota Aplicada', tb.pAliq ? pct(tb.pAliq) : '-', X3 - X2 - 2);
+    campo(X3, 174.3 + y1, 'Retenção do ISSQN', RETISS[tb.tpRetISSQN] || '-', X4 - X3 - 2);
+    campo(X4, 174.3 + y1, 'ISSQN Apurado', money(tb.vISSQN));
+
+    // ---- tributação federal ----
+    negrito('TRIBUTAÇÃO FEDERAL', L, 182.8 + y1, 7);
+    campo(L, 186.8 + y1, 'IRRF', money(tb.vRetIRRF), X2 - L - 2);
+    campo(X2, 186.8 + y1, 'CP', money(tb.vRetCP), X3 - X2 - 2);
+    campo(X3, 186.8 + y1, 'CSLL', money(tb.vRetCSLL), X4 - X3 - 2);
+    const totFed = (parseFloat(tb.vRetIRRF) || 0) + (parseFloat(tb.vRetCP) || 0) + (parseFloat(tb.vRetCSLL) || 0) + (parseFloat(tb.vPis) || 0) + (parseFloat(tb.vCofins) || 0);
+    campo(L, 194.9 + y1, 'PIS', money(tb.vPis), X2 - L - 2);
+    campo(X2, 194.9 + y1, 'COFINS', money(tb.vCofins), X3 - X2 - 2);
+    campo(X3, 194.9 + y1, 'Retenção do PIS/COFINS', tb.tpRetPisCofins === '1' ? 'Retido' : '-', X4 - X3 - 2);
+    campo(X4, 194.9 + y1, 'TOTAL TRIBUTAÇÃO FEDERAL', totFed ? money(totFed) : '-');
+    linha(202.8 + y1);
+
+    // ---- valor total ----
+    negrito('VALOR TOTAL DA NFS-E', L, 206.8 + y1, 7);
+    campo(L, 211 + y1, 'Valor do Serviço', money(tb.vServ), X2 - L - 2);
+    campo(X2, 211 + y1, 'Desconto Condicionado', money(tb.vDescCond), X3 - X2 - 2);
+    campo(X3, 211 + y1, 'Desconto Incondicionado', money(tb.vDescIncond), X4 - X3 - 2);
+    campo(X4, 211 + y1, 'ISSQN Retido', tb.tpRetISSQN && tb.tpRetISSQN !== '1' ? money(tb.vISSQN) : '-');
+    const retFed = (parseFloat(tb.vRetIRRF) || 0) + (parseFloat(tb.vRetCP) || 0) + (parseFloat(tb.vRetCSLL) || 0);
+    campo(L, 219.1 + y1, 'IRRF, CP,CSLL - Retidos', moneyZero(retFed), X2 - L - 2);
+    campo(X2, 219.1 + y1, 'PIS/COFINS Retidos', tb.tpRetPisCofins === '1' ? money((parseFloat(tb.vPis) || 0) + (parseFloat(tb.vCofins) || 0)) : '-', X3 - X2 - 2);
+    campo(X4, 219.1 + y1, 'Valor Líquido da NFS-e', money(tb.vLiq || tb.vServ));
+    linha(226.7 + y1);
+
+    // ---- totais aproximados e informações complementares ----
+    negrito('TOTAIS APROXIMADOS DOS TRIBUTOS', L, 230.8 + y1, 7);
+    campo(L, 235 + y1, 'Federais', pct(tb.pTotTribFed), 50);
+    campo(63.3, 235 + y1, 'Estaduais', pct(tb.pTotTribEst), 50);
+    campo(123.4, 235 + y1, 'Municípios', pct(tb.pTotTribMun), 50);
+    negrito('INFORMAÇÕES COMPLEMENTARES', L, 248 + y1, 7);
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8);
+    const maxLinhasCompl = Math.max(1, Math.floor((290 - (252 + y1)) / 4));
+    let linhasCompl = d.infCompl ? pdf.splitTextToSize(d.infCompl, XD - L) : [];
+    if (linhasCompl.length > maxLinhasCompl) linhasCompl = linhasCompl.slice(0, maxLinhasCompl - 1).concat(['(continua no XML da nota)']);
+    linhasCompl.forEach((t, i) => normal(t, L, 252 + y1 + i * 4, 8));
+    return pdf;
+};
+
+window.baixarDanfseNotaNFeCloud = function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n || !n.xml_completo) { mostrarAlerta('O XML dessa NFS-e não está salvo.', 'erro'); return; }
+    if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
+    let pdf, d;
+    try {
+        d = window.gerarDadosDanfseDeXml(n.xml_completo);
+        pdf = window.montarPdfDanfse(d);
+    } catch (e) {
+        console.error('Erro gerando DANFSe:', e);
+        mostrarAlerta('Não consegui gerar o PDF dessa NFS-e: ' + (e && e.message ? e.message : e), 'erro');
+        return;
+    }
+    pdf.save(`DANFSe_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`);
 };
 
 window.atualizarStatusRevisaoNFeCloud = async function(id, novoStatus) {
