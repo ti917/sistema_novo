@@ -17,8 +17,11 @@ const zlib = require("zlib");
 const { createClient } = require("@supabase/supabase-js");
 
 const HOST = process.env.ADN_AMBIENTE === "restrita" ? "adn.producaorestrita.nfse.gov.br" : "adn.nfse.gov.br";
-const MAX_PAGINAS = 40;          // ate 2000 documentos por rodada (o resto fica pra proxima)
-const PAUSA_ENTRE_PAGINAS_MS = 500;
+// Conservador de proposito: o ADN tem limite de requisicoes (erro 429) que a documentacao
+// nao detalha. 10 paginas por rodada = ate 500 documentos, com 2s entre cada pedido; o
+// historico entra aos poucos (de hora em hora). Se vier 429 o script para na hora.
+const MAX_PAGINAS = 10;
+const PAUSA_ENTRE_PAGINAS_MS = 2000;
 
 const so = (v) => String(v || "").replace(/\D/g, "");
 
