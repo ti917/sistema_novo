@@ -32,7 +32,15 @@ const MAX_PAGINAS = 20;
 // Agora" do financeiro podia disparar uma consulta poucos minutos depois de
 // outra. Agora, se a ultima consulta de distribuicao foi ha menos que isso, o
 // script PULA so' a consulta (a parte de ciencia continua rodando normal).
-const MIN_MINUTOS_ENTRE_CONSULTAS = 61;
+//
+// ATUALIZADO 29/10/2026 (pedido do Italo): o intervalo agora e' contado a
+// partir da ULTIMA consulta - 65 min depois dela (1h da regra da SEFAZ + 5
+// min de folga). O GitHub acorda o workflow a cada 5 min; se ainda nao deu
+// 65 min, o script encerra na hora, sem falar com a SEFAZ (nem ciencia, nem
+// recuperacao) - ver o "return" logo depois de calcular pularConsulta.
+// O financeiro.html le o mesmo horario (funcao sefaz_ultima_consulta) pra
+// mostrar "Proxima atualizacao automatica".
+const MIN_MINUTOS_ENTRE_CONSULTAS = 65;
 
 // Prazo legal da Ciencia da Operacao: 10 dias a partir da autorizacao da NFe.
 // Depois disso a SEFAZ recusa sempre - nao adianta tentar (e gastar cota).
@@ -191,7 +199,16 @@ async function main() {
         : Infinity;
     const pularConsulta = minutosDesdeUltimaConsulta < MIN_MINUTOS_ENTRE_CONSULTAS;
     if (pularConsulta) {
-        console.log(`Ultima consulta de distribuicao foi ha ${Math.round(minutosDesdeUltimaConsulta)} min (minimo ${MIN_MINUTOS_ENTRE_CONSULTAS}) - pulando a consulta pra nao levar 656. A parte de ciencia roda normal.`);
+        // Ainda nao deu o intervalo: encerra sem fazer NADA na SEFAZ. Com o
+        // workflow acordando a cada 5 min, a proxima rodada que passar dos
+        // 65 min faz a consulta (e a ciencia/recuperacao junto).
+        const faltam = Math.ceil(MIN_MINUTOS_ENTRE_CONSULTAS - minutosDesdeUltimaConsulta);
+        console.log(JSON.stringify({
+            ok: true,
+            consultaPulada: true,
+            motivo: `ultima consulta ha ${Math.floor(minutosDesdeUltimaConsulta)} min - proxima em ~${faltam} min (intervalo de ${MIN_MINUTOS_ENTRE_CONSULTAS} min)`,
+        }));
+        return;
     }
 
     // Coluna situacao_sefaz (sql_extra/sefaz_situacao_cancelada.sql) guarda
