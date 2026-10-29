@@ -2152,6 +2152,11 @@
                     /* PDF sem XML completo: parece apagado, mas aceita clique (abre o pop-up com o motivo) */
                     #tela-notas-fiscais .nf-arq.nf-arq-sem-pdf { opacity:0.45; cursor:help; }
                     #tela-notas-fiscais .nf-arq.nf-arq-sem-pdf:hover { opacity:0.75; }
+                    /* Selo da assinatura digital ao lado dos botões XML/PDF */
+                    #tela-notas-fiscais .nf-selo { background:none; border:none; padding:0 2px; cursor:pointer; font-size:1.05rem; line-height:1; }
+                    #tela-notas-fiscais .nf-selo.ok { color:#2ecc71; }
+                    #tela-notas-fiscais .nf-selo.erro { color:#e74c3c; }
+                    #tela-notas-fiscais .nf-selo.pend { color:var(--cor-texto-secundario); cursor:default; }
                     #tela-notas-fiscais .nf-status-select { padding:6px 10px; font-size:0.8rem; font-weight:bold; min-width:125px; border-radius:7px; }
                     #tela-notas-fiscais .nf-vazio { text-align:center; padding:45px 20px; color: var(--cor-texto-secundario); }
                     #tela-notas-fiscais .nf-vazio i { font-size:2rem; color: var(--cor-acento); opacity:0.6; display:block; margin-bottom:12px; }
@@ -10090,9 +10095,57 @@ window.renderizarNotasRecebidas = function() {
                     <option value="Ignorada" ${status === 'Ignorada' ? 'selected' : ''}>Ignorada</option>
                 </select>
             </td>
-            <td><div class="nf-arquivos">${btnXml}${btnPdf}</div></td>
+            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}</div></td>
         </tr>`;
     }).join('');
+    window._nfeConferirSelos();
+};
+
+// ---- Selo de assinatura digital (check verde / X vermelho) ao lado do PDF ----
+// A conferência roda no navegador (a mesma do DANFE) assim que a lista aparece;
+// o resultado fica guardado por nota até recarregar a página.
+window.__assinNFeCache = window.__assinNFeCache || {};
+window._nfeSeloHtml = function(id) {
+    const r = window.__assinNFeCache[id];
+    if (!r) return `<button class="nf-selo pend" data-nf-id="${id}" title="Conferindo a assinatura digital…" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>`;
+    const tit = r.ok ? 'Assinatura digital conferida: o XML não foi alterado. Clique para ver.' : 'ATENÇÃO: a assinatura digital NÃO conferiu. Clique para ver.';
+    return `<button class="nf-selo ${r.ok ? 'ok' : 'erro'}" data-nf-id="${id}" title="${tit}" onclick="window.mostrarSeloAssinaturaNFe('${id}')"><i class="fa-solid ${r.ok ? 'fa-circle-check' : 'fa-circle-xmark'}"></i></button>`;
+};
+window._nfeConferirSelos = async function() {
+    if (window.__conferindoSelosNFe) return; // já tem uma rodada em andamento
+    window.__conferindoSelosNFe = true;
+    try {
+        // Todas as notas carregadas (não só as filtradas), pra não perder nenhuma se o filtro mudar no meio.
+        for (const n of Object.values(window.__notasNFeCloudPorId || {})) {
+            if (n.tipo !== 'NFe' || !n.xml_completo || window.__assinNFeCache[n.id]) continue;
+            let r;
+            try {
+                const d = window.gerarDadosDanfeDeXml(n.xml_completo);
+                r = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+            } catch (e) {
+                r = { ok: false, motivo: 'Não consegui conferir a assinatura (' + (e && e.message ? e.message : e) + ').' };
+            }
+            const agora = new Date();
+            r = { ok: !!r.ok, motivo: r.motivo, quando: agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) };
+            window.__assinNFeCache[n.id] = r;
+            document.querySelectorAll(`.nf-selo[data-nf-id="${n.id}"]`).forEach(el => { el.outerHTML = window._nfeSeloHtml(n.id); });
+        }
+    } finally {
+        window.__conferindoSelosNFe = false;
+    }
+};
+window.mostrarSeloAssinaturaNFe = async function(id) {
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const r = window.__assinNFeCache[id];
+    if (!r) return;
+    const msg = `${esc(r.motivo)}<br><br><span style="font-size:0.85em; opacity:0.8;">Conferido pelo sistema em ${esc(r.quando)}. Isso só mostra que o XML não foi alterado; para saber se a nota está válida, consulte a chave no portal da NF-e (www.nfe.fazenda.gov.br).</span>`;
+    const cancelar = document.getElementById('btn-confirm-cancelar');
+    if (cancelar) cancelar.style.display = 'none';
+    try {
+        await window.mostrarConfirmacao(msg, r.ok ? 'Assinatura digital conferida' : 'Assinatura NÃO confere', 'Entendi', r.ok ? 'fa-circle-check' : 'fa-circle-xmark', r.ok ? '#2ecc71' : '#e74c3c');
+    } finally {
+        if (cancelar) cancelar.style.display = '';
+    }
 };
 
 // Texto do botão PDF quando ele está cinza: explica POR QUE a nota ainda não tem PDF,
@@ -10844,19 +10897,15 @@ window.montarPdfDanfe = function(d, opcoes) {
     fonte(6.5, false);
     linhasAdic.forEach((l, i) => pdf.text(l, M + 1, y + 5 + i * 2.7));
 
-    // Resultado da conferência da assinatura digital do emitente
-    if (assinatura) {
+    // Assinatura digital: quando confere, o PDF fica limpo (o check verde aparece na
+    // lista de notas). Só quando NÃO confere sai o aviso vermelho no rodapé.
+    if (assinatura && !assinatura.ok) {
         const agora = new Date();
         const quando = agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const yRodape = Math.min(y + hAdic + 4, ALT_PAG - 2);
         fonte(6.5, true);
-        if (assinatura.ok) {
-            pdf.setTextColor(0, 120, 70);
-            pdf.text(`Assinatura digital do emitente conferida pelo sistema em ${quando}: o XML não foi alterado desde a emissão.`, M, yRodape);
-        } else {
-            pdf.setTextColor(200, 0, 0);
-            pdf.text(caber(`ATENÇÃO (${quando}): ${assinatura.motivo}`, W), M, yRodape);
-        }
+        pdf.setTextColor(200, 0, 0);
+        pdf.text(caber(`ATENÇÃO (${quando}): ${assinatura.motivo}`, W), M, yRodape);
         pdf.setTextColor(0, 0, 0);
     }
 
