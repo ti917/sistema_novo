@@ -9781,10 +9781,11 @@ window.carregarNotasRecebidasNFeCloud = async function() {
             situacaoFmt = '<span style="font-size:0.78rem; font-weight:bold; color:#2ecc71; background:rgba(46,204,113,0.12); padding:3px 10px; border-radius:10px;"><i class="fa-solid fa-check"></i> Autorizada</span>';
         }
 
-        // Manifestação do Destinatário (Ciência da Operação) - o que o NOSSO
-        // sistema já registrou (campo ciencia_status). Se foi manifestado
-        // por outro sistema (ex: NFeCloud direto), a gente não sabe disso
-        // aqui ainda - só reflete tentativas feitas por este sistema.
+        // Manifestação do Destinatário (Ciência da Operação) - campo
+        // ciencia_status. "enviado" vale tanto pra ciência mandada por este
+        // sistema quanto pra manifestação que a SEFAZ mostrou que já existia
+        // (feita pela NFeCloud ou outro sistema) - o detalhe aparece no
+        // tooltip.
         let manifestacaoFmt = '<span style="color:var(--cor-texto-secundario); font-size:0.78rem;">Pendente</span>';
         if (n.tipo !== 'NFe') {
             manifestacaoFmt = '<span style="color:var(--cor-texto-secundario); font-size:0.78rem;" title="NFCe não tem manifestação do destinatário">não se aplica</span>';
@@ -9865,148 +9866,472 @@ window.baixarXmlNotaNFeCloud = function(id) {
     setTimeout(() => URL.revokeObjectURL(url), 4000);
 };
 
-// Lê o XML completo da nota (schema procNFe = NFe + protocolo de
-// autorização) e monta um DANFE simplificado em PDF, tudo no navegador
-// (não manda o XML pra lugar nenhum). Não é o DANFE oficial em formulário
-// contínuo (isso exige o layout exato homologado), mas traz os mesmos
-// dados: emitente, destinatário, chave de acesso, itens e totais - serve
-// pra conferência e arquivo interno.
+// Lê o XML completo da nota (procNFe = NFe + protocolo de autorização) e monta
+// o DANFE em PDF no layout padrão do Manual de Orientação do Contribuinte
+// (retrato): canhoto, emitente, código de barras da chave, destinatário,
+// duplicatas, cálculo do imposto, transportador/volumes, produtos e dados
+// adicionais - com cabeçalho repetido e "FOLHA x/y" quando passa de uma
+// página. Tudo no navegador (o XML não sai daqui).
+//
+// Trocado em 29/10/2026 (antes era um "DANFE Simplificado" com só emitente,
+// destinatário, itens e totais).
 window.gerarDadosDanfeDeXml = function(xmlString) {
     const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
-    const porTag = (tag, raiz) => {
-        const els = (raiz || doc).getElementsByTagName(tag);
-        return els.length ? els[0].textContent.trim() : '';
+    const primeiro = (raiz, tag) => {
+        if (!raiz) return null;
+        const els = raiz.getElementsByTagName(tag);
+        return els.length ? els[0] : null;
     };
-    const porTagDe = (el, tag) => {
-        if (!el) return '';
-        const filhos = el.getElementsByTagName(tag);
-        return filhos.length ? filhos[0].textContent.trim() : '';
+    const txt = (raiz, tag) => {
+        const el = primeiro(raiz, tag);
+        return el ? (el.textContent || '').trim() : '';
     };
-    const infNFe = doc.getElementsByTagName('infNFe')[0] || null;
-    const ide = doc.getElementsByTagName('ide')[0] || null;
-    const emit = doc.getElementsByTagName('emit')[0] || null;
-    const dest = doc.getElementsByTagName('dest')[0] || null;
-    const enderEmit = emit ? emit.getElementsByTagName('enderEmit')[0] : null;
-    const enderDest = dest ? dest.getElementsByTagName('enderDest')[0] : null;
-    const total = doc.getElementsByTagName('ICMSTot')[0] || null;
-    const infProt = doc.getElementsByTagName('infProt')[0] || null;
+    const filhosElemento = (el) => el ? Array.from(el.childNodes).filter(n => n.nodeType === 1) : [];
 
-    const chave = (infProt && porTagDe(infProt, 'chNFe'))
+    const infNFe = primeiro(doc, 'infNFe');
+    const ide = primeiro(infNFe, 'ide');
+    const emit = primeiro(infNFe, 'emit');
+    const dest = primeiro(infNFe, 'dest');
+    const total = primeiro(infNFe, 'ICMSTot');
+    const transp = primeiro(infNFe, 'transp');
+    const cobr = primeiro(infNFe, 'cobr');
+    const infAdic = primeiro(infNFe, 'infAdic');
+    const infProt = primeiro(doc, 'infProt');
+
+    const chave = txt(infProt, 'chNFe')
         || (infNFe && infNFe.getAttribute('Id') ? infNFe.getAttribute('Id').replace(/^NFe/, '') : '');
 
-    const enderTexto = (end) => end
-        ? [porTagDe(end, 'xLgr') + (porTagDe(end, 'nro') ? ', ' + porTagDe(end, 'nro') : ''), porTagDe(end, 'xBairro'), porTagDe(end, 'xMun') + '/' + porTagDe(end, 'UF'), porTagDe(end, 'CEP')]
-            .filter(Boolean).join(' - ')
-        : '';
+    const endereco = (end) => ({
+        logradouro: [txt(end, 'xLgr'), txt(end, 'nro')].filter(Boolean).join(', ') + (txt(end, 'xCpl') ? ' - ' + txt(end, 'xCpl') : ''),
+        bairro: txt(end, 'xBairro'),
+        municipio: txt(end, 'xMun'),
+        uf: txt(end, 'UF'),
+        cep: txt(end, 'CEP'),
+        fone: txt(end, 'fone'),
+    });
 
-    const itens = Array.from(doc.getElementsByTagName('det')).map(det => {
-        const prod = det.getElementsByTagName('prod')[0];
+    const itens = (infNFe ? Array.from(infNFe.getElementsByTagName('det')) : []).map(det => {
+        const prod = primeiro(det, 'prod');
+        const icmsGrupo = filhosElemento(primeiro(det, 'ICMS'))[0] || null; // ICMS00, ICMS20, ICMSSN102...
+        const ipi = primeiro(det, 'IPI');
+        const cst = icmsGrupo ? (txt(icmsGrupo, 'orig') + (txt(icmsGrupo, 'CST') || txt(icmsGrupo, 'CSOSN'))) : '';
         return {
             item: det.getAttribute('nItem') || '',
-            codigo: porTagDe(prod, 'cProd'),
-            descricao: porTagDe(prod, 'xProd'),
-            ncm: porTagDe(prod, 'NCM'),
-            cfop: porTagDe(prod, 'CFOP'),
-            unidade: porTagDe(prod, 'uCom'),
-            quantidade: porTagDe(prod, 'qCom'),
-            valorUnit: porTagDe(prod, 'vUnCom'),
-            valorTotal: porTagDe(prod, 'vProd'),
+            codigo: txt(prod, 'cProd'),
+            descricao: txt(prod, 'xProd') + (txt(det, 'infAdProd') ? '\n' + txt(det, 'infAdProd') : ''),
+            ncm: txt(prod, 'NCM'),
+            cst,
+            cfop: txt(prod, 'CFOP'),
+            unidade: txt(prod, 'uCom'),
+            quantidade: txt(prod, 'qCom'),
+            valorUnit: txt(prod, 'vUnCom'),
+            valorTotal: txt(prod, 'vProd'),
+            bcIcms: txt(icmsGrupo, 'vBC'),
+            valorIcms: txt(icmsGrupo, 'vICMS'),
+            aliqIcms: txt(icmsGrupo, 'pICMS'),
+            valorIpi: txt(ipi, 'vIPI'),
+            aliqIpi: txt(ipi, 'pIPI'),
         };
     });
 
+    const duplicatas = (cobr ? Array.from(cobr.getElementsByTagName('dup')) : []).map(dup => ({
+        numero: txt(dup, 'nDup'),
+        vencimento: txt(dup, 'dVenc'),
+        valor: txt(dup, 'vDup'),
+    }));
+    const fatura = primeiro(cobr, 'fat');
+
+    const transporta = primeiro(transp, 'transporta');
+    const veic = primeiro(transp, 'veicTransp');
+    const vols = transp ? Array.from(transp.getElementsByTagName('vol')) : [];
+    const somaVol = (tag) => {
+        const vals = vols.map(v => txt(v, tag)).filter(Boolean);
+        return vals.length ? String(vals.reduce((a, v) => a + (parseFloat(v) || 0), 0)) : '';
+    };
+
+    const tot = (tag) => txt(total, tag);
     return {
         chave,
-        numero: ide ? porTagDe(ide, 'nNF') : '',
-        serie: ide ? porTagDe(ide, 'serie') : '',
-        naturezaOperacao: ide ? porTagDe(ide, 'natOp') : '',
-        dataEmissao: ide ? porTagDe(ide, 'dhEmi') : '',
-        emitNome: emit ? porTagDe(emit, 'xNome') : '',
-        emitCnpj: emit ? porTagDe(emit, 'CNPJ') : '',
-        emitEndereco: enderTexto(enderEmit),
-        destNome: dest ? porTagDe(dest, 'xNome') : '',
-        destCnpjCpf: dest ? (porTagDe(dest, 'CNPJ') || porTagDe(dest, 'CPF')) : '',
-        destEndereco: enderTexto(enderDest),
-        protocolo: infProt ? porTagDe(infProt, 'nProt') : '',
-        protocoloData: infProt ? porTagDe(infProt, 'dhRecbto') : '',
+        tpAmb: txt(ide, 'tpAmb'),
+        tpNF: txt(ide, 'tpNF'),
+        numero: txt(ide, 'nNF'),
+        serie: txt(ide, 'serie'),
+        naturezaOperacao: txt(ide, 'natOp'),
+        dataEmissao: txt(ide, 'dhEmi') || txt(ide, 'dEmi'),
+        dataSaida: txt(ide, 'dhSaiEnt') || txt(ide, 'dSaiEnt'),
+        emit: {
+            nome: txt(emit, 'xNome'),
+            fantasia: txt(emit, 'xFant'),
+            cnpjCpf: txt(emit, 'CNPJ') || txt(emit, 'CPF'),
+            ie: txt(emit, 'IE'),
+            iest: txt(emit, 'IEST'),
+            ...endereco(primeiro(emit, 'enderEmit')),
+        },
+        dest: {
+            nome: txt(dest, 'xNome'),
+            cnpjCpf: txt(dest, 'CNPJ') || txt(dest, 'CPF') || txt(dest, 'idEstrangeiro'),
+            ie: txt(dest, 'IE'),
+            ...endereco(primeiro(dest, 'enderDest')),
+        },
+        protocolo: txt(infProt, 'nProt'),
+        protocoloData: txt(infProt, 'dhRecbto'),
         itens,
-        valorProdutos: total ? porTagDe(total, 'vProd') : '',
-        valorFrete: total ? porTagDe(total, 'vFrete') : '',
-        valorDesconto: total ? porTagDe(total, 'vDesc') : '',
-        valorICMS: total ? porTagDe(total, 'vICMS') : '',
-        valorIPI: total ? porTagDe(total, 'vIPI') : '',
-        valorTotal: total ? porTagDe(total, 'vNF') : '',
+        duplicatas,
+        fatura: fatura ? { numero: txt(fatura, 'nFat'), valorOriginal: txt(fatura, 'vOrig'), valorDesconto: txt(fatura, 'vDesc'), valorLiquido: txt(fatura, 'vLiq') } : null,
+        totais: {
+            bcIcms: tot('vBC'), icms: tot('vICMS'), bcIcmsSt: tot('vBCST'), icmsSt: tot('vST'),
+            ii: tot('vII'), totTrib: tot('vTotTrib'), produtos: tot('vProd'), frete: tot('vFrete'),
+            seguro: tot('vSeg'), desconto: tot('vDesc'), outras: tot('vOutro'), ipi: tot('vIPI'), nota: tot('vNF'),
+        },
+        transp: {
+            modFrete: txt(transp, 'modFrete'),
+            nome: txt(transporta, 'xNome'),
+            cnpjCpf: txt(transporta, 'CNPJ') || txt(transporta, 'CPF'),
+            ie: txt(transporta, 'IE'),
+            endereco: txt(transporta, 'xEnder'),
+            municipio: txt(transporta, 'xMun'),
+            uf: txt(transporta, 'UF'),
+            placa: txt(veic, 'placa'),
+            placaUf: txt(veic, 'UF'),
+            antt: txt(veic, 'RNTC'),
+            quantidade: somaVol('qVol'),
+            especie: vols.length ? txt(vols[0], 'esp') : '',
+            marca: vols.length ? txt(vols[0], 'marca') : '',
+            numeracao: vols.length ? txt(vols[0], 'nVol') : '',
+            pesoBruto: somaVol('pesoB'),
+            pesoLiquido: somaVol('pesoL'),
+        },
+        infAdFisco: txt(infAdic, 'infAdFisco'),
+        infCpl: txt(infAdic, 'infCpl'),
     };
+};
+
+// Código de barras CODE-128 subconjunto C (só dígitos, em pares) - é o que o
+// DANFE usa pra chave de acesso de 44 dígitos. Desenhado em vetor (retângulos)
+// pra sair nítido em qualquer impressora.
+window._danfeCode128C = function(digitos) {
+    const P = ['212222','222122','222221','121223','121322','131222','122213','122312','132212','221213','221312','231212','112232','122132','122231','113222','123122','123221','223211','221132','221231','213212','223112','312131','311222','321122','321221','312212','322112','322211','212123','212321','232121','111323','131123','131321','112313','132113','132311','211313','231113','231311','112133','112331','132131','113123','113321','133121','313121','211331','231131','213113','213311','213131','311123','311321','331121','312113','312311','332111','314111','221411','431111','111224','111422','121124','121421','141122','141221','112214','112412','122114','122411','142112','142211','241211','221114','413111','241112','134111','111242','121142','121241','114212','124112','124211','411212','421112','421211','212141','214121','412121','111143','111341','131141','114113','114311','411113','411311','113141','114131','311141','411131','211412','211214','211232','2331112'];
+    let d = String(digitos || '').replace(/\D/g, '');
+    if (d.length % 2) d = '0' + d;
+    const codigos = [105];
+    for (let i = 0; i < d.length; i += 2) codigos.push(parseInt(d.substr(i, 2), 10));
+    let soma = 105;
+    for (let i = 1; i < codigos.length; i++) soma += codigos[i] * i;
+    codigos.push(soma % 103, 106);
+    return codigos.map(c => P[c]).join(''); // larguras alternando barra/espaço, começando por barra
 };
 
 window.baixarDanfeNotaNFeCloud = function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
     if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
+    let pdf, d;
+    try {
+        d = window.gerarDadosDanfeDeXml(n.xml_completo);
+        pdf = window.montarPdfDanfe(d);
+    } catch (e) {
+        console.error('Erro gerando DANFE:', e);
+        mostrarAlerta('Não consegui gerar o PDF dessa nota: ' + (e && e.message ? e.message : e), 'erro');
+        return;
+    }
+    pdf.save(`DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`);
+};
 
-    const d = window.gerarDadosDanfeDeXml(n.xml_completo);
-    const moeda = (v) => 'R$ ' + (parseFloat(v || '0') || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
-    const dataFmt = (iso) => iso ? new Date(iso).toLocaleString('pt-BR') : '-';
-    const chaveFmt = (d.chave || '').replace(/(\d{4})(?=\d)/g, '$1 ');
-
+window.montarPdfDanfe = function(d) {
     const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
-    let y = 15;
-    pdf.setFontSize(14); pdf.setFont(undefined, 'bold');
-    pdf.text('DANFE Simplificado — Documento Auxiliar da Nota Fiscal Eletrônica', 15, y);
-    pdf.setFontSize(8); pdf.setFont(undefined, 'normal');
-    y += 5;
-    pdf.text('Gerado a partir do XML autorizado pela SEFAZ — não substitui o DANFE oficial em formulário contínuo.', 15, y);
-    y += 8;
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
 
-    pdf.setFontSize(10); pdf.setFont(undefined, 'bold');
-    pdf.text(`NF-e nº ${d.numero || '-'}  Série ${d.serie || '-'}`, 15, y);
-    pdf.text(`Emissão: ${dataFmt(d.dataEmissao)}`, 120, y);
-    y += 6;
-    pdf.setFont(undefined, 'normal'); pdf.setFontSize(9);
-    pdf.text(`Natureza da operação: ${d.naturezaOperacao || '-'}`, 15, y);
-    y += 7;
+    // ---------- formatação ----------
+    const so = (v) => String(v || '').replace(/\D/g, '');
+    const num = (v, casasMin, casasMax) => {
+        if (v === '' || v === null || v === undefined) return '';
+        const f = parseFloat(v);
+        if (isNaN(f)) return String(v);
+        return f.toLocaleString('pt-BR', { minimumFractionDigits: casasMin, maximumFractionDigits: casasMax === undefined ? casasMin : casasMax });
+    };
+    const moeda = (v) => num(v === '' ? '0' : v, 2);
+    const docFmt = (v) => {
+        const s = so(v);
+        if (s.length === 14) return s.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+        if (s.length === 11) return s.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+        return v || '';
+    };
+    const cepFmt = (v) => { const s = so(v); return s.length === 8 ? s.replace(/^(\d{5})(\d{3})$/, '$1-$2') : (v || ''); };
+    const foneFmt = (v) => {
+        const s = so(v);
+        if (s.length === 10) return s.replace(/^(\d{2})(\d{4})(\d{4})$/, '($1) $2-$3');
+        if (s.length === 11) return s.replace(/^(\d{2})(\d{5})(\d{4})$/, '($1) $2-$3');
+        return v || '';
+    };
+    // Lê data/hora direto do texto do XML (já vem no fuso da nota) - não
+    // converte pelo fuso do computador, pra não mudar o dia.
+    const dataFmt = (v) => { const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+    const horaFmt = (v) => { const m = String(v || '').match(/T(\d{2}:\d{2}:\d{2})/); return m ? m[1] : ''; };
+    const nNFFmt = (v) => so(v).padStart(9, '0').replace(/^(\d{3})(\d{3})(\d{3})$/, '$1.$2.$3');
+    const serieFmt = (v) => so(v).padStart(3, '0');
+    const chaveFmt = (v) => so(v).replace(/(\d{4})(?=\d)/g, '$1 ');
+    const MOD_FRETE = {
+        '0': '0-Por conta do Emit', '1': '1-Por conta do Dest', '2': '2-Por conta de Terc',
+        '3': '3-Próprio por Emit', '4': '4-Próprio por Dest', '9': '9-Sem Transporte',
+    };
 
-    pdf.setFont(undefined, 'bold'); pdf.text('Emitente', 15, y); y += 5;
-    pdf.setFont(undefined, 'normal');
-    pdf.text(`${d.emitNome || '-'}  —  CNPJ ${d.emitCnpj || '-'}`, 15, y); y += 5;
-    pdf.text(d.emitEndereco || '-', 15, y); y += 8;
+    // ---------- desenho ----------
+    const M = 5, W = 200, ALT_PAG = 297;
+    const LBL = 5, VAL = 7.5;
+    pdf.setLineWidth(0.2);
+    pdf.setDrawColor(0); pdf.setTextColor(0);
+    const fonte = (tam, negrito) => { pdf.setFont('helvetica', negrito ? 'bold' : 'normal'); pdf.setFontSize(tam); };
+    const caber = (texto, largura) => {
+        let t = String(texto == null ? '' : texto).replace(/\s+/g, ' ').trim();
+        if (pdf.getTextWidth(t) <= largura) return t;
+        while (t.length > 1 && pdf.getTextWidth(t + '...') > largura) t = t.slice(0, -1);
+        return t + '...';
+    };
+    // Campo com rótulo pequeno em cima e valor embaixo, dentro de uma caixa.
+    const campo = (x, y, w, h, rotulo, valor, opc) => {
+        opc = opc || {};
+        pdf.rect(x, y, w, h);
+        fonte(LBL, false);
+        pdf.text(caber(rotulo, w - 1.5), x + 0.8, y + 2.1);
+        fonte(opc.tam || VAL, !!opc.negrito);
+        const v = caber(valor, w - 1.6);
+        const yv = y + h - 1.4;
+        if (opc.alinhar === 'direita') pdf.text(v, x + w - 0.8, yv, { align: 'right' });
+        else if (opc.alinhar === 'centro') pdf.text(v, x + w / 2, yv, { align: 'center' });
+        else pdf.text(v, x + 0.8, yv);
+    };
+    // Linha de campos com larguras que somam W.
+    const linha = (y, h, campos) => {
+        let x = M;
+        campos.forEach(c => { campo(x, y, c[0], h, c[1], c[2], c[3]); x += c[0]; });
+        return y + h;
+    };
+    const titulo = (y, texto) => { fonte(6, true); pdf.text(texto, M, y + 2.6); return y + 3.4; };
 
-    pdf.setFont(undefined, 'bold'); pdf.text('Destinatário', 15, y); y += 5;
-    pdf.setFont(undefined, 'normal');
-    pdf.text(`${d.destNome || '-'}  —  CNPJ/CPF ${d.destCnpjCpf || '-'}`, 15, y); y += 5;
-    pdf.text(d.destEndereco || '-', 15, y); y += 8;
+    const codigoBarras = (x, y, w, h) => {
+        const larguras = window._danfeCode128C(d.chave);
+        const modulos = larguras.split('').reduce((a, c) => a + Number(c), 0);
+        const margemSilencio = 4; // módulos de cada lado
+        const mod = w / (modulos + margemSilencio * 2);
+        let cx = x + margemSilencio * mod;
+        pdf.setFillColor(0, 0, 0);
+        for (let i = 0; i < larguras.length; i++) {
+            const lw = Number(larguras[i]) * mod;
+            if (i % 2 === 0) pdf.rect(cx, y, lw, h, 'F');
+            cx += lw;
+        }
+    };
 
-    pdf.setFont(undefined, 'bold'); pdf.text('Chave de acesso', 15, y); y += 5;
-    pdf.setFont('courier', 'normal'); pdf.setFontSize(9);
-    pdf.text(chaveFmt || '-', 15, y); y += 5;
-    pdf.setFont(undefined, 'normal'); pdf.setFontSize(9);
-    pdf.text(`Protocolo de autorização: ${d.protocolo || '-'}  (${dataFmt(d.protocoloData)})`, 15, y); y += 8;
+    const posFolha = {}; // página -> {x, y} onde escrever "FOLHA x/y" no fim
 
+    // Cabeçalho (emitente + DANFE + chave + natureza/protocolo + IEs/CNPJ).
+    // Repete em todas as folhas, como no DANFE oficial. Devolve o y final.
+    const cabecalho = (y0) => {
+        const H = 32;
+        // Emitente
+        pdf.rect(M, y0, 80, H);
+        fonte(LBL, false); pdf.text('IDENTIFICAÇÃO DO EMITENTE', M + 0.8, y0 + 2.1);
+        fonte(9, true);
+        const nomeLinhas = pdf.splitTextToSize(d.emit.nome || '', 76).slice(0, 2);
+        let yy = y0 + 7.5;
+        nomeLinhas.forEach(l => { pdf.text(l, M + 40, yy, { align: 'center' }); yy += 4; });
+        fonte(7, false);
+        yy += 1;
+        [
+            d.emit.logradouro,
+            [d.emit.bairro, cepFmt(d.emit.cep)].filter(Boolean).join(' - '),
+            [d.emit.municipio && (d.emit.municipio + (d.emit.uf ? ' - ' + d.emit.uf : '')), d.emit.fone && ('Fone: ' + foneFmt(d.emit.fone))].filter(Boolean).join('   '),
+        ].forEach(l => { if (l) { pdf.text(caber(l, 76), M + 40, yy, { align: 'center' }); yy += 3.4; } });
+
+        // Caixa DANFE
+        const xd = M + 80, wd = 34;
+        pdf.rect(xd, y0, wd, H);
+        fonte(12, true); pdf.text('DANFE', xd + wd / 2, y0 + 5, { align: 'center' });
+        fonte(5.5, false);
+        pdf.text('Documento Auxiliar da', xd + wd / 2, y0 + 8, { align: 'center' });
+        pdf.text('Nota Fiscal Eletrônica', xd + wd / 2, y0 + 10.3, { align: 'center' });
+        fonte(6, false);
+        pdf.text('0 - ENTRADA', xd + 2, y0 + 14);
+        pdf.text('1 - SAÍDA', xd + 2, y0 + 16.6);
+        pdf.rect(xd + wd - 9, y0 + 11.6, 6, 6);
+        fonte(10, true); pdf.text(d.tpNF || '', xd + wd - 6, y0 + 16.2, { align: 'center' });
+        fonte(8, true);
+        pdf.text('Nº ' + nNFFmt(d.numero), xd + wd / 2, y0 + 22, { align: 'center' });
+        pdf.text('SÉRIE ' + serieFmt(d.serie), xd + wd / 2, y0 + 25.6, { align: 'center' });
+        posFolha[pdf.internal.getCurrentPageInfo().pageNumber] = { x: xd + wd / 2, y: y0 + 29.4 };
+
+        // Código de barras + chave + consulta
+        const xc = xd + wd, wc = W - 80 - wd;
+        pdf.rect(xc, y0, wc, 12);
+        codigoBarras(xc + 2, y0 + 1.5, wc - 4, 9);
+        campo(xc, y0 + 12, wc, 7, 'CHAVE DE ACESSO', chaveFmt(d.chave), { tam: 7.5, negrito: true, alinhar: 'centro' });
+        pdf.rect(xc, y0 + 19, wc, H - 19);
+        fonte(7, false);
+        pdf.text('Consulta de autenticidade no portal nacional da NF-e', xc + wc / 2, y0 + 23.5, { align: 'center' });
+        pdf.text('www.nfe.fazenda.gov.br/portal ou no site da Sefaz Autorizadora', xc + wc / 2, y0 + 27, { align: 'center' });
+
+        let y = y0 + H;
+        const protocolo = d.protocolo ? `${d.protocolo} - ${dataFmt(d.protocoloData)} ${horaFmt(d.protocoloData)}` : '';
+        y = linha(y, 7, [[80 + wd, 'NATUREZA DA OPERAÇÃO', d.naturezaOperacao], [wc, 'PROTOCOLO DE AUTORIZAÇÃO DE USO', protocolo, { alinhar: 'centro' }]]);
+        y = linha(y, 7, [[67, 'INSCRIÇÃO ESTADUAL', d.emit.ie], [67, 'INSCRIÇÃO ESTADUAL DO SUBST. TRIBUT.', d.emit.iest], [66, 'CNPJ / CPF', docFmt(d.emit.cnpjCpf)]]);
+        return y;
+    };
+
+    const marcaHomologacao = () => {
+        if (d.tpAmb !== '2') return;
+        pdf.setTextColor(200, 200, 200);
+        fonte(40, true);
+        pdf.text('SEM VALOR FISCAL', 105, 160, { align: 'center', angle: 35 });
+        pdf.setTextColor(0, 0, 0);
+    };
+
+    // ---------- Folha 1 ----------
+    marcaHomologacao();
+    // Canhoto
+    let y = M;
+    pdf.rect(M, y, 170, 16);
+    fonte(5.5, false);
+    const textoCanhoto = `RECEBEMOS DE ${d.emit.nome || ''} OS PRODUTOS E/OU SERVIÇOS CONSTANTES DA NOTA FISCAL ELETRÔNICA INDICADA AO LADO. ` +
+        `EMISSÃO: ${dataFmt(d.dataEmissao)}  VALOR TOTAL: R$ ${moeda(d.totais.nota)}  DESTINATÁRIO: ${d.dest.nome || ''} - ${[d.dest.logradouro, d.dest.bairro, d.dest.municipio, d.dest.uf].filter(Boolean).join(', ')}`;
+    pdf.splitTextToSize(textoCanhoto, 167).slice(0, 3).forEach((l, i) => pdf.text(l, M + 1, y + 2.5 + i * 2.2));
+    campo(M, y + 8, 40, 8, 'DATA DE RECEBIMENTO', '');
+    campo(M + 40, y + 8, 130, 8, 'IDENTIFICAÇÃO E ASSINATURA DO RECEBEDOR', '');
+    pdf.rect(M + 170, y, 30, 16);
+    fonte(10, true); pdf.text('NF-e', M + 185, y + 5, { align: 'center' });
+    fonte(7.5, true);
+    pdf.text('Nº ' + nNFFmt(d.numero), M + 185, y + 9.5, { align: 'center' });
+    pdf.text('SÉRIE ' + serieFmt(d.serie), M + 185, y + 13, { align: 'center' });
+    // linha pontilhada de corte
+    pdf.setLineDashPattern([1, 1], 0);
+    pdf.line(M, y + 18, M + W, y + 18);
+    pdf.setLineDashPattern([], 0);
+
+    y = cabecalho(y + 20);
+
+    // Destinatário
+    y = titulo(y + 0.6, 'DESTINATÁRIO / REMETENTE');
+    y = linha(y, 7, [[117, 'NOME / RAZÃO SOCIAL', d.dest.nome], [48, 'CNPJ / CPF', docFmt(d.dest.cnpjCpf), { alinhar: 'centro' }], [35, 'DATA DA EMISSÃO', dataFmt(d.dataEmissao), { alinhar: 'centro' }]]);
+    y = linha(y, 7, [[95, 'ENDEREÇO', d.dest.logradouro], [45, 'BAIRRO / DISTRITO', d.dest.bairro], [25, 'CEP', cepFmt(d.dest.cep), { alinhar: 'centro' }], [35, 'DATA DA SAÍDA/ENTRADA', dataFmt(d.dataSaida), { alinhar: 'centro' }]]);
+    y = linha(y, 7, [[75, 'MUNICÍPIO', d.dest.municipio], [10, 'UF', d.dest.uf, { alinhar: 'centro' }], [35, 'FONE / FAX', foneFmt(d.dest.fone)], [45, 'INSCRIÇÃO ESTADUAL', d.dest.ie], [35, 'HORA DA SAÍDA/ENTRADA', horaFmt(d.dataSaida), { alinhar: 'centro' }]]);
+
+    // Fatura / duplicatas
+    y = titulo(y + 0.6, 'FATURA / DUPLICATAS');
+    if (d.duplicatas.length) {
+        const porLinha = 7, wDup = W / porLinha, hDup = 9;
+        d.duplicatas.forEach((dup, i) => {
+            const col = i % porLinha, lin = Math.floor(i / porLinha);
+            const x = M + col * wDup, yd = y + lin * hDup;
+            pdf.rect(x, yd, wDup, hDup);
+            fonte(6, false);
+            pdf.text('Num.: ' + caber(dup.numero, wDup - 9), x + 1, yd + 2.6);
+            pdf.text('Venc.: ' + dataFmt(dup.vencimento), x + 1, yd + 5.2);
+            fonte(6, true);
+            pdf.text('Valor: R$ ' + moeda(dup.valor), x + 1, yd + 7.8);
+        });
+        y += Math.ceil(d.duplicatas.length / porLinha) * hDup;
+    } else {
+        const f = d.fatura;
+        const textoFat = f
+            ? `Fatura: ${f.numero || '-'}   Valor original: R$ ${moeda(f.valorOriginal)}   Desconto: R$ ${moeda(f.valorDesconto)}   Valor líquido: R$ ${moeda(f.valorLiquido)}`
+            : 'Sem duplicatas';
+        pdf.rect(M, y, W, 5);
+        fonte(6.5, false); pdf.text(textoFat, M + 1, y + 3.5);
+        y += 5;
+    }
+
+    // Cálculo do imposto
+    y = titulo(y + 0.6, 'CÁLCULO DO IMPOSTO');
+    const t = d.totais, w7 = W / 7, w6 = W / 6, dir = { alinhar: 'direita' };
+    y = linha(y, 7, [
+        [w7, 'BASE DE CÁLC. DO ICMS', moeda(t.bcIcms), dir], [w7, 'VALOR DO ICMS', moeda(t.icms), dir],
+        [w7, 'BASE DE CÁLC. ICMS S.T.', moeda(t.bcIcmsSt), dir], [w7, 'VALOR DO ICMS SUBST.', moeda(t.icmsSt), dir],
+        [w7, 'V. IMP. IMPORTAÇÃO', moeda(t.ii), dir], [w7, 'V. TOT. TRIB.', moeda(t.totTrib), dir],
+        [w7, 'VALOR TOTAL DOS PRODUTOS', moeda(t.produtos), dir],
+    ]);
+    y = linha(y, 7, [
+        [w6, 'VALOR DO FRETE', moeda(t.frete), dir], [w6, 'VALOR DO SEGURO', moeda(t.seguro), dir],
+        [w6, 'DESCONTO', moeda(t.desconto), dir], [w6, 'OUTRAS DESPESAS', moeda(t.outras), dir],
+        [w6, 'VALOR TOTAL DO IPI', moeda(t.ipi), dir], [w6, 'VALOR TOTAL DA NOTA', moeda(t.nota), { alinhar: 'direita', negrito: true }],
+    ]);
+
+    // Transportador
+    y = titulo(y + 0.6, 'TRANSPORTADOR / VOLUMES TRANSPORTADOS');
+    const tr = d.transp;
+    y = linha(y, 7, [
+        [70, 'NOME / RAZÃO SOCIAL', tr.nome], [32, 'FRETE POR CONTA', MOD_FRETE[tr.modFrete] || tr.modFrete],
+        [22, 'CÓDIGO ANTT', tr.antt], [22, 'PLACA DO VEÍCULO', tr.placa], [10, 'UF', tr.placaUf, { alinhar: 'centro' }],
+        [44, 'CNPJ / CPF', docFmt(tr.cnpjCpf)],
+    ]);
+    y = linha(y, 7, [[80, 'ENDEREÇO', tr.endereco], [66, 'MUNICÍPIO', tr.municipio], [10, 'UF', tr.uf, { alinhar: 'centro' }], [44, 'INSCRIÇÃO ESTADUAL', tr.ie]]);
+    y = linha(y, 7, [
+        [25, 'QUANTIDADE', num(tr.quantidade, 0, 3), dir], [35, 'ESPÉCIE', tr.especie], [35, 'MARCA', tr.marca],
+        [35, 'NUMERAÇÃO', tr.numeracao], [35, 'PESO BRUTO', num(tr.pesoBruto, 3), dir], [35, 'PESO LÍQUIDO', num(tr.pesoLiquido, 3), dir],
+    ]);
+
+    // Produtos
+    y = titulo(y + 0.6, 'DADOS DOS PRODUTOS / SERVIÇOS');
+    const TOPO_OUTRAS_FOLHAS = M + 46 + 0.6 + 3.4; // cabeçalho repetido + título
     pdf.autoTable({
         startY: y,
-        head: [['Item', 'Código', 'Descrição', 'NCM', 'CFOP', 'Un.', 'Qtd.', 'Vl. Unit.', 'Vl. Total']],
-        body: d.itens.map(it => [it.item, it.codigo, it.descricao, it.ncm, it.cfop, it.unidade, it.quantidade, moeda(it.valorUnit), moeda(it.valorTotal)]),
-        styles: { fontSize: 7, cellPadding: 1.5 },
-        headStyles: { fillColor: [0, 70, 55] },
-        margin: { left: 15, right: 15 },
+        margin: { left: M, right: M, top: TOPO_OUTRAS_FOLHAS, bottom: M },
+        theme: 'grid',
+        head: [['CÓDIGO', 'DESCRIÇÃO DO PRODUTO / SERVIÇO', 'NCM/SH', 'CST', 'CFOP', 'UN', 'QUANT.', 'VALOR UNIT.', 'VALOR TOTAL', 'B.CÁLC ICMS', 'VALOR ICMS', 'VALOR IPI', 'ALÍQ. ICMS', 'ALÍQ. IPI']],
+        body: d.itens.map(it => [
+            it.codigo, it.descricao, it.ncm, it.cst, it.cfop, it.unidade,
+            num(it.quantidade, 2, 4), num(it.valorUnit, 2, 4), moeda(it.valorTotal),
+            num(it.bcIcms, 2), num(it.valorIcms, 2), num(it.valorIpi, 2), num(it.aliqIcms, 2), num(it.aliqIpi, 2),
+        ]),
+        styles: { font: 'helvetica', fontSize: 6, cellPadding: 0.7, lineColor: [0, 0, 0], lineWidth: 0.1, textColor: [0, 0, 0], valign: 'top', overflow: 'linebreak' },
+        headStyles: { fillColor: [255, 255, 255], textColor: [0, 0, 0], fontStyle: 'bold', fontSize: 5, halign: 'center', valign: 'middle' },
+        columnStyles: {
+            0: { cellWidth: 15 }, 1: { cellWidth: 53 }, 2: { cellWidth: 13, halign: 'center' }, 3: { cellWidth: 8, halign: 'center' },
+            4: { cellWidth: 9, halign: 'center' }, 5: { cellWidth: 8, halign: 'center' }, 6: { cellWidth: 13, halign: 'right' },
+            7: { cellWidth: 14, halign: 'right' }, 8: { cellWidth: 15, halign: 'right' }, 9: { cellWidth: 14, halign: 'right' },
+            10: { cellWidth: 12, halign: 'right' }, 11: { cellWidth: 10, halign: 'right' }, 12: { cellWidth: 8, halign: 'right' },
+            13: { cellWidth: 8, halign: 'right' },
+        },
+        didDrawPage: (data) => {
+            if (data.pageNumber > 1) {
+                marcaHomologacao();
+                const yc = cabecalho(M);
+                titulo(yc + 0.6, 'DADOS DOS PRODUTOS / SERVIÇOS (continuação)');
+            }
+        },
     });
+    y = (pdf.lastAutoTable && pdf.lastAutoTable.finalY) || y;
 
-    let yFinal = (pdf.lastAutoTable && pdf.lastAutoTable.finalY ? pdf.lastAutoTable.finalY : y) + 8;
-    pdf.setFont(undefined, 'bold'); pdf.setFontSize(9);
-    pdf.text('Totais', 15, yFinal); yFinal += 5;
-    pdf.setFont(undefined, 'normal');
-    const linhasTotais = [
-        `Produtos: ${moeda(d.valorProdutos)}`,
-        `Frete: ${moeda(d.valorFrete)}`,
-        `Desconto: ${moeda(d.valorDesconto)}`,
-        `ICMS: ${moeda(d.valorICMS)}`,
-        `IPI: ${moeda(d.valorIPI)}`,
-    ];
-    pdf.text(linhasTotais.join('     '), 15, yFinal); yFinal += 7;
-    pdf.setFont(undefined, 'bold'); pdf.setFontSize(11);
-    pdf.text(`Valor Total da Nota: ${moeda(d.valorTotal)}`, 15, yFinal);
+    // Dados adicionais (no fim dos produtos; se não couber, vai pra uma folha nova)
+    fonte(6.5, false);
+    const textoAdic = [d.infAdFisco && ('Inf. fisco: ' + d.infAdFisco), d.infCpl && ('Inf. contribuinte: ' + d.infCpl)].filter(Boolean).join('\n');
+    let linhasAdic = textoAdic ? pdf.splitTextToSize(textoAdic, 128) : [];
+    const altAdic = (lin) => Math.max(28, 4 + lin * 2.7);
+    if (y + 0.6 + 3.4 + altAdic(linhasAdic.length) > ALT_PAG - M) {
+        pdf.addPage();
+        marcaHomologacao();
+        y = cabecalho(M);
+    }
+    const maxLinhas = Math.floor((ALT_PAG - M - (y + 4) - 4) / 2.7);
+    if (linhasAdic.length > maxLinhas) linhasAdic = linhasAdic.slice(0, maxLinhas - 1).concat(['(continua no XML da nota)']);
+    y = titulo(y + 0.6, 'DADOS ADICIONAIS');
+    const hAdic = altAdic(linhasAdic.length);
+    pdf.rect(M, y, 130, hAdic);
+    pdf.rect(M + 130, y, 70, hAdic);
+    fonte(LBL, false);
+    pdf.text('INFORMAÇÕES COMPLEMENTARES', M + 0.8, y + 2.1);
+    pdf.text('RESERVADO AO FISCO', M + 130.8, y + 2.1);
+    fonte(6.5, false);
+    linhasAdic.forEach((l, i) => pdf.text(l, M + 1, y + 5 + i * 2.7));
 
-    pdf.save(`DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`);
+    // FOLHA x/y em cada página
+    const totalFolhas = pdf.internal.getNumberOfPages();
+    for (let p = 1; p <= totalFolhas; p++) {
+        const pos = posFolha[p];
+        if (!pos) continue;
+        pdf.setPage(p);
+        fonte(7, false);
+        pdf.text(`FOLHA ${p}/${totalFolhas}`, pos.x, pos.y, { align: 'center' });
+    }
+    return pdf;
 };
 
 window.atualizarStatusRevisaoNFeCloud = async function(id, novoStatus) {
@@ -10132,8 +10457,15 @@ window.importarZipNFeCloud = async function(fileList) {
         const mapaCnpjUnidade = new Map();
         (unidades || []).forEach(u => { if (u.cnpj) mapaCnpjUnidade.set(_nfeSoNumeros(u.cnpj), u.id); });
 
-        let processados = 0, recebidos = 0, semCnpjIdentificado = 0, erros = 0;
+        let processados = 0, recebidos = 0, semCnpjIdentificado = 0, erros = 0, completas = 0;
         const linhas = [];
+        // XML completo da nota (NFe/NFCe com itens) vai pra coluna xml_completo
+        // - é ela que libera o botão de PDF (DANFE) e o vencimento. Antes ia
+        // tudo pra xml_raw (que é a coluna do RESUMO), então nota importada
+        // pelo zip nunca tinha PDF. Fica numa lista separada porque o upsert em
+        // lote preenche com vazio as colunas que faltam numa linha - misturar
+        // as duas apagaria o xml_raw (resumo) de notas que já existem.
+        const linhasCompletas = [];
 
         for (const arq of arquivosXml) {
             try {
@@ -10146,6 +10478,26 @@ window.importarZipNFeCloud = async function(fileList) {
                 if (!centroCustoId) { semCnpjIdentificado++; continue; }
 
                 recebidos++;
+                const ehNotaCompleta = (doc.tipo === 'NFe' || doc.tipo === 'NFCe')
+                    && /<infNFe[\s>]/i.test(xml) && /<det[\s>]/i.test(xml);
+                if (ehNotaCompleta) {
+                    completas++;
+                    linhasCompletas.push({
+                        chave_acesso: doc.chave,
+                        tipo: doc.tipo,
+                        numero: doc.numero,
+                        serie: doc.serie,
+                        emitente_nome: doc.emitenteNome,
+                        emitente_cnpj: doc.emitenteCnpj,
+                        destinatario_nome: doc.destinatarioNome,
+                        destinatario_cnpj: doc.destinatarioCnpj,
+                        valor_total: doc.valorTotal,
+                        data_emissao: doc.dataEmissao,
+                        centro_custo_id: centroCustoId,
+                        xml_completo: xml,
+                    });
+                    continue;
+                }
                 linhas.push({
                     chave_acesso: doc.chave,
                     tipo: doc.tipo,
@@ -10171,8 +10523,18 @@ window.importarZipNFeCloud = async function(fileList) {
                 .upsert(linhas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
             if (errUpsert) throw new Error('Não consegui salvar as notas: ' + errUpsert.message);
         }
+        if (linhasCompletas.length) {
+            // Mesma chave duas vezes no mesmo lote faz o upsert falhar inteiro
+            // ("cannot affect row a second time") - fica só a última.
+            const unicasCompletas = Array.from(new Map(linhasCompletas.map(l => [l.chave_acesso, l])).values());
+            const { error: errUpsertCompletas } = await supabaseClient
+                .from('nfecloud_documentos')
+                .upsert(unicasCompletas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
+            if (errUpsertCompletas) throw new Error('Não consegui salvar as notas completas: ' + errUpsertCompletas.message);
+        }
 
         let msg = `Importado: ${recebidos} nota(s) de ${processados} documento(s) no zip.`;
+        if (completas) msg += ` ${completas} com XML completo (PDF/DANFE liberado).`;
         if (semCnpjIdentificado) msg += ` ${semCnpjIdentificado} não bateram com nenhum CNPJ cadastrado nas unidades (ignoradas).`;
         if (erros) msg += ` ${erros} arquivo(s) com erro ao ler.`;
         mostrarAlerta(msg, recebidos ? 'sucesso' : 'erro');
