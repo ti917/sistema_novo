@@ -39,6 +39,31 @@ const MIN_MINUTOS_ENTRE_CONSULTAS = 61;
 // Usa 9 dias de margem.
 const CIENCIA_PRAZO_DIAS = 9;
 
+// Recuperacao do XML completo de notas antigas por CHAVE (consChNFe).
+// Motivo: a distribuicao por NSU entrega cada documento uma vez so'. Muitas
+// notas antigas ja foram manifestadas (pela NFeCloud ou por nos), mas o XML
+// completo delas passou pela consulta antes desse codigo saber gravar
+// procNFe - e nao volta mais sozinho. A consulta por chave pede a nota
+// diretamente.
+//
+// LIMITE DA SEFAZ (NT 2014.002 v1.12+): no maximo 20 consultas por chave por
+// HORA, por CNPJ - contando as de QUALQUER sistema que use esse CNPJ (a
+// NFeCloud inclusive). Estourar = 656 e CNPJ bloqueado por 1h. Por isso:
+// - poucas por execucao (5 a cada 1h30 = ~3 por hora, bem longe das 20);
+// - pausa de 3s entre cada uma;
+// - so' roda se a consulta de distribuicao desta execucao rodou e NAO deu
+//   erro (se a SEFAZ ja esta irritada, nao cutuca);
+// - para na hora se vier 656;
+// - cada nota que nao veio completa so' e' tentada de novo depois de 24h;
+// - so' notas de ate 89 dias (a SEFAZ so' guarda 90 dias pra distribuicao).
+// Precisa da coluna nfecloud_documentos.xml_completo_tentado_em (ver
+// sql_extra/sefaz_recupera_xml_completo.sql). Se a coluna nao existir, essa
+// parte so' e' pulada (com aviso no log) - o resto do script roda normal.
+const RECUPERA_XML_POR_EXECUCAO = 5;
+const RECUPERA_XML_PAUSA_MS = 3000;
+const RECUPERA_XML_RETENTAR_HORAS = 24;
+const RECUPERA_XML_MAX_DIAS = 89;
+
 function extractTag(xml, tag) {
     const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, "i"));
     return m ? m[1].trim() : null;
@@ -54,7 +79,16 @@ function decodificarChave(chave) {
 }
 
 function buildEnvelope(cUFAutor, cnpj, tpAmb, ultNSU) {
-    const distDFeInt = `<distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01"><tpAmb>${tpAmb}</tpAmb><cUFAutor>${cUFAutor}</cUFAutor><CNPJ>${cnpj}</CNPJ><distNSU><ultNSU>${ultNSU.padStart(15, "0")}</ultNSU></distNSU></distDFeInt>`;
+    return buildEnvelopeComCorpo(cUFAutor, cnpj, tpAmb, `<distNSU><ultNSU>${ultNSU.padStart(15, "0")}</ultNSU></distNSU>`);
+}
+
+// Mesma consulta de distribuicao, mas pedindo UMA nota especifica pela chave.
+function buildEnvelopePorChave(cUFAutor, cnpj, tpAmb, chave) {
+    return buildEnvelopeComCorpo(cUFAutor, cnpj, tpAmb, `<consChNFe><chNFe>${chave}</chNFe></consChNFe>`);
+}
+
+function buildEnvelopeComCorpo(cUFAutor, cnpj, tpAmb, corpo) {
+    const distDFeInt = `<distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe" versao="1.01"><tpAmb>${tpAmb}</tpAmb><cUFAutor>${cUFAutor}</cUFAutor><CNPJ>${cnpj}</CNPJ>${corpo}</distDFeInt>`;
     return `<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body><nfeDistDFeInteresse xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe"><nfeDadosMsg>${distDFeInt}</nfeDadosMsg></nfeDistDFeInteresse></soap12:Body></soap12:Envelope>`;
 }
 
@@ -86,6 +120,42 @@ function postSoap(envelope, pfxBuffer, senha) {
         req.write(body);
         req.end();
     });
+}
+
+// Grava a nota completa (procNFe = NFe + protocolo de autorizacao). So'
+// mexe nos campos que vem da propria nota + xml_completo - nunca apaga o
+// resumo (xml_raw) nem o status de ciencia/revisao de uma linha que ja
+// existe. Preenche tipo/numero/etc porque, pra uma nota cujo resumo nunca
+// chegou, o upsert vira INSERT e "tipo" e' NOT NULL.
+// Devolve { chave } se gravou, { chave: null } se o XML nao tinha chave, ou
+// { erro } se o Supabase recusou.
+async function salvarProcNFe(supabase, xmlDoc, cnpj, centroCustoId) {
+    const chave =
+        extractTag(xmlDoc, "chNFe") ||
+        (xmlDoc.match(/Id="NFe(\d{44})"/) || [])[1] ||
+        "";
+    if (!chave) return { chave: null };
+    const decod = decodificarChave(chave);
+    const { error } = await supabase
+        .from("nfecloud_documentos")
+        .upsert({
+            chave_acesso: chave,
+            xml_completo: xmlDoc,
+            tipo: decod?.mod === "65" ? "NFCe" : "NFe",
+            numero: decod?.numero ? String(parseInt(decod.numero, 10)) : null,
+            serie: decod?.serie ? String(parseInt(decod.serie, 10)) : null,
+            emitente_nome: extractTag(xmlDoc, "xNome"),
+            emitente_cnpj: extractTag(xmlDoc, "CNPJ"),
+            destinatario_cnpj: cnpj,
+            valor_total: parseFloat(extractTag(xmlDoc, "vNF") || "0") || null,
+            data_emissao: (extractTag(xmlDoc, "dhEmi") || "").slice(0, 10) || null,
+            centro_custo_id: centroCustoId,
+        }, { onConflict: "chave_acesso", ignoreDuplicates: false });
+    if (error) {
+        console.error("Erro gravando xml completo:", chave, error.message);
+        return { erro: error.message };
+    }
+    return { chave };
 }
 
 async function main() {
@@ -193,40 +263,9 @@ async function main() {
                 // DANFE em PDF de verdade. So atualiza a coluna xml_completo
                 // dessa nota - nao mexe em mais nada da linha que ja existe.
                 if (schema.startsWith("procNFe")) {
-                    const chaveCompleta =
-                        extractTag(xmlDoc, "chNFe") ||
-                        (xmlDoc.match(/Id="NFe(\d{44})"/) || [])[1] ||
-                        "";
-                    if (chaveCompleta) {
-                        const decodCompleta = decodificarChave(chaveCompleta);
-                        // Preenche os mesmos campos que o resumo (resNFe) preencheria,
-                        // nao so chave_acesso + xml_completo. Sem isso, pra uma nota
-                        // cujo resumo a gente NUNCA recebeu antes (ex: NSU ja tinha
-                        // passado por ela antes dessa parte do codigo existir), o
-                        // upsert vira um INSERT sem a coluna "tipo" (NOT NULL) e
-                        // quebra. A NFe completa tem os mesmos dados do resumo, entao
-                        // da pra extrair igual - numa linha que ja existe isso so
-                        // reescreve os mesmos valores de novo, sem problema.
-                        const { error: erroXmlCompleto } = await supabase
-                            .from("nfecloud_documentos")
-                            .upsert({
-                                chave_acesso: chaveCompleta,
-                                xml_completo: xmlDoc,
-                                tipo: decodCompleta?.mod === "65" ? "NFCe" : "NFe",
-                                numero: decodCompleta?.numero ? String(parseInt(decodCompleta.numero, 10)) : null,
-                                serie: decodCompleta?.serie ? String(parseInt(decodCompleta.serie, 10)) : null,
-                                emitente_nome: extractTag(xmlDoc, "xNome"),
-                                emitente_cnpj: extractTag(xmlDoc, "CNPJ"),
-                                destinatario_cnpj: cnpj,
-                                valor_total: parseFloat(extractTag(xmlDoc, "vNF") || "0") || null,
-                                data_emissao: (extractTag(xmlDoc, "dhEmi") || "").slice(0, 10) || null,
-                                centro_custo_id: centroCustoId,
-                            }, { onConflict: "chave_acesso", ignoreDuplicates: false });
-                        if (erroXmlCompleto) {
-                            console.error("Erro gravando xml completo:", chaveCompleta, erroXmlCompleto.message);
-                            gravacaoFalhou = true;
-                        } else totalGravados++;
-                    }
+                    const r = await salvarProcNFe(supabase, xmlDoc, cnpj, centroCustoId);
+                    if (r.erro) gravacaoFalhou = true;
+                    else if (r.chave) totalGravados++;
                     continue;
                 }
 
@@ -333,6 +372,103 @@ async function main() {
             .select("chave_acesso");
         if (erroJaManifestadas) console.error("Erro marcando notas ja manifestadas:", erroJaManifestadas.message);
         else jaManifestadasForaDoNossoSistema = (atualizadas || []).length;
+    }
+
+    // ---- Recuperacao do XML completo por chave (ver RECUPERA_XML_*) ----
+    let xmlRecuperados = 0, xmlRecuperacaoTentativas = 0, xmlRecuperacaoStatus = "nao rodou";
+    if (pularConsulta) {
+        xmlRecuperacaoStatus = "pulada (consulta de distribuicao pulada nesta execucao)";
+    } else if (consultaComErro) {
+        xmlRecuperacaoStatus = "pulada (consulta de distribuicao deu erro nesta execucao)";
+    } else {
+        try {
+            const agoraMs = Date.now();
+            const limiteEmissao = new Date(agoraMs - RECUPERA_XML_MAX_DIAS * 24 * 3600 * 1000).toISOString().slice(0, 10);
+            const limiteTentativa = new Date(agoraMs - RECUPERA_XML_RETENTAR_HORAS * 3600 * 1000).toISOString();
+            // Da' 2h pra nota chegar sozinha pela distribuicao antes de pedir
+            // por chave (o normal e' ela vir sozinha depois de manifestada).
+            const limiteCriacao = new Date(agoraMs - 2 * 3600 * 1000).toISOString();
+            const { data: semXml, error: erroSemXml } = await supabase
+                .from("nfecloud_documentos")
+                .select("chave_acesso, ciencia_status, xml_completo_tentado_em")
+                .eq("tipo", "NFe")
+                .is("xml_completo", null)
+                .gte("data_emissao", limiteEmissao)
+                .lt("criado_em", limiteCriacao)
+                .or(`xml_completo_tentado_em.is.null,xml_completo_tentado_em.lt."${limiteTentativa}"`)
+                .order("data_emissao", { ascending: true }) // mais antigas primeiro (mais perto de sair dos 90 dias)
+                .limit(200);
+
+            if (erroSemXml) {
+                xmlRecuperacaoStatus = /xml_completo_tentado_em/.test(erroSemXml.message)
+                    ? "pulada (falta rodar sql_extra/sefaz_recupera_xml_completo.sql no Supabase)"
+                    : "erro: " + erroSemXml.message;
+                console.error("Recuperacao de XML completo:", xmlRecuperacaoStatus);
+            } else {
+                xmlRecuperacaoStatus = "ok";
+                // Primeiro as que a gente SABE que ja tem manifestacao
+                // (ciencia "enviado"), depois as outras - mantendo a ordem
+                // de data dentro de cada grupo (sort do JS e' estavel).
+                const fila = (semXml || [])
+                    .slice()
+                    .sort((a, b) => (b.ciencia_status === "enviado") - (a.ciencia_status === "enviado"))
+                    .slice(0, RECUPERA_XML_POR_EXECUCAO);
+                for (let i = 0; i < fila.length; i++) {
+                    const chave = fila[i].chave_acesso;
+                    if (!/^\d{44}$/.test(chave || "")) continue;
+                    if (i > 0) await new Promise((r) => setTimeout(r, RECUPERA_XML_PAUSA_MS));
+                    xmlRecuperacaoTentativas++;
+                    let veioCompleto = false;
+                    let resp;
+                    try {
+                        resp = await postSoap(buildEnvelopePorChave(cUFAutor, cnpj, tpAmb, chave), pfxBuffer, senha);
+                    } catch (e) {
+                        console.error("Recuperacao de XML: falha de rede na chave", chave, String(e));
+                        xmlRecuperacaoStatus = "parou por falha de rede";
+                        break;
+                    }
+                    const cStatChave = extractTag(resp.texto, "cStat") || "";
+                    if (resp.status < 200 || resp.status >= 300) {
+                        console.error("Recuperacao de XML: HTTP", resp.status, "na chave", chave);
+                        xmlRecuperacaoStatus = "parou por HTTP " + resp.status;
+                        break;
+                    }
+                    if (cStatChave === "656") {
+                        console.error("Recuperacao de XML: SEFAZ devolveu 656 - parando na hora.");
+                        xmlRecuperacaoStatus = "parou por 656";
+                        break;
+                    }
+                    if (cStatChave === "138") {
+                        const re = /<docZip[^>]*schema="([^"]+)"[^>]*>([^<]+)<\/docZip>/g;
+                        let m;
+                        while ((m = re.exec(resp.texto)) !== null) {
+                            if (!m[1].startsWith("procNFe")) continue;
+                            try {
+                                const xmlDoc = zlib.gunzipSync(Buffer.from(m[2], "base64")).toString("utf-8");
+                                const r = await salvarProcNFe(supabase, xmlDoc, cnpj, centroCustoId);
+                                if (r.chave) { veioCompleto = true; xmlRecuperados++; }
+                            } catch (e) {
+                                console.error("Recuperacao de XML: docZip ilegivel na chave", chave, String(e));
+                            }
+                        }
+                    }
+                    if (!veioCompleto) {
+                        // Ainda sem manifestacao (veio so' o resumo) ou a SEFAZ
+                        // recusou por outro motivo: registra a tentativa pra
+                        // nao insistir nessa nota antes de 24h.
+                        console.log("Recuperacao de XML: chave", chave, "sem XML completo ainda -", cStatChave, extractTag(resp.texto, "xMotivo") || "");
+                    }
+                    const { error: erroMarca } = await supabase
+                        .from("nfecloud_documentos")
+                        .update({ xml_completo_tentado_em: new Date().toISOString() })
+                        .eq("chave_acesso", chave);
+                    if (erroMarca) console.error("Recuperacao de XML: erro marcando tentativa:", chave, erroMarca.message);
+                }
+            }
+        } catch (e) {
+            xmlRecuperacaoStatus = "erro geral: " + (e && e.message ? e.message : String(e));
+            console.error("Recuperacao de XML completo:", e && e.stack ? e.stack : String(e));
+        }
     }
 
     // Se a SEFAZ ja liberou o XML COMPLETO (procNFe) de uma nota, e' porque ela
@@ -477,6 +613,9 @@ async function main() {
         cienciasComErro,
         jaManifestadasForaDoNossoSistema,
         jaComXmlCompleto,
+        xmlRecuperados,
+        xmlRecuperacaoTentativas,
+        xmlRecuperacaoStatus,
     }));
 }
 
