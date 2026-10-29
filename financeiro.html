@@ -9754,10 +9754,15 @@ window.carregarNotasRecebidasNFeCloud = async function() {
 
     const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const corStatus = { 'Pendente': '#ff9800', 'Lançada': '#2ecc71', 'Ignorada': '#64748b' };
-    // cSitNFe (resumo da distribuição) usa os mesmos codigos de cStat da SEFAZ:
-    // 100/150 = Autorizada | 101/155 = Cancelada | 110/205/301/302/303 = Denegada.
-    const CSIT_CANCELADA = ['101', '155'];
-    const CSIT_DENEGADA = ['110', '205', '301', '302', '303'];
+    // Situação da nota na SEFAZ. CORRIGIDO 29/10/2026: o cSitNFe do resumo
+    // (resNFe) NÃO usa os códigos de cStat - usa 1 = Autorizada, 2 = Denegada,
+    // 3 = Cancelada (NT 2014.002). Antes só reconhecia 101/155, então nota
+    // com cSitNFe 3 (cancelada) aparecia como "Autorizada". Os códigos de
+    // cStat continuam na lista porque o protocolo do XML completo (protNFe)
+    // usa eles (100/150 = autorizada etc).
+    const CSIT_AUTORIZADA = ['1', '100', '150'];
+    const CSIT_CANCELADA = ['3', '101', '151', '155'];
+    const CSIT_DENEGADA = ['2', '110', '205', '301', '302', '303'];
 
     tbody.innerHTML = data.map(n => {
         // A data/hora de emissão completa (dhEmi tem hora + fuso) não fica
@@ -9768,17 +9773,29 @@ window.carregarNotasRecebidasNFeCloud = async function() {
             ? new Date(dhEmiRaw).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
             : (n.data_emissao ? new Date(n.data_emissao + 'T00:00:00').toLocaleDateString('pt-BR') : '-');
 
-        // Situação real na SEFAZ (autorizada/cancelada/denegada) - só dá pra
-        // saber pelo resumo (cSitNFe). Separado do status_revisao, que é o
-        // fluxo de trabalho do financeiro (lançou, ignorou etc.)
-        const cSit = n.xml_raw ? _nfeExtractTag(n.xml_raw, 'cSitNFe') : null;
+        // Situação real na SEFAZ (autorizada/cancelada/denegada). Separado do
+        // status_revisao, que é o fluxo de trabalho do financeiro (lançou,
+        // ignorou etc.). Ordem de prioridade:
+        //  1. situacao_sefaz = 'cancelada' (gravado pela sincronização quando
+        //     chega o evento de cancelamento ou a SEFAZ responde 653) - vale
+        //     mesmo que o resumo antigo diga "autorizada", porque o resumo
+        //     nunca é atualizado depois que chega;
+        //  2. cSitNFe do resumo (xml_raw);
+        //  3. cStat do protocolo do XML completo (quando não tem resumo).
+        let cSit = n.xml_raw ? _nfeExtractTag(n.xml_raw, 'cSitNFe') : null;
+        if (!cSit && n.xml_completo) cSit = _nfeExtractTag(n.xml_completo, 'cStat');
+        const cancelPorEvento = n.situacao_sefaz === 'cancelada';
         let situacaoFmt = '<span style="color:var(--cor-texto-secundario);">-</span>';
-        if (cSit && CSIT_CANCELADA.includes(cSit)) {
-            situacaoFmt = '<span style="font-size:0.78rem; font-weight:bold; color:#ff4757; background:rgba(255,71,87,0.12); padding:3px 10px; border-radius:10px;"><i class="fa-solid fa-ban"></i> Cancelada</span>';
+        if (cancelPorEvento || (cSit && CSIT_CANCELADA.includes(cSit))) {
+            situacaoFmt = '<span title="O fornecedor cancelou essa nota na SEFAZ - não lançar/pagar" style="font-size:0.78rem; font-weight:bold; color:#ff4757; background:rgba(255,71,87,0.12); padding:3px 10px; border-radius:10px; cursor:help;"><i class="fa-solid fa-ban"></i> Cancelada</span>';
         } else if (cSit && CSIT_DENEGADA.includes(cSit)) {
             situacaoFmt = '<span style="font-size:0.78rem; font-weight:bold; color:#ff4757; background:rgba(255,71,87,0.12); padding:3px 10px; border-radius:10px;"><i class="fa-solid fa-triangle-exclamation"></i> Denegada</span>';
-        } else if (cSit) {
+        } else if (cSit && CSIT_AUTORIZADA.includes(cSit)) {
             situacaoFmt = '<span style="font-size:0.78rem; font-weight:bold; color:#2ecc71; background:rgba(46,204,113,0.12); padding:3px 10px; border-radius:10px;"><i class="fa-solid fa-check"></i> Autorizada</span>';
+        } else if (cSit) {
+            // Código que a gente não conhece: mostra o código em vez de
+            // chutar "Autorizada".
+            situacaoFmt = '<span style="color:var(--cor-texto-secundario); font-size:0.78rem;" title="Código de situação desconhecido">código ' + esc(cSit) + '</span>';
         }
 
         // Manifestação do Destinatário (Ciência da Operação) - campo
