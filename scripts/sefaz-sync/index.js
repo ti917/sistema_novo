@@ -294,11 +294,31 @@ async function main() {
         // pelo bug do SOAPAction, corrigido em 28/10/2026 - precisou de um
         // UPDATE manual no banco pra desempacar, porque o codigo nunca ia
         // tentar de novo sozinho).
+        //
+        // SO' DEPOIS DE 48H (pedido do Italo, 29/10/2026): descoberto que
+        // quando a gente recebe o XML COMPLETO (procNFe) de uma nota, isso
+        // so acontece se ela JA foi manifestada por alguem - manifestacao e'
+        // por CNPJ, nao por sistema (confirmado contra forum tecnico de NFe:
+        // https://www.projetoacbr.com.br/forum/topic/35543-distribuicaodfe-xml-resumo-ou-completo/).
+        // Ou seja, tem outro sistema (provavelmente a NFeCloud) manifestando
+        // as notas quase na hora, sozinho - e' provavelmente ele que fica
+        // consumindo boa parte da cota do certificado e causando os 656.
+        // Em vez de competir com ele tentando ciencia pra TODA nota pendente
+        // toda execucao, a gente so tenta a nossa propria ciencia como rede
+        // de seguranca: se uma nota ficar 48h+ sem ninguem mais ter
+        // manifestado ela (ciencia_status ainda null/erro), af sim tenta.
+        // Isso corta MUITO o volume de tentativas de ciencia (menos cota
+        // gasta, menos chance de contribuir pro bloqueio) sem abrir mao da
+        // protecao contra a SEFAZ bloquear a emissao das nossas proprias
+        // notas por falta de manifestacao acumulada.
+        const CIENCIA_SO_APOS_HORAS = 48;
+        const corteCiencia = new Date(Date.now() - CIENCIA_SO_APOS_HORAS * 60 * 60 * 1000).toISOString();
         const { data: pendentes, error: erroPendentes } = await supabase
             .from("nfecloud_documentos")
             .select("chave_acesso")
             .eq("tipo", "NFe")
             .or("ciencia_status.is.null,ciencia_status.eq.erro")
+            .lt("criado_em", corteCiencia)
             .limit(MAX_CIENCIAS_POR_EXECUCAO);
 
         if (erroPendentes) {
