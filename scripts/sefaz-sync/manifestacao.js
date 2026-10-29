@@ -21,6 +21,9 @@
 // a documentacao oficial da SEFAZ-SP e de bibliotecas de terceiros antes de
 // implementar (nao foi chute).
 //
+// (Em 28/10/2026 isso chegou a ser trocado pro servidor da SEFAZ-SP - foi um
+// engano, desfeito em 29/10/2026; ver comentario de AN_HOSTS.)
+//
 // Depois que a SEFAZ aceita a ciencia, o XML completo da nota (NFe + o
 // protocolo de autorizacao, schema "procNFe") passa a ficar disponivel pra
 // download na consulta de distribuicao normal - geralmente aparece numa das
@@ -36,26 +39,27 @@ const os = require("os");
 const path = require("path");
 const { SignedXml } = require("xml-crypto");
 
-// CORRECAO (28/10/2026): diferente do que o comentario antigo dizia, o
-// servico de Recepcao de Eventos (NFeRecepcaoEvento4 - usado pela Ciencia da
-// Operacao) NAO e' centralizado no Ambiente Nacional pra todo mundo. Cada UF
-// que roda autorizador proprio (caso de SP) tem o SEU PROPRIO endereco pra
-// esse servico - confirmado na pagina oficial da SEFAZ-SP
-// (portal.fazenda.sp.gov.br/servicos/nfe/Paginas/URL-WEBSERVICES.aspx), que
-// lista tres enderecos diferentes com nome parecido (SP, SVC-AN e Ambiente
-// Nacional) - cada UF usa o seu, nao o nacional generico. Isso e' diferente
-// da consulta de distribuicao (NFeDistribuicaoDFe, em index.js), que essa
-// sim e' sempre centralizada no Ambiente Nacional pra qualquer UF - foi essa
-// diferenca que explicava o erro "action ... was NOT RECOGNIZED": a gente
-// mandava a ciencia pro servidor nacional generico, que nao reconhecia essa
-// action porque quem atende esse servico pra empresas de SP e' o servidor
-// proprio da SEFAZ-SP, nao o nacional.
-const SEFAZ_AMBIENTE_PARA_HOST_SP = {
-    "1": "nfe.fazenda.sp.gov.br", // producao
-    "2": "homologacao.nfe.fazenda.sp.gov.br", // homologacao
+// CORRECAO (29/10/2026) - volta pro Ambiente Nacional, agora do jeito certo.
+//
+// Manifestacao do Destinatario (Ciencia, Confirmacao, Desconhecimento,
+// Operacao nao Realizada) e' SEMPRE no Ambiente Nacional, com cOrgao 91 -
+// pra qualquer UF, inclusive SP. O endereco de eventos da SEFAZ-SP
+// (nfe.fazenda.sp.gov.br/ws/NFeRecepcaoEvento4.asmx) e' pra eventos das notas
+// que a gente EMITE (cancelamento, carta de correcao), nao pra manifestacao.
+//
+// O erro "action ... was NOT RECOGNIZED" que tinhamos no Ambiente Nacional
+// em 28/10 NAO era o endereco: era o NOME da action. No Ambiente Nacional a
+// operacao se chama "nfeRecepcaoEventoNF" (a resposta dele vem em
+// <nfeRecepcaoEventoNFResult>), e a gente mandava "nfeRecepcaoEvento" (que e'
+// o nome usado pelos servidores estaduais, tipo SP). Alem disso, no padrao
+// 4.00 o <nfeDadosMsg> vai DIRETO dentro do <soap12:Body>, sem um elemento
+// "invólucro" com o nome da operacao em volta.
+const AN_HOSTS = {
+    "1": "www.nfe.fazenda.gov.br", // producao
+    "2": "hom1.nfe.fazenda.gov.br", // homologacao (nao validado - so usamos producao)
 };
-const AN_PATH = "/ws/NFeRecepcaoEvento4.asmx";
-const SOAP_ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento";
+const AN_PATH = "/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx";
+const SOAP_ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEventoNF";
 const TP_EVENTO_CIENCIA = "210210";
 
 // Extrai a chave privada e o certificado (em PEM) de dentro do .pfx, usando
@@ -277,15 +281,26 @@ async function buscarCadeiaDoServidor(host) {
 }
 
 async function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
-    const host = SEFAZ_AMBIENTE_PARA_HOST_SP[tpAmb] || SEFAZ_AMBIENTE_PARA_HOST_SP["1"];
-    const ca = await buscarCadeiaDoServidor(host);
+    const host = AN_HOSTS[tpAmb] || AN_HOSTS["1"];
+    // Passar "ca" no Node SUBSTITUI a lista padrao de autoridades confiaveis -
+    // por isso junta as raizes padrao do Node com a cadeia buscada via AIA.
+    // Se a busca via AIA falhar por qualquer motivo, segue so com as raizes
+    // padrao (que ja bastam pros servidores do Ambiente Nacional - a consulta
+    // de distribuicao, no mesmo dominio, sempre funcionou sem nada extra).
+    let cadeiaExtra = [];
+    try {
+        cadeiaExtra = await buscarCadeiaDoServidor(host);
+    } catch (e) {
+        console.error("Aviso: nao consegui montar a cadeia TLS via AIA, usando so as raizes padrao:", e && e.message ? e.message : String(e));
+    }
+    const ca = [...tls.rootCertificates, ...cadeiaExtra];
     return new Promise((resolve, reject) => {
         const soapBody =
             `<?xml version="1.0" encoding="utf-8"?>` +
             `<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">` +
-            `<soap12:Body><nfeRecepcaoEvento xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">` +
-            `<nfeDadosMsg>${envEventoAssinadoXml}</nfeDadosMsg>` +
-            `</nfeRecepcaoEvento></soap12:Body></soap12:Envelope>`;
+            `<soap12:Body>` +
+            `<nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">${envEventoAssinadoXml}</nfeDadosMsg>` +
+            `</soap12:Body></soap12:Envelope>`;
         const body = Buffer.from(soapBody, "utf-8");
         const req = https.request(
             {
@@ -296,16 +311,9 @@ async function postEventoSoap(envEventoAssinadoXml, pfxBuffer, senha, tpAmb) {
                 passphrase: senha,
                 ca,
                 headers: {
-                    // Historico desse header (28/10/2026): tentamos so
-                    // "SOAPAction", so "action" no Content-Type, e os dois juntos -
-                    // nenhuma combinacao resolveu sozinha o erro "action ... was
-                    // NOT RECOGNIZED". O motivo real nao era o header: era o
-                    // HOST (ver comentario de SEFAZ_AMBIENTE_PARA_HOST_SP acima -
-                    // a gente mandava pro Ambiente Nacional generico, e quem
-                    // atende esse servico pra SP e' o servidor proprio da
-                    // SEFAZ-SP). Mantemos os dois headers juntos porque nao faz
-                    // mal nenhum e cobre qualquer variacao de exigencia entre
-                    // SOAP 1.1/1.2 dos diferentes servidores da SEFAZ.
+                    // SOAP 1.2: a action vai no Content-Type. O SOAPAction (estilo
+                    // SOAP 1.1) vai junto porque nao atrapalha e alguns servidores
+                    // da SEFAZ olham ele.
                     "Content-Type": `application/soap+xml; charset=utf-8; action="${SOAP_ACTION}"`,
                     "SOAPAction": SOAP_ACTION,
                     "Content-Length": body.length,

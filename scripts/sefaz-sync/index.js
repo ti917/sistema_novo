@@ -26,6 +26,19 @@ const SEFAZ_PATH = "/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx";
 const SOAP_ACTION = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/nfeDistDFeInteresse";
 const MAX_PAGINAS = 20;
 
+// Regra da SEFAZ: depois de uma consulta que volta 137 ("nenhum documento"),
+// tem que esperar 1 HORA antes de consultar de novo - senao vem 656 (Consumo
+// Indevido). O agendamento de 1h30 respeita isso, mas o botao "Sincronizar
+// Agora" do financeiro podia disparar uma consulta poucos minutos depois de
+// outra. Agora, se a ultima consulta de distribuicao foi ha menos que isso, o
+// script PULA so' a consulta (a parte de ciencia continua rodando normal).
+const MIN_MINUTOS_ENTRE_CONSULTAS = 61;
+
+// Prazo legal da Ciencia da Operacao: 10 dias a partir da autorizacao da NFe.
+// Depois disso a SEFAZ recusa sempre - nao adianta tentar (e gastar cota).
+// Usa 9 dias de margem.
+const CIENCIA_PRAZO_DIAS = 9;
+
 function extractTag(xml, tag) {
     const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, "i"));
     return m ? m[1].trim() : null;
@@ -94,8 +107,22 @@ async function main() {
     const pfxBuffer = Buffer.from(pfxBase64, "base64");
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const { data: controle } = await supabase.from("sefaz_nsu_controle").select("ultimo_nsu").eq("cnpj", cnpj).maybeSingle();
+    const { data: controle, error: erroControle } = await supabase.from("sefaz_nsu_controle").select("ultimo_nsu, atualizado_em").eq("cnpj", cnpj).maybeSingle();
+    if (erroControle) {
+        // Sem saber o ultimo NSU, consultar com "0" baixaria tudo de novo e
+        // gastaria cota a toa. Melhor parar aqui.
+        console.error("Erro lendo sefaz_nsu_controle:", erroControle.message);
+        process.exit(1);
+    }
     let ultNSU = controle?.ultimo_nsu || "0";
+
+    const minutosDesdeUltimaConsulta = controle?.atualizado_em
+        ? (Date.now() - new Date(controle.atualizado_em).getTime()) / 60000
+        : Infinity;
+    const pularConsulta = minutosDesdeUltimaConsulta < MIN_MINUTOS_ENTRE_CONSULTAS;
+    if (pularConsulta) {
+        console.log(`Ultima consulta de distribuicao foi ha ${Math.round(minutosDesdeUltimaConsulta)} min (minimo ${MIN_MINUTOS_ENTRE_CONSULTAS}) - pulando a consulta pra nao levar 656. A parte de ciencia roda normal.`);
+    }
 
     const { data: unidades } = await supabase.from("financeiro_centros_custo").select("id, cnpj");
     const mapaCnpjUnidade = new Map();
@@ -111,12 +138,16 @@ async function main() {
     // (process.exitCode), sem interromper o resto do script (process.exit
     // mataria tudo na hora, inclusive a parte da ciencia logo abaixo).
     let consultaComErro = false;
+    // Se gravar no Supabase falhar, o NSU NAO pode avancar - senao essas notas
+    // nunca mais voltam na distribuicao (a SEFAZ so' entrega cada NSU uma vez
+    // por consulta sequencial). Ver uso mais abaixo.
+    let gravacaoFalhou = false;
     // Chaves que a propria consulta de distribuicao revelou que JA TEM
     // manifestacao registrada na SEFAZ (de qualquer sistema - ver comentario
     // mais abaixo, onde o resEvento e' lido).
     const chavesComManifestacaoNaDistribuicao = new Set();
 
-    while (paginas < MAX_PAGINAS) {
+    while (!pularConsulta && paginas < MAX_PAGINAS) {
         // Pausa pequena entre paginas (pedido do Italo, 28/10/2026 - mesma ideia
         // da pausa na ciencia logo abaixo): se tiver bastante nota nova pra trazer,
         // esse loop pode rodar varias paginas seguidas - sem pausa, isso vira uma
@@ -191,8 +222,10 @@ async function main() {
                                 data_emissao: (extractTag(xmlDoc, "dhEmi") || "").slice(0, 10) || null,
                                 centro_custo_id: centroCustoId,
                             }, { onConflict: "chave_acesso", ignoreDuplicates: false });
-                        if (erroXmlCompleto) console.error("Erro gravando xml completo:", erroXmlCompleto.message);
-                        else totalGravados++;
+                        if (erroXmlCompleto) {
+                            console.error("Erro gravando xml completo:", chaveCompleta, erroXmlCompleto.message);
+                            gravacaoFalhou = true;
+                        } else totalGravados++;
                     }
                     continue;
                 }
@@ -209,7 +242,9 @@ async function main() {
                 // 210210 Ciencia, 210220 Desconhecimento, 210240 Nao Realizada)
                 // cumpre a obrigacao do destinatario - nao precisa ser
                 // especificamente Ciencia pra poder pular o envio.
-                if (schema.startsWith("resEvento")) {
+                // Eventos podem vir resumidos (resEvento) ou completos
+                // (procEventoNFe) - os dois tem chNFe e tpEvento.
+                if (schema.startsWith("resEvento") || schema.startsWith("procEventoNFe")) {
                     const chaveEvento = extractTag(xmlDoc, "chNFe") || "";
                     const tpEvento = extractTag(xmlDoc, "tpEvento") || "";
                     const TIPOS_MANIFESTACAO = ["210200", "210210", "210220", "210240"];
@@ -238,24 +273,45 @@ async function main() {
                     xml_raw: xmlDoc,
                 });
             } catch (e) {
+                // docZip corrompido/ilegivel: registra, mas nao trava o NSU
+                // (tentar de novo daria o mesmo erro pra sempre).
                 console.error("Erro processando um docZip:", String(e));
             }
         }
 
         if (linhas.length) {
             const { error } = await supabase.from("nfecloud_documentos").upsert(linhas, { onConflict: "chave_acesso", ignoreDuplicates: false });
-            if (error) console.error("Erro gravando no Supabase:", error.message);
-            else totalGravados += linhas.length;
+            if (error) {
+                console.error("Erro gravando no Supabase:", error.message);
+                gravacaoFalhou = true;
+            } else totalGravados += linhas.length;
+        }
+
+        if (gravacaoFalhou) {
+            // Nao avanca o NSU: a proxima execucao pede essa mesma pagina de
+            // novo (o upsert e' por chave_acesso, entao nao duplica nada).
+            console.error("Gravacao no Supabase falhou - NSU mantido em", ultNSU, "pra nao perder notas.");
+            consultaComErro = true;
+            process.exitCode = 1;
+            break;
         }
 
         ultNSU = novoUltNSU;
         if (BigInt(novoUltNSU) >= BigInt(maxNSU)) break;
     }
 
-    await supabase.from("sefaz_nsu_controle").upsert(
-        { cnpj, ultimo_nsu: ultNSU, atualizado_em: new Date().toISOString() },
-        { onConflict: "cnpj" }
-    );
+    // So' grava o controle quando a consulta realmente rodou (inclusive com
+    // erro/656 - assim o proximo clique no botao tambem respeita o intervalo).
+    if (!pularConsulta) {
+        const { error: erroSalvarNsu } = await supabase.from("sefaz_nsu_controle").upsert(
+            { cnpj, ultimo_nsu: ultNSU, atualizado_em: new Date().toISOString() },
+            { onConflict: "cnpj" }
+        );
+        if (erroSalvarNsu) {
+            console.error("Erro salvando ultimo NSU:", erroSalvarNsu.message);
+            process.exitCode = 1;
+        }
+    }
 
     // Antes de tentar mandar Ciencia da Operacao, marca como "ja resolvido"
     // (sem gastar requisicao nenhuma) qualquer chave que a propria
@@ -277,6 +333,30 @@ async function main() {
             .select("chave_acesso");
         if (erroJaManifestadas) console.error("Erro marcando notas ja manifestadas:", erroJaManifestadas.message);
         else jaManifestadasForaDoNossoSistema = (atualizadas || []).length;
+    }
+
+    // Se a SEFAZ ja liberou o XML COMPLETO (procNFe) de uma nota, e' porque ela
+    // JA tem manifestacao registrada pro nosso CNPJ (feita por qualquer
+    // sistema). Marca essas como resolvidas sem gastar nenhuma requisicao.
+    // Antes isso nao era feito, e depois de 48h o script mandava Ciencia pra
+    // notas ja manifestadas - se a manifestacao delas fosse a final
+    // (Confirmacao), a SEFAZ recusa a Ciencia, a nota virava "erro" e era
+    // tentada de novo toda execucao, gastando cota pra nada.
+    let jaComXmlCompleto = 0;
+    {
+        const { data: atualizadas, error: erroXml } = await supabase
+            .from("nfecloud_documentos")
+            .update({
+                ciencia_status: "enviado",
+                ciencia_enviada_em: new Date().toISOString(),
+                ciencia_detalhe: "Manifestacao ja existia na SEFAZ (XML completo ja liberado - provavelmente feita pelo NFeCloud ou outro sistema)",
+            })
+            .eq("tipo", "NFe")
+            .not("xml_completo", "is", null)
+            .or("ciencia_status.is.null,ciencia_status.eq.erro")
+            .select("chave_acesso");
+        if (erroXml) console.error("Erro marcando notas com XML completo:", erroXml.message);
+        else jaComXmlCompleto = (atualizadas || []).length;
     }
 
     // Manda "Ciencia da Operacao" pras NFe que ainda nao foram manifestadas -
@@ -313,12 +393,17 @@ async function main() {
         // notas por falta de manifestacao acumulada.
         const CIENCIA_SO_APOS_HORAS = 48;
         const corteCiencia = new Date(Date.now() - CIENCIA_SO_APOS_HORAS * 60 * 60 * 1000).toISOString();
+        // data_emissao e' "AAAA-MM-DD" - compara so' a data.
+        const limitePrazo = new Date(Date.now() - CIENCIA_PRAZO_DIAS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const { data: pendentes, error: erroPendentes } = await supabase
             .from("nfecloud_documentos")
             .select("chave_acesso")
             .eq("tipo", "NFe")
             .or("ciencia_status.is.null,ciencia_status.eq.erro")
+            .is("xml_completo", null) // XML completo = ja manifestada (ver acima)
             .lt("criado_em", corteCiencia)
+            .gte("data_emissao", limitePrazo) // fora do prazo de 10 dias a SEFAZ recusa sempre
+            .order("data_emissao", { ascending: true }) // as mais perto de vencer o prazo primeiro
             .limit(MAX_CIENCIAS_POR_EXECUCAO);
 
         if (erroPendentes) {
@@ -326,6 +411,7 @@ async function main() {
         } else if (pendentes && pendentes.length) {
             const { keyPem, certPem } = extrairChavePemECertPem(pfxBuffer, senha);
             let primeiraCiencia = true;
+            let falhasSeguidas = 0;
             for (const doc of pendentes) {
                 // Pausa pequena entre cada ciencia (pedido do Italo, 28/10/2026): antes
                 // mandava as ate 50 ciencias uma atras da outra sem nenhum intervalo -
@@ -357,6 +443,21 @@ async function main() {
                     })
                     .eq("chave_acesso", doc.chave_acesso);
                 if (erroUpdate) console.error("Erro gravando status da ciencia:", doc.chave_acesso, erroUpdate.message);
+
+                // Freios pra nao insistir quando o problema e' geral (nao da nota):
+                // - 656 = SEFAZ bloqueou por consumo indevido: cada tentativa a
+                //   mais so' estende o bloqueio. Para na hora.
+                // - 3 falhas seguidas de qualquer tipo (rede, TLS, HTTP, schema):
+                //   quase certeza que todas as outras vao falhar igual.
+                if (resultado.cStat === "656") {
+                    console.error("SEFAZ devolveu 656 (Consumo Indevido) na ciencia - parando o lote por aqui.");
+                    break;
+                }
+                falhasSeguidas = resultado.ok ? 0 : falhasSeguidas + 1;
+                if (falhasSeguidas >= 3) {
+                    console.error("3 ciencias seguidas falharam - parando o lote por aqui. Ultimo erro:", detalhe.slice(0, 300));
+                    break;
+                }
             }
         }
     } catch (e) {
@@ -369,11 +470,13 @@ async function main() {
         processados: totalProcessados,
         gravados: totalGravados,
         paginas,
+        consultaPulada: pularConsulta,
         ultNSU,
         ultimoStatus: `${ultimoCStat} - ${ultimoXMotivo}`,
         cienciasEnviadas,
         cienciasComErro,
         jaManifestadasForaDoNossoSistema,
+        jaComXmlCompleto,
     }));
 }
 
