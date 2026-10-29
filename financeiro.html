@@ -10212,7 +10212,7 @@ window.renderizarNotasRecebidas = function(manterPagina) {
                     <option value="Ignorada" ${status === 'Ignorada' ? 'selected' : ''}>Ignorada</option>
                 </select>
             </td>
-            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}</div></td>
+            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${(n.tipo === 'NFe' && temXmlCompleto && sit.chave === 'autorizada' && status !== 'Lançada') ? `<button class="nf-arq" style="border-color:var(--cor-acento); color:var(--cor-acento);" title="Lançar essa nota no sistema (Almoxarifado)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
         </tr>`;
     }).join('');
     window._nfeConferirSelos();
@@ -10691,6 +10691,78 @@ window.baixarDanfeNotaNFeCloud = async function(id) {
         return;
     }
     pdf.save(`DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`);
+};
+
+
+// ---------------------------------------------------------------------
+// LANÇAR NOTA RECEBIDA (29/10/2026): do botão "Lançar" da linha, pergunta o
+// destino. Almoxarifado = abre o "Lançar Nota de Almoxarifado" já preenchido com o
+// XML que está na tabela (fornecedor, nº, data, itens) e com o DANFE em PDF
+// anexado sozinho. Nada é salvo até a pessoa conferir e clicar em Salvar Nota.
+// ---------------------------------------------------------------------
+window.lancarNotaRecebida = function(id) {
+    const antigo = document.getElementById('modal-lancar-nota-recebida');
+    if (antigo) antigo.remove();
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n) return;
+    const html = `
+    <div id="modal-lancar-nota-recebida" class="modal-overlay" style="z-index: 100040;">
+        <div class="glass-card" style="width:100%; max-width:460px; border-top:4px solid var(--cor-acento); padding:25px; position:relative;">
+            <button type="button" onclick="document.getElementById('modal-lancar-nota-recebida').remove()" style="position:absolute; top:12px; right:15px; background:none; border:none; color:var(--cor-texto-secundario); cursor:pointer; font-size:1.4rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="margin:0 0 6px; color:var(--cor-acento);">Lançar nota ${String(n.numero || '').replace(/[<>&"]/g, '')}</h3>
+            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 18px;">Onde você quer lançar essa nota?</p>
+            <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:14px 16px; margin-bottom:10px;" onclick="window.lancarNotaNoAlmoxarifado('${id}')">
+                <i class="fa-solid fa-boxes-stacked" style="color:var(--cor-acento);"></i>
+                <span style="text-align:left;">Almoxarifado<br><span style="font-weight:normal; font-size:0.75rem; color:var(--cor-texto-secundario);">Preenche itens e anexa o PDF sozinho</span></span>
+            </button>
+            <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:14px 16px; opacity:.5; cursor:default;" disabled>
+                <i class="fa-solid fa-building"></i>
+                <span style="text-align:left;">Centro de Custo<br><span style="font-weight:normal; font-size:0.75rem;">Em breve</span></span>
+            </button>
+        </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+};
+
+window.lancarNotaNoAlmoxarifado = async function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    const caixa = document.getElementById('modal-lancar-nota-recebida');
+    if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
+    if (caixa) caixa.remove();
+    try {
+        await window.abrirModalNotaAlmoxarifado();
+        window.__almoxOrigemNotaId = id; // quando salvar, a nota recebida vira "Lançada"
+
+        // Unidade (a nota já sabe de qual unidade é, pelo CNPJ do destinatário)
+        const selUn = document.getElementById('almox-unidade');
+        if (selUn && n.centro_custo_id) selUn.value = n.centro_custo_id;
+
+        // XML -> mesmo preenchimento automático que já existia (fornecedor, nº, data, itens).
+        // O texto já está decodificado no banco, então a declaração de encoding vira utf-8.
+        const xmlTexto = String(n.xml_completo).replace(/encoding=["'][^"']*["']/i, 'encoding="utf-8"');
+        await window.preencherAlmoxarifadoPorXmlNFe(new File([xmlTexto], `NFe_${n.numero || id}.xml`, { type: 'text/xml' }));
+
+        // PDF (DANFE) gerado aqui mesmo e anexado na nota
+        try {
+            if (window.jspdf && window.jspdf.jsPDF) {
+                const d = window.gerarDadosDanfeDeXml(n.xml_completo);
+                const assinatura = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+                if (assinatura.ok) {
+                    const pdf = window.montarPdfDanfe(d, { assinatura, situacao: (n.__situacao && n.__situacao.chave) || 'autorizada' });
+                    const arq = new File([pdf.output('blob')], `DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`, { type: 'application/pdf' });
+                    window.adicionarAnexosSelecionados('almox-anexo', [arq]);
+                } else {
+                    mostrarAlerta('A assinatura digital dessa nota não conferiu, então o PDF não foi anexado sozinho. Confira a nota antes de lançar.', 'erro');
+                }
+            }
+        } catch (ePdf) {
+            console.error('Lançar nota: PDF não anexado -', ePdf);
+            mostrarAlerta('Não consegui anexar o PDF sozinho (' + (ePdf && ePdf.message ? ePdf.message : ePdf) + '). Dá pra anexar na mão.', 'erro');
+        }
+    } catch (e) {
+        console.error('Erro abrindo lançamento no Almoxarifado:', e);
+        mostrarAlerta('Não consegui preparar o lançamento: ' + (e && e.message ? e.message : e), 'erro');
+    }
 };
 
 window.montarPdfDanfe = function(d, opcoes) {
@@ -11783,6 +11855,7 @@ window.filtrarEstoqueAlmoxarifadoLocal = function() {
 };
 
 window.abrirModalNotaAlmoxarifado = async function(id = null) {
+    window.__almoxOrigemNotaId = null;
     if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
     if (typeof todasCategoriasGlobais === 'undefined' || todasCategoriasGlobais.length === 0) await carregarCategorias(true);
     if (todosFornecedoresGlobais.length === 0) await carregarFornecedores(true);
@@ -12263,7 +12336,19 @@ async function salvarNotaAlmoxarifado(e) {
 
         mostrarAlerta('Nota de almoxarifado salva! Entradas geradas automaticamente no Estoque da unidade.', 'sucesso');
         document.getElementById('modal-almoxarifado').remove();
-        carregarAlmoxarifado();
+        // Veio do botão "Lançar" da tela Notas Fiscais: marca a nota recebida como Já Lançada
+        if (window.__almoxOrigemNotaId) {
+            const idOrigem = window.__almoxOrigemNotaId;
+            window.__almoxOrigemNotaId = null;
+            const { error: errSt } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', idOrigem);
+            if (!errSt) {
+                const nOrig = (window.__notasNFeCloudPorId || {})[idOrigem];
+                if (nOrig) nOrig.status_revisao = 'Lançada';
+                if (window._nfAtualizarKpis) window._nfAtualizarKpis();
+                if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true);
+            }
+        }
+        try { carregarAlmoxarifado(); } catch (_) {}
     } catch (err) {
         mostrarAlerta('Erro ao salvar: ' + err.message, 'erro');
         btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Salvar Nota';
