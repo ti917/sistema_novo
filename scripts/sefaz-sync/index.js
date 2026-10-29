@@ -194,6 +194,15 @@ async function main() {
         console.log(`Ultima consulta de distribuicao foi ha ${Math.round(minutosDesdeUltimaConsulta)} min (minimo ${MIN_MINUTOS_ENTRE_CONSULTAS}) - pulando a consulta pra nao levar 656. A parte de ciencia roda normal.`);
     }
 
+    // Coluna situacao_sefaz (sql_extra/sefaz_situacao_cancelada.sql) guarda
+    // "cancelada" quando a SEFAZ avisa que o fornecedor cancelou a nota. O
+    // resumo (resNFe) chega uma vez so' e nunca e' atualizado - se a nota for
+    // cancelada depois, o que chega e' um EVENTO de cancelamento separado.
+    // Se a coluna ainda nao existir, so' essa parte fica desligada.
+    const { error: erroColSituacao } = await supabase.from("nfecloud_documentos").select("situacao_sefaz").limit(1);
+    const temColSituacao = !erroColSituacao;
+    if (!temColSituacao) console.error("Aviso: coluna situacao_sefaz nao existe (rodar sql_extra/sefaz_situacao_cancelada.sql) - cancelamentos nao serao marcados.");
+
     const { data: unidades } = await supabase.from("financeiro_centros_custo").select("id, cnpj");
     const mapaCnpjUnidade = new Map();
     (unidades || []).forEach((u) => { if (u.cnpj) mapaCnpjUnidade.set(String(u.cnpj).replace(/\D/g, ""), u.id); });
@@ -216,6 +225,8 @@ async function main() {
     // manifestacao registrada na SEFAZ (de qualquer sistema - ver comentario
     // mais abaixo, onde o resEvento e' lido).
     const chavesComManifestacaoNaDistribuicao = new Set();
+    // Chaves que a distribuicao mostrou que foram CANCELADAS pelo emitente.
+    const chavesCanceladas = new Set();
 
     while (!pularConsulta && paginas < MAX_PAGINAS) {
         // Pausa pequena entre paginas (pedido do Italo, 28/10/2026 - mesma ideia
@@ -289,6 +300,10 @@ async function main() {
                     const TIPOS_MANIFESTACAO = ["210200", "210210", "210220", "210240"];
                     if (chaveEvento && TIPOS_MANIFESTACAO.includes(tpEvento)) {
                         chavesComManifestacaoNaDistribuicao.add(chaveEvento);
+                    }
+                    // 110111 = Cancelamento | 110112 = Cancelamento por substituicao
+                    if (chaveEvento && (tpEvento === "110111" || tpEvento === "110112")) {
+                        chavesCanceladas.add(chaveEvento);
                     }
                     continue;
                 }
@@ -374,6 +389,17 @@ async function main() {
         else jaManifestadasForaDoNossoSistema = (atualizadas || []).length;
     }
 
+    let canceladasMarcadas = 0;
+    if (temColSituacao && chavesCanceladas.size) {
+        const { data: canc, error: erroCanc } = await supabase
+            .from("nfecloud_documentos")
+            .update({ situacao_sefaz: "cancelada" })
+            .in("chave_acesso", Array.from(chavesCanceladas))
+            .select("chave_acesso");
+        if (erroCanc) console.error("Erro marcando notas canceladas:", erroCanc.message);
+        else canceladasMarcadas += (canc || []).length;
+    }
+
     // ---- Recuperacao do XML completo por chave (ver RECUPERA_XML_*) ----
     let xmlRecuperados = 0, xmlRecuperacaoTentativas = 0, xmlRecuperacaoStatus = "nao rodou";
     if (pularConsulta) {
@@ -390,7 +416,7 @@ async function main() {
             const limiteCriacao = new Date(agoraMs - 2 * 3600 * 1000).toISOString();
             const { data: semXml, error: erroSemXml } = await supabase
                 .from("nfecloud_documentos")
-                .select("chave_acesso, ciencia_status, xml_completo_tentado_em")
+                .select(temColSituacao ? "chave_acesso, ciencia_status, xml_completo_tentado_em, situacao_sefaz" : "chave_acesso, ciencia_status, xml_completo_tentado_em")
                 .eq("tipo", "NFe")
                 .is("xml_completo", null)
                 .gte("data_emissao", limiteEmissao)
@@ -410,6 +436,7 @@ async function main() {
                 // (ciencia "enviado"), depois as outras - mantendo a ordem
                 // de data dentro de cada grupo (sort do JS e' estavel).
                 const fila = (semXml || [])
+                    .filter((r) => r.situacao_sefaz !== "cancelada") // cancelada nunca vai ter XML pra baixar
                     .slice()
                     .sort((a, b) => (b.ciencia_status === "enviado") - (a.ciencia_status === "enviado"))
                     .slice(0, RECUPERA_XML_POR_EXECUCAO);
@@ -451,6 +478,16 @@ async function main() {
                                 console.error("Recuperacao de XML: docZip ilegivel na chave", chave, String(e));
                             }
                         }
+                    }
+                    // 653 = "NF-e Cancelada, arquivo indisponivel para download":
+                    // o emitente cancelou. Marca e nunca mais pede essa nota.
+                    if (cStatChave === "653" && temColSituacao) {
+                        const { error: erro653 } = await supabase
+                            .from("nfecloud_documentos")
+                            .update({ situacao_sefaz: "cancelada" })
+                            .eq("chave_acesso", chave);
+                        if (erro653) console.error("Erro marcando nota cancelada:", chave, erro653.message);
+                        else canceladasMarcadas++;
                     }
                     if (!veioCompleto) {
                         // Ainda sem manifestacao (veio so' o resumo) ou a SEFAZ
@@ -531,16 +568,22 @@ async function main() {
         const corteCiencia = new Date(Date.now() - CIENCIA_SO_APOS_HORAS * 60 * 60 * 1000).toISOString();
         // data_emissao e' "AAAA-MM-DD" - compara so' a data.
         const limitePrazo = new Date(Date.now() - CIENCIA_PRAZO_DIAS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-        const { data: pendentes, error: erroPendentes } = await supabase
+        const { data: pendentesBrutos, error: erroPendentes } = await supabase
             .from("nfecloud_documentos")
-            .select("chave_acesso")
+            .select(temColSituacao ? "chave_acesso, situacao_sefaz" : "chave_acesso")
             .eq("tipo", "NFe")
             .or("ciencia_status.is.null,ciencia_status.eq.erro")
             .is("xml_completo", null) // XML completo = ja manifestada (ver acima)
             .lt("criado_em", corteCiencia)
             .gte("data_emissao", limitePrazo) // fora do prazo de 10 dias a SEFAZ recusa sempre
             .order("data_emissao", { ascending: true }) // as mais perto de vencer o prazo primeiro
-            .limit(MAX_CIENCIAS_POR_EXECUCAO);
+            .limit(200);
+        // Nota cancelada nao recebe Ciencia (a SEFAZ recusa) - filtrado aqui
+        // e nao na consulta porque "diferente de cancelada" no banco tambem
+        // descartaria as linhas com situacao vazia.
+        const pendentes = (pendentesBrutos || [])
+            .filter((r) => r.situacao_sefaz !== "cancelada")
+            .slice(0, MAX_CIENCIAS_POR_EXECUCAO);
 
         if (erroPendentes) {
             console.error("Erro buscando notas pendentes de ciencia:", erroPendentes.message);
@@ -613,6 +656,7 @@ async function main() {
         cienciasComErro,
         jaManifestadasForaDoNossoSistema,
         jaComXmlCompleto,
+        canceladasMarcadas,
         xmlRecuperados,
         xmlRecuperacaoTentativas,
         xmlRecuperacaoStatus,
