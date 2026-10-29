@@ -160,10 +160,18 @@ async function salvarProcNFe(supabase, xmlDoc, cnpj, centroCustoId) {
             centro_custo_id: centroCustoId,
         }, { onConflict: "chave_acesso", ignoreDuplicates: false });
     if (error) {
-        console.error("Erro gravando xml completo:", chave, error.message);
+        console.error("Erro gravando xml completo:", chaveLog(chave), error.message);
         return { erro: error.message };
     }
     return { chave };
+}
+
+// O repositorio e' publico, entao os logs do GitHub Actions tambem sao: nao
+// escreve a chave de acesso inteira das notas no log - so' os ultimos 8
+// digitos, que bastam pra achar a nota no financeiro.
+function chaveLog(chave) {
+    const c = String(chave || "");
+    return c.length > 8 ? "..." + c.slice(-8) : c;
 }
 
 async function main() {
@@ -467,13 +475,13 @@ async function main() {
                     try {
                         resp = await postSoap(buildEnvelopePorChave(cUFAutor, cnpj, tpAmb, chave), pfxBuffer, senha);
                     } catch (e) {
-                        console.error("Recuperacao de XML: falha de rede na chave", chave, String(e));
+                        console.error("Recuperacao de XML: falha de rede na chave", chaveLog(chave), String(e));
                         xmlRecuperacaoStatus = "parou por falha de rede";
                         break;
                     }
                     const cStatChave = extractTag(resp.texto, "cStat") || "";
                     if (resp.status < 200 || resp.status >= 300) {
-                        console.error("Recuperacao de XML: HTTP", resp.status, "na chave", chave);
+                        console.error("Recuperacao de XML: HTTP", resp.status, "na chave", chaveLog(chave));
                         xmlRecuperacaoStatus = "parou por HTTP " + resp.status;
                         break;
                     }
@@ -492,7 +500,7 @@ async function main() {
                                 const r = await salvarProcNFe(supabase, xmlDoc, cnpj, centroCustoId);
                                 if (r.chave) { veioCompleto = true; xmlRecuperados++; }
                             } catch (e) {
-                                console.error("Recuperacao de XML: docZip ilegivel na chave", chave, String(e));
+                                console.error("Recuperacao de XML: docZip ilegivel na chave", chaveLog(chave), String(e));
                             }
                         }
                     }
@@ -503,20 +511,20 @@ async function main() {
                             .from("nfecloud_documentos")
                             .update({ situacao_sefaz: "cancelada" })
                             .eq("chave_acesso", chave);
-                        if (erro653) console.error("Erro marcando nota cancelada:", chave, erro653.message);
+                        if (erro653) console.error("Erro marcando nota cancelada:", chaveLog(chave), erro653.message);
                         else canceladasMarcadas++;
                     }
                     if (!veioCompleto) {
                         // Ainda sem manifestacao (veio so' o resumo) ou a SEFAZ
                         // recusou por outro motivo: registra a tentativa pra
                         // nao insistir nessa nota antes de 24h.
-                        console.log("Recuperacao de XML: chave", chave, "sem XML completo ainda -", cStatChave, extractTag(resp.texto, "xMotivo") || "");
+                        console.log("Recuperacao de XML: chave", chaveLog(chave), "sem XML completo ainda -", cStatChave, extractTag(resp.texto, "xMotivo") || "");
                     }
                     const { error: erroMarca } = await supabase
                         .from("nfecloud_documentos")
                         .update({ xml_completo_tentado_em: new Date().toISOString() })
                         .eq("chave_acesso", chave);
-                    if (erroMarca) console.error("Recuperacao de XML: erro marcando tentativa:", chave, erroMarca.message);
+                    if (erroMarca) console.error("Recuperacao de XML: erro marcando tentativa:", chaveLog(chave), erroMarca.message);
                 }
             }
         } catch (e) {
@@ -638,7 +646,7 @@ async function main() {
                         ciencia_detalhe: detalhe.slice(0, 1500),
                     })
                     .eq("chave_acesso", doc.chave_acesso);
-                if (erroUpdate) console.error("Erro gravando status da ciencia:", doc.chave_acesso, erroUpdate.message);
+                if (erroUpdate) console.error("Erro gravando status da ciencia:", chaveLog(doc.chave_acesso), erroUpdate.message);
 
                 // Freios pra nao insistir quando o problema e' geral (nao da nota):
                 // - 656 = SEFAZ bloqueou por consumo indevido: cada tentativa a

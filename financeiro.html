@@ -10278,14 +10278,202 @@ window._danfeCode128C = function(digitos) {
     return codigos.map(c => P[c]).join(''); // larguras alternando barra/espaço, começando por barra
 };
 
-window.baixarDanfeNotaNFeCloud = function(id) {
+// =====================================================================
+// CONFERÊNCIA DA ASSINATURA DIGITAL DO XML DA NF-e (29/10/2026)
+//
+// Todo XML de NF-e é assinado digitalmente pelo emitente (XMLDSig: o
+// <Signature> ao lado do <infNFe>). Antes de gerar a DANFE, o sistema
+// confere, tudo aqui no navegador:
+//   1. o "resumo" (hash) do <infNFe> bate com o <DigestValue> assinado -
+//      se alguém mudar QUALQUER coisa na nota (valor, vencimento, CNPJ,
+//      itens), não bate;
+//   2. a assinatura (<SignatureValue>) confere com a chave pública do
+//      certificado que veio no próprio XML;
+//   3. o certificado é do CNPJ do emitente (pelo menos a raiz - os 8
+//      primeiros dígitos - porque filial costuma assinar com o
+//      certificado da matriz).
+// O que isso NÃO faz: validar a cadeia do certificado até a raiz da
+// ICP-Brasil. A prova definitiva continua sendo consultar a chave no
+// portal da SEFAZ.
+//
+// Canonicalização: C14N 1.0 inclusiva (http://www.w3.org/TR/2001/REC-xml-c14n-20010315),
+// que é a exigida pelo Manual de Orientação do Contribuinte.
+// =====================================================================
+window._nfeC14n = function(elApice, elIgnorar) {
+    const XMLNS = 'http://www.w3.org/2000/xmlns/';
+    const escTexto = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
+    const escAttr = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/\t/g, '&#x9;').replace(/\n/g, '&#xA;').replace(/\r/g, '&#xD;');
+    // Namespaces "em escopo" num elemento (dele e dos ancestrais; o mais perto vale).
+    const nsEmEscopo = (el) => {
+        const mapa = {};
+        const cadeia = [];
+        for (let n = el; n && n.nodeType === 1; n = n.parentNode) cadeia.unshift(n);
+        cadeia.forEach(n => {
+            Array.from(n.attributes).forEach(a => {
+                if (a.name === 'xmlns') mapa[''] = a.value;
+                else if (a.name.startsWith('xmlns:')) mapa[a.name.slice(6)] = a.value;
+            });
+        });
+        return mapa;
+    };
+    const partes = [];
+    const visitar = (el, nsPaiRenderizado) => {
+        if (el === elIgnorar) return; // transform "enveloped-signature"
+        const nsAqui = nsEmEscopo(el);
+        // Declarações a escrever: no ápice, todas as em escopo; nos filhos,
+        // só as que mudaram em relação ao pai.
+        const decls = [];
+        Object.keys(nsAqui).forEach(pfx => {
+            if (pfx === 'xml') return;
+            const valor = nsAqui[pfx];
+            const valorPai = Object.prototype.hasOwnProperty.call(nsPaiRenderizado, pfx) ? nsPaiRenderizado[pfx] : (pfx === '' ? '' : undefined);
+            if (pfx === '' && valor === '' && (valorPai === '' || valorPai === undefined)) return;
+            if (valor !== valorPai) decls.push([pfx, valor]);
+        });
+        decls.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        const attrs = Array.from(el.attributes)
+            .filter(a => a.name !== 'xmlns' && !a.name.startsWith('xmlns:'))
+            .map(a => ({ uri: a.namespaceURI && a.namespaceURI !== XMLNS ? a.namespaceURI : '', local: a.localName || a.name, nome: a.name, valor: a.value }))
+            .sort((a, b) => (a.uri !== b.uri ? (a.uri < b.uri ? -1 : 1) : (a.local < b.local ? -1 : a.local > b.local ? 1 : 0)));
+        partes.push('<' + el.nodeName);
+        decls.forEach(([pfx, valor]) => partes.push(pfx === '' ? ` xmlns="${escAttr(valor)}"` : ` xmlns:${pfx}="${escAttr(valor)}"`));
+        attrs.forEach(a => partes.push(` ${a.nome}="${escAttr(a.valor)}"`));
+        partes.push('>');
+        const nsRenderizado = Object.assign({}, nsPaiRenderizado);
+        decls.forEach(([pfx, valor]) => { nsRenderizado[pfx] = valor; });
+        Array.from(el.childNodes).forEach(f => {
+            if (f.nodeType === 1) visitar(f, nsRenderizado);
+            else if (f.nodeType === 3 || f.nodeType === 4) partes.push(escTexto(f.nodeValue));
+            else if (f.nodeType === 7) partes.push(`<?${f.target}${f.data ? ' ' + f.data : ''}?>`);
+            // comentários (8) ficam de fora: C14N "sem comentários"
+        });
+        partes.push('</' + el.nodeName + '>');
+    };
+    visitar(elApice, {});
+    return partes.join('');
+};
+
+window.verificarAssinaturaNFe = async function(xmlString, cnpjEmitente) {
+    const DSIG = 'http://www.w3.org/2000/09/xmldsig#';
+    const falha = (motivo) => ({ ok: false, motivo });
+    try {
+        if (!window.crypto || !window.crypto.subtle) return falha('Este navegador não permite conferir assinatura digital (precisa abrir o sistema por https).');
+        const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
+        if (doc.getElementsByTagName('parsererror').length) return falha('O XML está corrompido (não deu pra ler).');
+        const infNFe = doc.getElementsByTagName('infNFe')[0];
+        if (!infNFe) return falha('O XML não tem o bloco infNFe.');
+        const idNota = infNFe.getAttribute('Id') || '';
+        // A assinatura da NOTA é a irmã do infNFe (dentro de <NFe>). O
+        // protocolo (protNFe) pode ter assinatura própria da SEFAZ - essa
+        // não é a que interessa aqui.
+        const sigs = Array.from(doc.getElementsByTagNameNS(DSIG, 'Signature'));
+        const sig = sigs.find(s => s.parentNode === infNFe.parentNode) || null;
+        if (!sig) return falha('O XML não tem assinatura digital do emitente.');
+        const pegar = (raiz, nome) => raiz.getElementsByTagNameNS(DSIG, nome)[0] || null;
+        const signedInfo = pegar(sig, 'SignedInfo');
+        const reference = signedInfo && pegar(signedInfo, 'Reference');
+        if (!signedInfo || !reference) return falha('Assinatura incompleta (sem SignedInfo/Reference).');
+        if ((reference.getAttribute('URI') || '') !== '#' + idNota) return falha('A assinatura não se refere a esta nota.');
+
+        const algC14n = (pegar(signedInfo, 'CanonicalizationMethod') || {}).getAttribute?.('Algorithm') || '';
+        if (algC14n !== 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315') return falha('Formato de assinatura não suportado (' + algC14n + ').');
+        const algDigest = (pegar(reference, 'DigestMethod') || {}).getAttribute?.('Algorithm') || '';
+        const algAssin = (pegar(signedInfo, 'SignatureMethod') || {}).getAttribute?.('Algorithm') || '';
+        const HASH = { 'http://www.w3.org/2000/09/xmldsig#sha1': 'SHA-1', 'http://www.w3.org/2001/04/xmlenc#sha256': 'SHA-256' };
+        const ASSIN = { 'http://www.w3.org/2000/09/xmldsig#rsa-sha1': 'SHA-1', 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256': 'SHA-256' };
+        if (!HASH[algDigest] || !ASSIN[algAssin]) return falha('Algoritmo de assinatura não suportado.');
+
+        const b64ParaBytes = (b64) => { const bin = atob(String(b64 || '').replace(/\s+/g, '')); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+        const bytesParaB64 = (buf) => { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
+        const utf8 = (t) => new TextEncoder().encode(t);
+
+        // 1. Hash do infNFe x DigestValue
+        const digestCalculado = bytesParaB64(await crypto.subtle.digest(HASH[algDigest], utf8(window._nfeC14n(infNFe, sig))));
+        const digestAssinado = ((pegar(reference, 'DigestValue') || {}).textContent || '').replace(/\s+/g, '');
+        if (digestCalculado !== digestAssinado) return falha('O conteúdo da nota foi ALTERADO depois de assinado pelo fornecedor (o resumo digital não bate).');
+
+        // 2. Assinatura com a chave pública do certificado
+        const certB64 = ((pegar(sig, 'X509Certificate') || {}).textContent || '');
+        if (!certB64.trim()) return falha('A assinatura não traz o certificado do emitente.');
+        const certDer = b64ParaBytes(certB64);
+        // Lê o DER do X.509 só até achar a chave pública (SubjectPublicKeyInfo).
+        const tlv = (b, p) => {
+            const tag = b[p]; let len = b[p + 1], cab = 2;
+            if (len & 0x80) { const n = len & 0x7f; len = 0; for (let i = 0; i < n; i++) len = (len * 256) + b[p + 2 + i]; cab = 2 + n; }
+            return { tag, ini: p, conteudo: p + cab, fim: p + cab + len };
+        };
+        const cert = tlv(certDer, 0);
+        const tbs = tlv(certDer, cert.conteudo);
+        let p = tbs.conteudo;
+        let campo = tlv(certDer, p);
+        if (campo.tag === 0xa0) { p = campo.fim; campo = tlv(certDer, p); } // versão
+        for (let i = 0; i < 5; i++) { p = campo.fim; campo = tlv(certDer, p); } // serial, alg, emissor, validade, titular
+        const spki = certDer.slice(campo.ini, campo.fim);
+        const chave = await crypto.subtle.importKey('spki', spki, { name: 'RSASSA-PKCS1-v1_5', hash: ASSIN[algAssin] }, false, ['verify']);
+        const assinatura = b64ParaBytes((pegar(sig, 'SignatureValue') || {}).textContent || '');
+        const confere = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', chave, assinatura, utf8(window._nfeC14n(signedInfo, null)));
+        if (!confere) return falha('A assinatura digital NÃO confere com o certificado do XML.');
+
+        // 3. Certificado do CNPJ do emitente (e-CNPJ da ICP-Brasil traz o
+        // CNPJ em texto no titular e/ou na extensão de nome alternativo).
+        const cnpj = String(cnpjEmitente || '').replace(/\D/g, '');
+        let textoCert = '';
+        for (let i = 0; i < certDer.length; i++) textoCert += String.fromCharCode(certDer[i]);
+        const cnpjConfere = cnpj.length === 14 && (textoCert.includes(cnpj) || textoCert.includes(cnpj.slice(0, 8)));
+        if (!cnpjConfere) return { ok: false, motivo: 'A assinatura é válida, mas o certificado NÃO é do CNPJ do emitente da nota.' };
+        return { ok: true, motivo: 'Assinatura digital do emitente conferida: o XML não foi alterado desde que o fornecedor assinou.' };
+    } catch (e) {
+        return falha('Não consegui conferir a assinatura (' + (e && e.message ? e.message : e) + ').');
+    }
+};
+
+// Janela de aviso quando a assinatura não confere: o padrão é NÃO gerar.
+window._danfeAvisoAssinatura = function(motivo, chave) {
+    return new Promise((resolver) => {
+        document.getElementById('modal-aviso-assinatura-nfe')?.remove();
+        const esc = (t) => String(t || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const div = document.createElement('div');
+        div.id = 'modal-aviso-assinatura-nfe';
+        div.className = 'modal-overlay';
+        div.style.zIndex = '100060';
+        div.innerHTML = `
+            <div class="modal-content glass-card" style="max-width:560px; border:2px solid #ff4757; padding:28px;">
+                <h3 style="margin:0 0 12px; color:#ff4757;"><i class="fa-solid fa-shield-halved"></i> Atenção: não pague esta nota sem conferir</h3>
+                <p style="color: var(--cor-texto-principal); font-size:0.92rem; line-height:1.55; margin:0 0 10px;">${esc(motivo)}</p>
+                <p style="color: var(--cor-texto-secundario); font-size:0.85rem; line-height:1.55; margin:0 0 18px;">Antes de pagar, consulte a chave no portal nacional da NF-e (www.nfe.fazenda.gov.br → Consultar NF-e) e compare valor, vencimento e CNPJ com o boleto. Avise o TI.</p>
+                <div style="font-family:monospace; font-size:0.8rem; color: var(--cor-texto-secundario); background: var(--cor-fundo-caixa); padding:8px 10px; border-radius:6px; margin-bottom:20px; word-break:break-all;">${esc(String(chave || '').replace(/(\d{4})(?=\d)/g, '$1 '))}</div>
+                <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+                    <button type="button" class="btn-secondary" data-r="gerar" style="border-color:#ff4757; color:#ff4757;">Gerar PDF mesmo assim (marcado)</button>
+                    <button type="button" class="btn-success" data-r="cancelar" style="background: var(--cor-acento); color:#000;">Não gerar</button>
+                </div>
+            </div>`;
+        div.addEventListener('click', (ev) => {
+            const r = ev.target.closest('[data-r]')?.dataset.r || (ev.target === div ? 'cancelar' : null);
+            if (!r) return;
+            div.remove();
+            resolver(r === 'gerar');
+        });
+        document.body.appendChild(div);
+    });
+};
+
+window.baixarDanfeNotaNFeCloud = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
     if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
     let pdf, d;
     try {
         d = window.gerarDadosDanfeDeXml(n.xml_completo);
-        pdf = window.montarPdfDanfe(d);
+        // Confere a assinatura digital do emitente ANTES de gerar. Se não
+        // conferir, o padrão é não gerar; se a pessoa insistir, o PDF sai
+        // com marca vermelha em todas as folhas.
+        const assinatura = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+        if (!assinatura.ok) {
+            console.warn('DANFE: assinatura do XML não conferiu -', d.chave, assinatura.motivo);
+            const gerarMesmoAssim = await window._danfeAvisoAssinatura(assinatura.motivo, d.chave);
+            if (!gerarMesmoAssim) return;
+        }
+        pdf = window.montarPdfDanfe(d, { assinatura });
     } catch (e) {
         console.error('Erro gerando DANFE:', e);
         mostrarAlerta('Não consegui gerar o PDF dessa nota: ' + (e && e.message ? e.message : e), 'erro');
@@ -10294,7 +10482,8 @@ window.baixarDanfeNotaNFeCloud = function(id) {
     pdf.save(`DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`);
 };
 
-window.montarPdfDanfe = function(d) {
+window.montarPdfDanfe = function(d, opcoes) {
+    const assinatura = (opcoes && opcoes.assinatura) || null;
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
 
@@ -10435,6 +10624,13 @@ window.montarPdfDanfe = function(d) {
     };
 
     const marcaHomologacao = () => {
+        if (assinatura && !assinatura.ok) {
+            pdf.setTextColor(255, 140, 140);
+            fonte(26, true);
+            pdf.text('ASSINATURA DIGITAL NÃO CONFERE', 105, 150, { align: 'center', angle: 35 });
+            pdf.text('NÃO PAGAR SEM CONSULTAR A SEFAZ', 105, 172, { align: 'center', angle: 35 });
+            pdf.setTextColor(0, 0, 0);
+        }
         if (d.tpAmb !== '2') return;
         pdf.setTextColor(200, 200, 200);
         fonte(40, true);
@@ -10584,6 +10780,22 @@ window.montarPdfDanfe = function(d) {
     pdf.text('RESERVADO AO FISCO', M + 130.8, y + 2.1);
     fonte(6.5, false);
     linhasAdic.forEach((l, i) => pdf.text(l, M + 1, y + 5 + i * 2.7));
+
+    // Resultado da conferência da assinatura digital do emitente
+    if (assinatura) {
+        const agora = new Date();
+        const quando = agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const yRodape = Math.min(y + hAdic + 4, ALT_PAG - 2);
+        fonte(6.5, true);
+        if (assinatura.ok) {
+            pdf.setTextColor(0, 120, 70);
+            pdf.text(`Assinatura digital do emitente conferida pelo sistema em ${quando}: o XML não foi alterado desde a emissão.`, M, yRodape);
+        } else {
+            pdf.setTextColor(200, 0, 0);
+            pdf.text(caber(`ATENÇÃO (${quando}): ${assinatura.motivo}`, W), M, yRodape);
+        }
+        pdf.setTextColor(0, 0, 0);
+    }
 
     // FOLHA x/y em cada página
     const totalFolhas = pdf.internal.getNumberOfPages();
