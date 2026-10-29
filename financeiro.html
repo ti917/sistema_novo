@@ -2193,8 +2193,8 @@
                             <!-- Só relê o que já está gravado no Supabase - não fala com a
                                  SEFAZ, então não tem risco de bloqueio por Consumo Indevido. -->
                             <button id="btn-atualizar-nfecloud" class="nf-btn" title="Rebusca a lista aqui do sistema (não consulta a SEFAZ de novo)" onclick="window.carregarNotasRecebidasNFeCloud()"><i class="fa-solid fa-rotate"></i> Atualizar lista</button>
-                            <input type="file" id="input-zip-nfecloud" accept=".zip" style="display:none;" onchange="window.importarZipNFeCloud(this.files)">
-                            <button id="btn-importar-nfecloud" class="nf-btn" title="Importa o .zip baixado na NFeCloud (não consulta a SEFAZ)" onclick="document.getElementById('input-zip-nfecloud').click()"><i class="fa-solid fa-file-zipper"></i> Importar .zip manual</button>
+                            <input type="file" id="input-zip-nfecloud" accept=".zip,.xml" multiple style="display:none;" onchange="window.importarZipNFeCloud(this.files)">
+                            <button id="btn-importar-nfecloud" class="nf-btn" title="Importa o .zip ou os .xml (NF-e, CT-e, NFS-e) baixados na NFeCloud (não consulta a SEFAZ)" onclick="document.getElementById('input-zip-nfecloud').click()"><i class="fa-solid fa-file-zipper"></i> Importar .zip / XML manual</button>
                         </div>
                     </div>
 
@@ -9898,6 +9898,9 @@ window.trocarSubAbaNotasFiscais = function(aba) {
 //  3. cStat do protocolo do XML completo (quando não tem resumo).
 // Devolve { chave: 'autorizada'|'cancelada'|'denegada'|'desconhecida'|'', codigo }.
 function _nfeSituacaoSefaz(n) {
+    // NFS-e: o XML nacional não traz o status da nota (cancelamento vem como evento
+    // separado, que o sistema ainda não recebe). Vale como autorizada, salvo marcação manual.
+    if (n.tipo === 'NFSe') return n.situacao_sefaz === 'cancelada' ? { chave: 'cancelada', codigo: null } : { chave: 'autorizada', codigo: null };
     const CSIT_AUTORIZADA = ['1', '100', '150'];
     const CSIT_CANCELADA = ['3', '101', '151', '155'];
     const CSIT_DENEGADA = ['2', '110', '205', '301', '302', '303'];
@@ -10061,7 +10064,9 @@ window.renderizarNotasRecebidas = function() {
 
         // Vencimento (cobr/dup/dVenc) só existe no XML completo.
         let vencFmt = '<span style="color:var(--cor-texto-secundario);" title="Só disponível depois que o XML completo da nota chegar">—</span>';
-        if (n.xml_completo) {
+        if (n.tipo === 'NFSe') {
+            vencFmt = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem;" title="A NFS-e não traz data de vencimento">não informado</span>';
+        } else if (n.xml_completo) {
             const venc = _nfeExtrairVencimento(n.xml_completo);
             vencFmt = venc
                 ? `<div class="nf-data">${new Date(venc.primeiro + 'T00:00:00').toLocaleDateString('pt-BR')}</div>${venc.total > 1 ? `<div class="nf-sub">1ª de ${venc.total} parcelas</div>` : ''}`
@@ -10153,6 +10158,7 @@ window.mostrarSeloAssinaturaNFe = async function(id) {
 // SEFAZ nunca mais vai liberar). Os prazos (9 dias para a ciência, 89 dias de retenção,
 // 48h até a ciência automática) são os mesmos do scripts/sefaz-sync/index.js.
 function _nfeMotivoSemPdf(n, sit) {
+    if (n.tipo === 'NFSe') return 'O PDF da NFS-e ainda não é gerado pelo sistema. Use o botão XML.';
     if (n.tipo !== 'NFe') return 'DANFE não se aplica a NFCe';
     if (sit && sit.chave === 'cancelada') return 'Nota cancelada pelo fornecedor: não há XML completo para gerar o PDF';
     const padrao = 'Aguardando a SEFAZ liberar o XML completo';
@@ -10958,6 +10964,29 @@ function _nfeSoNumeros(v) {
 // SEFAZ — mesma estrutura <emit>/<dest>/<ide> nos dois). NFSe não tem padrão
 // nacional (cada prefeitura usa um layout), então entra como "melhor esforço".
 function _nfeParseDocumentoXml(xml) {
+    // NFS-e do padrão NACIONAL (Portal Nacional da NFS-e, xmlns sped.fazenda.gov.br/nfse):
+    // chave de 50 dígitos no Id do <infNFSe> ("NFS" + 50 números), prestador em <emit>,
+    // tomador em <toma> (dentro do <DPS>), valor em <vServ> e emissão em <dhEmi>.
+    if (/<infNFSe[\s>]/i.test(xml)) {
+        const chaveNfse = (xml.match(/<infNFSe[^>]*\bId="NFS(\d{50})"/i) || [])[1] || null;
+        const emitNfse = _nfeExtractBlock(xml, 'emit') || '';
+        const tomaNfse = _nfeExtractBlock(xml, 'toma') || '';
+        const dpsNfse = _nfeExtractBlock(xml, 'infDPS') || xml;
+        return {
+            chave: chaveNfse,
+            tipo: 'NFSe',
+            nacional: true,
+            numero: _nfeExtractTag(xml, 'nNFSe'),
+            serie: _nfeExtractTag(dpsNfse, 'serie'),
+            emitenteNome: _nfeExtractTag(emitNfse, 'xNome'),
+            emitenteCnpj: _nfeSoNumeros(_nfeExtractTag(emitNfse, 'CNPJ') || _nfeExtractTag(emitNfse, 'CPF')),
+            destinatarioNome: _nfeExtractTag(tomaNfse, 'xNome'),
+            destinatarioCnpj: _nfeSoNumeros(_nfeExtractTag(tomaNfse, 'CNPJ') || _nfeExtractTag(tomaNfse, 'CPF')),
+            valorTotal: parseFloat(_nfeExtractTag(dpsNfse, 'vServ') || '0') || null,
+            dataEmissao: (_nfeExtractTag(dpsNfse, 'dhEmi') || _nfeExtractTag(xml, 'dhProc') || '').slice(0, 10) || null,
+        };
+    }
+
     let chave = (xml.match(/Id="(?:NFe|CTe)?(\d{44})"/i) || [])[1]
         || (xml.match(/<ch(?:NFe|CTe)>(\d{44})<\/ch(?:NFe|CTe)>/i) || [])[1]
         || null;
@@ -11052,17 +11081,25 @@ window.atualizarProximaSincronizacaoSefaz = async function() {
 };
 
 window.importarZipNFeCloud = async function(fileList) {
-    const arquivo = fileList && fileList[0];
-    if (!arquivo) return;
+    const arquivosEscolhidos = Array.from(fileList || []);
+    if (!arquivosEscolhidos.length) return;
     const btn = document.getElementById('btn-importar-nfecloud');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo o zip...'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Lendo os arquivos...'; }
 
     try {
-        if (typeof JSZip === 'undefined') throw new Error('Biblioteca de zip não carregou — recarregue a página e tente de novo.');
-
-        const zip = await JSZip.loadAsync(arquivo);
-        const arquivosXml = Object.values(zip.files).filter(f => !f.dir && /\.xml$/i.test(f.name));
-        if (!arquivosXml.length) throw new Error('Não achei nenhum arquivo .xml dentro desse zip.');
+        // Aceita .zip (vários XMLs dentro) e/ou .xml soltos, tudo de uma vez.
+        // Cada item vira { name, async() } pra o resto da função tratar igual.
+        const arquivosXml = [];
+        for (const arquivo of arquivosEscolhidos) {
+            if (/\.zip$/i.test(arquivo.name)) {
+                if (typeof JSZip === 'undefined') throw new Error('Biblioteca de zip não carregou — recarregue a página e tente de novo.');
+                const zip = await JSZip.loadAsync(arquivo);
+                Object.values(zip.files).filter(f => !f.dir && /\.xml$/i.test(f.name)).forEach(f => arquivosXml.push(f));
+            } else if (/\.xml$/i.test(arquivo.name)) {
+                arquivosXml.push({ name: arquivo.name, async: () => arquivo.text() });
+            }
+        }
+        if (!arquivosXml.length) throw new Error('Não achei nenhum arquivo .xml (nem dentro de zip) no que você escolheu.');
 
         const { data: unidades, error: errUnidades } = await supabaseClient.from('financeiro_centros_custo').select('id, cnpj');
         if (errUnidades) throw new Error('Não consegui carregar os CNPJs das unidades: ' + errUnidades.message);
@@ -11090,8 +11127,9 @@ window.importarZipNFeCloud = async function(fileList) {
                 if (!centroCustoId) { semCnpjIdentificado++; continue; }
 
                 recebidos++;
-                const ehNotaCompleta = (doc.tipo === 'NFe' || doc.tipo === 'NFCe')
-                    && /<infNFe[\s>]/i.test(xml) && /<det[\s>]/i.test(xml);
+                const ehNotaCompleta = ((doc.tipo === 'NFe' || doc.tipo === 'NFCe')
+                    && /<infNFe[\s>]/i.test(xml) && /<det[\s>]/i.test(xml))
+                    || doc.nacional === true; // NFS-e nacional já vem inteira (não tem resumo + completo)
                 if (ehNotaCompleta) {
                     completas++;
                     linhasCompletas.push({
@@ -11145,16 +11183,16 @@ window.importarZipNFeCloud = async function(fileList) {
             if (errUpsertCompletas) throw new Error('Não consegui salvar as notas completas: ' + errUpsertCompletas.message);
         }
 
-        let msg = `Importado: ${recebidos} nota(s) de ${processados} documento(s) no zip.`;
-        if (completas) msg += ` ${completas} com XML completo (PDF/DANFE liberado).`;
+        let msg = `Importado: ${recebidos} nota(s) de ${processados} documento(s).`;
+        if (completas) msg += ` ${completas} com XML completo (NF-e com PDF/DANFE liberado; NFS-e com XML).`;
         if (semCnpjIdentificado) msg += ` ${semCnpjIdentificado} não bateram com nenhum CNPJ cadastrado nas unidades (ignoradas).`;
         if (erros) msg += ` ${erros} arquivo(s) com erro ao ler.`;
         mostrarAlerta(msg, recebidos ? 'sucesso' : 'erro');
         window.carregarNotasRecebidasNFeCloud();
     } catch (e) {
-        mostrarAlerta('Não consegui importar o zip: ' + e.message, 'erro');
+        mostrarAlerta('Não consegui importar: ' + e.message, 'erro');
     } finally {
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-zipper"></i> Importar .zip da NFeCloud'; }
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-zipper"></i> Importar .zip / XML manual'; }
         const input = document.getElementById('input-zip-nfecloud');
         if (input) input.value = '';
     }
