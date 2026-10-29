@@ -67,7 +67,10 @@ const CIENCIA_PRAZO_DIAS = 9;
 // Precisa da coluna nfecloud_documentos.xml_completo_tentado_em (ver
 // sql_extra/sefaz_recupera_xml_completo.sql). Se a coluna nao existir, essa
 // parte so' e' pulada (com aviso no log) - o resto do script roda normal.
-const RECUPERA_XML_POR_EXECUCAO = 5;
+// 29/10/2026: de 5 para 15 por rodada (pedido do Italo: a NFeCloud foi cancelada e a fila de
+// notas antigas sem XML andava devagar). Roda 1 vez a cada ~65 min, entao sao ~14 por hora,
+// abaixo do limite de ~20/h da SEFAZ. Se vier 656 o loop para na hora.
+const RECUPERA_XML_POR_EXECUCAO = 15;
 const RECUPERA_XML_PAUSA_MS = 3000;
 const RECUPERA_XML_RETENTAR_HORAS = 24;
 const RECUPERA_XML_MAX_DIAS = 89;
