@@ -10938,6 +10938,30 @@ window.montarPdfDanfe = function(d, opcoes) {
 // Municípios: o XML só traz o nome do município do emitente (xLocEmi), da prestação
 // (xLocPrestacao) e da incidência (xLocIncid); os demais saem como código IBGE.
 // =====================================================================
+// Municípios que o XML só traz como código IBGE. Lista curta (cidades que já apareceram nas
+// notas); as outras são consultadas na API do IBGE na hora de gerar o PDF e, se isso falhar,
+// o PDF mostra o código ("IBGE 1234567").
+window.MUNICIPIOS_IBGE_CONHECIDOS = {
+    '3530706': 'Mogi Guaçu', '3530805': 'Mogi Mirim', '3509502': 'Campinas',
+    '3145208': 'Nova Serrana', '3550308': 'São Paulo', '3549904': 'São José dos Campos',
+};
+window._ibgeCacheNomes = window._ibgeCacheNomes || {};
+window._nomeMunicipioIbge = async function(cod) {
+    cod = String(cod || '').replace(/\D/g, '');
+    if (cod.length !== 7) return '';
+    if (window.MUNICIPIOS_IBGE_CONHECIDOS[cod]) return window.MUNICIPIOS_IBGE_CONHECIDOS[cod];
+    if (window._ibgeCacheNomes[cod] !== undefined) return window._ibgeCacheNomes[cod];
+    let nome = '';
+    try {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 4000);
+        const r = await fetch(`https://servicodados.ibge.gov.br/api/v1/localidades/municipios/${cod}`, { signal: ctl.signal });
+        clearTimeout(timer);
+        if (r.ok) { const j = await r.json(); nome = (j && j.nome) || ''; }
+    } catch (_e) { /* sem internet / bloqueado: fica o código */ }
+    window._ibgeCacheNomes[cod] = nome;
+    return nome;
+};
 window.gerarDadosDanfseDeXml = function(xmlString) {
     const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
     if (doc.getElementsByTagName('parsererror').length) throw new Error('O XML da NFS-e está corrompido.');
@@ -10963,7 +10987,7 @@ window.gerarDadosDanfseDeXml = function(xmlString) {
         if (cMun === cMunEmit && txt(infNFSe, 'xLocEmi')) return txt(infNFSe, 'xLocEmi');
         if (cMun === txt(infNFSe, 'cLocIncid') && txt(infNFSe, 'xLocIncid')) return txt(infNFSe, 'xLocIncid');
         if (cMun === txt(serv, 'cLocPrestacao') && txt(infNFSe, 'xLocPrestacao')) return txt(infNFSe, 'xLocPrestacao');
-        return 'IBGE ' + cMun;
+        return window.MUNICIPIOS_IBGE_CONHECIDOS[cMun] || ('IBGE ' + cMun);
     };
     const chave = ((infNFSe.getAttribute('Id') || '').match(/(\d{50})/) || [])[1] || '';
     const endereco = (end) => [txt(end, 'xLgr'), txt(end, 'nro'), txt(end, 'xCpl'), txt(end, 'xBairro')].filter(Boolean).join(', ');
@@ -11237,13 +11261,22 @@ window.montarPdfDanfse = function(d) {
     return pdf;
 };
 
-window.baixarDanfseNotaNFeCloud = function(id) {
+window.baixarDanfseNotaNFeCloud = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (!n || !n.xml_completo) { mostrarAlerta('O XML dessa NFS-e não está salvo.', 'erro'); return; }
     if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
     let pdf, d;
     try {
         d = window.gerarDadosDanfseDeXml(n.xml_completo);
+        // Município que veio só como código IBGE: tenta trocar pelo nome (API do IBGE).
+        const resolve = async (t) => {
+            const m = String(t || '').match(/^IBGE (\d{7})$/);
+            if (!m) return t;
+            return (await window._nomeMunicipioIbge(m[1])) || t;
+        };
+        d.toma.municipio = await resolve(d.toma.municipio);
+        d.servico.localPrestacao = await resolve(d.servico.localPrestacao);
+        d.trib.municipioIncidencia = await resolve(d.trib.municipioIncidencia);
         pdf = window.montarPdfDanfse(d);
     } catch (e) {
         console.error('Erro gerando DANFSe:', e);
