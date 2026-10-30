@@ -2269,14 +2269,19 @@
                         </div>
                     </div>
 
-                    <div class="nf-filtros" style="grid-template-columns: minmax(260px, 2fr) auto; margin-top:-8px; align-items:end;">
+                    <div class="nf-filtros" style="grid-template-columns: minmax(260px, 2fr) minmax(200px, 1fr) auto; margin-top:-8px; align-items:end;">
                         <div>
                             <label><i class="fa-solid fa-calendar-days" style="color: var(--cor-acento);"></i> Período de emissão</label>
                             <input type="text" id="nf-filtro-periodo" class="modern-input" style="cursor:pointer; text-align:center; font-weight:bold; color: var(--cor-acento);" placeholder="Todas as datas — clique para escolher o período..." readonly>
                             <input type="hidden" id="nf-filtro-de"><input type="hidden" id="nf-filtro-ate">
                         </div>
                         <div>
+                            <label><i class="fa-solid fa-tags" style="color: var(--cor-acento);"></i> Categoria (NFS-e)</label>
+                            <select id="nf-filtro-categoria" class="modern-input" onchange="window.renderizarNotasRecebidas()"><option value="">Todas</option></select>
+                        </div>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
                             <button type="button" class="nf-btn" onclick="window.nfLimparPeriodo()"><i class="fa-solid fa-eraser"></i> Limpar período</button>
+                            <button type="button" class="nf-btn" style="color:var(--cor-acento); border-color:var(--cor-acento);" title="Cadastre o CNPJ do prestador e a categoria dele: todas as NFS-e dele (as que já existem e as novas) ficam com essa categoria" onclick="window.nfCategoriasAbrir()"><i class="fa-solid fa-tags"></i> Categorias por CNPJ</button>
                         </div>
                     </div>
 
@@ -10256,6 +10261,130 @@ window.lancarNotaEnviada = async function(id) {
     });
 };
 
+
+// ===== Categoria automática das NFS-e por CNPJ do prestador =====
+window.__nfCategoriasCnpj = window.__nfCategoriasCnpj || {};
+window.nfCategoriasCarregar = async function() {
+    try {
+        const { data, error } = await supabaseClient.from('nfse_categoria_cnpj').select('*');
+        if (error) throw error;
+        window.__nfCategoriasCnpj = {};
+        (data || []).forEach(r => { window.__nfCategoriasCnpj[String(r.cnpj).replace(/\D/g, '')] = r; });
+        window.__nfCategoriasOk = true;
+    } catch (e) {
+        window.__nfCategoriasOk = false; // tabela ainda não criada: a tela segue sem categoria
+    }
+    const sel = document.getElementById('nf-filtro-categoria');
+    if (sel) {
+        const atual = sel.value;
+        const cats = [...new Set(Object.values(window.__nfCategoriasCnpj).map(r => r.categoria))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+        const esc = (t) => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        sel.innerHTML = '<option value="">Todas</option><option value="__sem__">Sem categoria</option>' + cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+        if (atual && [...sel.options].some(o => o.value === atual)) sel.value = atual;
+    }
+};
+window.nfCategoriaDe = function(n) {
+    if (!n || n.tipo !== 'NFSe') return '';
+    const r = window.__nfCategoriasCnpj[String(n.emitente_cnpj || '').replace(/\D/g, '')];
+    return r ? r.categoria : '';
+};
+window.nfCategoriaChip = function(n) {
+    if (!n || n.tipo !== 'NFSe' || !window.__nfCategoriasOk) return '';
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const cat = window.nfCategoriaDe(n);
+    const cnpj = String(n.emitente_cnpj || '').replace(/\D/g, '');
+    return cat
+        ? `<div style="margin-top:5px;"><span class="nf-chip ok" style="cursor:pointer;" title="Categoria automática pelo CNPJ do prestador — clique para alterar" onclick="window.nfCategoriasAbrir('${cnpj}')"><i class="fa-solid fa-tag"></i> ${esc(cat)}</span></div>`
+        : `<div style="margin-top:5px;"><span class="nf-chip neutro" style="cursor:pointer;" title="Cadastrar a categoria desse prestador" onclick="window.nfCategoriasAbrir('${cnpj}')"><i class="fa-solid fa-plus"></i> categoria</span></div>`;
+};
+window.nfCategoriasAbrir = async function(cnpjInicial) {
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    if (!window.__nfCategoriasOk) { await window.nfCategoriasCarregar(); }
+    if (!window.__nfCategoriasOk) { mostrarAlerta('Falta rodar o SQL nfse_categoria_cnpj.sql no Supabase (cria a tabela das categorias por CNPJ).', 'erro'); return; }
+    if (todasCategoriasGlobais.length === 0) await carregarCategorias(true);
+    document.getElementById('modal-nf-categorias')?.remove();
+    const cats = todasCategoriasGlobais.filter(c => c.tipo !== 'Receita' && c.aplicacao !== 'Notas a Receber' && c.aplicacao !== 'Almoxarifado');
+    const nomes = [...new Set(cats.map(c => c.nome))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    const opts = '<option value="">Selecione a categoria...</option>' + nomes.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    // Prestadores de NFS-e ainda sem categoria (sugestão rápida)
+    const vistos = new Map();
+    (window.__notasRecebidasLista || []).forEach(n => {
+        if (n.tipo !== 'NFSe') return;
+        const c = String(n.emitente_cnpj || '').replace(/\D/g, '');
+        if (c && !window.__nfCategoriasCnpj[c] && !vistos.has(c)) vistos.set(c, _nfeDecodificaEntidades(n.emitente_nome) || c);
+    });
+    const sugestoes = [...vistos.entries()].slice(0, 40).map(([c, nm]) => `<button type="button" class="nf-btn" style="padding:5px 10px; font-size:0.75rem;" onclick="window.nfCategoriasPreencher('${c}')">${esc(nm)}</button>`).join('');
+    const html = `<div id="modal-nf-categorias" class="modal-overlay" style="z-index:100060;">
+      <div class="glass-card" style="width:100%; max-width:720px; max-height:90vh; overflow-y:auto; border-top:4px solid var(--cor-acento); padding:24px; position:relative;">
+        <button type="button" onclick="document.getElementById('modal-nf-categorias').remove()" style="position:absolute; top:12px; right:15px; background:none; border:none; color:var(--cor-texto-secundario); cursor:pointer; font-size:1.4rem;"><i class="fa-solid fa-xmark"></i></button>
+        <h3 style="margin:0 0 6px; color:var(--cor-acento);"><i class="fa-solid fa-tags"></i> Categorias por CNPJ (NFS-e)</h3>
+        <p style="font-size:0.83rem; color:var(--cor-texto-secundario); margin:0 0 16px; line-height:1.5;">Cadastre o CNPJ do prestador e a categoria dele. Toda NFS-e desse CNPJ, as que já estão no sistema e as que chegarem depois, recebe a categoria sozinha. Depois dá pra filtrar a lista só por essa categoria.</p>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
+          <div><label style="font-size:0.75rem; font-weight:bold; color:var(--cor-texto-secundario);">CNPJ do prestador</label><input type="text" id="nfcat-cnpj" class="modern-input" placeholder="00.000.000/0000-00" value="${esc(_nfeFormatarCnpj(cnpjInicial || ''))}" oninput="window.nfCategoriasAchaNome()"></div>
+          <div><label style="font-size:0.75rem; font-weight:bold; color:var(--cor-texto-secundario);">Categoria</label><select id="nfcat-categoria" class="modern-input">${opts}</select></div>
+        </div>
+        <div id="nfcat-nome" style="font-size:0.82rem; color:var(--cor-texto-secundario); min-height:20px; margin-bottom:12px;"></div>
+        <button type="button" class="btn-success" style="background:var(--cor-acento); color:#000;" onclick="window.nfCategoriasSalvar()"><i class="fa-solid fa-save"></i> Salvar categoria do CNPJ</button>
+        ${sugestoes ? `<div style="margin-top:18px;"><div style="font-size:0.75rem; font-weight:bold; color:var(--cor-texto-secundario); margin-bottom:8px;">PRESTADORES SEM CATEGORIA (clique para preencher o CNPJ)</div><div style="display:flex; flex-wrap:wrap; gap:6px;">${sugestoes}</div></div>` : ''}
+        <div style="margin-top:20px; font-size:0.75rem; font-weight:bold; color:var(--cor-texto-secundario); margin-bottom:8px;">JÁ CADASTRADOS</div>
+        <div id="nfcat-lista"></div>
+      </div></div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+    const existente = window.__nfCategoriasCnpj[String(cnpjInicial || '').replace(/\D/g, '')];
+    if (existente) document.getElementById('nfcat-categoria').value = existente.categoria;
+    window.nfCategoriasDesenharLista();
+    window.nfCategoriasAchaNome();
+};
+window.nfCategoriasPreencher = function(c) {
+    document.getElementById('nfcat-cnpj').value = _nfeFormatarCnpj(c);
+    window.nfCategoriasAchaNome();
+    document.getElementById('nfcat-categoria').focus();
+};
+window.nfCategoriasAchaNome = function() {
+    const c = String(document.getElementById('nfcat-cnpj')?.value || '').replace(/\D/g, '');
+    const el = document.getElementById('nfcat-nome');
+    if (!el) return;
+    const n = (window.__notasRecebidasLista || []).find(x => x.tipo === 'NFSe' && String(x.emitente_cnpj || '').replace(/\D/g, '') === c);
+    const qtd = (window.__notasRecebidasLista || []).filter(x => x.tipo === 'NFSe' && String(x.emitente_cnpj || '').replace(/\D/g, '') === c).length;
+    el.textContent = c.length === 14 ? (n ? `${_nfeDecodificaEntidades(n.emitente_nome)} — ${qtd} NFS-e no sistema` : 'Nenhuma NFS-e desse CNPJ no sistema ainda (a categoria vale quando chegar).') : '';
+};
+window.nfCategoriasDesenharLista = function() {
+    const box = document.getElementById('nfcat-lista');
+    if (!box) return;
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const linhas = Object.values(window.__nfCategoriasCnpj).sort((a, b) => String(a.nome_prestador || '').localeCompare(String(b.nome_prestador || ''), 'pt-BR'));
+    box.innerHTML = linhas.length ? linhas.map(r => `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--cor-borda); font-size:0.85rem;">
+        <div><b>${esc(r.nome_prestador || '—')}</b><div style="font-size:0.75rem; color:var(--cor-texto-secundario);">${esc(_nfeFormatarCnpj(r.cnpj))}</div></div>
+        <div style="display:flex; align-items:center; gap:10px;"><span class="nf-chip ok"><i class="fa-solid fa-tag"></i> ${esc(r.categoria)}</span>
+        <button type="button" class="nf-btn" style="padding:5px 9px; color:var(--cor-perigo);" title="Remover" onclick="window.nfCategoriasRemover('${r.cnpj}')"><i class="fa-solid fa-trash"></i></button></div></div>`).join('')
+        : '<div style="color:var(--cor-texto-secundario); font-size:0.85rem;">Nenhum CNPJ cadastrado ainda.</div>';
+};
+window.nfCategoriasSalvar = async function() {
+    const cnpj = String(document.getElementById('nfcat-cnpj').value || '').replace(/\D/g, '');
+    const categoria = document.getElementById('nfcat-categoria').value;
+    if (cnpj.length !== 14) { mostrarAlerta('Digite o CNPJ completo do prestador (14 números).', 'erro'); return; }
+    if (!categoria) { mostrarAlerta('Escolha a categoria.', 'erro'); return; }
+    const nota = (window.__notasRecebidasLista || []).find(x => x.tipo === 'NFSe' && String(x.emitente_cnpj || '').replace(/\D/g, '') === cnpj);
+    const { error } = await supabaseClient.from('nfse_categoria_cnpj').upsert({
+        cnpj, categoria,
+        nome_prestador: nota ? _nfeDecodificaEntidades(nota.emitente_nome) : (window.__nfCategoriasCnpj[cnpj]?.nome_prestador || null),
+        criado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null
+    }, { onConflict: 'cnpj' });
+    if (error) { mostrarAlerta('Não consegui salvar: ' + error.message, 'erro'); return; }
+    await window.nfCategoriasCarregar();
+    const qtd = (window.__notasRecebidasLista || []).filter(x => window.nfCategoriaDe(x) === categoria && String(x.emitente_cnpj || '').replace(/\D/g, '') === cnpj).length;
+    mostrarAlerta(`Categoria "${categoria}" salva para o CNPJ. ${qtd} NFS-e já ficaram com ela.`, 'sucesso');
+    window.nfCategoriasAbrir();
+    window.renderizarNotasRecebidas(true);
+};
+window.nfCategoriasRemover = async function(cnpj) {
+    const { error } = await supabaseClient.from('nfse_categoria_cnpj').delete().eq('cnpj', cnpj);
+    if (error) { mostrarAlerta('Não consegui remover: ' + error.message, 'erro'); return; }
+    await window.nfCategoriasCarregar();
+    window.nfCategoriasAbrir();
+    window.renderizarNotasRecebidas(true);
+};
+
 window.trocarSubAbaNotasFiscais = function(aba) {
     window.__nfSubAbaAtual = aba;
     document.querySelectorAll('#tela-notas-fiscais .nf-aba').forEach(b => b.classList.toggle('active', b.dataset.nfAba === aba));
@@ -10357,6 +10486,7 @@ window.carregarNotasRecebidasNFeCloud = async function() {
         return;
     }
 
+    await window.nfCategoriasCarregar();
     window.__notasRecebidasLista = data || [];
     // Guarda por id pros botões de XML/PDF acharem a nota sem colocar XML
     // gigante dentro de atributo onclick.
@@ -10468,6 +10598,7 @@ window.renderizarNotasRecebidas = function(manterPagina) {
     const fUnidade = document.getElementById('nf-filtro-unidade')?.value || '';
     const fStatus = document.getElementById('nf-filtro-status')?.value || '';
     const fSituacao = document.getElementById('nf-filtro-situacao')?.value || '';
+    const fCategoria = document.getElementById('nf-filtro-categoria')?.value || '';
 
     const todasGeral = window.__notasRecebidasLista || [];
     const tipoAtivo = window.__nfTipoAtivo || '';
@@ -10476,6 +10607,10 @@ window.renderizarNotasRecebidas = function(manterPagina) {
         if (fUnidade && n.financeiro_centros_custo?.nome_unidade !== fUnidade) return false;
         if (fStatus && (n.status_revisao || 'Pendente') !== fStatus) return false;
         if (fSituacao && n.__situacao.chave !== fSituacao) return false;
+        if (fCategoria) {
+            const cat = window.nfCategoriaDe(n);
+            if (fCategoria === '__sem__' ? (n.tipo !== 'NFSe' || cat) : cat !== fCategoria) return false;
+        }
         if (busca) {
             const texto = norm([n.emitente_nome, n.numero, n.chave_acesso, n.emitente_cnpj].join(' '));
             const digitos = String(n.emitente_cnpj || '') + ' ' + String(n.chave_acesso || '');
@@ -10570,7 +10705,7 @@ window.renderizarNotasRecebidas = function(manterPagina) {
         const status = n.status_revisao || 'Pendente';
         return `<tr class="${sit.chave === 'cancelada' ? 'nf-linha-cancelada' : ''}">
             <td><div class="nf-num">${esc(n.numero || '-')}${n.serie ? `<span style="color:var(--cor-texto-secundario); font-weight:normal;"> / ${esc(n.serie)}</span>` : ''}</div><span class="nf-tipo">${esc(n.tipo)}</span></td>
-            <td><div class="nf-emit">${esc(_nfeDecodificaEntidades(n.emitente_nome) || '-')}</div>${subEmit ? `<div class="nf-sub">${subEmit}</div>` : ''}</td>
+            <td><div class="nf-emit">${esc(_nfeDecodificaEntidades(n.emitente_nome) || '-')}</div>${subEmit ? `<div class="nf-sub">${subEmit}</div>` : ''}${window.nfCategoriaChip(n)}</td>
             <td><div class="nf-data">${dataFmt}</div>${horaFmt ? `<div class="nf-sub">${horaFmt}</div>` : ''}</td>
             <td>${vencFmt}</td>
             <td class="nf-valor">${n.valor_total != null ? 'R$ ' + Number(n.valor_total).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}</td>
