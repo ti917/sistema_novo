@@ -9272,7 +9272,8 @@ window.carregarNotasReceber = async function() {
     filtrarNotasReceberLocal();
 };
 
-window.abrirModalNotaReceber = async function(id = null) {
+window.abrirModalNotaReceber = async function(id = null, preset = null) {
+    window.__lancEnvOrigem = preset && preset.nfId ? preset : null;
     if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
     if (todasCategoriasGlobais.length === 0) await carregarCategorias(true);
 
@@ -9305,6 +9306,15 @@ window.abrirModalNotaReceber = async function(id = null) {
             }
         }
         tituloModal = '<i class="fa-solid fa-pen"></i> Editar Nota';
+    } else if (preset) {
+        // Vindo de "Notas Enviadas -> Lançar": já traz cliente/valores da própria NFS-e.
+        nota.nome_empresa_cliente = preset.unidade || '';
+        nota.valor_bruto = preset.bruto ? 'R$ ' + preset.bruto.toLocaleString('pt-BR', {minimumFractionDigits: 2}) : '';
+        nota.valor_liquido = preset.liquido ? 'R$ ' + preset.liquido.toLocaleString('pt-BR', {minimumFractionDigits: 2}) : '';
+        nota.numero_nf = preset.numeroNf || '';
+        nota.descricao = preset.categoria || '';
+        dataReferenciaParaOModal = preset.dataRef || '';
+        tituloModal = '<i class="fa-solid fa-paper-plane"></i> Lançar nota enviada em Notas a Receber';
     } else {
         const hj = new Date();
         dataReferenciaParaOModal = `${hj.getFullYear()}-${String(hj.getMonth() + 1).padStart(2, '0')}-${String(hj.getDate()).padStart(2, '0')}`;
@@ -9334,6 +9344,8 @@ window.abrirModalNotaReceber = async function(id = null) {
             
             <h2 style="color: var(--cor-acento); margin-top: 0; margin-bottom: 20px;">${tituloModal}</h2>
             
+            ${(preset && !preset.unidade) ? '<div style="background:rgba(255,152,0,0.12); color:#ff9800; border-radius:8px; padding:10px 12px; font-size:0.82rem; margin-bottom:14px;"><i class="fa-solid fa-circle-info"></i> Não achei a unidade no texto da nota. Selecione abaixo em <b>Nome da Empresa / Cliente</b>.</div>' : ''}
+            ${(preset && preset.unidade) ? `<div style="background:rgba(46,204,113,0.12); color:#2ecc71; border-radius:8px; padding:10px 12px; font-size:0.82rem; margin-bottom:14px;"><i class="fa-solid fa-circle-check"></i> Unidade identificada pelo texto da nota: <b>${String(preset.unidade).replace(/[<>&"]/g, '')}</b>. Confira antes de salvar.</div>` : ''}
             <form id="form-salvar-nota-receber">
                 <input type="hidden" id="nota-id" value="${id || ''}">
                 
@@ -9479,6 +9491,19 @@ window.abrirModalNotaReceber = async function(id = null) {
             anexosArraySalvar = [fileNameNf]; // substitui a NF anterior, se houver
         }
 
+        // Lançamento vindo das Notas Enviadas: anexa o PDF (DANFSe/DANFE) da própria nota, se o usuário não escolheu outro arquivo.
+        const origemEnv = window.__lancEnvOrigem;
+        if (origemEnv && !idNota && !(fileInputAnexoNf && fileInputAnexoNf.files.length > 0)) {
+            try {
+                const blobPdf = await window._nfeEnvGerarPdfBlob(origemEnv.nfId);
+                if (blobPdf) {
+                    const nomePdf = `NF_RECEBER_${Date.now()}_${Math.random().toString(36).substring(7)}.pdf`;
+                    const { error: errUpPdf } = await supabaseClient.storage.from('anexos_financeiro').upload(nomePdf, blobPdf, { contentType: 'application/pdf' });
+                    if (!errUpPdf) anexosArraySalvar = [nomePdf];
+                }
+            } catch (ePdf) { console.warn('Não consegui anexar o PDF da nota:', ePdf); }
+        }
+
         const payload = {
             nome_empresa_cliente: document.getElementById('nota-empresa').value.trim(),
             descricao: document.getElementById('nota-descricao').value.trim(),
@@ -9506,6 +9531,12 @@ window.abrirModalNotaReceber = async function(id = null) {
                 if (error) throw error;
                 if (notaInserida && notaInserida.length > 0) {
                     await window.sincronizarBaixaNotaComCentroCusto(notaInserida[0]);
+                }
+                if (origemEnv) {
+                    const { error: errMarcaEnv } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', origemEnv.nfId);
+                    const nEnv = (window.__notasNFeCloudPorId || {})[origemEnv.nfId];
+                    if (!errMarcaEnv && nEnv) { nEnv.status_revisao = 'Lançada'; if (window.nfeFiltrar) window.nfeFiltrar(true); }
+                    window.__lancEnvOrigem = null;
                 }
                 mostrarAlerta("Nota registrada com sucesso!", "sucesso");
             }
@@ -10112,16 +10143,19 @@ window.nfeFiltrar = function(mantemPagina) {
                 ? `<button class="nf-arq pdf" title="Gerar e baixar PDF" onclick="window.${fn}('${n.id}')"><i class="fa-solid fa-file-pdf"></i> PDF</button>`
                 : `<button class="nf-arq" disabled title="PDF precisa do XML completo"><i class="fa-solid fa-file-pdf"></i> PDF</button>`;
             const dt = n.data_emissao ? new Date(n.data_emissao).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '-';
-            const chip = cancelada
+            const lancada = n.status_revisao === 'Lançada';
+            const chip = (cancelada
                 ? '<span class="nf-chip perigo"><i class="fa-solid fa-ban"></i> Cancelada</span>'
-                : '<span class="nf-chip ok"><i class="fa-solid fa-circle-check"></i> Autorizada</span>';
+                : '<span class="nf-chip ok"><i class="fa-solid fa-circle-check"></i> Autorizada</span>')
+                + (lancada ? ' <span class="nf-chip neutro" title="Já lançada em Notas a Receber"><i class="fa-solid fa-check-double"></i> Lançada</span>' : '');
+            const btnLancar = cancelada ? '' : `<button class="nf-arq" style="color:var(--cor-acento); border-color:var(--cor-acento);" title="${lancada ? 'Já lançada — clique para ver quem lançou' : 'Lançar em Notas a Receber'}" onclick="window.lancarNotaEnviada('${n.id}')"><i class="fa-solid fa-file-invoice-dollar"></i> ${lancada ? 'Lançada' : 'Lançar'}</button>`;
             return `<tr class="${cancelada ? 'nf-linha-cancelada' : ''}">
                 <td><div class="nf-num">${esc(n.numero || '-')}${n.serie ? `<span style="color:var(--cor-texto-secundario); font-weight:normal;"> / ${esc(n.serie)}</span>` : ''}</div><span class="nf-tipo">${esc(n.tipo)}</span></td>
                 <td><div class="nf-num">${esc(n.destinatario_nome || '-')}</div><div class="nf-sub">${esc(_nfeFormatarCnpj(n.destinatario_cnpj))}</div></td>
                 <td><div class="nf-data">${dt}</div></td>
                 <td style="text-align:right; font-weight:bold;">${moeda(n.valor_total)}</td>
                 <td>${chip}</td>
-                <td><div class="nf-arquivos">${btnXml}${btnPdf}</div></td></tr>`;
+                <td><div class="nf-arquivos">${btnXml}${btnPdf}${btnLancar}</div></td></tr>`;
         }).join('');
     }
     const pg = document.getElementById('nfe-paginacao');
@@ -10130,6 +10164,93 @@ window.nfeFiltrar = function(mantemPagina) {
             <span style="font-size:0.85rem;">Página ${window.__nfePag} de ${paginas}</span>
             <button class="nf-btn" ${window.__nfePag >= paginas ? 'disabled' : ''} onclick="window.nfeIrParaPagina(${window.__nfePag + 1})">Próxima ›</button>`;
     }
+};
+
+
+// ===== Lançar nota ENVIADA em Notas a Receber =====
+window._nfeEnvGerarPdfBlob = async function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n || !n.xml_completo || !window.jspdf || !window.jspdf.jsPDF) return null;
+    if (n.tipo === 'NFSe') {
+        const d = window.gerarDadosDanfseDeXml(n.xml_completo);
+        const resolve = async (t) => { const m = String(t || '').match(/^IBGE (\d{7})$/); return m ? ((await window._nomeMunicipioIbge(m[1])) || t) : t; };
+        d.toma.municipio = await resolve(d.toma.municipio);
+        d.servico.localPrestacao = await resolve(d.servico.localPrestacao);
+        d.trib.municipioIncidencia = await resolve(d.trib.municipioIncidencia);
+        return window.montarPdfDanfse(d).output('blob');
+    }
+    return null; // DANFE de NF-e: anexo manual por enquanto
+};
+
+// Descobre a unidade pelo texto da descrição do serviço (ex.: "HOSPITAL ... VARZEA PAULISTA").
+// Só aceita se achar exatamente 1 unidade; senão deixa em branco pra pessoa escolher.
+window._nfeEnvDetectarUnidade = function(texto, centros) {
+    const toks = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+    const COMUM = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E', 'HOSPITAL', 'MUNICIPAL', 'REGIONAL', 'UPA', 'SANTA', 'CASA', 'MISERICORDIA', 'MATERNIDADE', 'UNIDADE', 'PRONTO', 'ATENDIMENTO', 'SAO', 'CENTRO', 'SAUDE', 'GERAL', 'ESTADUAL', 'POLICLINICA', 'SPA', 'UBS', 'AMBULATORIO']);
+    const fonte = new Set(toks(texto));
+    const achadas = (centros || []).filter(c => {
+        if (!c || !c.nome_unidade) return false;
+        let nome = String(c.nome_unidade);
+        const i = nome.indexOf(' - ');
+        const partes = i > 0 && i <= 8 ? nome.slice(i + 3) : nome; // tira a sigla "HMVP - "
+        const chaves = toks(partes).filter(x => !COMUM.has(x) && x.length > 1);
+        return chaves.length > 0 && chaves.every(x => fonte.has(x));
+    });
+    return achadas.length === 1 ? achadas[0] : null;
+};
+
+window.lancarNotaEnviada = async function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n) return;
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    if (!n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não está salvo.', 'erro'); return; }
+    if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
+
+    // Já lançada? Procura em Notas a Receber pelo nº da NF + valor bruto e mostra quem/quando.
+    try {
+        const num = String(n.numero || '').replace(/^0+/, '');
+        const { data: jaTem } = await supabaseClient.from('financeiro_notas_receber')
+            .select('numero_nf, nome_empresa_cliente, valor_bruto, criado_por, created_at')
+            .eq('valor_bruto', Number(n.valor_total) || 0);
+        const achou = (jaTem || []).find(x => String(x.numero_nf || '').replace(/^0+/, '') === num && num);
+        if (achou || (n.status_revisao === 'Lançada')) {
+            const quando = achou && achou.created_at ? new Date(achou.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'não registrado';
+            const msg = `Essa NFS-e ${esc(n.numero)} já foi lançada em Notas a Receber.<br><br>`
+                + `<b>Cliente/Unidade:</b> ${esc(achou ? achou.nome_empresa_cliente : 'não identificado')}<br>`
+                + `<b>Quando:</b> ${esc(quando)}<br><b>Por:</b> ${esc(achou ? (achou.criado_por || 'não registrado') : 'não registrado')}`;
+            const cancelar = document.getElementById('btn-confirm-cancelar');
+            if (cancelar) cancelar.style.display = 'none';
+            try { await window.mostrarConfirmacao(msg, 'Nota já lançada', 'Entendi', 'fa-triangle-exclamation', '#e67e22'); }
+            finally { if (cancelar) cancelar.style.display = ''; }
+            if (n.status_revisao !== 'Lançada') {
+                const { error } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', id);
+                if (!error) { n.status_revisao = 'Lançada'; window.nfeFiltrar(true); }
+            }
+            return;
+        }
+    } catch (e) { console.warn('Checagem de nota já lançada falhou:', e); }
+
+    // Dados direto do XML
+    const xml = new DOMParser().parseFromString(n.xml_completo, 'text/xml');
+    const pega = (sel) => xml.querySelector(sel)?.textContent?.trim() || '';
+    const num = (v) => { const x = parseFloat(v); return isNaN(x) ? 0 : x; };
+    const desc = pega('xDescServ');
+    const bruto = num(pega('vServ')) || num(pega('infNFSe > valores > vBC')) || Number(n.valor_total) || 0;
+    const liquido = num(pega('infNFSe > valores > vLiq')) || bruto;
+    const comp = pega('dCompet') || String(n.data_emissao || '').slice(0, 10);
+    const unidade = window._nfeEnvDetectarUnidade(desc, todosCentrosCustoGlobais);
+    // Categoria: se o nome de alguma categoria de Notas a Receber aparece no texto, sugere ela.
+    if (todasCategoriasGlobais.length === 0 && typeof carregarCategorias === 'function') await carregarCategorias(true);
+    const normT = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const cats = (todasCategoriasGlobais || []).filter(c => (c.aplicacao === 'Notas a Receber' || c.aplicacao === 'Ambos') && normT(desc).includes(normT(c.nome)));
+    await window.abrirModalNotaReceber(null, {
+        nfId: id,
+        unidade: unidade ? unidade.nome_unidade : '',
+        bruto, liquido,
+        numeroNf: String(n.numero || ''),
+        dataRef: comp,
+        categoria: cats.length === 1 ? cats[0].nome : ''
+    });
 };
 
 window.trocarSubAbaNotasFiscais = function(aba) {
