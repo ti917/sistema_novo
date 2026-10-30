@@ -10420,7 +10420,7 @@ window.emitirNotaAbrir = function() {
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-bottom:14px;">
         <div><label style="${lbl}"><i class="fa-solid fa-building-user"></i> 1. Cliente (tomador)</label>
           <select id="emit-cliente" class="modern-input" onchange="window.emitirNotaTrocouCliente()"><option value="">Selecione o cliente...</option>${clientes.map(([c, nm]) => `<option value="${esc(c)}">${esc(nm)} — ${esc(_nfeFormatarCnpj(c))}</option>`).join('')}</select></div>
-        <div><label style="${lbl}"><i class="fa-solid fa-copy"></i> 2. Copiar de qual nota anterior?</label>
+        <div><label style="${lbl}"><i class="fa-solid fa-copy"></i> 2. Unidade / contrato (copia a última nota dela)</label>
           <select id="emit-modelo" class="modern-input" onchange="window.emitirNotaCopiar()" disabled><option value="">Escolha o cliente primeiro</option></select></div>
       </div>
 
@@ -10464,14 +10464,34 @@ window.emitirNotaAbrir = function() {
     </div></div>`;
     document.body.insertAdjacentHTML('beforeend', html);
 };
-window.emitirNotaTrocouCliente = function() {
+window.emitirNotaTrocouCliente = async function() {
     const cnpj = document.getElementById('emit-cliente').value;
     const sel = document.getElementById('emit-modelo');
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const notas = (window.__notasEnviadasLista || []).filter(n => n.tipo === 'NFSe' && n.xml_completo && n.destinatario_cnpj === cnpj && n.__situacao?.chave !== 'cancelada');
     sel.disabled = !cnpj;
-    sel.innerHTML = '<option value="">' + (notas.length ? 'Escolha a nota para copiar...' : 'Sem nota anterior desse cliente') + '</option>'
-        + notas.slice(0, 30).map(n => `<option value="${n.id}">NFS-e ${String(n.numero).replace(/[<>&"]/g, '')} — ${n.data_emissao ? new Date(n.data_emissao).toLocaleDateString('pt-BR') : ''} — ${(Number(n.valor_total) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</option>`).join('');
-    if (notas.length) { sel.value = notas[0].id; window.emitirNotaCopiar(); }
+    if (typeof todosCentrosCustoGlobais !== 'undefined' && todosCentrosCustoGlobais.length === 0 && typeof carregarCentrosCusto === 'function') await carregarCentrosCusto(true);
+    // Uma opção por unidade/contrato: a nota mais recente de cada um (a lista já vem da mais nova pra mais antiga).
+    const grupos = new Map();
+    notas.forEach(n => {
+        const x = new DOMParser().parseFromString(n.xml_completo, 'text/xml');
+        const desc = x.querySelector('xDescServ')?.textContent || '';
+        const un = window._nfeEnvDetectarUnidade(desc, typeof todosCentrosCustoGlobais !== 'undefined' ? todosCentrosCustoGlobais : []);
+        const ctr = (desc.match(/CONTRATO[^0-9]{0,30}([\d]+\s*\/\s*\d{4})/i) || [])[1];
+        const chave = un ? 'U:' + un.nome_unidade : (ctr ? 'C:' + ctr.replace(/\s/g, '') : 'D:' + desc.replace(/\s+/g, ' ').slice(0, 80).toUpperCase());
+        if (!grupos.has(chave)) grupos.set(chave, { n, un, ctr, qtd: 0 });
+        grupos.get(chave).qtd++;
+    });
+    const itens = [...grupos.values()];
+    sel.innerHTML = '<option value="">' + (itens.length ? 'Escolha a unidade / contrato...' : 'Sem nota anterior desse cliente') + '</option>'
+        + itens.map(g => {
+            const rotulo = g.un ? g.un.nome_unidade : (g.ctr ? `Contrato ${g.ctr}` : 'Unidade não identificada');
+            const extra = g.un && g.ctr ? ` · contrato ${g.ctr}` : '';
+            return `<option value="${g.n.id}">${esc(rotulo)}${esc(extra)} — última: NFS-e ${esc(g.n.numero)} (${g.n.data_emissao ? new Date(g.n.data_emissao).toLocaleDateString('pt-BR') : ''}), ${g.qtd} nota(s)</option>`;
+        }).join('');
+    // Só pré-seleciona quando existe uma única unidade; com várias, a pessoa precisa escolher.
+    if (itens.length === 1) { sel.value = itens[0].n.id; window.emitirNotaCopiar(); }
+    else { ['emit-local','emit-ctrib','emit-desc','emit-bruto','emit-iss','emit-inss','emit-ir','emit-csll','emit-pis','emit-cofins'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; }); window.emitirNotaRecalcular(false); }
 };
 window.emitirNotaCopiar = function() {
     const n = (window.__notasNFeCloudPorId || {})[document.getElementById('emit-modelo').value];
