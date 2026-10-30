@@ -10772,14 +10772,71 @@ window.lancarNotaRecebida = function(id) {
     document.body.insertAdjacentHTML('beforeend', html);
 };
 
+// Procura se essa NF-e já foi lançada no Almoxarifado. Primeiro pela chave de acesso
+// (exato); se a nota antiga foi lançada sem a chave, pelo nº da NF + fornecedor.
+window._almoxBuscarNotaDuplicada = async function({ chave, numero, fornecedor }) {
+    const norm = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
+    const semZeros = (t) => String(t || '').replace(/\D/g, '').replace(/^0+/, '');
+    try {
+        if (chave) {
+            const { data, error } = await supabaseClient.from('almoxarifado_notas').select('*').eq('chave_acesso', chave).limit(1);
+            if (!error && data && data.length) return data[0];
+        }
+        if (numero && fornecedor) {
+            const { data, error } = await supabaseClient.from('almoxarifado_notas').select('*').eq('numero_nf', String(numero).trim()).limit(50);
+            if (!error && data) {
+                const f = norm(fornecedor);
+                const achou = data.find(x => norm(x.fornecedor) === f && (!chave || !x.chave_acesso || x.chave_acesso === chave));
+                if (achou) return achou;
+            }
+            // número com zeros à esquerda (000.032.593) no cadastro manual
+            const alvo = semZeros(numero);
+            if (alvo) {
+                const { data: d2, error: e2 } = await supabaseClient.from('almoxarifado_notas').select('*').ilike('fornecedor', '%' + String(fornecedor).trim().slice(0, 12).replace(/[%_]/g, '') + '%').limit(200);
+                if (!e2 && d2) {
+                    const f = norm(fornecedor);
+                    const achou2 = d2.find(x => norm(x.fornecedor) === f && semZeros(x.numero_nf) === alvo && (!chave || !x.chave_acesso || x.chave_acesso === chave));
+                    if (achou2) return achou2;
+                }
+            }
+        }
+    } catch (e) { console.warn('Checagem de nota duplicada falhou:', e); }
+    return null;
+};
+
+window._almoxAvisoNotaJaLancada = async function(nota) {
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const cc = (typeof todosCentrosCustoGlobais !== 'undefined' ? todosCentrosCustoGlobais : []).find(c => c.id === nota.centro_custo_id);
+    const quando = nota.created_at ? new Date(nota.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : (nota.data_compra ? new Date(nota.data_compra + 'T12:00:00').toLocaleDateString('pt-BR') : 'data não registrada');
+    const msg = `Essa NF${nota.numero_nf ? ' ' + esc(nota.numero_nf) : ''} já foi lançada no Almoxarifado.<br><br>`
+        + `<b>Unidade:</b> ${esc(cc ? cc.nome_unidade : 'não identificada')}<br>`
+        + `<b>Quando:</b> ${esc(quando)}<br>`
+        + `<b>Por:</b> ${esc(nota.criado_por || 'não registrado')}`;
+    const cancelar = document.getElementById('btn-confirm-cancelar');
+    if (cancelar) cancelar.style.display = 'none';
+    try { await window.mostrarConfirmacao(msg, 'Nota já lançada', 'Entendi', 'fa-triangle-exclamation', '#e67e22'); }
+    finally { if (cancelar) cancelar.style.display = ''; }
+};
+
 window.lancarNotaNoAlmoxarifado = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     const caixa = document.getElementById('modal-lancar-nota-recebida');
     if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
     if (caixa) caixa.remove();
     try {
+        // Já lançada? Bloqueia aqui mesmo, antes de abrir a tela.
+        const jaLancada = await window._almoxBuscarNotaDuplicada({ chave: n.chave_acesso, numero: n.numero, fornecedor: _nfeDecodificaEntidades(n.emitente_nome) });
+        if (jaLancada) {
+            if ((n.status_revisao || 'Pendente') !== 'Lançada') {
+                const { error: errMarca } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', id);
+                if (!errMarca) { n.status_revisao = 'Lançada'; if (window._nfAtualizarKpis) window._nfAtualizarKpis(); if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true); }
+            }
+            await window._almoxAvisoNotaJaLancada(jaLancada);
+            return;
+        }
         await window.abrirModalNotaAlmoxarifado();
         window.__almoxOrigemNotaId = id; // quando salvar, a nota recebida vira "Lançada"
+        window.__almoxChaveAtual = n.chave_acesso || null;
 
         // Unidade (a nota já sabe de qual unidade é, pelo CNPJ do destinatário)
         const selUn = document.getElementById('almox-unidade');
@@ -11913,6 +11970,7 @@ window.filtrarEstoqueAlmoxarifadoLocal = function() {
 
 window.abrirModalNotaAlmoxarifado = async function(id = null) {
     window.__almoxOrigemNotaId = null;
+    window.__almoxChaveAtual = null;
     if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
     if (typeof todasCategoriasGlobais === 'undefined' || todasCategoriasGlobais.length === 0) await carregarCategorias(true);
     if (todosFornecedoresGlobais.length === 0) await carregarFornecedores(true);
@@ -12116,6 +12174,7 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
 
         const nomeFornecedor = pegar('emit xNome') || pegar('emit xFant');
         const numeroNF = pegar('ide nNF');
+        window.__almoxChaveAtual = ((xml.querySelector('infNFe')?.getAttribute('Id') || '').replace(/\D/g, '') || pegar('protNFe chNFe') || null);
         const dataEmissaoRaw = pegar('ide dhEmi') || pegar('ide dEmi');
         const dataEmissao = dataEmissaoRaw ? dataEmissaoRaw.substring(0, 10) : '';
 
@@ -12397,6 +12456,20 @@ async function salvarNotaAlmoxarifado(e) {
 
         const centroCustoId = document.getElementById('almox-unidade').value;
         if (!centroCustoId) throw new Error('Selecione a unidade.');
+
+        // Nota nova: não deixa lançar a mesma NF duas vezes
+        if (!idNota) {
+            const dup = await window._almoxBuscarNotaDuplicada({
+                chave: window.__almoxChaveAtual,
+                numero: document.getElementById('almox-numero-nf').value.trim(),
+                fornecedor: (document.getElementById('almox-fornecedor').value || '').trim()
+            });
+            if (dup) {
+                btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Salvar Nota';
+                await window._almoxAvisoNotaJaLancada(dup);
+                return;
+            }
+        }
         const cc = todosCentrosCustoGlobais.find(c => c.id === centroCustoId);
 
         let anexoUrl = null;
@@ -12432,6 +12505,7 @@ async function salvarNotaAlmoxarifado(e) {
             data_compra: document.getElementById('almox-data').value,
             anexo_nf: anexoUrl,
             valor_total: valorTotalNota,
+            ...(window.__almoxChaveAtual && !idNota ? { chave_acesso: window.__almoxChaveAtual } : {}),
             empresa: (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas') ? empresaFinanceiraSelecionada : (cc ? cc.empresa : null),
             criado_por: usuarioAtual.nome
         };
@@ -12442,7 +12516,12 @@ async function salvarNotaAlmoxarifado(e) {
             if (error) throw error;
             await supabaseClient.from('almoxarifado_itens').delete().eq('nota_id', idNota);
         } else {
-            const { data: inserida, error } = await supabaseClient.from('almoxarifado_notas').insert([payloadNota]).select();
+            let { data: inserida, error } = await supabaseClient.from('almoxarifado_notas').insert([payloadNota]).select();
+            if (error && /chave_acesso/i.test(error.message || '')) {
+                // Coluna ainda não existe no banco: salva sem a chave (falta rodar sql_extra/almoxarifado_chave_acesso.sql)
+                const { chave_acesso, ...semChave } = payloadNota;
+                ({ data: inserida, error } = await supabaseClient.from('almoxarifado_notas').insert([semChave]).select());
+            }
             if (error) throw error;
             notaId = inserida[0].id;
         }
