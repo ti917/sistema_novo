@@ -1423,11 +1423,12 @@
             <thead>
                 <tr style="background: var(--cor-header-tabela); color: var(--cor-texto-secundario); font-size: 0.85rem; text-transform: uppercase;">
                     <th style="padding: 15px;">Nome do Insumo</th>
+                    <th style="padding: 15px; width: 260px;">Categoria</th>
                     <th style="padding: 15px; text-align: center; width: 150px;">Ações</th>
                 </tr>
             </thead>
             <tbody id="lista-insumos-body">
-                <tr><td colspan="2" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</td></tr>
+                <tr><td colspan="3" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</td></tr>
             </tbody>
         </table>
     </div>
@@ -4639,7 +4640,7 @@ window.filtrarInsumos = function() {
     });
 
     if (filtrados.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="2" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum insumo encontrado.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum insumo encontrado.</td></tr>';
         return;
     }
 
@@ -4650,6 +4651,7 @@ window.filtrarInsumos = function() {
                 <td style="padding: 15px;">
                     <strong style="color: var(--cor-texto-principal); font-size: 1.05rem;">${ins.nome}</strong>
                 </td>
+                <td style="padding: 15px; font-size: 0.85rem; color: ${ins.categoria ? 'var(--cor-texto-principal)' : 'var(--cor-texto-secundario)'};">${ins.categoria || '— sem categoria —'}</td>
                 <td style="padding: 15px; text-align: center;">
                     <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: #3498db; color: #3498db;" onclick="abrirModalInsumo('${ins.id}')" title="Editar"><i class="fa-solid fa-pen"></i></button>
                     <button class="btn-secondary" style="padding: 6px 10px; font-size: 0.8rem; border-radius: 6px; border-color: #e74c3c; color: #e74c3c; margin-left: 5px;" onclick="excluirInsumo('${ins.id}')" title="Excluir"><i class="fa-solid fa-trash"></i></button>
@@ -4686,6 +4688,13 @@ window.abrirModalInsumo = function(id = null) {
                     <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Nome do Insumo <span style="color: var(--cor-perigo);">*</span></label>
                     <input type="text" id="insumo-nome" class="modern-input" required placeholder="Ex: Saco de Lixo 100L" value="${insumo.nome}">
                 </div>
+                <div style="margin-bottom: 25px;">
+                    <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;">Categoria <span style="font-weight:normal;">(usada no preenchimento automático do Almoxarifado)</span></label>
+                    <select id="insumo-categoria" class="modern-input">
+                        <option value="">— sem categoria —</option>
+                        ${obterCategoriasAlmoxarifado().map(c => `<option value="${String(c.nome).replace(/"/g, '&quot;')}" ${insumo.categoria === c.nome ? 'selected' : ''}>${c.nome}</option>`).join('')}
+                    </select>
+                </div>
 
                 <div style="display: flex; justify-content: flex-end; gap: 10px;">
                     <button type="button" class="btn-secondary" onclick="document.getElementById('modal-insumo').remove()">Cancelar</button>
@@ -4706,17 +4715,29 @@ window.abrirModalInsumo = function(id = null) {
         const idInsumo = document.getElementById('insumo-id').value;
         const payload = {
             nome: document.getElementById('insumo-nome').value.trim(),
+            categoria: document.getElementById('insumo-categoria').value || null,
             empresa: empresaFinanceiraSelecionada === 'Todas' ? null : empresaFinanceiraSelecionada,
             criado_por: usuarioAtual.nome
         };
 
         try {
             if (idInsumo) {
-                const { error } = await supabaseClient.from('financeiro_insumos').update(payload).eq('id', idInsumo);
+                let { error } = await supabaseClient.from('financeiro_insumos').update(payload).eq('id', idInsumo);
+                if (error && /categoria/i.test(error.message || '')) {
+                    // Coluna ainda não existe no banco: salva sem ela e avisa
+                    const { categoria, ...semCategoria } = payload;
+                    ({ error } = await supabaseClient.from('financeiro_insumos').update(semCategoria).eq('id', idInsumo));
+                    if (!error) mostrarAlerta('Salvei o nome, mas a categoria não: falta rodar o SQL sql_extra/insumos_categoria.sql no Supabase.', 'aviso');
+                }
                 if (error) throw error;
                 mostrarAlerta("Insumo atualizado com sucesso!", "sucesso");
             } else {
-                const { error } = await supabaseClient.from('financeiro_insumos').insert([payload]);
+                let { error } = await supabaseClient.from('financeiro_insumos').insert([payload]);
+                if (error && /categoria/i.test(error.message || '')) {
+                    const { categoria, ...semCategoria } = payload;
+                    ({ error } = await supabaseClient.from('financeiro_insumos').insert([semCategoria]));
+                    if (!error) mostrarAlerta('Salvei o insumo, mas a categoria não: falta rodar o SQL sql_extra/insumos_categoria.sql no Supabase.', 'aviso');
+                }
                 if (error) throw error;
                 mostrarAlerta("Insumo cadastrado com sucesso!", "sucesso");
             }
@@ -12207,7 +12228,10 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
 
             return {
                 produto: insumoCadastrado ? insumoCadastrado.nome : nomeDaNota,
-                categoria: encontrarCategoriaPorProduto(nomeDaNota),
+                // 1º a categoria que o próprio Insumo cadastrado já tem (se ainda existir na lista), 2º o palpite por palavra
+                categoria: (insumoCadastrado && insumoCadastrado.categoria && categoriasDisponiveis.some(c => c.nome === insumoCadastrado.categoria))
+                    ? insumoCadastrado.categoria
+                    : encontrarCategoriaPorProduto(nomeDaNota),
                 quantidade: qtdReal,
                 medida: medidaFinal,
                 valor_unitario: valorUnitReal.toFixed(2),
@@ -12513,10 +12537,22 @@ window.sincronizarCadastrosAlmoxarifado = async function(cc, nomeFornecedor, ite
         // 1) Garante cada Insumo no catálogo global (financeiro_insumos)
         const nomesInsumosDaNota = [...new Set(itens.map(it => (it.produto || '').trim()).filter(Boolean))];
         for (const nomeInsumo of nomesInsumosDaNota) {
-            const jaExisteNoCatalogo = todosInsumosGlobais.some(i => i.nome === nomeInsumo);
-            if (jaExisteNoCatalogo) continue;
-            const payloadInsumo = { nome: nomeInsumo, empresa: empresaPadrao, criado_por: usuarioAtual.nome };
-            const { data: inseridoInsumo, error: errIns } = await supabaseClient.from('financeiro_insumos').insert([payloadInsumo]).select();
+            const categoriaEscolhida = ((itens.find(it => (it.produto || '').trim() === nomeInsumo) || {}).categoria) || null;
+            const insumoExistente = todosInsumosGlobais.find(i => i.nome === nomeInsumo);
+            if (insumoExistente) {
+                // Já existe: se a categoria escolhida nesta nota é diferente, guarda a nova (é assim que o erro é corrigido de vez)
+                if (categoriaEscolhida && insumoExistente.categoria !== categoriaEscolhida) {
+                    const { error: errCatIns } = await supabaseClient.from('financeiro_insumos').update({ categoria: categoriaEscolhida }).eq('id', insumoExistente.id);
+                    if (!errCatIns) insumoExistente.categoria = categoriaEscolhida;
+                    else console.warn('Não consegui guardar a categoria do insumo (falta rodar sql_extra/insumos_categoria.sql?):', errCatIns.message);
+                }
+                continue;
+            }
+            const payloadInsumo = { nome: nomeInsumo, categoria: categoriaEscolhida, empresa: empresaPadrao, criado_por: usuarioAtual.nome };
+            let { data: inseridoInsumo, error: errIns } = await supabaseClient.from('financeiro_insumos').insert([payloadInsumo]).select();
+            if (errIns && /categoria/i.test(errIns.message || '')) {
+                ({ data: inseridoInsumo, error: errIns } = await supabaseClient.from('financeiro_insumos').insert([{ nome: nomeInsumo, empresa: empresaPadrao, criado_por: usuarioAtual.nome }]).select());
+            }
             if (errIns) { console.error('Erro ao auto-cadastrar insumo do Almoxarifado:', errIns); continue; }
             if (inseridoInsumo && inseridoInsumo[0]) todosInsumosGlobais.push(inseridoInsumo[0]);
         }
