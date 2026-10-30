@@ -16528,6 +16528,17 @@ window.mostrarAvisoVagaExcedente = function(mensagemHtml) {
         </button>`;
     }
 
+    window.__ocoCtx = { idColab, nome, dataIso };
+    let btnAddOcorrencia = '';
+    if (usuarioAtual.perfil === 'Admin') {
+        const nomeSafeOco = encodeURIComponent(nome).replace(/'/g, "%27");
+        btnAddOcorrencia = `
+        <button class="btn-secondary" style="width: 100%; margin-top: 10px; border-color: #ff9800; color: #ff9800; font-weight: bold; background: rgba(255,152,0,0.1);"
+            onclick="ocoAbrir('${idColab}', decodeURIComponent('${nomeSafeOco}'), '${dataIso}')">
+            <i class="fa-solid fa-clipboard-list"></i> Adicionar ocorrência
+        </button>`;
+    }
+
     // 👇 A MÁGICA DA TRAVA FINAL: APAGA O BLOCO INTEIRO SE NÃO FOR ADMIN 👇
     if (acoesRapidasHtml && usuarioAtual.perfil === 'Admin') {
         acoesRapidasHtml = `
@@ -16547,6 +16558,7 @@ window.mostrarAvisoVagaExcedente = function(mensagemHtml) {
             ${conteudoExtra}
             ${acoesRapidasHtml}
             ${btnEdicaoAdmin}
+            ${btnAddOcorrencia}
         </div>
     `;
 };
@@ -93662,6 +93674,172 @@ window.toggleHorasEdicaoRapida = function() {
         boxHoras.style.display = 'block';
     } else {
         boxHoras.style.display = 'none';
+    }
+};
+
+// ================= NOVO MODAL: ADICIONAR OCORRÊNCIA NO DIA (a partir dos Detalhes da Escala) =================
+// O modal de Detalhes continua igual; o botão "Adicionar ocorrência" abre ESTE modal separado, com
+// o colaborador e a data já preenchidos. Grava nas mesmas tabelas/regras do Lançamento Direto (Admin).
+window.__ocoCtx = null;
+window.OCO_TIPOS = [
+    { sigla: 'FA',   nome: 'Falta Injustificada',        icone: 'fa-user-xmark',      cor: '#dc3545', cheio: true,  anexo: false },
+    { sigla: 'ATM',  nome: 'Atestado Médico',            icone: 'fa-notes-medical',   cor: '#ff9800', cheio: true,  anexo: true,  cid: true },
+    { sigla: 'ATC',  nome: 'Atestado de Acompanhante',   icone: 'fa-people-arrows',   cor: '#ff9800', cheio: true,  anexo: true },
+    { sigla: 'ATOB', nome: 'Atestado de Óbito',          icone: 'fa-ribbon',          cor: '#9e9e9e', cheio: true,  anexo: true },
+    { sigla: 'LG',   nome: 'Licença Casamento (Gala)',   icone: 'fa-ring',            cor: '#e91e63', cheio: true,  anexo: true },
+    { sigla: 'LDM',  nome: 'Licença Maternidade',        icone: 'fa-baby',            cor: '#e91e63', cheio: true,  anexo: true },
+    { sigla: 'LDP',  nome: 'Licença Paternidade',        icone: 'fa-baby-carriage',   cor: '#e91e63', cheio: true,  anexo: true },
+    { sigla: 'DECL', nome: 'Declaração de Horas',        icone: 'fa-file-signature',  cor: '#4fc3f7', cheio: false, anexo: false, cid: true, horas: true }
+];
+
+window.ocoFechar = function() { document.getElementById('modal-add-ocorrencia')?.remove(); };
+
+window.ocoAbrir = async function(idColab, nome, dataIso) {
+    window.__ocoCtx = Object.assign({}, window.__ocoCtx || {}, { idColab, nome, dataIso });
+    window.ocoFechar();
+    const dataBR = formatarDataBR(dataIso);
+    const div = document.createElement('div');
+    div.id = 'modal-add-ocorrencia';
+    div.style.cssText = 'position:fixed;inset:0;background:rgba(0,10,25,0.88);z-index:100030;display:flex;justify-content:center;align-items:center;padding:20px;';
+    div.innerHTML = `
+        <div class="glass-card" style="width:100%;max-width:640px;max-height:90vh;overflow-y:auto;border:1px solid #ff9800;position:relative;">
+            <button type="button" onclick="ocoFechar()" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#fff;cursor:pointer;font-size:1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color:#ff9800;margin-bottom:4px;"><i class="fa-solid fa-clipboard-list"></i> Adicionar ocorrência</h3>
+            <p style="color:var(--cor-texto-secundario);font-size:0.88rem;margin-bottom:14px;"><b style="color:#fff;">${nome}</b> · ${dataBR}</p>
+            <div id="oco-corpo"><div style="text-align:center;padding:25px;color:#ff9800;"><i class="fa-solid fa-circle-notch fa-spin fa-2x"></i></div></div>
+        </div>`;
+    document.body.appendChild(div);
+    await window.ocoMostrarMenu();
+};
+
+// Busca tudo que já está lançado (Pendente/Aprovado) cobrindo o dia
+window.ocoBuscarExistentes = async function(idColab, dataIso) {
+    const { data } = await supabaseClient.from('ausencias')
+        .select('id, sigla, motivo, status, data_inicio, data_fim, criado_por')
+        .eq('colaborador_id', idColab).in('status', ['Pendente', 'Aprovado'])
+        .lte('data_inicio', dataIso).gte('data_fim', dataIso);
+    return data || [];
+};
+
+window.ocoMostrarMenu = async function() {
+    const { idColab, nome, dataIso } = window.__ocoCtx;
+    const corpo = document.getElementById('oco-corpo');
+    if (!corpo) return;
+    const existentes = await window.ocoBuscarExistentes(idColab, dataIso);
+    const cheiosExistentes = existentes.filter(e => window.OCO_TIPOS.some(t => t.sigla === e.sigla && t.cheio));
+    const jaTemSigla = new Set(existentes.map(e => e.sigla));
+
+    let blocoExist = '';
+    if (existentes.length) {
+        blocoExist = `
+        <div style="background:rgba(255,193,7,0.08);border:1px dashed #ffc107;border-radius:8px;padding:12px;margin-bottom:14px;">
+            <strong style="color:#ffc107;font-size:0.8rem;text-transform:uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Ocorrências já lançadas neste dia</strong>
+            ${existentes.map(e => `<div style="font-size:0.85rem;color:#fff;margin-top:6px;"><b>${e.sigla}</b> — ${e.motivo || ''} <span style="color:var(--cor-texto-secundario);">(${formatarDataBR(e.data_inicio)}${e.data_fim !== e.data_inicio ? ' a ' + formatarDataBR(e.data_fim) : ''} · ${e.status === 'Pendente' ? 'aguardando aprovação' : 'aprovada'})</span></div>`).join('')}
+            <p style="font-size:0.78rem;color:var(--cor-texto-secundario);margin-top:8px;">Pode lançar outra só se for compatível. Ausência de dia inteiro não combina com outra ausência de dia inteiro, e o mesmo tipo não pode se repetir.</p>
+        </div>`;
+    }
+
+    const tiles = window.OCO_TIPOS.map(t => {
+        let bloqueado = '';
+        if (jaTemSigla.has(t.sigla)) bloqueado = 'Já lançado neste dia';
+        else if (t.cheio && cheiosExistentes.length) bloqueado = 'Já há ausência de dia inteiro';
+        const estilo = bloqueado ? 'opacity:0.4;cursor:not-allowed;' : 'cursor:pointer;';
+        return `<button type="button" ${bloqueado ? `disabled title="${bloqueado}"` : `onclick="ocoAbrirForm('${t.sigla}')"`}
+            style="${estilo}background:rgba(255,255,255,0.04);border:1px solid ${t.cor}66;border-left:4px solid ${t.cor};color:#fff;border-radius:8px;padding:12px;text-align:left;">
+            <i class="fa-solid ${t.icone}" style="color:${t.cor};margin-right:6px;"></i><b>${t.sigla}</b> · ${t.nome}
+            ${bloqueado ? `<br><small style="color:var(--cor-texto-secundario);">${bloqueado}</small>` : ''}
+        </button>`;
+    }).join('');
+
+    corpo.innerHTML = `
+        ${blocoExist}
+        <p style="color:var(--cor-texto-secundario);font-size:0.85rem;margin-bottom:8px;">Escolha o que deseja lançar:</p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px;">${tiles}
+            <button type="button" onclick="ocoAbrirAbate()" style="cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid #00bcd466;border-left:4px solid #00bcd4;color:#fff;border-radius:8px;padding:12px;text-align:left;"><i class="fa-solid fa-calendar-minus" style="color:#00bcd4;margin-right:6px;"></i><b>Abate</b> · Banco de horas</button>
+        </div>`;
+};
+
+window.ocoAbrirAbate = async function() {
+    const { idColab, nome } = window.__ocoCtx;
+    const { data: p } = await supabaseClient.from('perfis').select('unidade, empresa').eq('id', idColab).single();
+    window.ocoFechar();
+    window.abrirModalLancarAbate(idColab, nome, p?.unidade || '', p?.empresa || '');
+};
+
+window.ocoAbrirForm = function(sigla) {
+    const t = window.OCO_TIPOS.find(x => x.sigla === sigla);
+    const { dataIso } = window.__ocoCtx;
+    const corpo = document.getElementById('oco-corpo');
+    const inp = 'width:100%;padding:10px;border-radius:8px;border:1px solid var(--cor-borda);background:rgba(0,0,0,0.3);color:#fff;';
+    corpo.innerHTML = `
+        <div style="border-left:4px solid ${t.cor};padding-left:10px;margin-bottom:14px;"><b style="color:${t.cor};"><i class="fa-solid ${t.icone}"></i> ${t.sigla} — ${t.nome}</b></div>
+        <div class="form-row" style="display:flex;gap:10px;">
+            <div class="form-group" style="flex:1;"><label>Data início *</label><input type="date" id="oco-ini" value="${dataIso}" style="${inp}"></div>
+            <div class="form-group" style="flex:1;"><label>Data fim *</label><input type="date" id="oco-fim" value="${dataIso}" style="${inp}"></div>
+        </div>
+        ${t.horas ? `<div class="form-group"><label>Horário da declaração *</label><div style="display:flex;gap:8px;align-items:center;"><input type="time" id="oco-hini" style="${inp}"><span>às</span><input type="time" id="oco-hfim" style="${inp}"></div></div>` : ''}
+        ${t.cid ? `<div class="form-group"><label>Possui CID?</label><select id="oco-cid-sel" style="${inp}" onchange="document.getElementById('oco-cid-box').classList.toggle('hidden', this.value!=='Sim')"><option value="Não">Não</option><option value="Sim">Sim</option></select>
+            <div id="oco-cid-box" class="hidden" style="margin-top:8px;"><input type="text" id="oco-cid" placeholder="Ex: J019, A00" oninput="this.value = formatarCID(this.value)" style="${inp}"></div></div>` : ''}
+        <div class="form-group"><label>Observação</label><textarea id="oco-obs" rows="2" style="${inp}"></textarea></div>
+        ${t.anexo ? `<div class="form-group"><label>Anexo (comprovante) *</label><input type="file" id="oco-arq" accept="application/pdf,image/*" style="width:100%;"></div>` : ''}
+        <div style="display:flex;gap:10px;margin-top:14px;">
+            <button type="button" class="btn-secondary" style="flex:1;" onclick="ocoMostrarMenu()"><i class="fa-solid fa-arrow-left"></i> Voltar</button>
+            <button type="button" id="oco-salvar" class="btn-success" style="flex:1;font-weight:bold;" onclick="ocoSalvar('${t.sigla}')"><i class="fa-solid fa-paper-plane"></i> Lançar e Enviar para Aprovação</button>
+        </div>`;
+};
+
+window.ocoSalvar = async function(sigla) {
+    const t = window.OCO_TIPOS.find(x => x.sigla === sigla);
+    const { idColab, nome } = window.__ocoCtx;
+    const btn = document.getElementById('oco-salvar');
+    const dataI = document.getElementById('oco-ini').value;
+    const dataF = document.getElementById('oco-fim').value;
+    const obs = (document.getElementById('oco-obs').value || '').trim();
+    if (!dataI || !dataF || new Date(dataI) > new Date(dataF)) return mostrarAlerta('Datas inválidas!', 'aviso');
+    const arq = document.getElementById('oco-arq');
+    if (t.anexo && (!arq || arq.files.length === 0)) return mostrarAlerta('Anexo obrigatório para este tipo de lançamento!', 'aviso');
+
+    let motivo = t.nome;
+    if (t.horas) {
+        const hi = document.getElementById('oco-hini').value, hf = document.getElementById('oco-hfim').value;
+        if (!hi || !hf) return mostrarAlerta('Preencha o horário da declaração!', 'aviso');
+        motivo = `Declaração de Horas (${hi} às ${hf})`;
+    }
+    let cid = null;
+    if (t.cid && document.getElementById('oco-cid-sel')?.value === 'Sim') {
+        cid = (document.getElementById('oco-cid').value || '').trim();
+        if (!cid) return mostrarAlerta('Informe o CID.', 'aviso');
+    }
+
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando...';
+    const liberar = () => { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Lançar e Enviar para Aprovação'; };
+    try {
+        const conflito = await window.checarConflitoGlobal(idColab, dataI, dataF, sigla === 'DECL');
+        if (conflito) { liberar(); return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br><b>${nome}</b> já possui <b>${conflito}</b> na escala nesse período.<br><br>Para prosseguir, exclua a ocorrência anterior.`, 'erro', '⛔ Conflito de Agendas'); }
+
+        const { data: p } = await supabaseClient.from('perfis').select('unidade, empresa').eq('id', idColab).single();
+        let urlAnexo = null;
+        if (arq && arq.files.length > 0) {
+            const base = `${formatarNomePasta(p?.empresa || 'Empresa')}/${formatarNomePasta(p?.unidade || '')}/${formatarNomePasta(nome)}/Ausencias`;
+            const urls = await subirDocumentos(base, arq.files);
+            urlAnexo = urls[0];
+        }
+        const { data: nova, error } = await supabaseClient.from('ausencias').insert([{
+            colaborador_id: idColab, nome, unidade: p?.unidade, sigla, motivo,
+            data_inicio: dataI, data_fim: dataF, cid, observacao: obs, documento: urlAnexo,
+            status: 'Pendente', criado_por: usuarioAtual.nome
+        }]).select('id').single();
+        if (error) throw error;
+        await supabaseClient.from('notificacoes').insert([{ colaborador_id: idColab, nome, unidade: p?.unidade, lida: false, tipo: 'Ausência_Admin', referencia_id: nova.id }]);
+
+        mostrarAlerta('Lançamento enviado para aprovação em Solicitações!', 'sucesso');
+        window.ocoFechar();
+        document.getElementById('modal-sistema-overlay')?.classList.add('hidden');
+        if (typeof atualizarContador === 'function') atualizarContador();
+        if (!document.getElementById('tela-escala').classList.contains('hidden') && typeof processarEscala === 'function') processarEscala();
+    } catch (err) {
+        liberar();
+        mostrarAlerta('Erro: ' + err.message, 'erro');
     }
 };
 
