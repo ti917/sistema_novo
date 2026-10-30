@@ -12027,6 +12027,55 @@ window.abrirModalNotaAlmoxarifado = async function(id = null) {
 // (por isso é 100% exato, ao contrário de ler a imagem/PDF). Detecta o encoding
 // declarado no XML (a maioria das NF-e vem em ISO-8859-1, não UTF-8) pra não
 // embaralhar acentuação nos nomes dos produtos.
+// Descobre a unidade (centro de custo) de uma NF-e pelo LOCAL DE ENTREGA do XML.
+// Tenta, nessa ordem (só aceita se der exatamente 1 unidade, senão não chuta):
+//   1) CEP do <entrega> aparecendo no endereço do centro de custo;
+//   2) rua + número do <entrega> aparecendo no endereço do centro de custo;
+//   3) texto "LOCAL DE ENTREGA: <nome>" das informações complementares batendo com o nome da unidade.
+window._nfeDetectarUnidadePorEntrega = function(xmlDoc, centros) {
+    // Normaliza e expande as abreviações comuns (STA -> SANTA, PROF -> PROFESSOR...), porque
+    // o nome da rua/unidade na nota quase sempre vem resumido; sem isso nunca bate.
+    const ABREV = { STA: 'SANTA', STO: 'SANTO', SAO: 'SAO', DR: 'DOUTOR', DRA: 'DOUTORA', PROF: 'PROFESSOR', PROFA: 'PROFESSORA', GOV: 'GOVERNADOR', PRES: 'PRESIDENTE', CEL: 'CORONEL', ENG: 'ENGENHEIRO', DEP: 'DEPUTADO', CAP: 'CAPITAO', MAL: 'MARECHAL', BRIG: 'BRIGADEIRO', VER: 'VEREADOR', AV: 'AVENIDA', R: 'RUA', ROD: 'RODOVIA', EST: 'ESTRADA', TRAV: 'TRAVESSA', AL: 'ALAMEDA', PC: 'PRACA', PCA: 'PRACA', JD: 'JARDIM', VL: 'VILA', RES: 'RESIDENCIAL', ESP: 'ESPLANADA', CTR: 'CENTRO' };
+    const TIPOS = ['AVENIDA', 'RUA', 'RODOVIA', 'ESTRADA', 'TRAVESSA', 'ALAMEDA', 'PRACA', 'LARGO'];
+    const LIGACAO = ['DE', 'DA', 'DO', 'DAS', 'DOS', 'E'];
+    const toks = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean).map(x => ABREV[x] || x);
+    const tag = (bloco, t) => { const el = bloco && bloco.getElementsByTagName(t)[0]; return el && el.textContent ? el.textContent.trim() : ''; };
+    const unico = (lista) => (lista.length === 1 ? lista[0] : null);
+    const contemTodos = (alvo, fonte) => { const set = new Set(fonte); return alvo.length > 0 && alvo.every(x => set.has(x)); };
+    const entrega = xmlDoc.getElementsByTagName('entrega')[0];
+    const ccs = (centros || []).filter(c => c && c.endereco);
+
+    if (entrega) {
+        // 1) CEP
+        const cep = tag(entrega, 'CEP').replace(/\D/g, '');
+        if (cep.length === 8) {
+            const r = unico(ccs.filter(c => (String(c.endereco).match(/\d{5}-?\d{3}/g) || []).some(x => x.replace(/\D/g, '') === cep)));
+            if (r) return { cc: r, motivo: 'CEP da entrega' };
+        }
+        // 2) rua + número (todas as palavras da rua da nota têm que estar no endereço da unidade)
+        const rua = toks(tag(entrega, 'xLgr')).filter(x => !TIPOS.includes(x) && !LIGACAO.includes(x));
+        const nro = toks(tag(entrega, 'nro'))[0] || '';
+        if (rua.join('').length >= 4 && /^\d+$/.test(nro)) {
+            const r = unico(ccs.filter(c => {
+                const fonte = toks(c.endereco);
+                return contemTodos(rua, fonte) && fonte.includes(nro);
+            }));
+            if (r) return { cc: r, motivo: 'endereço de entrega' };
+        }
+    }
+    // 3) "LOCAL DE ENTREGA: UPA STA HELENA" no texto livre da nota (nome resumido também vale)
+    const infCpl = (xmlDoc.getElementsByTagName('infCpl')[0] || {}).textContent || '';
+    const m = infCpl.match(/LOCAL DE ENTREGA\s*:\s*([^;\n\r]+)/i);
+    if (m) {
+        const alvo = toks(m[1]).filter(x => !LIGACAO.includes(x));
+        if (alvo.join('').length >= 4) {
+            const r = unico((centros || []).filter(c => c && contemTodos(alvo, toks(c.nome_unidade))));
+            if (r) return { cc: r, motivo: 'local de entrega informado na nota' };
+        }
+    }
+    return null;
+};
+
 window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
     try {
         const buffer = await file.arrayBuffer();
@@ -12055,6 +12104,15 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
             const nomeFinalFornecedor = fornecedorCadastrado ? fornecedorCadastrado.nome : nomeFornecedor;
             if (!fornecedorCadastrado) window.tsAlmoxFornecedor.addOption({ value: nomeFinalFornecedor, text: nomeFinalFornecedor });
             window.tsAlmoxFornecedor.setValue(nomeFinalFornecedor);
+        }
+        // Unidade pelo local de entrega (só quando é uma nota nova, não ao editar uma já salva)
+        if (!document.getElementById('almox-id')?.value) {
+            const achada = window._nfeDetectarUnidadePorEntrega(xml, todosCentrosCustoGlobais);
+            const selUn = document.getElementById('almox-unidade');
+            if (achada && selUn) {
+                selUn.value = achada.cc.id;
+                mostrarAlerta(`Unidade reconhecida pelo ${achada.motivo}: ${achada.cc.nome_unidade}. Confira antes de salvar.`, 'sucesso');
+            }
         }
         if (numeroNF) document.getElementById('almox-numero-nf').value = numeroNF;
         if (dataEmissao) document.getElementById('almox-data').value = dataEmissao;
