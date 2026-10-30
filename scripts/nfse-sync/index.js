@@ -8,7 +8,8 @@
 // - E' outro servico, separado da SEFAZ: nao divide limite nem bloqueio com a NF-e.
 // - Cursor por NSU na tabela nfse_nsu_controle (sql_extra/nfse_nsu_controle.sql).
 //   So' avanca depois que a gravacao no Supabase deu certo.
-// - Notas emitidas PELA empresa (como prestadora) sao ignoradas.
+// - Notas emitidas PELA empresa (como prestadora) entram com direcao = 'enviada' (aba Notas
+//   Enviadas); as tomadas entram com direcao = 'recebida'. (sql_extra/nfse_direcao.sql)
 // - Evento de cancelamento marca situacao_sefaz = 'cancelada' na nota.
 // - O repositorio e' publico: o log mostra so' contagens, nunca nomes/valores/chaves.
 
@@ -63,7 +64,7 @@ function lerNfse(xml) {
 // Separa um lote do ADN em notas tomadas (pra gravar) e chaves canceladas.
 function processarLote(lote, cnpjCert, mapaCnpjUnidade) {
     const raizCert = cnpjCert.slice(0, 8);
-    const r = { linhas: [], canceladas: [], tomadasIgnoradas: 0, emitidasPelaEmpresa: 0, outras: 0, eventosOutros: 0, semXml: 0, maiorNsu: 0 };
+    const r = { linhas: [], canceladas: [], tomadasIgnoradas: 0, emitidasPelaEmpresa: 0, enviadasLidas: 0, outras: 0, eventosOutros: 0, semXml: 0, maiorNsu: 0 };
     for (const d of lote) {
         const nsu = parseInt(d.NSU || d.nsu || "0", 10) || 0;
         if (nsu > r.maiorNsu) r.maiorNsu = nsu;
@@ -82,8 +83,25 @@ function processarLote(lote, cnpjCert, mapaCnpjUnidade) {
         const n = lerNfse(xml);
         if (!n) { r.outras++; continue; }
         if (!n.destinatarioCnpj || !(mapaCnpjUnidade.has(n.destinatarioCnpj) || n.destinatarioCnpj.slice(0, 8) === raizCert)) {
-            if (n.emitenteCnpj && n.emitenteCnpj.slice(0, 8) === raizCert) r.emitidasPelaEmpresa++;
-            else r.outras++;
+            if (n.emitenteCnpj && n.emitenteCnpj.slice(0, 8) === raizCert) {
+                // Emitida pela empresa (prestadora): vai pra aba Notas Enviadas. O "cliente" e' o tomador.
+                r.emitidasPelaEmpresa++;
+                r.linhas.push({
+                    chave_acesso: n.chave,
+                    tipo: "NFSe",
+                    numero: n.numero,
+                    serie: n.serie,
+                    emitente_nome: n.emitenteNome,
+                    emitente_cnpj: n.emitenteCnpj,
+                    destinatario_nome: n.destinatarioNome,
+                    destinatario_cnpj: n.destinatarioCnpj,
+                    valor_total: n.valorTotal,
+                    data_emissao: n.dataEmissao,
+                    centro_custo_id: null,
+                    xml_completo: xml,
+                    direcao: "enviada",
+                });
+            } else r.outras++;
             continue;
         }
         r.linhas.push({
@@ -99,6 +117,7 @@ function processarLote(lote, cnpjCert, mapaCnpjUnidade) {
             data_emissao: n.dataEmissao,
             centro_custo_id: mapaCnpjUnidade.get(n.destinatarioCnpj) || null,
             xml_completo: xml,
+            direcao: "recebida",
         });
     }
     return r;
@@ -170,9 +189,18 @@ async function main() {
         // 1) notas tomadas (sem repetir chave dentro do mesmo lote)
         const unicas = Array.from(new Map(res.linhas.map((l) => [l.chave_acesso, l])).values());
         if (unicas.length) {
-            const { error } = await supabase.from("nfecloud_documentos").upsert(unicas, { onConflict: "chave_acesso", ignoreDuplicates: false });
+            let { error } = await supabase.from("nfecloud_documentos").upsert(unicas, { onConflict: "chave_acesso", ignoreDuplicates: false });
+            let gravar = unicas;
+            if (error && /direcao/i.test(error.message || "")) {
+                // Coluna "direcao" ainda nao existe (falta rodar sql_extra/nfse_direcao.sql): segue
+                // gravando so' as recebidas, como antes, e as enviadas ficam pra depois do SQL
+                // (o cursor so' avanca depois de gravar, entao nao se perde nada se o cursor for zerado).
+                console.warn("Coluna direcao ausente: gravando so' as recebidas (rode sql_extra/nfse_direcao.sql).");
+                gravar = unicas.filter((l) => l.direcao !== "enviada").map(({ direcao, ...resto }) => resto);
+                ({ error } = gravar.length ? await supabase.from("nfecloud_documentos").upsert(gravar, { onConflict: "chave_acesso", ignoreDuplicates: false }) : { error: null });
+            }
             if (error) { console.error("Erro gravando NFS-e:", error.message); parou = "erro ao gravar"; falhou = true; break; }
-            tot.gravadas += unicas.length;
+            tot.gravadas += gravar.length;
         }
         // 2) cancelamentos (depois das notas, pro caso das duas virem no mesmo lote)
         if (res.canceladas.length) {
