@@ -13068,6 +13068,33 @@ window._nfeDetectarUnidadePorEntrega = function(xmlDoc, centros) {
             if (r) return { cc: r, motivo: 'local de entrega informado na nota' };
         }
     }
+    // 5) Último recurso, "inteligente": junta TODO o texto de localização da nota (rua, complemento, bairro e cidade
+    //    do destinatário/entrega + informações complementares) e pontua cada unidade pelas palavras do NOME dela que
+    //    aparecem nesse texto (ex.: "UPA Carapina" na rua do destinatário -> unidade UPA CARAPINA). Se vários cadastros
+    //    dividem o mesmo CEP, só eles disputam. Só aceita quando UMA unidade fica claramente na frente.
+    window.__detUnidadeDiag = '';
+    const PARTES = ['xLgr', 'xCpl', 'xBairro', 'xMun'];
+    const lerLocal = (bloco) => PARTES.map(t => tag(bloco, t)).join(' ');
+    const blob = [lerLocal(entrega), lerLocal(endDest), (xmlDoc.getElementsByTagName('infCpl')[0] || {}).textContent || '', (xmlDoc.getElementsByTagName('infAdFisco')[0] || {}).textContent || ''].join(' ');
+    const GENERICAS = new Set([...TIPOS, ...LIGACAO, 'NORTE', 'SUL', 'LESTE', 'OESTE', 'CENTRO', 'JARDIM', 'VILA', 'PARQUE', 'SEM', 'NUMERO', 'EMAIL', 'DESTINATARIO', 'ENTREGA', 'CONTRIBUINTE', 'INF', 'FINANCEIRO', 'LOCAL', 'COM', 'BRASIL', 'HOSPITAL', 'MUNICIPAL', 'REGIONAL', 'SANTA', 'SANTO', 'UNIDADE', 'PRONTO', 'ATENDIMENTO', 'ADULTO', 'INFANTIL']);
+    const doTexto = new Set(toks(blob).filter(x => x.length >= 4 && !/^\d+$/.test(x) && !GENERICAS.has(x)));
+    const cepNota = (tag(endDest, 'CEP') || tag(entrega, 'CEP')).replace(/\D/g, '');
+    let pool = (centros || []).filter(c => c && c.nome_unidade);
+    if (cepNota.length === 8) {
+        const mesmoCep = pool.filter(c => (String(c.endereco || '').match(/\d{5}-?\d{3}/g) || []).some(x => x.replace(/\D/g, '') === cepNota));
+        if (mesmoCep.length > 1) pool = mesmoCep;
+    }
+    const pontos = pool.map(c => {
+        const nomeToks = toks(c.nome_unidade).filter(x => x.length >= 4 && !GENERICAS.has(x));
+        const batidas = [...new Set(nomeToks)].filter(x => doTexto.has(x));
+        return { c, nota: batidas.reduce((t, x) => t + x.length, 0), batidas };
+    }).filter(x => x.nota >= 6).sort((x, y) => y.nota - x.nota);
+    if (pontos.length === 1 || (pontos.length > 1 && pontos[0].nota > pontos[1].nota)) {
+        return { cc: pontos[0].c, motivo: `nome "${pontos[0].batidas.join(' ')}" no endereço da nota` };
+    }
+    window.__detUnidadeDiag = pontos.length > 1
+        ? `Empate entre: ${pontos.slice(0, 3).map(x => x.c.nome_unidade).join(' / ')}.`
+        : (cepNota ? `Nenhuma unidade combina com o CEP ${cepNota.replace(/^(\d{5})(\d{3})$/, '$1-$2')} nem com o texto da nota.` : 'A nota não traz endereço de destinatário/entrega que combine com uma unidade.');
     return null;
 };
 
@@ -13108,6 +13135,8 @@ window.preencherAlmoxarifadoPorXmlNFe = async function (file) {
             if (achada && selUn) {
                 selUn.value = achada.cc.id;
                 mostrarAlerta(`Unidade reconhecida pelo ${achada.motivo}: ${achada.cc.nome_unidade}. Confira antes de salvar.`, 'sucesso');
+            } else if (selUn) {
+                mostrarAlerta(`Não consegui escolher a unidade sozinho. ${window.__detUnidadeDiag || ''} Selecione manualmente.`.trim(), 'info');
             }
         }
         if (numeroNF) document.getElementById('almox-numero-nf').value = numeroNF;
