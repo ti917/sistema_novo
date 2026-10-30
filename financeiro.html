@@ -11844,18 +11844,37 @@ window.importarZipNFeCloud = async function(fileList) {
                 .upsert(linhas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
             if (errUpsert) throw new Error('Não consegui salvar as notas: ' + errUpsert.message);
         }
+        let mantidasDaSefaz = 0;
         if (linhasCompletas.length) {
             // Mesma chave duas vezes no mesmo lote faz o upsert falhar inteiro
             // ("cannot affect row a second time") - fica só a última.
-            const unicasCompletas = Array.from(new Map(linhasCompletas.map(l => [l.chave_acesso, l])).values());
-            const { error: errUpsertCompletas } = await supabaseClient
-                .from('nfecloud_documentos')
-                .upsert(unicasCompletas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
-            if (errUpsertCompletas) throw new Error('Não consegui salvar as notas completas: ' + errUpsertCompletas.message);
+            let unicasCompletas = Array.from(new Map(linhasCompletas.map(l => [l.chave_acesso, l])).values());
+
+            // Nota que JÁ tem o XML completo (veio da SEFAZ) não é tocada: o XML da SEFAZ é o
+            // que vale. O importado só entra nas notas que ainda não tinham o XML completo.
+            const chaves = unicasCompletas.map(l => l.chave_acesso);
+            const jaTemXml = new Set();
+            for (let i = 0; i < chaves.length; i += 100) {
+                const { data: existentes, error: errExist } = await supabaseClient
+                    .from('nfecloud_documentos').select('chave_acesso')
+                    .in('chave_acesso', chaves.slice(i, i + 100)).not('xml_completo', 'is', null);
+                if (errExist) throw new Error('Não consegui conferir quais notas já têm XML: ' + errExist.message);
+                (existentes || []).forEach(e => jaTemXml.add(e.chave_acesso));
+            }
+            mantidasDaSefaz = jaTemXml.size;
+            unicasCompletas = unicasCompletas.filter(l => !jaTemXml.has(l.chave_acesso));
+
+            if (unicasCompletas.length) {
+                const { error: errUpsertCompletas } = await supabaseClient
+                    .from('nfecloud_documentos')
+                    .upsert(unicasCompletas, { onConflict: 'chave_acesso', ignoreDuplicates: false });
+                if (errUpsertCompletas) throw new Error('Não consegui salvar as notas completas: ' + errUpsertCompletas.message);
+            }
         }
 
         let msg = `Importado: ${recebidos} nota(s) de ${processados} documento(s).`;
         if (completas) msg += ` ${completas} com XML completo (NF-e com PDF/DANFE liberado; NFS-e com XML).`;
+        if (mantidasDaSefaz) msg += ` ${mantidasDaSefaz} já tinham o XML completo (da SEFAZ) e foram mantidas como estavam.`;
         if (semCnpjIdentificado) msg += ` ${semCnpjIdentificado} sem unidade cadastrada para o CNPJ do destinatário (entraram sem unidade; ela é escolhida ao lançar).`;
         if (erros) msg += ` ${erros} arquivo(s) com erro ao ler.`;
         mostrarAlerta(msg, recebidos ? 'sucesso' : 'erro');
