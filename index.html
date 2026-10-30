@@ -93785,6 +93785,13 @@ window.ocoAbrirForm = function(sigla) {
     const inp = 'width:100%;padding:10px;border-radius:8px;border:1px solid var(--cor-borda);background:rgba(0,0,0,0.3);color:#fff;';
     corpo.innerHTML = `
         <div style="border-left:4px solid ${t.cor};padding-left:10px;margin-bottom:14px;"><b style="color:${t.cor};"><i class="fa-solid ${t.icone}"></i> ${t.sigla} — ${t.nome}</b></div>
+        ${(t.anexo || t.horas) ? `
+        <div class="form-group" style="background:rgba(79,195,247,0.1);padding:12px;border-radius:8px;border:1px dashed #4fc3f7;margin-bottom:14px;">
+            <label style="color:#4fc3f7;font-weight:bold;"><i class="fa-solid fa-wand-magic-sparkles"></i> Anexe o documento${t.anexo ? ' *' : ''} e deixe a Clara IA preencher</label>
+            <p style="font-size:0.75rem;color:#ffc107;margin:4px 0 8px;"><i class="fa-solid fa-triangle-exclamation"></i> Aceita <b>somente PDF</b>. Se forem vários documentos, junte tudo em um único PDF.</p>
+            <input type="file" id="oco-arq" accept="application/pdf" style="width:100%;margin-bottom:8px;" onchange="window.validarSomentePdf(this)">
+            <button type="button" id="oco-btn-clara" class="btn-secondary" style="width:100%;border-color:#4fc3f7;color:#4fc3f7;font-weight:bold;background:transparent;" onclick="ocoLerComClara('${t.sigla}')"><i class="fa-solid fa-microchip"></i> Preencher automaticamente com a Clara IA</button>
+        </div>` : ''}
         <div class="form-row" style="display:flex;gap:10px;">
             <div class="form-group" style="flex:1;"><label>Data início *</label><input type="date" id="oco-ini" value="${dataIso}" style="${inp}"></div>
             <div class="form-group" style="flex:1;"><label>Data fim *</label><input type="date" id="oco-fim" value="${dataIso}" style="${inp}"></div>
@@ -93811,11 +93818,89 @@ window.ocoAbrirForm = function(sigla) {
                 <small style="color:var(--cor-texto-secundario);display:block;margin-top:8px;">Para cobrir vários dias, lance o primeiro aqui e os demais em Lançamento Direto.</small>
             </div>
         </div>
-        ${t.anexo ? `<div class="form-group"><label>Anexo (comprovante) *</label><input type="file" id="oco-arq" accept="application/pdf,image/*" style="width:100%;"></div>` : ''}
         <div style="display:flex;gap:10px;margin-top:14px;">
             <button type="button" class="btn-secondary" style="flex:1;" onclick="ocoMostrarMenu()"><i class="fa-solid fa-arrow-left"></i> Voltar</button>
             <button type="button" id="oco-salvar" class="btn-success" style="flex:1;font-weight:bold;" onclick="ocoSalvar('${t.sigla}')"><i class="fa-solid fa-paper-plane"></i> Lançar e Enviar para Aprovação</button>
         </div>`;
+};
+
+window.ocoLerComClara = async function(sigla) {
+    const { nome } = window.__ocoCtx;
+    const fileInput = document.getElementById('oco-arq');
+    const btn = document.getElementById('oco-btn-clara');
+    if (!fileInput.files || fileInput.files.length === 0) return mostrarAlerta('Anexe o PDF do atestado/laudo médico!', 'aviso');
+    if (!window.validarSomentePdf(fileInput)) return;
+    const textoBtn = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Lendo documento...';
+    const marcar = (id) => { const e = document.getElementById(id); if (e) { e.style.backgroundColor = 'rgba(40,167,69,0.05)'; e.style.borderColor = '#28a745'; e.style.fontWeight = 'bold'; } };
+    try {
+        const rasterizar = async (file) => {
+            const pdfDoc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+            const total = Math.min(pdfDoc.numPages, 20), paginas = [];
+            for (let i = 1; i <= total; i++) {
+                const page = await pdfDoc.getPage(i);
+                const v0 = page.getViewport({ scale: 1 });
+                const vp = page.getViewport({ scale: Math.min(2, 1600 / Math.max(v0.width, v0.height)) });
+                const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+                await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+                const du = cv.toDataURL('image/jpeg', 0.75);
+                paginas.push({ base64Puro: du.substring(du.indexOf(';base64,') + 8), mimeType: 'image/jpeg' });
+            }
+            return paginas;
+        };
+        const arquivos = (await Promise.all(Array.from(fileInput.files).map(rasterizar))).flat();
+        const resp = await Promise.race([
+            supabaseClient.functions.invoke('gemini-ocr-atestado', { body: { arquivos } }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('Tempo limite estourado. A rede está lenta ou o arquivo é muito grande.')), 120000))
+        ]);
+        if (resp.error) {
+            let msg = 'Erro na IA ao tentar ler o documento médico.';
+            try { const d = await resp.error.context.json(); msg = d.erro || (d.error ? JSON.stringify(d.error) : msg); } catch (e) { msg = resp.error.message || msg; }
+            throw new Error(msg);
+        }
+        const data = resp.data || {};
+
+        // Datas (início, dias de afastamento -> fim)
+        if (data.data_inicio) { document.getElementById('oco-ini').value = data.data_inicio; marcar('oco-ini'); }
+        let fim = data.data_fim;
+        if (data.data_inicio && data.qtd_dias && !isNaN(data.qtd_dias)) {
+            const d = new Date(data.data_inicio + 'T12:00:00'); d.setDate(d.getDate() + parseInt(data.qtd_dias) - 1);
+            fim = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+        if (sigla === 'DECL') fim = data.data_inicio || fim;
+        if (fim) { document.getElementById('oco-fim').value = fim; marcar('oco-fim'); }
+        else if (data.parecer_medico) mostrarAlerta('⚠️ Atestado sem Data Fim! O documento parece ser um Laudo Indeterminado.', 'aviso');
+
+        // CID
+        if (data.cid && data.cid.trim() && document.getElementById('oco-cid-sel')) {
+            const sel = document.getElementById('oco-cid-sel'); sel.value = 'Sim'; sel.dispatchEvent(new Event('change'));
+            const ci = document.getElementById('oco-cid'); ci.value = data.cid.toUpperCase(); marcar('oco-cid');
+        }
+        // Horário da declaração
+        if (sigla === 'DECL' && data.horas) {
+            const m = String(data.horas).match(/(\d{1,2}:\d{2})\D+(\d{1,2}:\d{2})/);
+            if (m) { document.getElementById('oco-hini').value = m[1].padStart(5, '0'); document.getElementById('oco-hfim').value = m[2].padStart(5, '0'); marcar('oco-hini'); marcar('oco-hfim'); }
+        }
+        // Observação / parecer
+        const obs = document.getElementById('oco-obs');
+        let txt = obs.value;
+        if (data.parecer_medico) txt = `PARECER DA IA: ${data.parecer_medico}\n` + txt;
+        if (txt) { obs.value = txt.trim(); marcar('oco-obs'); }
+
+        // Avisos de conferência (o colaborador e o tipo já estão definidos pelo dia escolhido)
+        let avisos = [];
+        if (data.nome_paciente) {
+            const norm = (x) => String(x).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
+            const lido = norm(data.nome_paciente).split(' ')[0];
+            if (lido && !norm(nome).includes(lido)) avisos.push(`O documento parece ser de <b>${data.nome_paciente}</b>, mas você está lançando para <b>${nome}</b>.`);
+        }
+        if (data.tipo_motivo && data.tipo_motivo.split('|')[0] !== sigla) avisos.push(`A Clara identificou o documento como <b>${data.tipo_motivo.replace('|', ' - ')}</b>, mas o tipo escolhido aqui é <b>${sigla}</b>.`);
+        if (avisos.length) mostrarAlerta('Confira antes de lançar:<br><br>' + avisos.join('<br><br>'), 'aviso', 'Atenção');
+    } catch (err) {
+        mostrarAlerta('Erro ao ler o documento: ' + err.message, 'erro');
+    } finally {
+        btn.disabled = false; btn.innerHTML = textoBtn;
+    }
 };
 
 window.ocoToggleCobertura = function(on) {
