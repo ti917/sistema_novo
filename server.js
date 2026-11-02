@@ -10,6 +10,8 @@ const PORT = process.env.PORT || 10000;
 const clients = new Map(); // code -> client
 const queues = { sinuca: [], truco: [] };
 let nextRoom = 1;
+// mensagens de amizade para quem está offline (em memória; os celulares também reenviam ao conectar)
+const mailbox = new Map(); // code -> [{kind, from, name}]
 
 // ------------------------------------------------------------ WebSocket mínimo
 function accept(req, socket) {
@@ -87,6 +89,11 @@ function onMsg(c, op, payload) {
       c.name = String(m.name || "Jogador").slice(0, 16);
       clients.set(code, c);
       sendJ(c, { t: "welcome", code, online: clients.size });
+      const box = mailbox.get(code);
+      if (box) {
+        mailbox.delete(code);
+        for (const x of box) sendJ(c, { t: "fmsg", kind: x.kind, from: x.from, name: x.name });
+      }
       break;
     }
     case "queue": {
@@ -121,6 +128,22 @@ function onMsg(c, op, payload) {
         if (list.length >= 20) break;
       }
       sendJ(c, { t: "search", q: m.q, list });
+      break;
+    }
+    case "fsend": {
+      // pedidos de amizade: req (pedido), acc (aceitou), dec (recusou), rem (desfez)
+      const kind = String(m.kind || "");
+      if (!["req", "acc", "dec", "rem"].includes(kind) || !c.code) return;
+      const f = clients.get(String(m.to || "").toUpperCase());
+      const to = String(m.to || "").toUpperCase();
+      if (f && f !== c) sendJ(f, { t: "fmsg", kind, from: c.code, name: c.name });
+      else if (/^[A-Z0-9]{4,8}$/.test(to) && to !== c.code) {
+        const box = (mailbox.get(to) || []).filter((x) => x.from !== c.code);
+        box.push({ kind, from: c.code, name: c.name });
+        if (box.length > 50) box.shift();
+        mailbox.set(to, box);
+      }
+      sendJ(c, { t: "fsent", kind, to: String(m.to || "").toUpperCase(), delivered: !!(f && f !== c) });
       break;
     }
     case "invite": {
