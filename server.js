@@ -111,6 +111,18 @@ function onMsg(c, op, payload) {
       sendJ(c, { t: "presence", list });
       break;
     }
+    case "search": {
+      const q = norm(String(m.q || "")).slice(0, 16);
+      if (q.length < 2) return sendJ(c, { t: "search", q: m.q, list: [] });
+      const list = [];
+      for (const f of clients.values()) {
+        if (f === c) continue;
+        if (norm(f.name).includes(q)) list.push({ code: f.code, name: f.name, online: true, status: f.room ? "jogando" : f.status });
+        if (list.length >= 20) break;
+      }
+      sendJ(c, { t: "search", q: m.q, list });
+      break;
+    }
     case "invite": {
       const f = clients.get(String(m.code || "").toUpperCase());
       if (!f || f === c) return sendJ(c, { t: "invite_fail", msg: "Amigo offline" });
@@ -133,6 +145,10 @@ function onMsg(c, op, payload) {
     case "leave": leaveRoom(c); break;
     case "ping": sendJ(c, { t: "pong" }); break;
   }
+}
+
+function norm(t) {
+  return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
 function match(host, guest, game) {
