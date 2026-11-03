@@ -52491,6 +52491,11 @@ window.claraTelefoneOculto = function(telefone, telefoneNormalizado) {
 };
 
 window.todasConversasClaraLog = [];
+// ⚡ 03/11/2026: a lista do Chat da Clara traz só as conversas dos últimos 30 dias (e o botão "Carregar
+// conversas mais antigas" traz o resto). O histórico COMPLETO de uma conversa só é buscado quando se clica nela.
+window.CLARA_JANELA_DIAS = 30;
+window.claraListaCompleta = false;
+window._claraConversasCompletas = {}; // chave da conversa -> true (histórico completo já carregado) | 'carregando'
 window.chatClaraColabsAgrupados = [];
 window.chatClaraSelecionado = null; // { telefone, telefoneNormalizado, colaboradorId, nome }
 
@@ -52626,53 +52631,70 @@ window.claraStatusEntregaHtml = function(wa, criadoEm) {
 };
 
 /** Busca no banco os logs de template desse período e junta com o log do chat. */
-window.claraBuscarLogsZapParaChat = async function() {
-    const { data, error } = await supabaseClient
+window.claraBuscarLogsZapParaChat = async function(opcoes) {
+    // opcoes (todas opcionais): { desde: ISO, colaboradorId, telefoneNormalizado, limite }
+    opcoes = opcoes || {};
+    let qLogs = supabaseClient
         .from('mensagens_whatsapp_log')
         .select('*')
-        .in('template_name', Object.keys(window.CLARA_TEMPLATES_NO_CHAT))
+        .in('template_name', Object.keys(window.CLARA_TEMPLATES_NO_CHAT));
+    if (opcoes.desde) qLogs = qLogs.gte('criado_em', opcoes.desde);
+    if (opcoes.colaboradorId) qLogs = qLogs.eq('colaborador_id', opcoes.colaboradorId);
+    else if (opcoes.telefoneNormalizado) qLogs = qLogs.eq('telefone_normalizado', opcoes.telefoneNormalizado);
+    const { data, error } = await qLogs
         .order('criado_em', { ascending: false })
-        .limit(1500);
+        .limit(opcoes.limite || 1500);
     if (error) { console.warn('Não consegui carregar status de entrega pro Chat da Clara:', error); return []; }
     const logs = data || [];
     // 📄 Descobre o NOME do documento: o log não guarda as variáveis do template, então casa com
     // documentos_avulsos (mesmo colaborador, documento criado até 1 min depois do envio — o mais
     // recente antes do envio vale). Em reenvio de cobrança, pega o último documento criado antes dele.
+    // ⚡ 03/11/2026: as buscas dos blocos de 150 colaboradores agora saem TODAS AO MESMO TEMPO (antes iam
+    // em fila, uma esperando a outra) e o casamento olha só os documentos DAQUELE colaborador (antes varria
+    // a lista inteira de documentos para cada um dos 1.500 logs). O resultado é o mesmo.
     try {
         const ids = [...new Set(logs.filter(l => l.template_name === 'aviso_assinatura_documento' && l.colaborador_id).map(l => l.colaborador_id))];
-        const docs = [];
-        for (let i = 0; i < ids.length; i += 150) {
-            const r = await supabaseClient.from('documentos_avulsos').select('colaborador_id, titulo_documento, created_at').in('colaborador_id', ids.slice(i, i + 150));
-            if (r.data) docs.push(...r.data);
-        }
         // ✅ Confirmação de assinatura: casa com o termo cuja assinatura (assinado_em) está mais perto
         // do envio da confirmação (até 15 min de diferença). Se não achar, fica o texto genérico.
         const idsConf = [...new Set(logs.filter(l => l.template_name === 'doc_assinado_confirmacao' && l.colaborador_id).map(l => l.colaborador_id))];
+        const pedacos = (lista) => { const p = []; for (let i = 0; i < lista.length; i += 150) p.push(lista.slice(i, i + 150)); return p; };
+        const [respDocs, respAss] = await Promise.all([
+            Promise.all(pedacos(ids).map(ch => supabaseClient.from('documentos_avulsos').select('colaborador_id, titulo_documento, created_at').in('colaborador_id', ch))),
+            Promise.all(pedacos(idsConf).map(ch => Promise.all([
+                supabaseClient.from('documentos_avulsos').select('colaborador_id, titulo_documento, assinado_em').in('colaborador_id', ch).not('assinado_em', 'is', null),
+                // Folha de Ponto / Holerite assinados (tabela documentos_mensais) — é daqui que vem a
+                // maioria das confirmações (a assinatura dispara a confirmação em poucos segundos).
+                supabaseClient.from('documentos_mensais').select('colaborador_id, tipo_documento, mes_ano, assinado_em').in('colaborador_id', ch).not('assinado_em', 'is', null)
+            ])))
+        ]);
+        const docs = [];
+        respDocs.forEach(r => { if (r.data) docs.push(...r.data); });
         const docsAss = [];
-        for (let i = 0; i < idsConf.length; i += 150) {
-            const r = await supabaseClient.from('documentos_avulsos').select('colaborador_id, titulo_documento, assinado_em').in('colaborador_id', idsConf.slice(i, i + 150)).not('assinado_em', 'is', null);
+        respAss.forEach(([r, rm]) => {
             if (r.data) docsAss.push(...r.data);
-            // Folha de Ponto / Holerite assinados (tabela documentos_mensais) — é daqui que vem a
-            // maioria das confirmações (a assinatura dispara a confirmação em poucos segundos).
-            const rm = await supabaseClient.from('documentos_mensais').select('colaborador_id, tipo_documento, mes_ano, assinado_em').in('colaborador_id', idsConf.slice(i, i + 150)).not('assinado_em', 'is', null);
             if (rm.data) docsAss.push(...rm.data.map(x => ({ colaborador_id: x.colaborador_id, assinado_em: x.assinado_em, titulo_documento: `${x.tipo_documento} ${x.mes_ano}` })));
-        }
+        });
+        const agrupar = (arr) => { const m = new Map(); arr.forEach(x => { const a = m.get(x.colaborador_id); if (a) a.push(x); else m.set(x.colaborador_id, [x]); }); return m; };
+        const docsPorColab = agrupar(docs), assPorColab = agrupar(docsAss);
         logs.forEach(l => {
             if (l.template_name !== 'doc_assinado_confirmacao') return;
             const t = new Date(l.criado_em).getTime();
-            const d = docsAss
-                .map(x => ({ x, dif: Math.abs(new Date(x.assinado_em).getTime() - t) }))
-                .filter(o => o.x.colaborador_id === l.colaborador_id && o.dif <= 15 * 60000)
-                .sort((a, b) => a.dif - b.dif)[0];
-            l._tituloAssinado = d ? d.x.titulo_documento : null;
+            let melhor = null, melhorDif = Infinity;
+            (assPorColab.get(l.colaborador_id) || []).forEach(x => {
+                const dif = Math.abs(new Date(x.assinado_em).getTime() - t);
+                if (dif <= 15 * 60000 && dif < melhorDif) { melhor = x; melhorDif = dif; }
+            });
+            l._tituloAssinado = melhor ? melhor.titulo_documento : null;
         });
         logs.forEach(l => {
             if (l.template_name !== 'aviso_assinatura_documento') return;
             const t = new Date(l.criado_em).getTime();
-            const d = docs
-                .filter(x => x.colaborador_id === l.colaborador_id && new Date(x.created_at || x.criado_em).getTime() <= t + 60000)
-                .sort((a, b) => new Date(b.created_at || b.criado_em) - new Date(a.created_at || a.criado_em))[0];
-            l._tituloDoc = d ? (d.titulo_documento || d.titulo) : null;
+            let melhor = null, melhorT = -Infinity;
+            (docsPorColab.get(l.colaborador_id) || []).forEach(x => {
+                const tx = new Date(x.created_at || x.criado_em).getTime();
+                if (tx <= t + 60000 && tx > melhorT) { melhor = x; melhorT = tx; }
+            });
+            l._tituloDoc = melhor ? (melhor.titulo_documento || melhor.titulo) : null;
         });
     } catch (e) { console.warn('Nome do documento indisponível no chat:', e); }
     return logs.map(window.claraLogZapParaMensagem);
@@ -52683,7 +52705,7 @@ window.claraAtualizarStatusZapAberto = async function() {
     const g = window.chatClaraSelecionado;
     const caixa = document.getElementById('chat-clara-mensagens');
     if (!g || !caixa || caixa.offsetParent === null) return;
-    const novos = await window.claraBuscarLogsZapParaChat();
+    const novos = await window.claraBuscarLogsZapParaChat({ colaboradorId: g.colaboradorId || null, telefoneNormalizado: g.telefoneNormalizado || null, limite: 500 });
     if (!novos.length) return;
     const porId = {};
     novos.forEach(n => { porId[n.id] = n; });
@@ -52730,11 +52752,19 @@ window.carregarChatClaraLista = async function(silencioso) {
     const container = document.getElementById('lista-chat-clara-colabs');
     if (container && silencioso !== true) container.innerHTML = '<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;"><i class="fa-solid fa-circle-notch fa-spin"></i> Carregando...</p>';
 
-    const { data, error } = await supabaseClient
-        .from('clara_conversas_log')
-        .select('*')
-        .order('criado_em', { ascending: false })
-        .limit(2000);
+    // ⚡ 03/11/2026: só os últimos 30 dias (as conversas e os logs de template — status de entrega/leitura —
+    // são buscados AO MESMO TEMPO). Conversas mais antigas: botão "Carregar conversas mais antigas".
+    // Mensagens NÃO LIDAS mais antigas que a janela também entram, pra a bolinha do menu bater com a lista.
+    const desde = window.claraListaCompleta ? null : new Date(Date.now() - window.CLARA_JANELA_DIAS * 86400000).toISOString();
+    let qConv = supabaseClient.from('clara_conversas_log').select('*');
+    if (desde) qConv = qConv.gte('criado_em', desde);
+    const buscas = [
+        qConv.order('criado_em', { ascending: false }).limit(2000),
+        window.claraBuscarLogsZapParaChat(desde ? { desde } : {})
+    ];
+    if (desde) buscas.push(supabaseClient.from('clara_conversas_log').select('*').eq('direcao', 'entrada').eq('lida', false).lt('criado_em', desde).order('criado_em', { ascending: false }).limit(300));
+    const [respConv, logsZapChat, respAntigasNaoLidas] = await Promise.all(buscas);
+    const { data, error } = respConv;
 
     if (error) {
         console.error('Erro ao carregar clara_conversas_log:', error);
@@ -52744,8 +52774,13 @@ window.carregarChatClaraLista = async function(silencioso) {
     }
 
     // 📲 Junta as mensagens de template (termos avulsos etc.) com o status de entrega/leitura
-    const logsZapChat = await window.claraBuscarLogsZapParaChat();
-    window.todasConversasClaraLog = [...(data || []), ...logsZapChat]
+    const antigasNaoLidas = (respAntigasNaoLidas && !respAntigasNaoLidas.error && respAntigasNaoLidas.data) || [];
+    const baseMsgs = [...(data || []), ...antigasNaoLidas, ...logsZapChat];
+    // Conversas cujo histórico completo já foi aberto nesta sessão não perdem as mensagens antigas na recarga
+    const chaveMsgDe = m => m.colaborador_id || `tel_${m.telefone_normalizado}`;
+    const idsBase = new Set(baseMsgs.map(m => m.id));
+    const preservadas = (window.todasConversasClaraLog || []).filter(m => window._claraConversasCompletas[chaveMsgDe(m)] === true && !idsBase.has(m.id));
+    window.todasConversasClaraLog = [...baseMsgs, ...preservadas]
         .filter(m => !window.claraTelefoneOculto(m.telefone, m.telefone_normalizado))
         .sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
 
@@ -52796,6 +52831,17 @@ window.claraMostrarMais = function() {
     window.filtrarChatClaraLista();
 };
 
+window.claraBotaoAntigasHtml = function() {
+    if (window.claraListaCompleta) return '';
+    return `<button type="button" id="clara-btn-antigas" class="btn-secondary" onclick="window.claraCarregarListaCompleta()" style="width: 100%; margin: 6px 0; padding: 10px;"><i class="fa-solid fa-clock-rotate-left"></i> Carregar conversas mais antigas (antes dos últimos ${window.CLARA_JANELA_DIAS} dias)</button>`;
+};
+window.claraCarregarListaCompleta = async function() {
+    const btn = document.getElementById('clara-btn-antigas');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Carregando...'; }
+    window.claraListaCompleta = true;
+    await window.carregarChatClaraLista(true);
+};
+
 window.filtrarChatClaraLista = function() {
     const termo = window.removerAcentos(document.getElementById('busca-chat-clara')?.value || '');
     const container = document.getElementById('lista-chat-clara-colabs');
@@ -52826,7 +52872,7 @@ window.filtrarChatClaraLista = function() {
 
     if (filtrados.length === 0) {
         const msg = filtro === 'docs' ? '🎉 Nenhum documento pendente de leitura (últimos 30 dias).' : filtro === 'respostas' ? 'Nenhuma resposta nova por aqui.' : 'Nenhuma conversa encontrada.';
-        container.innerHTML = `<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">${msg}</p>`;
+        container.innerHTML = `<p style="text-align:center; color: var(--cor-texto-secundario); font-size: 0.85rem; padding: 20px;">${msg}</p>` + window.claraBotaoAntigasHtml();
         return;
     }
 
@@ -52861,6 +52907,7 @@ window.filtrarChatClaraLista = function() {
     if (restantes > 0) {
         html += `<button type="button" id="clara-btn-mostrar-mais" class="btn-secondary" onclick="window.claraMostrarMais()" style="width: 100%; margin: 6px 0; padding: 10px;"><i class="fa-solid fa-angles-down"></i> Mostrar mais ${Math.min(restantes, window.CLARA_TAMANHO_BLOCO)} (restam ${restantes})</button>`;
     }
+    html += window.claraBotaoAntigasHtml();
     const rolagem = container.scrollTop;
     container.innerHTML = html;
     container.scrollTop = rolagem; // a lista não "pula" pro topo quando chega mensagem nova ou carrega mais um bloco
@@ -52980,8 +53027,41 @@ window.montarConteudoMidiaChatClara = function(m) {
     return `<span class="clara-bubble-texto">${textoEscapado}</span>`;
 };
 
+/** Busca o histórico COMPLETO de uma conversa (as duas tabelas) só quando se clica nela. Devolve true se trouxe mensagens novas. */
+window.claraCarregarConversaCompleta = async function(grupo) {
+    if (!grupo || window._claraConversasCompletas[grupo.chave]) return false;
+    window._claraConversasCompletas[grupo.chave] = 'carregando';
+    try {
+        let qConv = supabaseClient.from('clara_conversas_log').select('*');
+        qConv = grupo.colaboradorId ? qConv.eq('colaborador_id', grupo.colaboradorId) : qConv.eq('telefone_normalizado', grupo.telefoneNormalizado);
+        const [r, logsZap] = await Promise.all([
+            qConv.order('criado_em', { ascending: false }).limit(1000),
+            window.claraBuscarLogsZapParaChat({ colaboradorId: grupo.colaboradorId || null, telefoneNormalizado: grupo.telefoneNormalizado || null, limite: 500 })
+        ]);
+        if (r.error) { delete window._claraConversasCompletas[grupo.chave]; console.warn('Histórico da conversa:', r.error); return false; }
+        const ids = new Set((window.todasConversasClaraLog || []).map(m => m.id));
+        const novos = [...(r.data || []), ...logsZap]
+            .filter(m => !ids.has(m.id) && !window.claraTelefoneOculto(m.telefone, m.telefone_normalizado));
+        if (novos.length) {
+            window.todasConversasClaraLog = [...window.todasConversasClaraLog, ...novos].sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
+        }
+        window._claraConversasCompletas[grupo.chave] = true;
+        return novos.length > 0;
+    } catch (e) {
+        delete window._claraConversasCompletas[grupo.chave];
+        console.warn('Histórico da conversa:', e);
+        return false;
+    }
+};
+
 window.abrirChatClaraColaborador = function(grupo) {
     window.chatClaraSelecionado = grupo;
+    // Primeira vez que abre essa conversa: já desenha o que tem (últimos 30 dias) e, em seguida, completa com o histórico
+    if (grupo && !window._claraConversasCompletas[grupo.chave]) {
+        window.claraCarregarConversaCompleta(grupo).then(trouxe => {
+            if (trouxe && window.chatClaraSelecionado && window.chatClaraSelecionado.chave === grupo.chave) window.abrirChatClaraColaborador(window.chatClaraSelecionado);
+        });
+    }
     window.marcarClaraConversaComoLida(grupo);
     window.filtrarChatClaraLista(); // realça o selecionado
 
