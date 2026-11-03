@@ -108333,6 +108333,7 @@ window.uniformeTextoItens = function(q, sapatoNumero, tams) {
     window.UNIFORME_ITENS.forEach(function(it) {
         const n = (q && q[it.k]) || 0;
         if (!n) return;
+        if (it.k === 'sapato' && /^(0|n\/?a|-)?$/i.test(String(sapatoNumero || '').trim())) sapatoNumero = '';
         if (it.k === 'sapato') partes.push(n === 1 ? ('um par de sapato' + (sapatoNumero ? ' nº ' + sapatoNumero : '')) : (n + ' pares de sapato' + (sapatoNumero ? ' nº ' + sapatoNumero : '')));
         else partes.push(n + ' ' + it.nome + ((tams && tams[it.k]) ? ' tam. ' + tams[it.k] : ''));
     });
@@ -108544,6 +108545,7 @@ window.carregarListaUniforme = async function(sfxParam) {
                 ? '<a href="' + reg.doc_assinado + '" target="_blank" class="btn-secondary" style="text-decoration:none; border-color:#28a745; color:#28a745; padding:5px 10px; font-size:0.74rem;"><i class="fa-solid fa-file-arrow-down"></i> Ver assinado</a>'
                   + '<button type="button" class="btn-secondary" style="border-color:var(--cor-perigo); color:var(--cor-perigo); padding:5px 9px; font-size:0.74rem;" title="Remover anexo" onclick="window.removerAnexoUniforme(\'' + c.id + '\', \'' + tipo + '\', \'' + esc(c.nome) + '\', ' + idx + ')"><i class="fa-solid fa-trash"></i></button>'
                 : '<input type="file" id="' + idInput + '" accept="image/*,.pdf" style="font-size:0.72rem; max-width:210px; color: var(--cor-texto-secundario);">'
+                  + '<button type="button" class="btn-secondary" style="border-color:var(--cor-perigo); color:var(--cor-perigo); padding:5px 9px; font-size:0.74rem;" title="Excluir este registro (ainda sem recibo assinado)" onclick="window.excluirRegistroUniforme(\'' + c.id + '\', \'' + tipo + '\', \'' + esc(c.nome) + '\', ' + idx + ')"><i class="fa-solid fa-trash"></i></button>'
                   + '<button type="button" class="btn-success" style="padding:5px 10px; font-size:0.74rem; font-weight:bold;" onclick="window.salvarAnexoUniforme(\'' + c.id + '\', \'' + tipo + '\', \'' + esc(c.nome) + '\', \'' + esc(c.unidade) + '\', \'' + esc(c.empresa) + '\', ' + idx + ', \'' + idInput + '\')"><i class="fa-solid fa-upload"></i> Anexar assinado</button>';
             return '<div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; padding:8px 10px; border-left:3px solid ' + cor + '; background:rgba(0,0,0,0.12); border-radius:6px;">'
                  + '<div style="font-size:0.78rem; color:var(--cor-texto-secundario); min-width:200px;">'
@@ -108968,6 +108970,51 @@ window.salvarAnexoUniforme = async function(idColab, tipo, nomeColab, unidadeCol
 
     } catch (e) {
         mostrarAlerta("Erro ao salvar: " + e.message, "erro");
+    }
+};
+
+// Exclui um registro de entrega/devolução que ainda NÃO tem recibo assinado (lançamento errado/duplicado).
+// O saldo do colaborador é recalculado sozinho (ele é sempre calculado a partir dos registros).
+window.excluirRegistroUniforme = async function(idColab, tipo, nomeColab, idx) {
+    const rotulo = tipo === 'entrega' ? 'entrega' : 'devolução';
+    const confirmado = await mostrarConfirmacao(`Excluir este registro de <b>${rotulo}</b> de uniforme de <b>${nomeColab}</b>?<br><br>O saldo dele será recalculado. Isso não pode ser desfeito.`, "Excluir Registro");
+    if (!confirmado) return;
+
+    try {
+        if (tipo === 'entrega') {
+            const { data: perfil, error: eB } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+            if (eB) throw eB;
+            let adm = _uniObj(perfil.dados_admissao);
+            const lista = adm.uniforme_entregas || [];
+            if (!lista[idx]) throw new Error('Registro não encontrado (a lista mudou). Atualize a tela e tente de novo.');
+            if (lista[idx].doc_assinado) throw new Error('Este registro já tem recibo assinado anexado. Remova o anexo antes de excluir.');
+            lista.splice(idx, 1);
+            adm.uniforme_entregas = lista;
+            const { data: ok, error } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', idColab).select('id');
+            if (error) throw error;
+            if (!ok || !ok.length) throw new Error('O banco não aceitou a gravação (sem permissão). Nada foi excluído.');
+        } else {
+            const { data: perfil, error: eB } = await supabaseClient.from('perfis').select('dados_rescisao').eq('id', idColab).single();
+            if (eB) throw eB;
+            let resc = _uniObj(perfil.dados_rescisao);
+            if (!Array.isArray(resc.uniforme_devolucoes)) {
+                resc.uniforme_devolucoes = (resc.uniforme_devolucao && resc.uniforme_devolucao.gerada) ? [resc.uniforme_devolucao] : [];
+            }
+            if (!resc.uniforme_devolucoes[idx]) throw new Error('Registro não encontrado (a lista mudou). Atualize a tela e tente de novo.');
+            if (resc.uniforme_devolucoes[idx].doc_assinado) throw new Error('Este registro já tem recibo assinado anexado. Remova o anexo antes de excluir.');
+            resc.uniforme_devolucoes.splice(idx, 1);
+            if (resc.uniforme_devolucoes.length) resc.uniforme_devolucao = resc.uniforme_devolucoes[resc.uniforme_devolucoes.length - 1];
+            else delete resc.uniforme_devolucao; // volta a "devolução pendente"
+            const { data: ok, error } = await supabaseClient.from('perfis').update({ dados_rescisao: resc }).eq('id', idColab).select('id');
+            if (error) throw error;
+            if (!ok || !ok.length) throw new Error('O banco não aceitou a gravação (sem permissão). Nada foi excluído.');
+            // o aviso do sino ("faltou devolver") deixa de valer: o saldo mudou
+            try { await supabaseClient.from('notificacoes').update({ lida: true }).eq('tipo', 'Uniforme_Nao_Devolvido_Admin').eq('referencia_id', idColab).eq('lida', false); } catch (e2) {}
+        }
+        mostrarAlerta("Registro excluído.", "sucesso");
+        window.carregarListaUniforme();
+    } catch (e) {
+        mostrarAlerta("Erro ao excluir: " + e.message, "erro");
     }
 };
 
