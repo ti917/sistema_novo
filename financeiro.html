@@ -10056,7 +10056,7 @@ window.__notasEnviadasLista = [];
 // Data e hora de emissão para exibir (horário de Brasília). Usa o dhEmi do XML (tem hora e fuso); sem XML,
 // cai pra data salva "AAAA-MM-DD" lida como data pura (sem fuso — senão aparece um dia a menos).
 window._nfeDataHoraEmissao = function(n) {
-    const bruto = (n.xml_raw && _nfeExtractTag(n.xml_raw, 'dhEmi')) || (n.xml_completo && (_nfeExtractTag(n.xml_completo, 'dhEmi') || _nfeExtractTag(n.xml_completo, 'dhProc'))) || null;
+    const bruto = n.dh_emi || (n.xml_raw && _nfeExtractTag(n.xml_raw, 'dhEmi')) || (n.xml_completo && (_nfeExtractTag(n.xml_completo, 'dhEmi') || _nfeExtractTag(n.xml_completo, 'dhProc'))) || null;
     if (bruto) {
         const d = new Date(bruto);
         if (!isNaN(d)) return {
@@ -10804,8 +10804,8 @@ function _nfeSituacaoSefaz(n) {
     const CSIT_AUTORIZADA = ['1', '100', '150'];
     const CSIT_CANCELADA = ['3', '101', '151', '155'];
     const CSIT_DENEGADA = ['2', '110', '205', '301', '302', '303'];
-    let cSit = n.xml_raw ? _nfeExtractTag(n.xml_raw, 'cSitNFe') : null;
-    if (!cSit && n.xml_completo) cSit = _nfeExtractTag(n.xml_completo, 'cStat');
+    let cSit = n.__lite ? (n.c_sit || n.c_stat || null) : (n.xml_raw ? _nfeExtractTag(n.xml_raw, 'cSitNFe') : null);
+    if (!cSit && !n.__lite && n.xml_completo) cSit = _nfeExtractTag(n.xml_completo, 'cStat');
     if (n.situacao_sefaz === 'cancelada' || (cSit && CSIT_CANCELADA.includes(cSit))) return { chave: 'cancelada', codigo: cSit };
     if (cSit && CSIT_DENEGADA.includes(cSit)) return { chave: 'denegada', codigo: cSit };
     if (cSit && CSIT_AUTORIZADA.includes(cSit)) return { chave: 'autorizada', codigo: cSit };
@@ -10834,6 +10834,47 @@ function _nfeFormatarCnpj(v) {
 // =====================================================================
 window.__notasRecebidasLista = window.__notasRecebidasLista || [];
 
+// ---------------------------------------------------------------------
+// 03/11/2026 - LISTA LEVE. Com a visão nfecloud_documentos_lista (sql_extra/nfecloud_lista_leve.sql)
+// a lista vem SEM o XML (que pesa centenas de KB por nota) e já com a situação, a data/hora
+// e o vencimento calculados no banco. O XML de cada nota é buscado só quando precisa
+// (clicar em XML/PDF/Lançar, ou conferir a assinatura das notas da página aberta).
+// Sem a visão, tudo continua como antes (a lista traz o XML junto).
+// ---------------------------------------------------------------------
+window._nfTemXmlCompleto = function(n) { return n.tem_xml_completo !== undefined ? !!n.tem_xml_completo : !!n.xml_completo; };
+window._nfTemXml = function(n) {
+    return n.tem_xml_completo !== undefined ? !!(n.tem_xml_completo || n.tem_xml_raw) : !!(n.xml_completo || n.xml_raw);
+};
+window._nfVencimento = function(n) {
+    if (n.__lite) return n.venc_primeiro ? { primeiro: String(n.venc_primeiro).slice(0, 10), total: Number(n.venc_total) || 1 } : null;
+    return n.xml_completo ? _nfeExtrairVencimento(n.xml_completo) : null;
+};
+// Traz xml_completo/xml_raw de UMA nota (se a lista veio sem eles). Guarda em memória.
+window._nfGarantirXml = async function(n) {
+    if (!n || !n.__lite || n.__xmlCarregado) return n;
+    const { data, error } = await supabaseClient.from('nfecloud_documentos').select('xml_completo, xml_raw').eq('id', n.id).maybeSingle();
+    if (error) { mostrarAlerta('Não consegui carregar o XML da nota: ' + (error.message || error), 'erro'); return n; }
+    if (data) { n.xml_completo = data.xml_completo; n.xml_raw = data.xml_raw; }
+    n.__xmlCarregado = true;
+    return n;
+};
+// Mesmo, para várias notas de uma vez (de 10 em 10).
+window._nfGarantirXmls = async function(lista) {
+    const faltam = (lista || []).filter(n => n && n.__lite && !n.__xmlCarregado);
+    for (let i = 0; i < faltam.length; i += 10) {
+        const grupo = faltam.slice(i, i + 10);
+        const { data, error } = await supabaseClient.from('nfecloud_documentos').select('id, xml_completo, xml_raw').in('id', grupo.map(n => n.id));
+        if (error) { console.warn('Não consegui carregar XMLs:', error.message); continue; }
+        const porId = {};
+        (data || []).forEach(r => { porId[r.id] = r; });
+        grupo.forEach(n => {
+            const r = porId[n.id];
+            if (r) { n.xml_completo = r.xml_completo; n.xml_raw = r.xml_raw; }
+            n.__xmlCarregado = true;
+        });
+    }
+};
+
 window.carregarNotasRecebidasNFeCloud = async function() {
     if (window.nfIniciarCalendarioPeriodo) window.nfIniciarCalendarioPeriodo();
     const tbody = document.getElementById('lista-nfecloud-body');
@@ -10845,8 +10886,10 @@ window.carregarNotasRecebidasNFeCloud = async function() {
     // Uma busca por tipo (até 500 de cada), pra o histórico grande de NFS-e
     // não empurrar as NF-e pra fora da lista.
     const buscaTipo = (filtro) => {
-        let q = supabaseClient.from('nfecloud_documentos')
-            .select('*, financeiro_centros_custo(nome_unidade)');
+        // Lista leve (sem XML) quando a visão existe no banco; senão, a tabela inteira como antes.
+        let q = window.__nfFonteLista === 'tabela'
+            ? supabaseClient.from('nfecloud_documentos').select('*, financeiro_centros_custo(nome_unidade)')
+            : supabaseClient.from('nfecloud_documentos_lista').select('*');
         q = filtro === 'outros' ? q.not('tipo', 'in', '(NFe,NFSe)') : q.eq('tipo', filtro);
         const de = document.getElementById('nf-filtro-de')?.value, ate = document.getElementById('nf-filtro-ate')?.value;
         if (de) q = q.gte('data_emissao', `${de}T00:00:00-03:00`);
@@ -10858,6 +10901,13 @@ window.carregarNotasRecebidasNFeCloud = async function() {
         return excluir ? q.neq('direcao', 'enviada') : q;
     }));
     let [rNfe, rNfse, rOutros] = await rodar(true);
+    // Visão leve ainda não criada no banco (sql_extra/nfecloud_lista_leve.sql): volta pra tabela.
+    if (window.__nfFonteLista !== 'tabela' && [rNfe, rNfse, rOutros].some(r => r.error && /nfecloud_documentos_lista|schema cache|does not exist|PGRST205|42P01/i.test(String(r.error.message || '') + String(r.error.code || '')))) {
+        window.__nfFonteLista = 'tabela';
+        [rNfe, rNfse, rOutros] = await rodar(true);
+    } else if (window.__nfFonteLista !== 'tabela' && ![rNfe, rNfse, rOutros].some(r => r.error && !/direcao/i.test(r.error.message || ''))) {
+        window.__nfFonteLista = 'view';
+    }
     // Antes de rodar o SQL da coluna "direcao" o filtro dá erro: refaz sem ele.
     if ([rNfe, rNfse, rOutros].some(r => r.error && /direcao/i.test(r.error.message || ''))) {
         [rNfe, rNfse, rOutros] = await rodar(false);
@@ -10873,6 +10923,18 @@ window.carregarNotasRecebidasNFeCloud = async function() {
     }
 
     await window.nfCategoriasCarregar();
+    // Lista leve: a visão não traz o nome da unidade nem o XML. Põe o nome (1 busca pequena) e marca a nota como "leve".
+    if (window.__nfFonteLista === 'view') {
+        let mapaUn = {};
+        try {
+            const { data: cc } = await supabaseClient.from('financeiro_centros_custo').select('id, nome_unidade');
+            (cc || []).forEach(c => { mapaUn[c.id] = c.nome_unidade; });
+        } catch (_) {}
+        data.forEach(n => {
+            n.__lite = true;
+            n.financeiro_centros_custo = mapaUn[n.centro_custo_id] ? { nome_unidade: mapaUn[n.centro_custo_id] } : null;
+        });
+    }
     window.__notasRecebidasLista = data || [];
     // Guarda por id pros botões de XML/PDF acharem a nota sem colocar XML
     // gigante dentro de atributo onclick.
@@ -10990,7 +11052,7 @@ window._nfAtualizarKpis = function() {
     const nomeTipo = { '': 'Notas recebidas', NFe: 'NF-e recebidas', NFSe: 'NFS-e recebidas', outros: 'Outros documentos' }[ativo];
     const rotulo = document.getElementById('nf-kpi-rotulo-total');
     if (rotulo) rotulo.firstChild.textContent = nomeTipo + ' ';
-    const comPdf = lista.filter(n => (n.tipo === 'NFe' || n.tipo === 'NFSe') && n.xml_completo).length;
+    const comPdf = lista.filter(n => (n.tipo === 'NFe' || n.tipo === 'NFSe') && window._nfTemXmlCompleto(n)).length;
     setTxt('nf-kpi-total', String(lista.length));
     setTxt('nf-kpi-total-sub', `${comPdf} com PDF (DANFE/DANFSe) disponível${filtrando ? ' · filtrado' : ''}`);
     setTxt('nf-kpi-valor', moeda(soma(naoCanceladas)));
@@ -11065,22 +11127,22 @@ window.renderizarNotasRecebidas = function(manterPagina) {
         // Já tem o XML completo: o motivo de existir a ciência (liberar o download do XML) já foi
         // cumprido, então não mostra "Erro ao enviar"/"Pendente" que só assusta. Não finge que a
         // ciência foi registrada na SEFAZ: mostra "XML completo" e explica no tooltip.
-        else if (n.xml_completo) manifestacaoFmt = `<span class="nf-chip ok" title="${esc('Esta nota já tem o XML completo, então não precisa de ciência para baixá-lo. A ciência da operação não foi registrada na SEFAZ por este sistema.' + (n.ciencia_detalhe ? ' (Último retorno: ' + n.ciencia_detalhe + ')' : ''))}"><i class="fa-solid fa-file-circle-check"></i> XML completo</span>`;
+        else if (window._nfTemXmlCompleto(n)) manifestacaoFmt = `<span class="nf-chip ok" title="${esc('Esta nota já tem o XML completo, então não precisa de ciência para baixá-lo. A ciência da operação não foi registrada na SEFAZ por este sistema.' + (n.ciencia_detalhe ? ' (Último retorno: ' + n.ciencia_detalhe + ')' : ''))}"><i class="fa-solid fa-file-circle-check"></i> XML completo</span>`;
         else if (n.ciencia_status === 'erro') manifestacaoFmt = `<span class="nf-chip alerta" title="${esc(n.ciencia_detalhe || 'erro desconhecido')}"><i class="fa-solid fa-triangle-exclamation"></i> Erro ao enviar</span>`;
 
         // Vencimento (cobr/dup/dVenc) só existe no XML completo.
         let vencFmt = '<span style="color:var(--cor-texto-secundario);" title="Só disponível depois que o XML completo da nota chegar">—</span>';
         if (n.tipo === 'NFSe') {
             vencFmt = '<span style="color:var(--cor-texto-secundario); font-size:0.8rem;" title="A NFS-e não traz data de vencimento">não informado</span>';
-        } else if (n.xml_completo) {
-            const venc = _nfeExtrairVencimento(n.xml_completo);
+        } else if (window._nfTemXmlCompleto(n)) {
+            const venc = window._nfVencimento(n);
             vencFmt = venc
                 ? `<div class="nf-data">${new Date(venc.primeiro + 'T00:00:00').toLocaleDateString('pt-BR')}</div>${venc.total > 1 ? `<div class="nf-sub">1ª de ${venc.total} parcelas</div>` : ''}`
                 : '<span style="color:var(--cor-texto-secundario); font-size:0.8rem;">não informado</span>';
         }
 
-        const temXml = !!(n.xml_completo || n.xml_raw);
-        const temXmlCompleto = !!n.xml_completo;
+        const temXml = window._nfTemXml(n);
+        const temXmlCompleto = window._nfTemXmlCompleto(n);
         const btnXml = temXml
             ? `<button class="nf-arq" title="Baixar XML${temXmlCompleto ? '' : ' (resumo — XML completo ainda não chegou)'}" onclick="window.baixarXmlNotaNFeCloud('${n.id}')"><i class="fa-solid fa-file-code"></i> XML</button>`
             : `<button class="nf-arq" title="Ainda não tem XML dessa nota" disabled><i class="fa-solid fa-file-code"></i> XML</button>`;
@@ -11111,7 +11173,7 @@ window.renderizarNotasRecebidas = function(manterPagina) {
             <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${(n.tipo === 'NFe' && temXmlCompleto && sit.chave === 'autorizada' && status !== 'Lançada') ? `<button class="nf-arq nf-arq-lancar" title="Lançar essa nota no sistema (Almoxarifado)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
         </tr>`;
     }).join('');
-    window._nfeConferirSelos();
+    window._nfeConferirSelos(window.__nfFonteLista === 'view' ? pagLista.map(n => n.id) : undefined);
 };
 
 // ---- Selo de assinatura digital (check verde / X vermelho) ao lado do PDF ----
@@ -11124,24 +11186,34 @@ window._nfeSeloHtml = function(id) {
     const tit = r.ok ? 'Assinatura digital conferida: o XML não foi alterado. Clique para ver.' : 'ATENÇÃO: a assinatura digital NÃO conferiu. Clique para ver.';
     return `<button class="nf-selo ${r.ok ? 'ok' : 'erro'}" data-nf-id="${id}" title="${tit}" onclick="window.mostrarSeloAssinaturaNFe('${id}')"><i class="fa-solid ${r.ok ? 'fa-circle-check' : 'fa-circle-xmark'}"></i></button>`;
 };
-window._nfeConferirSelos = async function() {
-    if (window.__conferindoSelosNFe) return; // já tem uma rodada em andamento
+window.__selosFila = window.__selosFila || [];
+// Sem ids: confere todas as notas carregadas (modo antigo, lista com XML). Com ids (lista leve):
+// só as da página aberta, buscando o XML delas de 10 em 10 - não o das 700 notas.
+window._nfeConferirSelos = async function(ids) {
+    const porId = window.__notasNFeCloudPorId || {};
+    const candidatas = (ids && ids.length ? ids.map(id => porId[id]) : Object.values(porId)).filter(Boolean);
+    candidatas.forEach(n => { if (!window.__selosFila.includes(n.id)) window.__selosFila.push(n.id); });
+    if (window.__conferindoSelosNFe) return; // já tem uma rodada em andamento; ela pega a fila inteira
     window.__conferindoSelosNFe = true;
     try {
-        // Todas as notas carregadas (não só as filtradas), pra não perder nenhuma se o filtro mudar no meio.
-        for (const n of Object.values(window.__notasNFeCloudPorId || {})) {
-            if (n.tipo !== 'NFe' || !n.xml_completo || window.__assinNFeCache[n.id]) continue;
-            let r;
-            try {
-                const d = window.gerarDadosDanfeDeXml(n.xml_completo);
-                r = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
-            } catch (e) {
-                r = { ok: false, motivo: 'Não consegui conferir a assinatura (' + (e && e.message ? e.message : e) + ').' };
+        while (window.__selosFila.length) {
+            const lote = window.__selosFila.splice(0, 10).map(id => porId[id]).filter(n => n && n.tipo === 'NFe' && window._nfTemXmlCompleto(n) && !window.__assinNFeCache[n.id]);
+            if (!lote.length) continue;
+            await window._nfGarantirXmls(lote);
+            for (const n of lote) {
+                if (!n.xml_completo || window.__assinNFeCache[n.id]) continue;
+                let r;
+                try {
+                    const d = window.gerarDadosDanfeDeXml(n.xml_completo);
+                    r = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+                } catch (e) {
+                    r = { ok: false, motivo: 'Não consegui conferir a assinatura (' + (e && e.message ? e.message : e) + ').' };
+                }
+                const agora = new Date();
+                r = { ok: !!r.ok, motivo: r.motivo, quando: agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) };
+                window.__assinNFeCache[n.id] = r;
+                document.querySelectorAll(`.nf-selo[data-nf-id="${n.id}"]`).forEach(el => { el.outerHTML = window._nfeSeloHtml(n.id); });
             }
-            const agora = new Date();
-            r = { ok: !!r.ok, motivo: r.motivo, quando: agora.toLocaleDateString('pt-BR') + ' ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) };
-            window.__assinNFeCache[n.id] = r;
-            document.querySelectorAll(`.nf-selo[data-nf-id="${n.id}"]`).forEach(el => { el.outerHTML = window._nfeSeloHtml(n.id); });
         }
     } finally {
         window.__conferindoSelosNFe = false;
@@ -11209,9 +11281,10 @@ function _nfeExtrairVencimento(xmlCompleto) {
 
 // Baixa o XML da nota (o completo se já tiver chegado, senão o resumo que
 // a SEFAZ manda na primeira consulta).
-window.baixarXmlNotaNFeCloud = function(id) {
+window.baixarXmlNotaNFeCloud = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (!n) return;
+    await window._nfGarantirXml(n);
     const xml = n.xml_completo || n.xml_raw;
     if (!xml) { mostrarAlerta('Essa nota ainda não tem XML disponível.', 'erro'); return; }
     const blob = new Blob([xml], { type: 'application/xml' });
@@ -11590,6 +11663,7 @@ window._danfeAvisoAssinatura = function(motivo, chave) {
 
 window.baixarDanfeNotaNFeCloud = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
+    if (n) await window._nfGarantirXml(n);
     if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
     if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
     let pdf, d;
@@ -11693,6 +11767,7 @@ window._almoxAvisoNotaJaLancada = async function(nota) {
 window.lancarNotaNoAlmoxarifado = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     const caixa = document.getElementById('modal-lancar-nota-recebida');
+    if (n) await window._nfGarantirXml(n);
     if (!n || !n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
     if (caixa) caixa.remove();
     try {
@@ -12429,6 +12504,7 @@ window.montarPdfDanfse = function(d) {
 
 window.baixarDanfseNotaNFeCloud = async function(id) {
     const n = (window.__notasNFeCloudPorId || {})[id];
+    if (n) await window._nfGarantirXml(n);
     if (!n || !n.xml_completo) { mostrarAlerta('O XML dessa NFS-e não está salvo.', 'erro'); return; }
     if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) { mostrarAlerta('Biblioteca de PDF não carregou — recarregue a página e tente de novo.', 'erro'); return; }
     let pdf, d;
