@@ -12973,9 +12973,17 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                 <i class="fa-solid fa-shirt"></i>
                 <input type="number" min="0" id="uniforme-qtd-camisa" placeholder="Quantidade de camiseta(s)" value="1">
             </div>
+            <div class="input-wrapper uniforme-tam" style="margin-bottom: 14px;">
+                <i class="fa-solid fa-ruler"></i>
+                <input type="text" id="uniforme-tam-camisa" placeholder="Tamanho da camiseta (ex: M)">
+            </div>
             <div class="input-wrapper" style="margin-bottom: 14px;">
                 <i class="fa-solid fa-vest"></i>
                 <input type="number" min="0" id="uniforme-qtd-calca" placeholder="Quantidade de calça(s)" value="1">
+            </div>
+            <div class="input-wrapper uniforme-tam" style="margin-bottom: 14px;">
+                <i class="fa-solid fa-ruler"></i>
+                <input type="text" id="uniforme-tam-calca" placeholder="Tamanho da calça (ex: 42)">
             </div>
             <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 8px; color: var(--cor-texto-secundario); font-size: 0.9rem;">
                 <input type="checkbox" id="uniforme-recebe-sapato" onchange="document.getElementById('box-uniforme-sapato').classList.toggle('hidden', !this.checked)" style="width: auto; cursor: pointer;"> <span id="uniforme-lbl-sapato">Recebe Sapato?</span>
@@ -12990,6 +12998,7 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
             <div class="input-wrapper" id="box-uniforme-agasalho" style="margin-bottom: 20px;">
                 <i class="fa-solid fa-mitten"></i>
                 <input type="number" min="0" id="uniforme-qtd-agasalho" placeholder="Quantidade de agasalho(s)" value="1">
+                <input type="text" class="uniforme-tam" id="uniforme-tam-agasalho" placeholder="Tamanho do agasalho (ex: G)" style="margin-top: 8px;">
             </div>
 
             <button id="btn-confirmar-uniforme" class="btn-primary" style="width: 100%;" onclick="window.confirmarGeracaoUniforme()"><i class="fa-solid fa-print"></i> Gerar Recibo</button>
@@ -24131,7 +24140,7 @@ window.salvarUnidadeOficial = async function() {
         document.getElementById('lista-vt-unidade-gestao-uni').innerHTML = '';
         document.getElementById('gestao-uni-usa-ficha-sus').checked = true;
         const chkExigeRelNova = document.getElementById('gestao-uni-exige-relatorio'); if (chkExigeRelNova) chkExigeRelNova.checked = false;
-        ['camisa','calca','sapato','agasalho'].forEach(function(k){ const i = document.getElementById('gestao-uni-kit-'+k); if (i) i.value = ''; });
+        window.kitUniformeLimpar('gestao-uni');
         
         // Limpa os cargos
         document.getElementById('lista-limites-cargo-gestao-uni').innerHTML = '';
@@ -24340,6 +24349,7 @@ window.salvarUnidadeOficial = async function() {
     </div>`;
     
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+    window.kitUniformeIniciar('edit-uni', '#lista-limites-cargo-edit-uni', u.kit_uniforme); // kit por cargo (cargos = Limites de Lotação desta unidade)
 
     // 👇 Se já tinha coordenadas salvas, mostra o mapa com o raio assim que o modal abre
     setTimeout(function() { window.atualizarMapaGeofencing('edit-uni'); }, 0);
@@ -108318,36 +108328,57 @@ window.uniformeListaDevolucoes = function(c) {
 };
 
 // Texto "2 camiseta(s), 1 calça(s) e 1 par(es) de sapato" a partir de {camisa,calca,sapato,agasalho}.
-window.uniformeTextoItens = function(q, sapatoNumero) {
+window.uniformeTextoItens = function(q, sapatoNumero, tams) {
     const partes = [];
     window.UNIFORME_ITENS.forEach(function(it) {
         const n = (q && q[it.k]) || 0;
         if (!n) return;
         if (it.k === 'sapato') partes.push(n === 1 ? ('um par de sapato' + (sapatoNumero ? ' nº ' + sapatoNumero : '')) : (n + ' pares de sapato' + (sapatoNumero ? ' nº ' + sapatoNumero : '')));
-        else partes.push(n + ' ' + it.nome);
+        else partes.push(n + ' ' + it.nome + ((tams && tams[it.k]) ? ' tam. ' + tams[it.k] : ''));
     });
     if (partes.length > 1) return partes.slice(0, -1).join(', ') + ' e ' + partes[partes.length - 1];
     return partes[0] || '';
 };
 
-// Kit esperado da unidade (ou null se a unidade ainda não tem kit cadastrado).
-window.uniformeKitDaUnidade = function(nomeUnidade, empresa) {
+// Normaliza o que está salvo em unidades_oficiais.kit_uniforme.
+// Formato novo: { padrao: {camisa,calca,sapato,agasalho} | null, cargos: { 'CARGO': {sapato:0, ...só o que foi preenchido} } }
+// Formato antigo (kit único da unidade, antes de existir kit por cargo): {camisa,calca,sapato,agasalho} → vira o "padrão".
+window.kitUniformeNormalizar = function(raw) {
+    const k = _uniObj(raw);
+    const itens = ['camisa', 'calca', 'sapato', 'agasalho'];
+    const paraNum = function(o) { const r = {}; itens.forEach(function(x) { r[x] = window._uniNum(o[x]); }); return r; };
+    if (itens.some(function(x) { return k[x] !== undefined; })) return { padrao: paraNum(k), cargos: {} };
+    return { padrao: k.padrao ? paraNum(k.padrao) : null, cargos: (k.cargos && typeof k.cargos === 'object') ? k.cargos : {} };
+};
+
+// Kit esperado de um colaborador: valor do CARGO dele (se a unidade configurou algo pra esse cargo)
+// completando o que faltar com o kit PADRÃO da unidade. Sem nada configurado → null.
+window.uniformeKitDaUnidade = function(nomeUnidade, empresa, cargo) {
     const mapa = window._uniformeUnidadesCache || {};
     const partes = String(nomeUnidade || '').split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+    const cargoUp = String(cargo || '').trim().toUpperCase();
     for (let i = 0; i < partes.length; i++) {
         const lista = mapa[partes[i]] || [];
         const u = lista.find(function(x) { return !empresa || x.empresa === empresa; }) || lista[0];
         if (!u) continue;
-        const k = _uniObj(u.kit_uniforme);
-        const kit = { camisa: window._uniNum(k.camisa), calca: window._uniNum(k.calca), sapato: window._uniNum(k.sapato), agasalho: window._uniNum(k.agasalho) };
-        if (kit.camisa + kit.calca + kit.sapato + kit.agasalho > 0) return kit;
+        const norm = window.kitUniformeNormalizar(u.kit_uniforme);
+        const chave = Object.keys(norm.cargos).find(function(c) { return c.trim().toUpperCase() === cargoUp; });
+        const over = chave ? norm.cargos[chave] : null;
+        if (!norm.padrao && !over) continue;
+        const kit = {};
+        ['camisa', 'calca', 'sapato', 'agasalho'].forEach(function(k) {
+            kit[k] = (over && over[k] !== undefined && over[k] !== '' && over[k] !== null) ? window._uniNum(over[k]) : (norm.padrao ? norm.padrao[k] : 0);
+        });
+        // Cargo configurado explicitamente pode ter kit zerado ("não recebe uniforme"); kit padrão zerado = não configurado.
+        if (over || (kit.camisa + kit.calca + kit.sapato + kit.agasalho > 0)) return kit;
     }
     return null;
 };
 
 // Situação completa de um colaborador: kit, entregue, falta entregar, em mãos, devolução.
 window.uniformeSituacao = function(c) {
-    const kit = window.uniformeKitDaUnidade(c.unidade, c.empresa);
+    const cargoColab = _uniObj(c.dados_admissao).cargo || '';
+    const kit = window.uniformeKitDaUnidade(c.unidade, c.empresa, cargoColab);
     const entregas = window.uniformeListaEntregas(c);
     const devolucoes = window.uniformeListaDevolucoes(c);
     const entregue = window.uniformeSomaQtds(entregas);
@@ -108375,7 +108406,7 @@ window.uniformeSituacao = function(c) {
         else if (totalEmMaos === 0) devSt = 'completa';
         else devSt = devolucoes.length ? 'parcial' : 'pendente';
     }
-    return { kit: kit, entregas: entregas, devolucoes: devolucoes, entregue: entregue, devolvido: devolvido, falta: falta, emMaos: emMaos,
+    return { cargo: cargoColab, kit: kit, kitVazio: !!(kit && (kit.camisa + kit.calca + kit.sapato + kit.agasalho) === 0), entregas: entregas, devolucoes: devolucoes, entregue: entregue, devolvido: devolvido, falta: falta, emMaos: emMaos,
              totalFalta: totalFalta, totalEmMaos: totalEmMaos, totalEntregue: totalEntregue, entregaSt: entregaSt, devSt: devSt, temRescisao: temRescisao };
 };
 
@@ -108505,7 +108536,7 @@ window.carregarListaUniforme = async function(sfxParam) {
         // Linha de um recibo no histórico (entrega ou devolução) com anexo próprio.
         const linhaRecibo = function(c, tipo, reg, idx) {
             const q = window.uniformeQtdsDoRegistro(reg);
-            const txt = window.uniformeTextoItens(q, tipo === 'entrega' ? reg.sapato_numero : '') || (tipo === 'entrega' ? 'recibo avulso' : 'nada devolvido');
+            const txt = window.uniformeTextoItens(q, tipo === 'entrega' ? reg.sapato_numero : '', tipo === 'entrega' ? { camisa: reg.tam_camisa, calca: reg.tam_calca, agasalho: reg.tam_agasalho } : null) || (tipo === 'entrega' ? 'recibo avulso' : 'nada devolvido');
             const nd = (tipo === 'devolucao' && reg.nao_devolvido) ? window.uniformeTextoItens(reg.nao_devolvido, '') : '';
             const idInput = 'upload-uniforme-' + tipo + sfx + '-' + c.id + '-' + idx;
             const cor = tipo === 'entrega' ? '#00bcd4' : '#ff6b6b';
@@ -108534,7 +108565,8 @@ window.carregarListaUniforme = async function(sfxParam) {
                 // Pré-seleção do modal: a Admissão só serve de sugestão quando a unidade não tem kit
                 recebeSapato: adm.uniforme?.recebeSapato !== false,
                 recebeAgasalho: adm.uniforme?.recebeAgasalho === true,
-                sapatoSugerido: adm.uniforme?.sapato || ''
+                sapatoSugerido: adm.uniforme?.sapato || '',
+                tam: { camisa: adm.uniforme?.camisa || '', calca: adm.uniforme?.calca || '', agasalho: adm.uniforme?.agasalho || '' }
             };
             const payloadAttr = JSON.stringify(payload).replace(/"/g, '&quot;');
 
@@ -108554,12 +108586,14 @@ window.carregarListaUniforme = async function(sfxParam) {
 
             // Linha "falta entregar" / "em mãos"
             let linhaSaldo = '';
-            if (!temRescisao && s.kit) {
+            if (!temRescisao && s.kit && s.kitVazio) {
+                linhaSaldo = '<div style="margin-top:8px; font-size:0.78rem; color:var(--cor-texto-secundario);"><i class="fa-solid fa-circle-info"></i> Este cargo não recebe uniforme nesta unidade.</div>';
+            } else if (!temRescisao && s.kit) {
                 linhaSaldo = s.totalFalta > 0
                     ? '<div style="margin-top:8px; font-size:0.8rem; color:#ffc107;"><i class="fa-solid fa-circle-exclamation"></i> <b>Falta entregar:</b> ' + window.uniformeTextoItens(s.falta, '') + '</div>'
                     : '<div style="margin-top:8px; font-size:0.78rem; color:#28a745;"><i class="fa-solid fa-circle-check"></i> Kit da unidade totalmente entregue.</div>';
             } else if (!temRescisao && !s.kit) {
-                linhaSaldo = '<div style="margin-top:8px; font-size:0.74rem; color:var(--cor-texto-secundario); font-style:italic;"><i class="fa-solid fa-circle-info"></i> A unidade <b>' + (c.unidade || '-') + '</b> ainda não tem kit de uniforme cadastrado (Gestão de Unidades) — o sistema não sabe o que falta entregar.</div>';
+                linhaSaldo = '<div style="margin-top:8px; font-size:0.74rem; color:var(--cor-texto-secundario); font-style:italic;"><i class="fa-solid fa-circle-info"></i> A unidade <b>' + (c.unidade || '-') + '</b> ainda não tem kit de uniforme cadastrado' + (adm.cargo ? ' para o cargo <b>' + adm.cargo + '</b>' : '') + ' (Gestão de Unidades) — o sistema não sabe o que falta entregar.</div>';
             } else if (temRescisao && s.totalEntregue === 0 && !s.entregas.length && !s.devolucoes.length) {
                 linhaSaldo = '<div style="margin-top:8px; font-size:0.78rem; color:#ff6b6b;"><i class="fa-solid fa-circle-exclamation"></i> Nenhuma entrega registrada no sistema — confirme com o colaborador se ele recebeu uniforme e registre o que foi devolvido.</div>';
             } else if (temRescisao && s.totalEmMaos > 0) {
@@ -108650,8 +108684,8 @@ window.abrirModalUniforme = async function(payloadStr, tipo) {
     if (entrega && sit && sit.kit) {
         sug = Object.assign({}, sit.falta);
         info = sit.totalFalta > 0
-            ? '<b>Kit da unidade:</b> ' + window.uniformeTextoItens(sit.kit, '') + '.<br><b>Já entregue:</b> ' + (window.uniformeTextoItens(sit.entregue, '') || 'nada') + '.<br><b style="color:#ffc107;">Falta entregar:</b> ' + window.uniformeTextoItens(sit.falta, '') + ' — já preenchido abaixo; ajuste se for entregar só uma parte hoje.'
-            : '<b style="color:#28a745;">O kit da unidade já foi totalmente entregue.</b> Use isto só para entrega extra / reposição (ajuste as quantidades).';
+            ? '<b>Kit do cargo' + (sit.cargo ? ' ' + sit.cargo : '') + ':</b> ' + (window.uniformeTextoItens(sit.kit, '') || 'nenhum item') + '.<br><b>Já entregue:</b> ' + (window.uniformeTextoItens(sit.entregue, '') || 'nada') + '.<br><b style="color:#ffc107;">Falta entregar:</b> ' + window.uniformeTextoItens(sit.falta, '') + ' — já preenchido abaixo; ajuste se for entregar só uma parte hoje.'
+            : (sit.kitVazio ? '<b>Este cargo não recebe uniforme nesta unidade.</b> Use só se for uma entrega excepcional.' : '<b style="color:#28a745;">O kit já foi totalmente entregue.</b>') + ' Use isto só para entrega extra / reposição (ajuste as quantidades).';
         if (sit.totalFalta === 0) sug = { camisa: 0, calca: 0, sapato: 0, agasalho: 0 };
     } else if (entrega) {
         info = 'A unidade ainda não tem kit cadastrado (Gestão de Unidades); informe manualmente o que está sendo entregue.';
@@ -108670,6 +108704,9 @@ window.abrirModalUniforme = async function(payloadStr, tipo) {
     document.getElementById('uniforme-qtd-calca').value = sug.calca;
     document.getElementById('uniforme-qtd-agasalho').value = sug.agasalho || 0;
     document.getElementById('uniforme-sapato-numero').value = entrega ? (d.sapatoSugerido || '') : '';
+    // Tamanhos vêm da Admissão do colaborador (editáveis aqui) e saem no recibo de ENTREGA.
+    ['camisa', 'calca', 'agasalho'].forEach(function(k) { const el = document.getElementById('uniforme-tam-' + k); if (el) el.value = entrega ? ((d.tam && d.tam[k]) || '') : ''; });
+    document.querySelectorAll('#modal-uniforme .uniforme-tam').forEach(function(el) { el.classList.toggle('hidden', !entrega); });
 
     const lblSapato = document.getElementById('uniforme-lbl-sapato');
     const lblAgasalho = document.getElementById('uniforme-lbl-agasalho');
@@ -108714,6 +108751,9 @@ window.confirmarGeracaoUniforme = async function() {
         sapato_numero: sapatoNumero,
         recebe_agasalho: recebeAgasalho,
         qtd_agasalho: Math.max(0, qtdAgasalho),
+        tam_camisa: entrega ? (document.getElementById('uniforme-tam-camisa')?.value || '').trim() : '',
+        tam_calca: entrega ? (document.getElementById('uniforme-tam-calca')?.value || '').trim() : '',
+        tam_agasalho: (entrega && recebeAgasalho) ? (document.getElementById('uniforme-tam-agasalho')?.value || '').trim() : '',
         gerado_em: new Date().toISOString(),
         gerado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual?.nome) ? usuarioAtual.nome : ''
     };
@@ -108805,7 +108845,7 @@ window.gerarReciboUniformePDF = function(colab, tipo, registro) {
 
         // Itens do recibo: só o que foi de fato entregue/devolvido neste lançamento
         // (entregas parciais geram recibo só do que foi entregue naquele dia).
-        const itensTexto = window.uniformeTextoItens(window.uniformeQtdsDoRegistro(registro), registro.sapato_numero);
+        const itensTexto = window.uniformeTextoItens(window.uniformeQtdsDoRegistro(registro), registro.sapato_numero, { camisa: registro.tam_camisa, calca: registro.tam_calca, agasalho: registro.tam_agasalho });
         const naoDevTexto = (tipo === 'devolucao' && registro.nao_devolvido) ? window.uniformeTextoItens(registro.nao_devolvido, '') : '';
 
         const textoDeclaracao = tipo === 'entrega'
@@ -108964,33 +109004,112 @@ window.removerAnexoUniforme = async function(idColab, tipo, nomeColab, idx) {
 };
 
 // ---- Kit de uniforme da unidade (campos usados na Gestão de Unidades Oficiais) ----
-window.kitUniformeCamposHtml = function(prefixo, kit) {
-    kit = _uniObj(kit);
+// Kit PADRÃO da unidade + ajustes por CARGO (os cargos vêm de "Limites de Lotação por Cargo" da própria unidade).
+// Campo do cargo em branco = usa o padrão; "0" = esse cargo NÃO recebe o item (ex.: Controlador de Acesso sem sapato).
+window._kitCargosCache = window._kitCargosCache || {};
+
+window.kitUniformeCamposHtml = function(prefixo, kitRaw) {
+    const norm = window.kitUniformeNormalizar(kitRaw);
+    const pad = norm.padrao || {};
     const campo = function(k, rot, ic) {
         return '<div class="form-group" style="margin-bottom:0; flex:1; min-width:110px;"><label style="font-size:0.78rem;"><i class="fa-solid ' + ic + '"></i> ' + rot + '</label>'
-             + '<input type="number" min="0" max="20" id="' + prefixo + '-kit-' + k + '" value="' + (window._uniNum(kit[k]) || '') + '" placeholder="0"></div>';
+             + '<input type="number" min="0" max="20" id="' + prefixo + '-kit-' + k + '" value="' + (norm.padrao ? (pad[k] || 0) : '') + '" placeholder="0"></div>';
     };
     return '<div style="margin-top:15px; margin-bottom:15px; background:rgba(0,188,212,0.05); padding:12px 15px; border-radius:8px; border:1px dashed #00bcd4;">'
          + '<label style="color:#00bcd4; font-weight:bold; display:block; margin-bottom:6px;"><i class="fa-solid fa-shirt"></i> Kit de Uniforme desta Unidade</label>'
-         + '<p style="font-size:0.75rem; color:var(--cor-texto-secundario); margin:0 0 10px 0; line-height:1.3;">Quanto cada colaborador desta unidade recebe. O sistema usa isso para mostrar o que <b>ainda falta entregar</b> e gerar o recibo só do que falta. Deixe vazio o que a unidade não usa (ex.: agasalho).</p>'
-         + '<div style="display:flex; gap:10px; flex-wrap:wrap;">' + campo('camisa', 'Camisetas', 'fa-shirt') + campo('calca', 'Calças', 'fa-vest') + campo('sapato', 'Pares de sapato', 'fa-shoe-prints') + campo('agasalho', 'Agasalhos', 'fa-mitten') + '</div></div>';
+         + '<p style="font-size:0.75rem; color:var(--cor-texto-secundario); margin:0 0 10px 0; line-height:1.3;">Quanto cada colaborador recebe. O sistema usa isso para mostrar o que <b>ainda falta entregar</b> e gerar o recibo só do que falta.</p>'
+         + '<div style="font-size:0.78rem; color:#00bcd4; font-weight:bold; margin-bottom:6px;">Kit padrão (vale para todos os cargos)</div>'
+         + '<div style="display:flex; gap:10px; flex-wrap:wrap;">' + campo('camisa', 'Camisetas', 'fa-shirt') + campo('calca', 'Calças', 'fa-vest') + campo('sapato', 'Pares de sapato', 'fa-shoe-prints') + campo('agasalho', 'Agasalhos', 'fa-mitten') + '</div>'
+         + '<div id="' + prefixo + '-kit-cargos" style="margin-top:14px;"></div></div>';
 };
 
-// Preenche o bloco de kit no modal "Nova Unidade" (o de edição é montado na hora, com os valores da unidade).
+// Lê as linhas de cargo que estão na tela (só o que foi preenchido).
+window._kitLerLinhasCargo = function(prefixo) {
+    const out = {};
+    document.querySelectorAll('#' + prefixo + '-kit-cargos [data-kitc-cargo]').forEach(function(row) {
+        const o = {};
+        row.querySelectorAll('input[data-k]').forEach(function(inp) { if (inp.value !== '') o[inp.getAttribute('data-k')] = window._uniNum(inp.value); });
+        out[row.getAttribute('data-kitc-cargo')] = o;
+    });
+    return out;
+};
+
+// Desenha uma linha por cargo que está em "Limites de Lotação por Cargo" da unidade.
+window.kitUniformeRenderCargos = function(prefixo, seletorLimites) {
+    const box = document.getElementById(prefixo + '-kit-cargos');
+    if (!box) return;
+    // guarda o que já foi digitado antes de redesenhar (cargo pode ser adicionado/removido a qualquer hora)
+    const cache = window._kitCargosCache[prefixo] = Object.assign(window._kitCargosCache[prefixo] || {}, window._kitLerLinhasCargo(prefixo));
+    const cargos = Array.from(document.querySelectorAll(seletorLimites + ' [data-cargo]')).map(function(t) { return t.getAttribute('data-cargo'); });
+    if (!cargos.length) {
+        box.innerHTML = '<div style="font-size:0.75rem; color:var(--cor-texto-secundario); font-style:italic;"><i class="fa-solid fa-circle-info"></i> Adicione cargos em <b>Limites de Lotação por Cargo</b> (logo abaixo) para configurar um kit diferente por cargo.</div>';
+        return;
+    }
+    const campo = function(cargoIdx, k, v, ic, rot) {
+        return '<div style="flex:1; min-width:70px;"><div style="font-size:0.68rem; color:var(--cor-texto-secundario); margin-bottom:2px;"><i class="fa-solid ' + ic + '"></i> ' + rot + '</div>'
+             + '<input type="number" min="0" max="20" data-k="' + k + '" value="' + (v === undefined ? '' : v) + '" placeholder="padrão" style="padding:6px 8px; height:34px; font-size:0.8rem;"></div>';
+    };
+    let h = '<div style="font-size:0.78rem; color:#00bcd4; font-weight:bold; margin-bottom:4px;">Ajuste por cargo</div>'
+          + '<p style="font-size:0.72rem; color:var(--cor-texto-secundario); margin:0 0 8px 0; line-height:1.3;">Em branco = usa o kit padrão. Digite <b>0</b> para o cargo <b>não receber</b> o item (ex.: Controlador de Acesso sem sapato).</p>'
+          + '<div style="display:flex; flex-direction:column; gap:8px;">';
+    cargos.forEach(function(cargo, i) {
+        const v = cache[cargo] || {};
+        h += '<div data-kitc-cargo="' + String(cargo).replace(/"/g, '&quot;') + '" style="background:rgba(0,0,0,0.15); border-radius:8px; padding:8px 10px;">'
+           + '<div style="font-size:0.8rem; font-weight:bold; color:#ffc107; margin-bottom:6px;"><i class="fa-solid fa-user-tie"></i> ' + cargo + '</div>'
+           + '<div style="display:flex; gap:8px; flex-wrap:wrap;">' + campo(i, 'camisa', v.camisa, 'fa-shirt', 'Camisetas') + campo(i, 'calca', v.calca, 'fa-vest', 'Calças') + campo(i, 'sapato', v.sapato, 'fa-shoe-prints', 'Sapatos') + campo(i, 'agasalho', v.agasalho, 'fa-mitten', 'Agasalhos') + '</div></div>';
+    });
+    box.innerHTML = h + '</div>';
+};
+
+// Liga o bloco ao modal: preenche com o kit salvo e redesenha os cargos sempre que a lista de limites mudar.
+window.kitUniformeIniciar = function(prefixo, seletorLimites, kitRaw) {
+    window._kitCargosCache[prefixo] = Object.assign({}, window.kitUniformeNormalizar(kitRaw).cargos);
+    window.kitUniformeRenderCargos(prefixo, seletorLimites);
+    const alvo = document.querySelector(seletorLimites);
+    if (alvo && !alvo._kitObserver) {
+        let agendado = false;
+        alvo._kitObserver = new MutationObserver(function() {
+            if (agendado) return; agendado = true;
+            requestAnimationFrame(function() { agendado = false; window.kitUniformeRenderCargos(prefixo, seletorLimites); });
+        });
+        alvo._kitObserver.observe(alvo, { childList: true, subtree: true });
+    }
+};
+
+window.kitUniformeLimpar = function(prefixo) {
+    window._kitCargosCache[prefixo] = {};
+    ['camisa', 'calca', 'sapato', 'agasalho'].forEach(function(k) { const i = document.getElementById(prefixo + '-kit-' + k); if (i) i.value = ''; });
+    window.kitUniformeRenderCargos(prefixo, prefixo === 'gestao-uni' ? '#lista-limites-cargo-gestao-uni' : '#lista-limites-cargo-edit-uni');
+};
+
+// Devolve o que será salvo em unidades_oficiais.kit_uniforme (ou null se nada foi preenchido).
+window.kitUniformeLerCampos = function(prefixo) {
+    const itens = ['camisa', 'calca', 'sapato', 'agasalho'];
+    let padraoPreenchido = false; const padrao = {};
+    itens.forEach(function(k) {
+        const v = document.getElementById(prefixo + '-kit-' + k)?.value;
+        if (v !== undefined && v !== '') padraoPreenchido = true;
+        padrao[k] = window._uniNum(v);
+    });
+    const cargos = {};
+    const linhas = window._kitLerLinhasCargo(prefixo);
+    Object.keys(linhas).forEach(function(c) { if (Object.keys(linhas[c]).length) cargos[c] = linhas[c]; });
+    if (!padraoPreenchido && !Object.keys(cargos).length) return null;
+    return { padrao: padraoPreenchido ? padrao : null, cargos: cargos };
+};
+
+// Kit do modal "Nova Unidade" (o de edição é iniciado na hora em que o modal abre).
 (function() {
     const montar = function() {
         const box = document.getElementById('gestao-uni-kit-uniforme-box');
-        if (box && !box.innerHTML.trim()) box.innerHTML = window.kitUniformeCamposHtml('gestao-uni', null);
+        if (box && !box.innerHTML.trim()) {
+            box.innerHTML = window.kitUniformeCamposHtml('gestao-uni', null);
+            window.kitUniformeIniciar('gestao-uni', '#lista-limites-cargo-gestao-uni', null);
+        }
     };
     montar();
     document.addEventListener('DOMContentLoaded', montar);
 })();
-
-window.kitUniformeLerCampos = function(prefixo) {
-    const v = function(k) { return window._uniNum(document.getElementById(prefixo + '-kit-' + k)?.value); };
-    const kit = { camisa: v('camisa'), calca: v('calca'), sapato: v('sapato'), agasalho: v('agasalho') };
-    return (kit.camisa + kit.calca + kit.sapato + kit.agasalho) > 0 ? kit : null;
-};
 
 // =========================================================
 // GERADOR DE IMPRESSÃO NATIVO DA CARTA SINDICAL (ABOUT:BLANK)
