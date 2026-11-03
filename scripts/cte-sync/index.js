@@ -35,11 +35,12 @@ const MAX_PAGINAS = 20;
 const MIN_MINUTOS_ENTRE_CONSULTAS = 65;
 
 function extractTag(xml, tag) {
-    const m = String(xml || "").match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, "i"));
+    // `<${tag}` seguido de espaco ou `>`: senao "dest" casava com <destCalc> e pegava o bloco errado
+    const m = String(xml || "").match(new RegExp(`<${tag}(?:\\s[^>]*)?>([^<]*)</${tag}>`, "i"));
     return m ? m[1].trim() : null;
 }
 function extractBlock(xml, tag) {
-    const m = String(xml || "").match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "i"));
+    const m = String(xml || "").match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
     return m ? m[1] : null;
 }
 // O repositorio e' publico: no log vai so' o final da chave.
