@@ -6251,7 +6251,8 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
                     forma_pagamento: formaPagamento,
                     pix_chave: pixChave,
                     numero_nf: numeroNf,
-                    chave_acesso: chaveNf
+                    chave_acesso: chaveNf,
+                    ...((origemNotaLanc && origemNotaLanc.contaFixaId) ? { conta_fixa_id: origemNotaLanc.contaFixaId } : {})
                 });
             }
 
@@ -11978,6 +11979,113 @@ window._nfDispensarDestino = async function(id, destino, desfazer) {
 // Descobre a unidade (centro de custo) de uma nota RECEBIDA, na ordem: unidade já ligada pelo CNPJ do destinatário →
 // endereço/CEP de entrega da NF-e (o mesmo do Almoxarifado) → texto do serviço / CNPJ do tomador (NFS-e) →
 // histórico: se todas as notas anteriores desse fornecedor foram pra MESMA unidade (Almoxarifado ou Centro de Custo).
+// ===== Contas fixas / recorrentes: a nota de um prestador que já tem conta fixa (ex.: PJ mensal) tem que
+// ENCAIXAR no lançamento recorrente daquele mês, e não criar outro (senão duplica o valor).
+window._nfNormTokens = function(t) {
+    return String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+};
+// Contas fixas ativas cujo NOME bate com o do emitente (todas as palavras da conta aparecem no nome do emitente).
+window._nfContasFixasDoPrestador = async function(n) {
+    const IGN = new Set(['PJ', 'RECORRENTE', 'LTDA', 'ME', 'EPP', 'MEI', 'EIRELI', 'SA', 'DE', 'DA', 'DO', 'DAS', 'DOS', 'E']);
+    const emit = new Set(window._nfNormTokens(_nfeDecodificaEntidades(n.emitente_nome || '')).filter(t => !/^\d+$/.test(t)));
+    if (!emit.size) return [];
+    if (!window.__contasFixasCache || Date.now() - window.__contasFixasCache.t > 120000) {
+        const { data, error } = await supabaseClient.from('financeiro_contas_fixas').select('*').eq('ativo', true);
+        window.__contasFixasCache = { t: Date.now(), lista: error ? [] : (data || []) };
+    }
+    return window.__contasFixasCache.lista.filter(c => {
+        const toks = [...new Set([...window._nfNormTokens(c.descricao), ...window._nfNormTokens(c.fornecedor_nome)])].filter(t => !IGN.has(t) && !/^\d+$/.test(t));
+        return toks.length >= 2 && toks.every(t => emit.has(t));
+    });
+};
+// Lançamentos recorrentes ainda sem NF, perto da data de emissão, das contas fixas desse prestador.
+window._nfBuscarRecorrenteDaNota = async function(n) {
+    const contas = await window._nfContasFixasDoPrestador(n);
+    if (!contas.length) return [];
+    const emissao = window._nfeInstanteEmissao(n);
+    const valorNota = Number(n.valor_total) || 0;
+    const { data, error } = await supabaseClient.from('financeiro_lancamentos')
+        .select('id, conta_fixa_id, centro_custo_id, descricao, data_vencimento, mes_referencia, valor_total, valor_parcela, status, numero_nf, anexos, categoria')
+        .in('conta_fixa_id', contas.map(c => c.id)).is('numero_nf', null).limit(200);
+    if (error || !data) return [];
+    const DIA = 86400000;
+    return data.map(l => {
+        const venc = new Date(String(l.data_vencimento).slice(0, 10) + 'T12:00:00-03:00').getTime();
+        return { lanc: l, conta: contas.find(c => c.id === l.conta_fixa_id), dist: Math.abs(venc - emissao) / DIA, valorIgual: Math.abs((Number(l.valor_total) || 0) - valorNota) < 0.01 };
+    }).filter(x => x.dist <= 60 && x.conta).sort((a, b) => (b.valorIgual - a.valorIgual) || (a.dist - b.dist)).slice(0, 4);
+};
+
+// Tela pra escolher: vincular ao lançamento recorrente (recomendado) ou criar um novo. Resolve {acao, cand} ou null (cancelou).
+window._nfEscolherRecorrente = function(n, cands) {
+    return new Promise((resolver) => {
+        document.getElementById('modal-nf-recorrente')?.remove();
+        const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const brl = (v) => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+        const cc = (id) => (todosCentrosCustoGlobais.find(c => c.id === id) || {}).nome_unidade || '';
+        const linhas = cands.map((c, i) => `
+            <label style="display:flex; gap:10px; align-items:flex-start; border:1px solid var(--cor-borda); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer;">
+                <input type="radio" name="nf-rec-cand" value="${i}" ${i === 0 ? 'checked' : ''} style="width:auto; margin-top:4px;">
+                <span style="font-size:0.85rem; line-height:1.4;"><b>${esc(c.conta.descricao)}</b> — ${esc(cc(c.lanc.centro_custo_id))}<br>
+                Vence <b>${esc(String(c.lanc.data_vencimento).slice(0, 10).split('-').reverse().join('/'))}</b> · ${brl(c.lanc.valor_total)} · ${esc(c.lanc.status)}
+                ${c.valorIgual ? '<span style="color:#2ecc71;"> · valor igual ao da nota</span>' : `<span style="color:#e67e22;"> · valor da nota é ${brl(n.valor_total)}</span>`}</span>
+            </label>`).join('');
+        const div = document.createElement('div');
+        div.id = 'modal-nf-recorrente'; div.className = 'modal-overlay'; div.style.zIndex = 100060;
+        div.innerHTML = `<div class="glass-card" style="width:100%; max-width:520px; border-top:4px solid #2ecc71; padding:24px; position:relative;">
+            <h3 style="margin:0 0 6px; color:#2ecc71;"><i class="fa-solid fa-link"></i> Essa nota já tem lançamento recorrente</h3>
+            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 14px; line-height:1.45;">O prestador tem <b>conta fixa</b> cadastrada e o sistema já lança o valor todo mês. Vincule a nota ao lançamento do mês — o número, a chave e o PDF entram nele, <b>sem criar outro lançamento</b>.</p>
+            ${linhas}
+            <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; margin-top:12px;">
+                <button type="button" class="btn-secondary" data-r="cancelar">Cancelar</button>
+                <button type="button" class="btn-secondary" data-r="novo" title="Só se esse mês não tem lançamento recorrente">Criar lançamento novo</button>
+                <button type="button" class="btn-success" data-r="vincular" style="background:#2ecc71; color:#000;"><i class="fa-solid fa-link"></i> Vincular ao selecionado</button>
+            </div></div>`;
+        div.addEventListener('click', (ev) => {
+            const r = ev.target.closest('[data-r]')?.dataset.r;
+            if (!r) return;
+            const i = parseInt(div.querySelector('input[name="nf-rec-cand"]:checked')?.value, 10) || 0;
+            div.remove();
+            resolver(r === 'cancelar' ? null : { acao: r, cand: cands[i] });
+        });
+        document.body.appendChild(div);
+    });
+};
+
+// Vincula a nota ao lançamento recorrente: número, chave, PDF anexado (e valor, se você quiser trocar).
+window._nfVincularARecorrente = async function(n, cand) {
+    const l = cand.lanc;
+    // PDF da própria nota → storage
+    let caminhoPdf = null;
+    try {
+        if (window.jspdf && window.jspdf.jsPDF) {
+            let blob = null;
+            if (n.tipo === 'NFe') {
+                const d = window.gerarDadosDanfeDeXml(n.xml_completo);
+                const ass = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+                if (ass.ok) blob = window.montarPdfDanfe(d, { assinatura: ass, situacao: (n.__situacao && n.__situacao.chave) || 'autorizada' }).output('blob');
+            } else blob = await window._nfeEnvGerarPdfBlob(n.id);
+            if (blob) {
+                caminhoPdf = `NF_GERAL_${Date.now()}_${Math.random().toString(36).substring(7)}.pdf`;
+                const { error: eUp } = await supabaseClient.storage.from('anexos_financeiro').upload(caminhoPdf, blob, { contentType: 'application/pdf' });
+                if (eUp) { console.warn('Upload do PDF falhou:', eUp.message); caminhoPdf = null; }
+            }
+        }
+    } catch (e) { console.warn('PDF não anexado:', e); }
+
+    const upd = { numero_nf: window.nfNumRaw(n.numero) || null, chave_acesso: n.chave_acesso || null };
+    if (caminhoPdf) upd.anexos = [...(Array.isArray(l.anexos) ? l.anexos : []), caminhoPdf];
+    // Valor diferente: pergunta se atualiza o lançamento pro valor da nota
+    if (!cand.valorIgual && Number(n.valor_total) > 0) {
+        const brl = (v) => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+        const atualizar = await window.mostrarConfirmacao(`O lançamento recorrente está com <b>${brl(l.valor_total)}</b> e a nota é de <b>${brl(n.valor_total)}</b>.<br><br>Atualizar o valor do lançamento para o da nota?`, 'Valor diferente', 'Atualizar valor', 'fa-pen', '#2ecc71');
+        if (atualizar) { upd.valor_total = Number(n.valor_total); upd.valor_parcela = Number(n.valor_total); }
+    }
+    let r = await supabaseClient.from('financeiro_lancamentos').update(upd).eq('id', l.id).select('id');
+    if (r.error && /chave_acesso/i.test(r.error.message || '')) { delete upd.chave_acesso; r = await supabaseClient.from('financeiro_lancamentos').update(upd).eq('id', l.id).select('id'); }
+    if (r.error || !r.data || !r.data.length) throw new Error((r.error && r.error.message) || 'O banco não aceitou a gravação (sem permissão).');
+    return { anexou: !!caminhoPdf };
+};
+
 window._nfDetectarUnidadeRecebida = async function(n) {
     const centros = todosCentrosCustoGlobais || [];
     if (n.centro_custo_id) { const cc = centros.find(c => c.id === n.centro_custo_id); if (cc) return { cc, motivo: 'CNPJ do destinatário' }; }
@@ -11997,6 +12105,12 @@ window._nfDetectarUnidadeRecebida = async function(n) {
             }
         }
     } catch (e) { console.warn('Detecção por XML falhou:', e); }
+    // Conta FIXA/recorrente desse prestador: a unidade da conta é a unidade da nota (ex.: PJ mensal da Sede)
+    try {
+        const contas = await window._nfContasFixasDoPrestador(n);
+        const idsCc = [...new Set(contas.map(c => c.centro_custo_id).filter(Boolean))];
+        if (idsCc.length === 1) { const cc = centros.find(c => c.id === idsCc[0]); if (cc) return { cc, motivo: 'conta fixa (recorrente) desse prestador' }; }
+    } catch (e) { console.warn('Conta fixa do prestador não consultada:', e); }
     // Fornecedor cadastrado em UMA só unidade (aba Fornecedores do centro de custo)
     try {
         const alvo = String(_nfeDecodificaEntidades(n.emitente_nome || '')).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
@@ -12124,7 +12238,26 @@ window.lancarNotaNoCentroCusto = async function(id) {
         }
     } catch (e) { console.warn(e); }
 
-    window.__lancNotaOrigem = { id };
+    // Prestador com CONTA FIXA (recorrente): encaixa no lançamento do mês em vez de criar outro (evita duplicar o valor)
+    let contaFixaDaNota = null;
+    try {
+        const cands = await window._nfBuscarRecorrenteDaNota(n);
+        if (cands.length) {
+            const esc = await window._nfEscolherRecorrente(n, cands);
+            if (!esc) return; // cancelou
+            if (esc.acao === 'vincular') {
+                try {
+                    const r = await window._nfVincularARecorrente(n, esc.cand);
+                    mostrarAlerta('Nota vinculada ao lançamento recorrente' + (r.anexou ? ' (PDF anexado)' : ' — o PDF não foi anexado sozinho, anexe no lançamento se precisar') + '.', 'sucesso');
+                } catch (eV) { mostrarAlerta('Não consegui vincular: ' + eV.message, 'erro'); return; }
+                await window._nfRecalcularStatus(id);
+                return;
+            }
+            contaFixaDaNota = esc.cand.conta; // "criar novo": o novo lançamento já nasce ligado à conta fixa (o gerador automático não repete o mês)
+        }
+    } catch (eRec) { console.warn('Checagem de recorrente falhou (segue lançamento normal):', eRec); }
+
+    window.__lancNotaOrigem = { id, contaFixaId: contaFixaDaNota ? contaFixaDaNota.id : null };
     await window.abrirModalLancamento({ centroId: ccId });
     const modal = document.getElementById('modal-lancamento');
     if (!modal) { window.__lancNotaOrigem = null; return; }
@@ -12149,7 +12282,7 @@ window.lancarNotaNoCentroCusto = async function(id) {
     // Categoria: pela categoria cadastrada pro CNPJ do prestador (NFS-e), se existir na lista
     try {
         if (n.tipo === 'NFSe' && !window.__nfCategoriasOk && typeof window.nfCategoriasCarregar === 'function') await window.nfCategoriasCarregar();
-        const cat = window.nfCategoriaDe(n);
+        const cat = window.nfCategoriaDe(n) || (contaFixaDaNota && contaFixaDaNota.categoria) || '';
         const selCat = document.getElementById('lanc-categoria');
         if (cat && selCat && Array.from(selCat.options).some(o => o.value === cat)) selCat.value = cat;
     } catch (e) { /* sem categoria automática */ }
