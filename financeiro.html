@@ -5958,8 +5958,9 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
             return parseFloat(v) || 0;
         };
 
-        window.abrirModalLancamento = async function() {
-    const idCc = document.getElementById('detalhe-unidade-nome').dataset.id;
+        window.abrirModalLancamento = async function(opcoes) {
+    // Pode vir de uma nota recebida (opcoes.centroId): aí não depende da tela de detalhe do centro de custo.
+    const idCc = (opcoes && opcoes.centroId) || document.getElementById('detalhe-unidade-nome').dataset.id;
     const cc = todosCentrosCustoGlobais.find(c => c.id === idCc);
     if (!cc) return mostrarAlerta("Erro ao identificar o Centro de Custo.", "erro");
 
@@ -6027,7 +6028,7 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
                         <input type="text" id="lanc-descricao" class="modern-input" required placeholder="Ex: Compra de materiais (NF 1234)">
                     </div>
                     <div style="flex: 1;">
-                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> NF Geral (Opcional)</label>
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-file-invoice"></i> NF Geral</label>
                         ${window.gerarHtmlZonaAnexo('lanc-nf-geral')}
                     </div>
                 </div>
@@ -6050,9 +6051,14 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
                         </div>
                     </div>
                     <div style="flex: 1; min-width: 140px;">
-                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-hashtag"></i> Nº da NF (Opcional)</label>
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-hashtag"></i> Nº da NF</label>
                         <input type="text" id="lanc-numero-nf" class="modern-input" placeholder="Ex: 12.345" onblur="this.value=window.nfNumFmt(this.value)">
                     </div>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-key"></i> Chave de Acesso da NF <span style="font-weight: normal; font-size: 0.75rem;">(44 dígitos — liga este lançamento à nota recebida)</span></label>
+                    <input type="text" id="lanc-chave-nf" class="modern-input" maxlength="60" placeholder="0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000" oninput="this.value = this.value.replace(/[^\d ]/g, '')">
                 </div>
 
                 <div style="margin-bottom: 20px; background: rgba(32, 201, 151, 0.1); padding: 15px; border-radius: 8px; border: 1px solid rgba(32, 201, 151, 0.3);">
@@ -6130,6 +6136,7 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
 
     document.getElementById('form-salvar-lancamento').addEventListener('submit', async (e) => {
         e.preventDefault();
+        const origemNotaLanc = window.__lancNotaOrigem || null; // guarda antes de fechar o modal (que limpa a origem)
         const btnSalvar = document.getElementById('btn-salvar-lanc-banco');
         const tipoLanc = document.getElementById('lanc-tipo').value;
         const categoria = document.getElementById('lanc-categoria').value;
@@ -6138,6 +6145,9 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
         const formaPagamento = tipoLanc === 'Despesa' ? (document.getElementById('lanc-forma-pagamento').value || null) : null;
         const pixChave = (formaPagamento === 'Pix') ? (document.getElementById('lanc-pix-chave').value.trim() || null) : null;
         const numeroNf = window.nfNumRaw(document.getElementById('lanc-numero-nf').value) || null;
+        const chaveNfDigitos = String(document.getElementById('lanc-chave-nf')?.value || '').replace(/\D/g, '');
+        if (chaveNfDigitos && chaveNfDigitos.length !== 44) return mostrarAlerta("A chave de acesso da NF tem 44 dígitos. Confira (ou deixe em branco).", "aviso");
+        const chaveNf = chaveNfDigitos || null;
 
         // Validação extra por segurança
         if (!categoria) return mostrarAlerta("Por favor, selecione uma categoria obrigatória.", "aviso");
@@ -6240,11 +6250,19 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
                     criado_por: usuarioAtual.nome,
                     forma_pagamento: formaPagamento,
                     pix_chave: pixChave,
-                    numero_nf: numeroNf
+                    numero_nf: numeroNf,
+                    chave_acesso: chaveNf
                 });
             }
 
-            const { data: lancamentosCriados, error } = await supabaseClient.from('financeiro_lancamentos').insert(payloads).select('id');
+            let resIns = await supabaseClient.from('financeiro_lancamentos').insert(payloads).select('id');
+            // Coluna da chave ainda não existe no banco: grava o resto normalmente e avisa
+            if (resIns.error && /chave_acesso/i.test(resIns.error.message || '')) {
+                payloads.forEach(pl => { delete pl.chave_acesso; });
+                resIns = await supabaseClient.from('financeiro_lancamentos').insert(payloads).select('id');
+                if (!resIns.error && chaveNf) mostrarAlerta('Lançamento gravado, mas a chave da NF não: falta rodar o SQL da coluna chave_acesso no Supabase.', 'aviso');
+            }
+            const lancamentosCriados = resIns.data, error = resIns.error;
             if (error) throw error;
 
             // ========================================================
@@ -6307,6 +6325,12 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
 
             mostrarAlerta(`Lançamento gravado! (${totalParcelas} parcelas registradas)`, "sucesso");
             window.fecharModalLancamento();
+
+            // Veio do botão "Lançar" de uma nota recebida: recalcula se a nota já está completa e volta pra lista de notas
+            if (origemNotaLanc) {
+                try { await window._nfRecalcularStatus(origemNotaLanc.id); } catch (eSt) { console.warn('Status da nota não atualizado:', eSt); }
+                return;
+            }
             
             // REFRESH INTELIGENTE (Dashboard Global vs Centro de Custo)
             if (!document.getElementById('tela-dashboard-fin').classList.contains('hidden')) {
@@ -6412,6 +6436,7 @@ if (document.getElementById('tela-notas-receber')?.classList.contains('hidden') 
         window.fecharModalLancamento = function() {
             const modal = document.getElementById('modal-lancamento');
             if (modal) modal.remove();
+            window.__lancNotaOrigem = null;
             Object.keys(window.__anexosSelecionados || {}).forEach(k => {
                 if (k === 'lanc-nf-geral' || k.startsWith('anexo-input-')) delete window.__anexosSelecionados[k];
             });
@@ -7387,7 +7412,7 @@ window.removerLinhaPagamento = function(idLinha) {
                         </div>
                     </div>
                     <div style="flex: 1; min-width: 140px;">
-                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-hashtag"></i> Nº da NF (Opcional)</label>
+                        <label style="color: var(--cor-texto-secundario); font-weight: bold; font-size: 0.85rem; display: block; margin-bottom: 5px;"><i class="fa-solid fa-hashtag"></i> Nº da NF</label>
                         <input type="text" id="edit-lanc-numero-nf" class="modern-input" placeholder="Ex: 12.345" value="${window.nfNumFmt(lanc.numero_nf)}" onblur="this.value=window.nfNumFmt(this.value)">
                     </div>
                 </div>
@@ -11351,7 +11376,7 @@ window.renderizarNotasRecebidas = function(manterPagina) {
                     <option value="Ignorada" ${status === 'Ignorada' ? 'selected' : ''}>Ignorada</option>
                 </select>
             </td>
-            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${(n.tipo === 'NFe' && temXmlCompleto && sit.chave === 'autorizada' && status !== 'Lançada') ? `<button class="nf-arq nf-arq-lancar" title="Lançar essa nota no sistema (Almoxarifado)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
+            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${((n.tipo === 'NFe' || n.tipo === 'NFSe') && temXmlCompleto && sit.chave === 'autorizada' && status !== 'Lançada') ? `<button class="nf-arq nf-arq-lancar" title="Lançar essa nota no sistema (Almoxarifado / Centro de Custo)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
         </tr>`;
     }).join('');
     window._nfeConferirSelos(window.__nfFonteLista === 'view' ? pagLista.map(n => n.id) : undefined);
@@ -11876,28 +11901,224 @@ window.baixarDanfeNotaNFeCloud = async function(id) {
 // XML que está na tabela (fornecedor, nº, data, itens) e com o DANFE em PDF
 // anexado sozinho. Nada é salvo até a pessoa conferir e clicar em Salvar Nota.
 // ---------------------------------------------------------------------
-window.lancarNotaRecebida = function(id) {
+// ===== Lançar nota RECEBIDA: destinos (Almoxarifado / Centro de Custo) com status de cada um =====
+// A nota só vira "Já lançada" na lista quando TODOS os destinos que se aplicam a ela estiverem feitos:
+// NF-e (produtos) = Almoxarifado + Centro de Custo; NFS-e (serviço) = só Centro de Custo.
+// Cada destino pode ser marcado "Não se aplica" (ex.: NF-e que não entra no estoque).
+window._nfDestinosNecessarios = function(n) { return n && n.tipo === 'NFSe' ? ['cc'] : ['almox', 'cc']; };
+
+// Procura o lançamento do Centro de Custo que nasceu dessa nota: pela chave de acesso (exato);
+// se não tiver chave, pelo Nº da NF + fornecedor (ou valor).
+window._ccBuscarLancamentoDaNota = async function(n) {
+    const norm = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
+    if (n.chave_acesso) {
+        const r = await supabaseClient.from('financeiro_lancamentos').select('id, centro_custo_id, criado_por, created_at').eq('chave_acesso', n.chave_acesso).limit(1);
+        if (!r.error && r.data && r.data.length) return r.data[0]; // erro = coluna ainda não criada: segue pelo número
+    }
+    const raw = String(n.numero || '').replace(/\D/g, '');
+    if (!raw) return null;
+    const semZ = raw.replace(/^0+/, '');
+    const variantes = [...new Set([raw, semZ, window.nfNumFmt(raw)].filter(Boolean))];
+    const r2 = await supabaseClient.from('financeiro_lancamentos').select('id, numero_nf, fornecedor_nome, descricao, valor_total, centro_custo_id, criado_por, created_at').in('numero_nf', variantes).limit(100);
+    if (r2.error || !r2.data) return null;
+    const forn = norm(_nfeDecodificaEntidades(n.emitente_nome));
+    const valor = Number(n.valor_total) || 0;
+    return r2.data.find(l => (forn && (norm(l.fornecedor_nome) === forn || norm(l.descricao).includes(forn))) || (valor && Number(l.valor_total) === valor)) || null;
+};
+
+// Estado atual dos destinos dessa nota (consulta o banco na hora).
+window._nfEstadoDestinos = async function(n) {
+    const out = { almox: null, cc: null, na: [], naErro: '' };
+    if (n.tipo === 'NFe') {
+        try { out.almox = await window._almoxBuscarNotaDuplicada({ chave: n.chave_acesso, numero: n.numero, fornecedor: _nfeDecodificaEntidades(n.emitente_nome) }); } catch (e) { console.warn(e); }
+    }
+    try { out.cc = await window._ccBuscarLancamentoDaNota(n); } catch (e) { console.warn(e); }
+    try {
+        const { data, error } = await supabaseClient.from('nfecloud_documentos').select('destinos_dispensados').eq('id', n.id).maybeSingle();
+        if (error) out.naErro = error.message || '';
+        else if (data && Array.isArray(data.destinos_dispensados)) out.na = data.destinos_dispensados;
+    } catch (e) { console.warn(e); }
+    return out;
+};
+
+// Recalcula e, se TUDO que se aplica já foi feito, marca a nota como "Lançada" (sobe na lista).
+window._nfRecalcularStatus = async function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n) return false;
+    const est = await window._nfEstadoDestinos(n);
+    const completo = window._nfDestinosNecessarios(n).every(d => (d === 'almox' ? !!est.almox : !!est.cc) || est.na.includes(d));
+    if (completo && (n.status_revisao || 'Pendente') !== 'Lançada') {
+        const { error } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', id);
+        if (!error) n.status_revisao = 'Lançada';
+    }
+    if (window._nfAtualizarKpis) window._nfAtualizarKpis();
+    if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true);
+    return completo;
+};
+
+// "Não se aplica" (ou desfazer) para um destino.
+window._nfDispensarDestino = async function(id, destino, desfazer) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n) return;
+    const est = await window._nfEstadoDestinos(n);
+    if (est.naErro) { mostrarAlerta('Para marcar "Não se aplica" falta rodar o SQL da coluna destinos_dispensados no Supabase.', 'erro'); return; }
+    let lista = est.na.filter(d => d !== destino);
+    if (!desfazer) lista.push(destino);
+    const { error } = await supabaseClient.from('nfecloud_documentos').update({ destinos_dispensados: lista }).eq('id', id);
+    if (error) { mostrarAlerta('Não consegui salvar: ' + error.message, 'erro'); return; }
+    if (desfazer && n.status_revisao === 'Lançada') {
+        // deixou de estar completa: volta pra pendente (só se de fato falta algo)
+        const falta = window._nfDestinosNecessarios(n).some(d => !(d === 'almox' ? !!est.almox : !!est.cc) && !lista.includes(d));
+        if (falta) { const { error: e2 } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Pendente' }).eq('id', id); if (!e2) n.status_revisao = 'Pendente'; }
+    }
+    await window._nfRecalcularStatus(id);
+    window.lancarNotaRecebida(id); // reabre o modal já com o status novo
+};
+
+window.lancarNotaRecebida = async function(id) {
     const antigo = document.getElementById('modal-lancar-nota-recebida');
     if (antigo) antigo.remove();
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (!n) return;
+    if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
+    const ehNfe = n.tipo === 'NFe';
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const optsUn = '<option value="">Selecione a unidade...</option>' + todosCentrosCustoGlobais.slice().sort((a, b) => a.nome_unidade.localeCompare(b.nome_unidade)).map(c => `<option value="${c.id}" ${n.centro_custo_id === c.id ? 'selected' : ''}>${esc(c.nome_unidade)}</option>`).join('');
     const html = `
     <div id="modal-lancar-nota-recebida" class="modal-overlay" style="z-index: 100040;">
-        <div class="glass-card" style="width:100%; max-width:460px; border-top:4px solid var(--cor-acento); padding:25px; position:relative;">
+        <div class="glass-card" style="width:100%; max-width:500px; border-top:4px solid var(--cor-acento); padding:25px; position:relative;">
             <button type="button" onclick="document.getElementById('modal-lancar-nota-recebida').remove()" style="position:absolute; top:12px; right:15px; background:none; border:none; color:var(--cor-texto-secundario); cursor:pointer; font-size:1.4rem;"><i class="fa-solid fa-xmark"></i></button>
-            <h3 style="margin:0 0 6px; color:var(--cor-acento);">Lançar nota ${String((window._nfTipoDe(n) === 'NFe' ? window.nfNumFmt(n.numero) : n.numero) || '').replace(/[<>&"]/g, '')}</h3>
-            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 18px;">Onde você quer lançar essa nota?</p>
-            <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:14px 16px; margin-bottom:10px;" onclick="window.lancarNotaNoAlmoxarifado('${id}')">
-                <i class="fa-solid fa-boxes-stacked" style="color:var(--cor-acento);"></i>
-                <span style="text-align:left;">Almoxarifado<br><span style="font-weight:normal; font-size:0.75rem; color:var(--cor-texto-secundario);">Preenche itens e anexa o PDF sozinho</span></span>
-            </button>
-            <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:14px 16px; opacity:.5; cursor:default;" disabled>
-                <i class="fa-solid fa-building"></i>
-                <span style="text-align:left;">Centro de Custo<br><span style="font-weight:normal; font-size:0.75rem;">Em breve</span></span>
-            </button>
+            <h3 style="margin:0 0 6px; color:var(--cor-acento);">Lançar nota ${esc((ehNfe ? window.nfNumFmt(n.numero) : n.numero) || '')}</h3>
+            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 16px;">${ehNfe ? 'Essa nota só fica como <b>Já lançada</b> quando os dois destinos estiverem feitos (ou marcados como "não se aplica").' : 'Lance essa nota no centro de custo da unidade.'}</p>
+            ${ehNfe ? `<div id="lnr-almox" style="border:1px solid var(--cor-borda); border-radius:10px; padding:12px 14px; margin-bottom:10px;"><i class="fa-solid fa-spinner fa-spin"></i> Conferindo Almoxarifado...</div>` : ''}
+            <div id="lnr-cc" style="border:1px solid var(--cor-borda); border-radius:10px; padding:12px 14px;">
+                <div id="lnr-cc-topo"><i class="fa-solid fa-spinner fa-spin"></i> Conferindo Centro de Custo...</div>
+                <div id="lnr-cc-corpo" style="display:none; margin-top:10px;">
+                    <select id="lnr-cc-unidade" class="modern-input" style="margin-bottom:8px;">${optsUn}</select>
+                    <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:12px 14px;" onclick="window.lancarNotaNoCentroCusto('${id}')">
+                        <i class="fa-solid fa-building" style="color:var(--cor-acento);"></i>
+                        <span style="text-align:left;">Lançar no Centro de Custo<br><span style="font-weight:normal; font-size:0.75rem; color:var(--cor-texto-secundario);">Preenche tudo pelo XML e anexa o PDF sozinho</span></span>
+                    </button>
+                </div>
+            </div>
         </div>
     </div>`;
     document.body.insertAdjacentHTML('beforeend', html);
+
+    const est = await window._nfEstadoDestinos(n);
+    if (!document.getElementById('modal-lancar-nota-recebida')) return; // fechou enquanto carregava
+    const fmtQuando = (r) => { try { return r && r.created_at ? new Date(r.created_at).toLocaleDateString('pt-BR') : ''; } catch (e) { return ''; } };
+    const linhaFeito = (rot, r) => `<div style="color:#2ecc71; font-weight:bold;"><i class="fa-solid fa-circle-check"></i> ${rot}: já lançado${fmtQuando(r) ? ' em ' + fmtQuando(r) : ''}${r && r.criado_por ? ' por ' + esc(r.criado_por) : ''}</div>`;
+    const linhaNa = (rot, dest) => `<div style="color:var(--cor-texto-secundario);"><i class="fa-solid fa-ban"></i> ${rot}: não se aplica a esta nota <a href="javascript:void(0)" style="margin-left:8px; font-size:0.75rem;" onclick="window._nfDispensarDestino('${id}','${dest}',true)">desfazer</a></div>`;
+    const linkNa = (dest) => `<div style="margin-top:6px; text-align:right;"><a href="javascript:void(0)" style="font-size:0.75rem; color:var(--cor-texto-secundario);" onclick="window._nfDispensarDestino('${id}','${dest}',false)">Não se aplica a esta nota</a></div>`;
+
+    const boxAlmox = document.getElementById('lnr-almox');
+    if (boxAlmox) {
+        if (est.almox) boxAlmox.innerHTML = linhaFeito('Almoxarifado', est.almox);
+        else if (est.na.includes('almox')) boxAlmox.innerHTML = linhaNa('Almoxarifado', 'almox');
+        else boxAlmox.innerHTML = `<button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:12px 14px;" onclick="window.lancarNotaNoAlmoxarifado('${id}')">
+                <i class="fa-solid fa-boxes-stacked" style="color:var(--cor-acento);"></i>
+                <span style="text-align:left;">Lançar no Almoxarifado<br><span style="font-weight:normal; font-size:0.75rem; color:var(--cor-texto-secundario);">Preenche itens e anexa o PDF sozinho</span></span></button>${linkNa('almox')}`;
+    }
+    const topo = document.getElementById('lnr-cc-topo'), corpo = document.getElementById('lnr-cc-corpo');
+    if (est.cc) { topo.innerHTML = linhaFeito('Centro de Custo', est.cc); }
+    else if (est.na.includes('cc')) { topo.innerHTML = linhaNa('Centro de Custo', 'cc'); }
+    else { topo.innerHTML = '<b>Centro de Custo</b> <span style="color:#e67e22; font-size:0.8rem;">pendente</span>'; corpo.style.display = 'block'; corpo.insertAdjacentHTML('beforeend', linkNa('cc')); }
+};
+
+// Abre o "Registrar Lançamento" do centro de custo já preenchido pelo XML e com o PDF da nota anexado.
+window.lancarNotaNoCentroCusto = async function(id) {
+    const n = (window.__notasNFeCloudPorId || {})[id];
+    if (!n) return;
+    const ccId = document.getElementById('lnr-cc-unidade')?.value || n.centro_custo_id || '';
+    if (!ccId) { mostrarAlerta('Escolha a unidade (centro de custo) onde essa nota será lançada.', 'aviso'); return; }
+    await window._nfGarantirXml(n);
+    if (!n.xml_completo) { mostrarAlerta('O XML completo dessa nota ainda não chegou.', 'erro'); return; }
+    document.getElementById('modal-lancar-nota-recebida')?.remove();
+
+    // Segurança: já existe lançamento dessa nota? Não deixa duplicar.
+    try {
+        const ja = await window._ccBuscarLancamentoDaNota(n);
+        if (ja) {
+            mostrarAlerta('Essa nota já foi lançada no Centro de Custo' + (ja.criado_por ? ' por ' + ja.criado_por : '') + '.', 'aviso');
+            await window._nfRecalcularStatus(id);
+            return;
+        }
+    } catch (e) { console.warn(e); }
+
+    window.__lancNotaOrigem = { id };
+    await window.abrirModalLancamento({ centroId: ccId });
+    const modal = document.getElementById('modal-lancamento');
+    if (!modal) { window.__lancNotaOrigem = null; return; }
+
+    const norm = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
+    const xml = new DOMParser().parseFromString(String(n.xml_completo).replace(/encoding=["'][^"']*["']/i, 'encoding="utf-8"'), 'text/xml');
+    const num = (v) => { const x = parseFloat(v); return isNaN(x) ? 0 : x; };
+    const emitente = _nfeDecodificaEntidades(n.emitente_nome) || '';
+    const ehNfe = n.tipo === 'NFe';
+    const brl = (v) => 'R$ ' + Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    // Fornecedor (só se já está cadastrado nessa unidade) e descrição
+    const selForn = document.getElementById('lanc-fornecedor');
+    if (selForn) {
+        const op = Array.from(selForn.options).find(o => o.value && norm(o.value) === norm(emitente));
+        if (op) { selForn.value = op.value; window.atualizarObrigatoriedadeDescricaoLanc(op.value, 'lanc'); }
+    }
+    const numFmt = ehNfe ? window.nfNumFmt(n.numero) : String(n.numero || '');
+    const inpDesc = document.getElementById('lanc-descricao');
+    if (inpDesc) inpDesc.value = `${ehNfe ? 'NF' : 'NFS-e'} ${numFmt}${emitente ? ' - ' + emitente : ''}`.toUpperCase();
+
+    // Categoria: pela categoria cadastrada pro CNPJ do prestador (NFS-e), se existir na lista
+    try {
+        if (n.tipo === 'NFSe' && !window.__nfCategoriasOk && typeof window.nfCategoriasCarregar === 'function') await window.nfCategoriasCarregar();
+        const cat = window.nfCategoriaDe(n);
+        const selCat = document.getElementById('lanc-categoria');
+        if (cat && selCat && Array.from(selCat.options).some(o => o.value === cat)) selCat.value = cat;
+    } catch (e) { /* sem categoria automática */ }
+
+    // Nº da NF e chave de acesso
+    const inpNum = document.getElementById('lanc-numero-nf'); if (inpNum) inpNum.value = numFmt;
+    const inpChave = document.getElementById('lanc-chave-nf'); if (inpChave && n.chave_acesso) inpChave.value = String(n.chave_acesso).replace(/(\d{4})(?=\d)/g, '$1 ');
+
+    // Parcelas: duplicatas da NF-e (cada uma com seu vencimento); sem duplicata, 1 parcela com o valor da nota
+    const dups = ehNfe ? Array.from(xml.querySelectorAll('cobr > dup')).map(d => ({ venc: d.querySelector('dVenc')?.textContent?.trim() || '', valor: num(d.querySelector('vDup')?.textContent) })) : [];
+    const totalNota = ehNfe ? (num(xml.querySelector('total > ICMSTot > vNF')?.textContent) || Number(n.valor_total) || 0)
+                            : (num(xml.querySelector('infNFSe > valores > vLiq')?.textContent) || Number(n.valor_total) || 0);
+    const dh = window._nfeDataHoraEmissao(n);
+    const dataEmissaoBr = dh && dh.data && dh.data !== '-' ? dh.data : '';
+    const parcelas = dups.length ? dups.map(d => ({ data: d.venc ? d.venc.split('-').reverse().join('/') : dataEmissaoBr, valor: d.valor || 0 })) : [{ data: dataEmissaoBr, valor: totalNota }];
+    while (document.querySelectorAll('.linha-pagamento').length < parcelas.length) window.adicionarLinhaPagamento();
+    const linhas = Array.from(document.querySelectorAll('.linha-pagamento'));
+    parcelas.forEach((p, i) => {
+        const linha = linhas[i]; if (!linha) return;
+        const dIn = linha.querySelector('.data-input');
+        if (dIn && p.data) { if (dIn._flatpickr) dIn._flatpickr.setDate(p.data, true, 'd/m/Y'); else dIn.value = p.data; }
+        const vIn = linha.querySelector('.valor-input');
+        if (vIn) { vIn.value = brl(p.valor); vIn.dispatchEvent(new Event('input', { bubbles: true })); }
+    });
+    if (dups.length) { const f = document.getElementById('lanc-forma-pagamento'); if (f) { f.value = 'Boleto'; if (window.toggleCampoPix) window.toggleCampoPix('Boleto', 'lanc'); } }
+
+    // PDF da própria nota anexado em "NF Geral"
+    let avisoPdf = '';
+    try {
+        if (window.jspdf && window.jspdf.jsPDF) {
+            let blob = null, nome = '';
+            if (ehNfe) {
+                const d = window.gerarDadosDanfeDeXml(n.xml_completo);
+                const assinatura = await window.verificarAssinaturaNFe(n.xml_completo, d.emit.cnpjCpf);
+                if (assinatura.ok) {
+                    blob = window.montarPdfDanfe(d, { assinatura, situacao: (n.__situacao && n.__situacao.chave) || 'autorizada' }).output('blob');
+                    nome = `DANFE_${d.numero || n.id}_${(d.chave || '').slice(-8)}.pdf`;
+                } else avisoPdf = ' A assinatura digital da nota não conferiu, então o PDF não foi anexado sozinho.';
+            } else {
+                blob = await window._nfeEnvGerarPdfBlob(id);
+                nome = `DANFSe_${n.numero || n.id}_${String(n.chave_acesso || '').slice(-8)}.pdf`;
+            }
+            if (blob) window.adicionarAnexosSelecionados('lanc-nf-geral', [new File([blob], nome, { type: 'application/pdf' })]);
+        }
+    } catch (ePdf) { console.warn('PDF da nota não anexado:', ePdf); avisoPdf = ' Não consegui anexar o PDF sozinho.'; }
+
+    mostrarAlerta('Lançamento preenchido pela nota. Confira a categoria, os vencimentos e grave.' + avisoPdf, avisoPdf ? 'aviso' : 'sucesso');
 };
 
 // Procura se essa NF-e já foi lançada no Almoxarifado. Primeiro pela chave de acesso
@@ -11956,10 +12177,7 @@ window.lancarNotaNoAlmoxarifado = async function(id) {
         // Já lançada? Bloqueia aqui mesmo, antes de abrir a tela.
         const jaLancada = await window._almoxBuscarNotaDuplicada({ chave: n.chave_acesso, numero: n.numero, fornecedor: _nfeDecodificaEntidades(n.emitente_nome) });
         if (jaLancada) {
-            if ((n.status_revisao || 'Pendente') !== 'Lançada') {
-                const { error: errMarca } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', id);
-                if (!errMarca) { n.status_revisao = 'Lançada'; if (window._nfAtualizarKpis) window._nfAtualizarKpis(); if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true); }
-            }
+            if ((n.status_revisao || 'Pendente') !== 'Lançada') await window._nfRecalcularStatus(id);
             await window._almoxAvisoNotaJaLancada(jaLancada);
             return;
         }
@@ -14345,13 +14563,8 @@ async function salvarNotaAlmoxarifado(e) {
         if (window.__almoxOrigemNotaId) {
             const idOrigem = window.__almoxOrigemNotaId;
             window.__almoxOrigemNotaId = null;
-            const { error: errSt } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', idOrigem);
-            if (!errSt) {
-                const nOrig = (window.__notasNFeCloudPorId || {})[idOrigem];
-                if (nOrig) nOrig.status_revisao = 'Lançada';
-                if (window._nfAtualizarKpis) window._nfAtualizarKpis();
-                if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true);
-            }
+            // Só vira "Já lançada" se o Centro de Custo também estiver feito (ou marcado "não se aplica")
+            try { await window._nfRecalcularStatus(idOrigem); } catch (eSt) { console.warn('Status da nota não atualizado:', eSt); }
         }
         try { carregarAlmoxarifado(); } catch (_) {}
     } catch (err) {
