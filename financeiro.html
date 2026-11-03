@@ -11975,6 +11975,43 @@ window._nfDispensarDestino = async function(id, destino, desfazer) {
     window.lancarNotaRecebida(id); // reabre o modal já com o status novo
 };
 
+// Descobre a unidade (centro de custo) de uma nota RECEBIDA, na ordem: unidade já ligada pelo CNPJ do destinatário →
+// endereço/CEP de entrega da NF-e (o mesmo do Almoxarifado) → texto do serviço / CNPJ do tomador (NFS-e) →
+// histórico: se todas as notas anteriores desse fornecedor foram pra MESMA unidade (Almoxarifado ou Centro de Custo).
+window._nfDetectarUnidadeRecebida = async function(n) {
+    const centros = todosCentrosCustoGlobais || [];
+    if (n.centro_custo_id) { const cc = centros.find(c => c.id === n.centro_custo_id); if (cc) return { cc, motivo: 'CNPJ do destinatário' }; }
+    try {
+        await window._nfGarantirXml(n);
+        if (n.xml_completo) {
+            const xml = new DOMParser().parseFromString(String(n.xml_completo).replace(/encoding=["'][^"']*["']/i, 'encoding="utf-8"'), 'text/xml');
+            if (n.tipo === 'NFe') {
+                const a = window._nfeDetectarUnidadePorEntrega(xml, centros);
+                if (a) return a;
+            } else if (n.tipo === 'NFSe') {
+                const u = window._nfeEnvDetectarUnidade(xml.querySelector('xDescServ')?.textContent || '', centros);
+                if (u) return { cc: u, motivo: 'texto do serviço' };
+                const toma = (xml.querySelector('toma CNPJ')?.textContent || '').replace(/\D/g, '');
+                const por = toma ? centros.filter(c => String(c.cnpj || '').replace(/\D/g, '') === toma) : [];
+                if (por.length === 1) return { cc: por[0], motivo: 'CNPJ do tomador' };
+            }
+        }
+    } catch (e) { console.warn('Detecção por XML falhou:', e); }
+    try {
+        const forn = _nfeDecodificaEntidades(n.emitente_nome || '').trim();
+        if (forn) {
+            const ids = new Set();
+            const [a, l] = await Promise.all([
+                supabaseClient.from('almoxarifado_notas').select('centro_custo_id').eq('fornecedor', forn).limit(50),
+                supabaseClient.from('financeiro_lancamentos').select('centro_custo_id').eq('fornecedor_nome', forn).limit(50)
+            ]);
+            [...(a.data || []), ...(l.data || [])].forEach(r => { if (r.centro_custo_id) ids.add(r.centro_custo_id); });
+            if (ids.size === 1) { const cc = centros.find(c => c.id === [...ids][0]); if (cc) return { cc, motivo: 'lançamentos anteriores desse fornecedor' }; }
+        }
+    } catch (e) { console.warn('Histórico do fornecedor falhou:', e); }
+    return null;
+};
+
 window.lancarNotaRecebida = async function(id) {
     const antigo = document.getElementById('modal-lancar-nota-recebida');
     if (antigo) antigo.remove();
@@ -11994,7 +12031,8 @@ window.lancarNotaRecebida = async function(id) {
             <div id="lnr-cc" style="border:1px solid var(--cor-borda); border-radius:10px; padding:12px 14px;">
                 <div id="lnr-cc-topo"><i class="fa-solid fa-spinner fa-spin"></i> Conferindo Centro de Custo...</div>
                 <div id="lnr-cc-corpo" style="display:none; margin-top:10px;">
-                    <select id="lnr-cc-unidade" class="modern-input" style="margin-bottom:8px;">${optsUn}</select>
+                    <select id="lnr-cc-unidade" class="modern-input" style="margin-bottom:6px;">${optsUn}</select>
+                    <div id="lnr-cc-aviso" style="font-size:0.76rem; margin-bottom:8px; color:var(--cor-texto-secundario);"><i class="fa-solid fa-spinner fa-spin"></i> Procurando a unidade…</div>
                     <button type="button" class="nf-btn" style="width:100%; justify-content:flex-start; padding:12px 14px;" onclick="window.lancarNotaNoCentroCusto('${id}')">
                         <i class="fa-solid fa-building" style="color:var(--cor-acento);"></i>
                         <span style="text-align:left;">Lançar no Centro de Custo<br><span style="font-weight:normal; font-size:0.75rem; color:var(--cor-texto-secundario);">Preenche tudo pelo XML e anexa o PDF sozinho</span></span>
@@ -12023,7 +12061,18 @@ window.lancarNotaRecebida = async function(id) {
     const topo = document.getElementById('lnr-cc-topo'), corpo = document.getElementById('lnr-cc-corpo');
     if (est.cc) { topo.innerHTML = linhaFeito('Centro de Custo', est.cc); }
     else if (est.na.includes('cc')) { topo.innerHTML = linhaNa('Centro de Custo', 'cc'); }
-    else { topo.innerHTML = '<b>Centro de Custo</b> <span style="color:#e67e22; font-size:0.8rem;">pendente</span>'; corpo.style.display = 'block'; corpo.insertAdjacentHTML('beforeend', linkNa('cc')); }
+    else {
+        topo.innerHTML = '<b>Centro de Custo</b> <span style="color:#e67e22; font-size:0.8rem;">pendente</span>'; corpo.style.display = 'block'; corpo.insertAdjacentHTML('beforeend', linkNa('cc'));
+        const achada = await window._nfDetectarUnidadeRecebida(n);
+        const aviso = document.getElementById('lnr-cc-aviso'), selUn = document.getElementById('lnr-cc-unidade');
+        if (!aviso || !selUn) return;
+        if (achada) {
+            selUn.value = achada.cc.id;
+            aviso.innerHTML = `<span style="color:#2ecc71;"><i class="fa-solid fa-circle-check"></i> Unidade identificada pelo ${esc(achada.motivo)}: <b>${esc(achada.cc.nome_unidade)}</b>. Confira.</span>`;
+        } else {
+            aviso.innerHTML = '<i class="fa-solid fa-circle-info"></i> Não consegui identificar a unidade sozinho — escolha acima.';
+        }
+    }
 };
 
 // Abre o "Registrar Lançamento" do centro de custo já preenchido pelo XML e com o PDF da nota anexado.
