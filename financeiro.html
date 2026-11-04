@@ -15913,6 +15913,11 @@ window.exportarExtratoDashboard = function (formato) {
         window.exportarExcelDashboardBonito(dados);
         return;
     }
+    // 🆕 PDF = relatório completo (KPIs + gráficos + tabelas + extrato), igual ao Excel.
+    if (formato === 'pdf') {
+        window.exportarPdfDashboard(dados);
+        return;
+    }
 
     const colunas = ['Vencimento', 'Pago em', 'Situação', 'Unidade', 'Tipo', 'Categoria',
                      'Fornecedor', 'Descrição', 'Referência', 'Parcela', 'Valor', 'Juros/Multa', 'Status'];
@@ -15935,6 +15940,268 @@ window.exportarExtratoDashboard = function (formato) {
         ];
     });
     window.exportarDados('extrato_financeiro', colunas, linhas, formato, 'Extrato de Movimentações Financeiras');
+};
+
+
+/* ======================================================================
+ * 🆕 RELATÓRIO COMPLETO DO DASHBOARD FINANCEIRO (PDF e Excel)
+ * Agora o relatório leva tudo que o Dashboard mostra: filtros aplicados, os 6 KPIs
+ * (inclui Vencido), os 4 gráficos e as tabelas de apoio (por mês, unidade,
+ * categoria, fornecedor, vencidos) + o extrato completo. Sempre a partir do MESMO
+ * recorte filtrado na tela (window._dadosFiltradosDash).
+ * ====================================================================== */
+window._dashRelatorioBase = function (dados) {
+    const num = (v) => Number(v || 0);
+    const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    const k = { receitas: 0, despPagas: 0, aPagar: 0, juros: 0, vencido: 0, qtdVencido: 0, maiorAtraso: 0 };
+    const mes = {}, cat = {}, forn = {}, uni = {}, vencidos = [];
+    dados.forEach(l => {
+        const v = num(l.valor_parcela), ehDesp = l.tipo === 'Despesa', pago = (l.status || 'Pendente') === 'Pago';
+        const nomeU = l._nomeUnidade || 'Sem unidade';
+        if (!uni[nomeU]) uni[nomeU] = { qtd: 0, receita: 0, despPaga: 0, aPagar: 0, juros: 0 };
+        uni[nomeU].qtd++;
+        if (l.tipo === 'Receita') { k.receitas += v; uni[nomeU].receita += v; }
+        else if (ehDesp) {
+            if (pago) { k.despPagas += v; k.juros += num(l.juros); uni[nomeU].despPaga += v; uni[nomeU].juros += num(l.juros); }
+            else { k.aPagar += v; uni[nomeU].aPagar += v; }
+            const c = l.categoria || 'Sem categoria';
+            cat[c] = cat[c] || { qtd: 0, total: 0 }; cat[c].qtd++; cat[c].total += v;
+            if (l.fornecedor_nome) { forn[l.fornecedor_nome] = forn[l.fornecedor_nome] || { qtd: 0, total: 0 }; forn[l.fornecedor_nome].qtd++; forn[l.fornecedor_nome].total += v; }
+            const s = window.situacaoLancamento(l);
+            if (s.codigo === 'vencido') { k.vencido += v; k.qtdVencido++; if (s.diasAtraso > k.maiorAtraso) k.maiorAtraso = s.diasAtraso; vencidos.push({ l, dias: s.diasAtraso || 0 }); }
+        }
+        const m = String(l.data_vencimento || l.data_pagamento || '').substring(0, 7);
+        if (m) { mes[m] = mes[m] || { receita: 0, despesa: 0 }; if (l.tipo === 'Receita') mes[m].receita += v; else mes[m].despesa += v; }
+    });
+    k.saldo = k.receitas - k.despPagas;
+    let acum = 0;
+    const porMes = Object.keys(mes).sort().map(m => {
+        const [a, mm] = m.split('-'); const saldo = mes[m].receita - mes[m].despesa; acum += saldo;
+        return { rotulo: MESES[parseInt(mm) - 1] + '/' + a.substring(2), receita: mes[m].receita, despesa: mes[m].despesa, saldo, acumulado: acum };
+    });
+    const totDesp = Object.values(cat).reduce((s, x) => s + x.total, 0);
+    const lista = (obj) => Object.entries(obj).map(([nome, x]) => ({ nome, qtd: x.qtd, total: x.total, pct: totDesp ? x.total / totDesp * 100 : 0 })).sort((a, b) => b.total - a.total);
+    const porUnidade = Object.entries(uni).map(([nome, u]) => ({ nome, ...u, saldo: u.receita - u.despPaga })).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    vencidos.sort((a, b) => b.dias - a.dias);
+    const nomesKpi = { 'receita': 'Receitas', 'despesa-paga': 'Despesas Pagas', 'despesa-apagar': 'Despesas a Pagar', 'juros': 'Juros Pagos', 'vencido': 'Vencido' };
+    const g = (id) => (document.getElementById(id) || {}).value || '';
+    const filtros = [
+        ['Período', g('dash-data-periodo') || 'Todo o período'],
+        ['Unidade', g('dash-filtro-unidade') || 'Todas'],
+        ['Forma de pagamento', g('dash-filtro-forma-pagamento') || 'Todas'],
+        ['Busca', g('dash-filtro-busca') || '—'],
+        ['Cartões marcados', (window.dashKpisAtivos && window.dashKpisAtivos.size) ? Array.from(window.dashKpisAtivos).map(c => nomesKpi[c] || c).join(' + ') : 'Todos']
+    ];
+    return { k, porMes, porCategoria: lista(cat), porFornecedor: lista(forn), porUnidade, vencidos, filtros, total: dados.length,
+        empresa: (typeof empresaFinanceiraSelecionada !== 'undefined' && empresaFinanceiraSelecionada !== 'Todas') ? empresaFinanceiraSelecionada : 'Todas as Empresas/Unidades',
+        carimbo: new Date().toLocaleString('pt-BR') };
+};
+
+// Desenha um gráfico fora da tela (fundo branco, bom pra imprimir) e devolve a imagem PNG.
+window._dashImagemGrafico = function (cfg) {
+    if (typeof Chart === 'undefined') return null;
+    const cv = document.createElement('canvas'); cv.width = 1000; cv.height = 460;
+    cfg.options = Object.assign({ responsive: false, animation: false, devicePixelRatio: 1 }, cfg.options || {});
+    cfg.plugins = [{ id: 'fundoBranco', beforeDraw(c) { const x = c.ctx; x.save(); x.globalCompositeOperation = 'destination-over'; x.fillStyle = '#ffffff'; x.fillRect(0, 0, c.width, c.height); x.restore(); } }];
+    let url = null;
+    try { const ch = new Chart(cv, cfg); url = cv.toDataURL('image/png'); ch.destroy(); } catch (e) { console.warn('Gráfico do relatório falhou:', e); }
+    return url;
+};
+
+window._dashGraficosRelatorio = function (b) {
+    const TXT = '#334155', GRADE = 'rgba(0,0,0,0.08)';
+    const moeda = (v) => 'R$ ' + Number(v).toLocaleString('pt-BR', { maximumFractionDigits: 0 });
+    const titulo = (t) => ({ display: true, text: t, color: '#0f172a', font: { size: 22, weight: 'bold' }, padding: { bottom: 12 } });
+    const eixos = (h) => {
+        const num = { color: TXT, font: { size: 16 }, callback: moeda }, cat = { color: TXT, font: { size: 16 } };
+        return h ? { x: { ticks: num, grid: { color: GRADE } }, y: { ticks: cat, grid: { display: false } } }
+                 : { x: { ticks: cat, grid: { display: false } }, y: { ticks: num, grid: { color: GRADE } } };
+    };
+    const img = {};
+    if (b.porMes.length) img.evolucao = window._dashImagemGrafico({
+        data: { labels: b.porMes.map(m => m.rotulo), datasets: [
+            { type: 'bar', label: 'Receita', data: b.porMes.map(m => m.receita), backgroundColor: 'rgba(46,204,113,0.85)' },
+            { type: 'bar', label: 'Despesa', data: b.porMes.map(m => m.despesa), backgroundColor: 'rgba(231,76,60,0.85)' },
+            { type: 'line', label: 'Saldo acumulado', data: b.porMes.map(m => m.acumulado), borderColor: '#3498db', borderWidth: 4, tension: 0.35, pointRadius: 4, fill: false }] },
+        options: { plugins: { title: titulo('Receita x Despesa por mês'), legend: { labels: { color: TXT, font: { size: 16 } } } }, scales: eixos(false) } });
+    let cats = b.porCategoria.map(c => [c.nome, c.total]);
+    if (cats.length) {
+        if (cats.length > 8) { const r = cats.slice(8).reduce((s, x) => s + x[1], 0); cats = cats.slice(0, 8).concat([['Outras (' + (b.porCategoria.length - 8) + ')', r]]); }
+        const PAL = ['#20c997', '#3498db', '#e67e22', '#9b59b6', '#e74c3c', '#f1c40f', '#1abc9c', '#e84393', '#95a5a6'];
+        img.categorias = window._dashImagemGrafico({ type: 'doughnut',
+            data: { labels: cats.map(c => c[0].length > 26 ? c[0].substring(0, 24) + '…' : c[0]), datasets: [{ data: cats.map(c => c[1]), backgroundColor: PAL, borderColor: '#fff', borderWidth: 2 }] },
+            options: { cutout: '55%', plugins: { title: titulo('Despesas por categoria'), legend: { position: 'right', labels: { color: TXT, font: { size: 16 }, boxWidth: 18 } } } } });
+    }
+    const f10 = b.porFornecedor.slice(0, 10);
+    if (f10.length) img.fornecedores = window._dashImagemGrafico({ type: 'bar',
+        data: { labels: f10.map(f => f.nome.length > 28 ? f.nome.substring(0, 26) + '…' : f.nome), datasets: [{ data: f10.map(f => f.total), backgroundColor: 'rgba(32,201,151,0.85)' }] },
+        options: { indexAxis: 'y', plugins: { title: titulo('Top 10 fornecedores'), legend: { display: false } }, scales: eixos(true) } });
+    const un = b.porUnidade.map(u => ({ nome: u.nome, v: u.despPaga + u.aPagar })).filter(u => u.v > 0).sort((a, c) => c.v - a.v).slice(0, 12);
+    if (un.length) {
+        const PAL = ['#20c997', '#3498db', '#e67e22', '#9b59b6', '#e74c3c', '#f1c40f', '#1abc9c', '#e84393', '#00bcd4', '#95a5a6'];
+        img.unidades = window._dashImagemGrafico({ type: 'bar',
+            data: { labels: un.map(u => u.nome.length > 18 ? u.nome.substring(0, 16) + '…' : u.nome), datasets: [{ data: un.map(u => u.v), backgroundColor: un.map((_, i) => PAL[i % PAL.length]) }] },
+            options: { plugins: { title: titulo('Despesa por unidade'), legend: { display: false } }, scales: eixos(false) } });
+    }
+    return img;
+};
+
+window.exportarPdfDashboard = function (dados) {
+    if (!dados || !dados.length) return mostrarAlerta('Não há nada para exportar com os filtros atuais.', 'aviso');
+    if (typeof window.jspdf === 'undefined') return mostrarAlerta('Biblioteca de PDF não carregou. Verifique a conexão.', 'erro');
+    try {
+        const b = window._dashRelatorioBase(dados), img = window._dashGraficosRelatorio(b);
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+        const W = doc.internal.pageSize.width, H = doc.internal.pageSize.height, M = 36;
+        const brl = (v) => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const VERDE = [30, 138, 110];
+
+        // Cabeçalho
+        doc.setFillColor(...VERDE); doc.rect(0, 0, W, 44, 'F');
+        doc.setTextColor(255); doc.setFontSize(16); doc.setFont(undefined, 'bold');
+        doc.text('Relatório do Dashboard Financeiro', M, 28);
+        doc.setFontSize(8.5); doc.setFont(undefined, 'normal');
+        doc.text(`${b.empresa}  ·  Gerado em ${b.carimbo}  ·  ${b.total} lançamento(s)`, W - M, 28, { align: 'right' });
+        doc.setTextColor(90); doc.setFontSize(8);
+        doc.text(b.filtros.map(f => `${f[0]}: ${f[1]}`).join('   |   '), M, 58);
+
+        // KPIs
+        const cards = [
+            ['Total Receitas', brl(b.k.receitas), [46, 204, 113], ''],
+            ['Despesas Pagas', brl(b.k.despPagas), [231, 76, 60], ''],
+            ['Despesas a Pagar', brl(b.k.aPagar), [230, 126, 34], ''],
+            ['Juros Pagos', brl(b.k.juros), [241, 196, 15], ''],
+            ['Vencido', brl(b.k.vencido), [255, 71, 87], b.k.qtdVencido ? `${b.k.qtdVencido} conta(s) · até ${b.k.maiorAtraso} dia(s)` : 'Nada em atraso'],
+            ['Saldo do Período', brl(b.k.saldo), b.k.saldo >= 0 ? [52, 152, 219] : [231, 76, 60], '']
+        ];
+        const gap = 8, cw = (W - 2 * M - 5 * gap) / 6;
+        cards.forEach((c, i) => {
+            const x = M + i * (cw + gap), y = 68;
+            doc.setFillColor(246, 249, 248); doc.setDrawColor(220, 228, 225); doc.roundedRect(x, y, cw, 54, 4, 4, 'FD');
+            doc.setFillColor(...c[2]); doc.rect(x, y, cw, 3.5, 'F');
+            doc.setTextColor(110); doc.setFontSize(7.5); doc.text(c[0].toUpperCase(), x + 8, y + 18);
+            doc.setTextColor(...c[2]); doc.setFontSize(11.5); doc.setFont(undefined, 'bold'); doc.text(c[1], x + 8, y + 35); doc.setFont(undefined, 'normal');
+            if (c[3]) { doc.setTextColor(120); doc.setFontSize(6.5); doc.text(c[3], x + 8, y + 47); }
+        });
+
+        // 4 gráficos (2x2) na primeira página
+        const gw = (W - 2 * M - 12) / 2, gh = gw * 0.46, gy = 134;
+        [['evolucao', 0, 0], ['categorias', 1, 0], ['fornecedores', 0, 1], ['unidades', 1, 1]].forEach(([nome, col, lin]) => {
+            const x = M + col * (gw + 12), y = gy + lin * (gh + 8);
+            if (img[nome]) doc.addImage(img[nome], 'PNG', x, y, gw, gh);
+            else { doc.setDrawColor(220); doc.rect(x, y, gw, gh); doc.setTextColor(150); doc.setFontSize(9); doc.text('Sem dados para este gráfico', x + gw / 2, y + gh / 2, { align: 'center' }); }
+        });
+
+        // Tabelas de apoio
+        let y = 0;
+        const secao = (t) => {
+            if (!y || y > H - 90) { doc.addPage(); y = 44; }
+            doc.setTextColor(...VERDE); doc.setFontSize(11); doc.setFont(undefined, 'bold'); doc.text(t, M, y); doc.setFont(undefined, 'normal'); y += 6;
+        };
+        const tabela = (head, body, opts) => {
+            const _outro = opts && opts.didParseCell, _cs = (opts && opts.columnStyles) || {};
+            doc.autoTable(Object.assign({ head: [head], body, startY: y, margin: { left: M, right: M, bottom: 30 },
+                styles: { fontSize: 7.5, cellPadding: 3.5, overflow: 'linebreak' },
+                headStyles: { fillColor: VERDE, textColor: 255, fontStyle: 'bold' },
+                alternateRowStyles: { fillColor: [245, 249, 248] } }, opts || {},
+                { didParseCell: (d) => { if (d.section === 'head' && _cs[d.column.index] && _cs[d.column.index].halign) d.cell.styles.halign = _cs[d.column.index].halign; if (_outro) _outro(d); } }));
+            y = doc.lastAutoTable.finalY + 20;
+        };
+        const dir = (n) => { const o = {}; for (let i = 0; i < n; i++) o[i] = { halign: 'right' }; return o; };
+
+        y = 0; secao('Resumo por unidade');
+        tabela(['Unidade', 'Lanç.', 'Receitas', 'Desp. pagas', 'Desp. a pagar', 'Juros', 'Saldo'],
+            b.porUnidade.map(u => [u.nome, u.qtd, brl(u.receita), brl(u.despPaga), brl(u.aPagar), brl(u.juros), brl(u.saldo)])
+                .concat([['TOTAL', b.total, brl(b.k.receitas), brl(b.k.despPagas), brl(b.k.aPagar), brl(b.k.juros), brl(b.k.saldo)]]),
+            { columnStyles: Object.assign(dir(7), { 0: { halign: 'left' } }), didParseCell: (d) => { if (d.row.index === b.porUnidade.length && d.section === 'body') { d.cell.styles.fontStyle = 'bold'; d.cell.styles.fillColor = [255, 233, 168]; } } });
+
+        secao('Receita x Despesa por mês');
+        tabela(['Mês', 'Receita', 'Despesa', 'Saldo do mês', 'Saldo acumulado'],
+            b.porMes.map(m => [m.rotulo, brl(m.receita), brl(m.despesa), brl(m.saldo), brl(m.acumulado)]), { columnStyles: Object.assign(dir(5), { 0: { halign: 'left' } }) });
+
+        secao('Despesas por categoria');
+        tabela(['Categoria', 'Lanç.', 'Total', '% das despesas'], b.porCategoria.map(c => [c.nome, c.qtd, brl(c.total), c.pct.toFixed(1) + '%']), { columnStyles: Object.assign(dir(4), { 0: { halign: 'left' } }) });
+
+        secao('Despesas por fornecedor (top 15)');
+        tabela(['Fornecedor', 'Lanç.', 'Total', '% das despesas'], b.porFornecedor.slice(0, 15).map(c => [c.nome, c.qtd, brl(c.total), c.pct.toFixed(1) + '%']), { columnStyles: Object.assign(dir(4), { 0: { halign: 'left' } }) });
+
+        if (b.vencidos.length) {
+            secao(`Contas vencidas (${b.vencidos.length})`);
+            tabela(['Vencimento', 'Atraso', 'Unidade', 'Fornecedor', 'Descrição', 'Valor'],
+                b.vencidos.map(x => [window.formatarDataBr(x.l.data_vencimento), x.dias + ' dia(s)', x.l._nomeUnidade || '', x.l.fornecedor_nome || '', x.l.descricao || '', brl(x.l.valor_parcela)]),
+                { columnStyles: { 5: { halign: 'right' } }, headStyles: { fillColor: [255, 71, 87], textColor: 255 } });
+        }
+
+        secao(`Extrato completo (${b.total} lançamentos)`);
+        tabela(['Vencimento', 'Pago em', 'Situação', 'Unidade', 'Tipo', 'Categoria', 'Fornecedor', 'Descrição', 'Parc.', 'Valor', 'Juros'],
+            dados.map(l => [window.formatarDataBr(l.data_vencimento || l.data_pagamento), l.data_pagamento ? window.formatarDataBr(l.data_pagamento) : '', window.situacaoLancamento(l).rotulo,
+                l._nomeUnidade || '', l.tipo || '', l.categoria || '', l.fornecedor_nome || '', l.descricao || '', `${l.parcela_atual || 1}/${l.total_parcelas || 1}`, brl(l.valor_parcela), l.juros ? brl(l.juros) : '']),
+            { styles: { fontSize: 6.8, cellPadding: 3, overflow: 'linebreak' }, columnStyles: { 9: { halign: 'right' }, 10: { halign: 'right' } } });
+
+        const n = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7); doc.setTextColor(150); doc.text(`Grupo Soul · Dashboard Financeiro  —  Página ${i} de ${n}`, M, H - 16); }
+        doc.save(`relatorio_dashboard_financeiro_${new Date().toISOString().substring(0, 10)}.pdf`);
+        mostrarAlerta('Relatório em PDF gerado (KPIs, gráficos, tabelas e extrato).', 'sucesso');
+    } catch (err) {
+        console.error(err);
+        mostrarAlerta('Erro ao gerar o PDF: ' + err.message, 'erro');
+    }
+};
+
+// Abas novas do Excel: Resumo (filtros + KPIs + gráficos) vem ANTES das demais; as de apoio, depois.
+window._dashExcelResumo = function (wb, b, img, C) {
+    const ws = wb.addWorksheet('Resumo', { views: [{ showGridLines: false }] });
+    ws.columns = Array.from({ length: 14 }, (_, i) => ({ width: i < 2 ? 26 : 13 }));
+    ws.mergeCells('A1:N1'); ws.getCell('A1').value = 'Relatório do Dashboard Financeiro — Grupo Soul'; ws.getCell('A1').font = { bold: true, size: 16, color: { argb: C.tituloTexto } };
+    ws.mergeCells('A2:N2'); ws.getCell('A2').value = `${b.empresa}  ·  Gerado em ${b.carimbo}  ·  ${b.total} lançamento(s)`; ws.getCell('A2').font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } };
+    let r = 4;
+    ws.getCell(r, 1).value = 'FILTROS APLICADOS'; ws.getCell(r, 1).font = { bold: true, color: { argb: C.tituloTexto } }; r++;
+    b.filtros.forEach(f => { ws.getCell(r, 1).value = f[0]; ws.getCell(r, 1).font = { bold: true }; ws.getCell(r, 2).value = f[1]; r++; });
+    r++;
+    ws.getCell(r, 1).value = 'INDICADORES'; ws.getCell(r, 1).font = { bold: true, color: { argb: C.tituloTexto } }; r++;
+    const kpis = [
+        ['Total Receitas', b.k.receitas, C.receita], ['Despesas Pagas', b.k.despPagas, C.despesaPaga], ['Despesas a Pagar', b.k.aPagar, C.despesaAPagar],
+        ['Juros Pagos', b.k.juros, 'FFF1C40F'], ['Vencido', b.k.vencido, C.vencido], ['Saldo do Período (Receitas − Desp. pagas)', b.k.saldo, 'FF3498DB']
+    ];
+    kpis.forEach(([nome, v, cor]) => {
+        ws.getCell(r, 1).value = nome; ws.getCell(r, 1).font = { bold: true }; ws.getCell(r, 1).border = { left: { style: 'thick', color: { argb: cor } } };
+        const c = ws.getCell(r, 2); c.value = v; c.numFmt = '"R$" #,##0.00'; c.font = { bold: true, size: 12, color: { argb: cor } }; c.alignment = { horizontal: 'right' };
+        if (nome === 'Vencido') { ws.getCell(r, 3).value = b.k.qtdVencido ? `${b.k.qtdVencido} conta(s) · até ${b.k.maiorAtraso} dia(s) de atraso` : 'Nada em atraso'; ws.getCell(r, 3).font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } }; }
+        r++;
+    });
+    r += 1;
+    ws.getCell(r, 1).value = 'GRÁFICOS'; ws.getCell(r, 1).font = { bold: true, color: { argb: C.tituloTexto } }; r++;
+    const W = 560, Hh = 258, linhasPorImg = 14;
+    [['evolucao', 0, 0], ['categorias', 1, 0], ['fornecedores', 0, 1], ['unidades', 1, 1]].forEach(([nome, col, lin]) => {
+        if (!img[nome]) return;
+        const id = wb.addImage({ base64: img[nome], extension: 'png' });
+        ws.addImage(id, { tl: { col: col === 0 ? 0.05 : 5.4, row: r - 1 + lin * linhasPorImg + 0.1 }, ext: { width: W, height: Hh } });
+    });
+};
+
+window._dashExcelApoio = function (wb, b, C) {
+    const moeda = '"R$" #,##0.00';
+    const aba = (nome, titulo, cab, linhas, fmts, larg) => {
+        const ws = wb.addWorksheet(nome, { views: [{ state: 'frozen', ySplit: 4 }] });
+        ws.columns = larg.map(w => ({ width: w }));
+        ws.mergeCells(1, 1, 1, cab.length); ws.getCell(1, 1).value = titulo; ws.getCell(1, 1).font = { bold: true, size: 14, color: { argb: C.tituloTexto } };
+        ws.mergeCells(2, 1, 2, cab.length); ws.getCell(2, 1).value = `${b.empresa}  ·  Gerado em ${b.carimbo}  ·  Respeitando os mesmos filtros da tela`; ws.getCell(2, 1).font = { italic: true, size: 9, color: { argb: 'FF7F8C8D' } };
+        const h = ws.getRow(4); h.values = cab; h.height = 20;
+        h.eachCell(c => { c.font = { bold: true, color: { argb: C.cabecalhoTexto } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.cabecalho } }; c.alignment = { vertical: 'middle', horizontal: 'center' }; });
+        linhas.forEach((l, i) => { const row = ws.addRow(l); row.eachCell((c, n) => { if (i % 2) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: C.zebra } }; c.border = { bottom: { style: 'hair', color: { argb: C.borda } } }; if (fmts[n - 1]) c.numFmt = fmts[n - 1]; }); });
+        ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: cab.length } };
+        return ws;
+    };
+    aba('Por Mês', 'Receita x Despesa por Mês', ['Mês', 'Receita', 'Despesa', 'Saldo do mês', 'Saldo acumulado'],
+        b.porMes.map(m => [m.rotulo, m.receita, m.despesa, m.saldo, m.acumulado]), [null, moeda, moeda, moeda, moeda], [14, 18, 18, 18, 18]);
+    aba('Por Categoria', 'Despesas por Categoria', ['Categoria', 'Qtd.', 'Total', '% das despesas'],
+        b.porCategoria.map(c => [c.nome, c.qtd, c.total, c.pct / 100]), [null, null, moeda, '0.0%'], [34, 10, 18, 16]);
+    aba('Por Fornecedor', 'Despesas por Fornecedor', ['Fornecedor', 'Qtd.', 'Total', '% das despesas'],
+        b.porFornecedor.map(c => [c.nome, c.qtd, c.total, c.pct / 100]), [null, null, moeda, '0.0%'], [38, 10, 18, 16]);
+    if (b.vencidos.length) aba('Vencidos', 'Contas Vencidas', ['Vencimento', 'Dias de atraso', 'Unidade', 'Fornecedor', 'Descrição', 'Categoria', 'Valor'],
+        b.vencidos.map(x => [window.formatarDataBr(x.l.data_vencimento), x.dias, x.l._nomeUnidade || '', x.l.fornecedor_nome || '', x.l.descricao || '', x.l.categoria || '', Number(x.l.valor_parcela || 0)]),
+        [null, null, null, null, null, null, moeda], [13, 14, 24, 24, 34, 22, 16]);
 };
 
 /**
@@ -15981,6 +16248,10 @@ window.exportarExcelDashboardBonito = async function (dados) {
         const wb = new ExcelJS.Workbook();
         wb.creator = 'Sistema RH Soul';
         wb.created = new Date();
+
+        // 🆕 Aba "Resumo" (filtros + indicadores + gráficos) vem primeiro
+        const _base = window._dashRelatorioBase(dados);
+        window._dashExcelResumo(wb, _base, window._dashGraficosRelatorio(_base), CORES);
 
         // ================= ABA 1: GERAL =================
         const wsGeral = wb.addWorksheet('Geral', { views: [{ state: 'frozen', ySplit: 4 }] });
@@ -16127,15 +16398,17 @@ window.exportarExcelDashboardBonito = async function (dados) {
             if (colNum >= 3) cell.numFmt = '"R$" #,##0.00';
         });
 
+        window._dashExcelApoio(wb, _base, CORES);
+
         const buffer = await wb.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = `extrato_financeiro_${new Date().toISOString().substring(0, 10)}.xlsx`;
+        a.download = `relatorio_dashboard_financeiro_${new Date().toISOString().substring(0, 10)}.xlsx`;
         a.click();
         URL.revokeObjectURL(a.href);
 
-        mostrarAlerta(`Excel gerado com ${dados.length} registro(s) em 2 abas (Geral + Por Unidade).`, 'sucesso');
+        mostrarAlerta(`Relatório em Excel gerado: ${wb.worksheets.length} abas (Resumo com gráficos, Geral, Por Unidade, Por Mês, Por Categoria, Por Fornecedor${_base.vencidos.length ? ', Vencidos' : ''}).`, 'sucesso');
     } catch (err) {
         mostrarAlerta('Erro ao exportar Excel: ' + err.message, 'erro');
     }
