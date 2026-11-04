@@ -32511,7 +32511,11 @@ async function salvarEscalaNoBanco() {
 window.prepararAssinaturaCadastradaEscala = async function() {
     const box = document.getElementById('assin-cadastrada-escala');
     if (!box) return;
-    const url = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+    let url = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+    if (url && !(await window._assinaturaTemTraco(url))) {
+        url = null;   // 🔒 imagem cadastrada vazia/inválida: trata como "sem assinatura cadastrada"
+        mostrarAlerta('A sua assinatura cadastrada está em branco ou não carregou. Desenhe agora, ou cadastre de novo em Edição de Documentos › Assinar Documento.', 'aviso');
+    }
     const blocoOk = document.getElementById('assin-cad-ok');
     const blocoSem = document.getElementById('assin-cad-sem');
     if (!url) {
@@ -32683,6 +32687,32 @@ window._assinaturaCadastradaEscalaBase64 = async function(url) {
 // a assinatura do gestor. "prefixo" identifica o formulário (ex: 'exp', 'des') e precisa
 // bater com os ids usados no bloco HTML "bloco-assin-fonte-<prefixo>" e com o id do canvas
 // próprio de cada formulário.
+// 🔒 TRAVA ANTI-ASSINATURA-VAZIA: confere se a imagem realmente tem traço (pixel visível que não seja branco/transparente).
+// Aceita data:, blob: ou http(s). Se a imagem não carregar, também devolve false. Usada antes de salvar/gerar qualquer documento com assinatura.
+window._assinaturaTemTraco = function(src) {
+    return new Promise((resolve) => {
+        if (!src) return resolve(false);
+        const im = new Image();
+        if (/^https?:/i.test(src)) im.crossOrigin = 'anonymous';
+        const fim = setTimeout(() => resolve(false), 20000);
+        im.onload = () => {
+            clearTimeout(fim);
+            try {
+                const esc = Math.min(1, 500 / Math.max(im.naturalWidth || 1, im.naturalHeight || 1));
+                const w = Math.max(1, Math.round((im.naturalWidth || 1) * esc)), h = Math.max(1, Math.round((im.naturalHeight || 1) * esc));
+                const c = document.createElement('canvas'); c.width = w; c.height = h;
+                const x = c.getContext('2d'); x.drawImage(im, 0, 0, w, h);
+                const d = x.getImageData(0, 0, w, h).data;
+                let n = 0;
+                for (let i = 0; i < d.length; i += 4) { if (d[i + 3] > 40 && (d[i] < 225 || d[i + 1] < 225 || d[i + 2] < 225)) n++; }
+                resolve(n >= Math.max(25, w * h * 0.0002));
+            } catch (e) { console.warn('Não consegui conferir a assinatura:', e); resolve(false); }
+        };
+        im.onerror = () => { clearTimeout(fim); resolve(false); };
+        im.src = src;
+    });
+};
+
 window._canvasAssinaturaGestorPorPrefixo = {
     exp: 'canvas-assinatura-exp',
     des: 'canvas-desempenho'
@@ -32697,7 +32727,12 @@ window.prepararFonteAssinaturaGestor = async function(prefixo) {
     const canvasEl = document.getElementById(window._canvasAssinaturaGestorPorPrefixo[prefixo]);
     if (!bloco || !canvasEl) return;
 
-    const url = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+    let url = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
+    if (url && !(await window._assinaturaTemTraco(url))) {
+        // 🔒 assinatura cadastrada sem imagem válida: não oferece (evita documento sem assinatura)
+        url = null;
+        mostrarAlerta('A sua assinatura cadastrada está em branco ou não carregou. Desenhe agora, ou cadastre de novo em Edição de Documentos › Assinar Documento.', 'aviso');
+    }
     if (!url) {
         bloco.classList.add('hidden');
         canvasEl.style.display = '';
@@ -32752,12 +32787,17 @@ window.obterAssinaturaGestorAvaliacao = async function(prefixo) {
     if (sel && sel.value === 'cadastrada') {
         const urlCad = usuarioAtual && usuarioAtual.assinatura_admin && usuarioAtual.assinatura_admin.assinatura_url;
         if (!urlCad) throw new Error('assinatura cadastrada não encontrada');
-        return {
+        const rCad = {
             base64: await window._assinaturaCadastradaEscalaBase64(urlCad),
             nome: window[`_nomeAssinaturaCadastrada_${prefixo}`] || (usuarioAtual && usuarioAtual.nome) || ''
         };
+        // 🔒 Nunca devolve assinatura vazia
+        if (!(await window._assinaturaTemTraco(rCad.base64))) throw new Error('a assinatura cadastrada está em branco');
+        return rCad;
     }
-    return { base64: canvasEl.toDataURL('image/png'), nome: (usuarioAtual && usuarioAtual.nome) || '' };
+    const rDes = { base64: canvasEl.toDataURL('image/png'), nome: (usuarioAtual && usuarioAtual.nome) || '' };
+    if (!(await window._assinaturaTemTraco(rDes.base64))) throw new Error('o quadro de assinatura está em branco');
+    return rDes;
 };
 
 // Verifica se tem algo assinado: se a opção for "cadastrada" sempre conta como preenchido
@@ -32829,6 +32869,10 @@ window.confirmarTrancarEscala = async function(usarCadastrada) {
         } else {
             // 1. MÁGICA: Extrai a assinatura em BASE64 (Texto) direto do Canvas!
             base64Signature = canvas.toDataURL('image/png');
+        }
+        // 🔒 Nunca tranca a escala com assinatura vazia
+        if (!(await window._assinaturaTemTraco(base64Signature))) {
+            throw new Error('a assinatura está em branco. ' + (usarCadastrada === true ? 'Sua assinatura cadastrada não tem imagem válida: cadastre de novo em Edição de Documentos › Assinar Documento ou desenhe no quadro.' : 'Desenhe a assinatura no quadro antes de trancar.'));
         }
 
         // 2. Salva o texto Base64 DIRETAMENTE na tabela (Coluna assinatura)
@@ -59692,7 +59736,15 @@ window.salvarAssinaturaAdmin = async function() {
         let arquivos = inputAssin.files;
         if (st.blob && !st.usarOriginal) arquivos = [new File([st.blob], 'assinatura.png', { type: 'image/png' })];
 
+        // 🔒 Não aceita imagem em branco/transparente como assinatura
+        const _urlTeste = URL.createObjectURL(arquivos[0]);
+        const _okImg = await window._assinaturaTemTraco(_urlTeste);
+        URL.revokeObjectURL(_urlTeste);
+        if (!_okImg) return mostrarAlerta('A imagem escolhida parece estar em branco ou transparente demais, sem traço de assinatura. Escolha outro arquivo.', 'erro');
+
         const urls = await subirDocumentos(caminhoBase, arquivos, 'Assinatura');
+        // confere o arquivo já salvo na nuvem antes de gravar no perfil
+        if (!(await window._assinaturaTemTraco(urls[0]))) throw new Error('a assinatura enviada não carregou da nuvem. Tente de novo.');
         novaCfg.assinatura_url = urls[0];
         novaCfg.atualizado_em = new Date().toISOString();
 
@@ -86255,6 +86307,11 @@ window.salvarFeedbackEGerarTermo = async function(idAval, nome, unidade, empresa
             }
         }
         pontosBd = pontosBd.trim();
+
+        // 🔒 Não gera o termo final sem a assinatura do gestor (ausente ou em branco)
+        if (!urlAssinaturaGestorSalva || !(await window._assinaturaTemTraco(urlAssinaturaGestorSalva.trim()))) {
+            throw new Error('A assinatura do gestor desta avaliação está ausente ou em branco, então o documento NÃO foi gerado. Peça ao gestor para refazer a avaliação.');
+        }
 
         // Guarda o link da foto do colaborador ANTES do banco ser sobrescrito com o PDF!
         const linkPngColaborador = aval.documento_assinado || '';

@@ -1215,6 +1215,10 @@
                     } else alerta('Sua assinatura ainda não foi cadastrada. Cadastre em Edição de Documentos › Assinar Documento e tente de novo.', 'aviso');
                     return;   // sem assinatura cadastrada não insere nada (nem só a linha com o nome)
                 }
+                // 🔒 Não insere assinatura em branco: confere se a imagem cadastrada tem traço de verdade
+                if (typeof window._assinaturaTemTraco === 'function' && !(await window._assinaturaTemTraco(cfg.assinatura_url))) {
+                    return alerta('A sua assinatura cadastrada está em branco ou não carregou. Cadastre de novo em Edição de Documentos › Assinar Documento e tente outra vez.', 'erro');
+                }
                 // monta, numa imagem só: assinatura + linha + nome (+ cargo da unidade), pronta para arrastar para onde quiser
                 const bloco = await comporBlocoAssinatura(temAssin ? cfg.assinatura_url : null);
                 const w = 300, h = Math.round(w * bloco.h / bloco.w);
