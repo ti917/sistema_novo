@@ -2224,6 +2224,7 @@
                             <!-- Só relê o que já está gravado no Supabase - não fala com a
                                  SEFAZ, então não tem risco de bloqueio por Consumo Indevido. -->
                             <button id="btn-atualizar-nfecloud" class="nf-btn" title="Rebusca a lista aqui do sistema (não consulta a SEFAZ de novo)" onclick="window.carregarNotasRecebidasNFeCloud()"><i class="fa-solid fa-rotate"></i> Atualizar lista</button>
+                            <button type="button" class="nf-btn" style="color:#f1c40f; border-color:#f1c40f;" title="Acha lançamentos antigos do Centro de Custo que ficaram sem o Nº da NF (por fornecedor + valor + vencimento) e deixa você vincular com revisão" onclick="window.nfConciliarAbrir()"><i class="fa-solid fa-link"></i> Conciliar antigas</button>
                             <input type="file" id="input-zip-nfecloud" accept=".zip,.xml" multiple style="display:none;" onchange="window.importarZipNFeCloud(this.files)">
                             <button id="btn-importar-nfecloud" class="nf-btn" title="Importa o .zip ou os .xml (NF-e, CT-e, NFS-e) baixados na NFeCloud (não consulta a SEFAZ)" onclick="document.getElementById('input-zip-nfecloud').click()"><i class="fa-solid fa-file-zipper"></i> Importar .zip / XML manual</button>
                         </div>
@@ -12000,6 +12001,260 @@ window._ccBuscarLancamentoDaNota = async function(n) {
     const forn = norm(_nfeDecodificaEntidades(n.emitente_nome));
     const valor = Number(n.valor_total) || 0;
     return r2.data.find(l => (forn && (norm(l.fornecedor_nome) === forn || norm(l.descricao).includes(forn))) || (valor && Number(l.valor_total) === valor)) || null;
+};
+
+
+// =====================================================================
+// 🔗 CONCILIAR NOTAS ANTIGAS — acha lançamentos do Centro de Custo que ficaram SEM o Nº da NF
+// e sugere a nota correspondente por fornecedor + valor + vencimento.
+// Só PREENCHE o número da NF (e a chave, se der) em lançamentos que estão sem número — nada é apagado
+// e as proteções de duplicidade que já existem continuam valendo. Sempre com revisão antes de gravar.
+// =====================================================================
+window.__nfConc = { pares: [], ambiguos: [], escolha: {} };
+
+window._nfConcNorm = function(t) {
+    return String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
+};
+window._nfConcFornOk = function(a, b) {
+    const stop = new Set(['LTDA', 'ME', 'EPP', 'SA', 'S', 'A', 'EIRELI', 'COMERCIO', 'COM', 'DE', 'DA', 'DO', 'E', 'INDUSTRIA', 'IND', 'SERVICOS', 'EMPRESA', 'CIA']);
+    const A = window._nfConcNorm(a), B = window._nfConcNorm(b);
+    if (!A || !B) return false;
+    if (A === B || A.includes(B) || B.includes(A)) return true;
+    const ta = new Set(A.split(' ').filter(x => x.length > 1 && !stop.has(x))), tb = new Set(B.split(' ').filter(x => x.length > 1 && !stop.has(x)));
+    if (!ta.size || !tb.size) return false;
+    let comum = 0; ta.forEach(x => { if (tb.has(x)) comum++; });
+    return comum / Math.min(ta.size, tb.size) >= 0.6 && comum >= 1;
+};
+window._nfConcDias = function(isoA, isoB) {
+    if (!isoA || !isoB) return null;
+    const a = new Date(String(isoA).slice(0, 10) + 'T12:00:00'), b = new Date(String(isoB).slice(0, 10) + 'T12:00:00');
+    if (isNaN(a) || isNaN(b)) return null;
+    return Math.round(Math.abs(a - b) / 86400000);
+};
+
+// Lê tudo paginado (1000 por vez)
+window._nfConcLerTudo = async function(montar) {
+    let todos = [], de = 0;
+    for (;;) {
+        const r = await montar().range(de, de + 999);
+        if (r.error) return { error: r.error, data: todos };
+        todos = todos.concat(r.data || []);
+        if (!r.data || r.data.length < 1000) break;
+        de += 1000;
+    }
+    return { data: todos };
+};
+
+window.nfConciliarAbrir = async function() {
+    document.getElementById('modal-nf-conciliar')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-nf-conciliar" class="modal-overlay" style="z-index: 100050;">
+        <div class="glass-card" style="width:100%; max-width:1100px; max-height:92vh; overflow-y:auto; position:relative; border:1px solid #f1c40f;">
+            <button type="button" onclick="document.getElementById('modal-nf-conciliar').remove()" style="position:absolute; top:12px; right:15px; background:none; border:none; color:var(--cor-texto-secundario); cursor:pointer; font-size:1.4rem;"><i class="fa-solid fa-xmark"></i></button>
+            <h3 style="color:#f1c40f; margin:0 0 6px;"><i class="fa-solid fa-link"></i> Conciliar notas antigas</h3>
+            <p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin:0 0 14px;">Procura lançamentos do Centro de Custo que ficaram <b>sem o Nº da NF</b> e sugere a nota correspondente por fornecedor, valor e vencimento. Ao vincular, só o número da NF é preenchido — nada é apagado.</p>
+            <div id="nf-conc-corpo" style="text-align:center; padding:30px; color:var(--cor-texto-secundario);"><i class="fa-solid fa-spinner fa-spin"></i> Procurando correspondências...</div>
+        </div>
+    </div>`);
+    const corpo = document.getElementById('nf-conc-corpo');
+    try {
+        const notas = (window.__notasRecebidasLista || []).filter(n => (n.tipo === 'NFe' || n.tipo === 'NFSe') && n.numero && Number(n.valor_total) > 0);
+        if (!notas.length) { corpo.innerHTML = 'Nenhuma nota carregada na lista. Feche e clique em "Atualizar lista" primeiro.'; return; }
+
+        // Lançamentos: todos (leves). Os SEM número são candidatos; os COM número servem pra saber quais notas já estão ligadas.
+        const cols = 'id, grupo_id, centro_custo_id, tipo, fornecedor_nome, descricao, valor_total, valor_parcela, data_vencimento, numero_nf, parcela_atual, total_parcelas';
+        let rl = await window._nfConcLerTudo(() => supabaseClient.from('financeiro_lancamentos').select(cols).order('id'));
+        if (rl.error) rl = await window._nfConcLerTudo(() => supabaseClient.from('financeiro_lancamentos').select('*').order('id'));
+        if (rl.error) throw new Error(rl.error.message);
+        const lancs = (rl.data || []).filter(l => String(l.tipo || '').toLowerCase() !== 'receita');
+
+        let mapaUn = {};
+        try { const { data: cc } = await supabaseClient.from('financeiro_centros_custo').select('id, nome_unidade'); (cc || []).forEach(c => { mapaUn[c.id] = c.nome_unidade; }); } catch (_) {}
+
+        const semZ = (x) => String(x || '').replace(/\D/g, '').replace(/^0+/, '');
+        const comNumero = new Map();
+        const grupos = new Map();
+        lancs.forEach(l => {
+            if (String(l.numero_nf || '').trim()) {
+                const k = semZ(l.numero_nf); if (!k) return;
+                if (!comNumero.has(k)) comNumero.set(k, []); comNumero.get(k).push(l);
+            } else {
+                const k = l.grupo_id || ('id' + l.id);
+                if (!grupos.has(k)) grupos.set(k, { key: k, grupo_id: l.grupo_id || null, ids: [], fornecedor: l.fornecedor_nome || '', descricao: l.descricao || '', valorTotal: Number(l.valor_total) || 0, soma: 0, venc: [], cc: l.centro_custo_id });
+                const g = grupos.get(k); g.ids.push(l.id); g.soma += Number(l.valor_parcela) || 0; if (l.data_vencimento) g.venc.push(String(l.data_vencimento).slice(0, 10));
+            }
+        });
+        const G = [...grupos.values()];
+
+        // Notas que já estão ligadas ao CC (mesmo critério do sistema: número + fornecedor ou valor) ou dispensadas saem da busca
+        const jaLigada = (n) => {
+            const k = semZ(n.numero);
+            const c = comNumero.get(k) || [];
+            const forn = window._nfConcNorm(_nfeDecodificaEntidades(n.emitente_nome)); const v = Number(n.valor_total) || 0;
+            return c.some(l => (forn && (window._nfConcNorm(l.fornecedor_nome) === forn || window._nfConcNorm(l.descricao).includes(forn))) || (v && Number(l.valor_total) === v));
+        };
+        const candidatasNotas = notas.filter(n => !jaLigada(n) && !(Array.isArray(n.destinos_dispensados) && n.destinos_dispensados.includes('cc')) && !(window.__nfDest && window.__nfDest[n.id] && window.__nfDest[n.id].cc));
+
+        // Pares possíveis
+        const nivelNome = { 1: 'forte', 2: 'medio', 3: 'fraco' };
+        const porNota = new Map();
+        candidatasNotas.forEach(n => {
+            const v = Number(n.valor_total) || 0;
+            const forn = _nfeDecodificaEntidades(n.emitente_nome);
+            const venc = window._nfVencimento ? window._nfVencimento(n) : null;
+            const vNota = venc && venc.primeiro ? venc.primeiro : null;
+            const lista = [];
+            G.forEach(g => {
+                const valorOk = Math.abs(g.valorTotal - v) <= 0.05 || Math.abs(g.soma - v) <= 0.05;
+                if (!valorOk) return;
+                const fornOk = window._nfConcFornOk(forn, g.fornecedor) || window._nfConcFornOk(forn, g.descricao);
+                let dias = null;
+                if (vNota && g.venc.length) dias = Math.min(...g.venc.map(d => window._nfConcDias(vNota, d)).filter(x => x != null));
+                if (!isFinite(dias)) dias = null;
+                let nivel = 0;
+                if (fornOk && dias === 0) nivel = 1;
+                else if (fornOk && dias != null && dias <= 5) nivel = 2;
+                else if (fornOk) nivel = 3;
+                else if (dias === 0) nivel = 3;
+                if (!nivel) return;
+                lista.push({ g, nivel, dias: dias == null ? 999 : dias, fornOk });
+            });
+            if (lista.length) {
+                lista.sort((a, b) => a.nivel - b.nivel || a.dias - b.dias);
+                porNota.set(n.id, { n, lista });
+            }
+        });
+
+        // Quantas notas disputam cada grupo (no melhor nível de cada uma)
+        const disputa = new Map();
+        porNota.forEach(({ n, lista }) => {
+            const melhor = lista[0];
+            lista.filter(x => x.nivel === melhor.nivel && x.dias === melhor.dias).forEach(x => {
+                if (!disputa.has(x.g.key)) disputa.set(x.g.key, new Set()); disputa.get(x.g.key).add(n.id);
+            });
+        });
+
+        const pares = [], ambiguos = [];
+        porNota.forEach(({ n, lista }) => {
+            const melhor = lista[0];
+            const empatados = lista.filter(x => x.nivel === melhor.nivel && x.dias === melhor.dias);
+            const unico = empatados.length === 1 && (disputa.get(melhor.g.key) || new Set()).size === 1;
+            if (unico) pares.push({ n, g: melhor.g, nivel: melhor.nivel, dias: melhor.dias });
+            else ambiguos.push({ n, opcoes: empatados.length > 1 ? empatados : lista.filter(x => x.g.key === melhor.g.key), nivel: melhor.nivel });
+        });
+        window.__nfConc = { pares, ambiguos, escolha: {}, mapaUn };
+        window._nfConcRender();
+    } catch (e) {
+        corpo.innerHTML = `<span style="color:var(--cor-perigo);">Erro ao procurar: ${String(e.message || e)}</span>`;
+    }
+};
+
+window._nfConcRender = function() {
+    const corpo = document.getElementById('nf-conc-corpo'); if (!corpo) return;
+    const { pares, ambiguos, mapaUn } = window.__nfConc;
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const brl = (v) => 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const dBr = (iso) => iso ? String(iso).slice(0, 10).split('-').reverse().join('/') : '-';
+    const cores = { 1: '#2ecc71', 2: '#f39c12', 3: '#e67e22' }, rot = { 1: 'Forte', 2: 'Médio', 3: 'Fraco' };
+    const vencNota = (n) => { const v = window._nfVencimento ? window._nfVencimento(n) : null; return v && v.primeiro ? dBr(v.primeiro) + (v.total > 1 ? ` (+${v.total - 1})` : '') : '-'; };
+    const linha = (n, g, nivel, dias, chk, idxAttr) => `
+        <tr style="border-top:1px solid var(--cor-borda);">
+            <td style="padding:8px;"><input type="checkbox" class="nf-conc-chk" ${idxAttr} ${chk ? 'checked' : ''} onchange="window._nfConcContar()"></td>
+            <td style="padding:8px;"><b>NF ${esc(window.nfNumFmt(n.numero))}</b><br><span style="font-size:0.75rem; color:var(--cor-texto-secundario);">${esc(_nfeDecodificaEntidades(n.emitente_nome))}</span><br><span style="font-size:0.75rem;">${brl(n.valor_total)} · venc. ${vencNota(n)}</span></td>
+            <td style="padding:8px;"><b>${esc(g.fornecedor || '-')}</b><br><span style="font-size:0.75rem; color:var(--cor-texto-secundario);">${esc(g.descricao || '')}</span><br><span style="font-size:0.75rem;">${esc((mapaUn || {})[g.cc] || '')} · ${brl(g.valorTotal)} · venc. ${esc(g.venc.slice().sort().map(dBr).join(', '))}</span></td>
+            <td style="padding:8px; text-align:center;"><span style="font-size:0.72rem; font-weight:800; color:${cores[nivel]}; border:1px solid ${cores[nivel]}; border-radius:10px; padding:2px 8px;">${rot[nivel]}</span><br><span style="font-size:0.7rem; color:var(--cor-texto-secundario);">${dias === 999 || dias == null ? 'sem venc.' : (dias === 0 ? 'venc. igual' : dias + ' dia(s) de dif.')}</span></td>
+        </tr>`;
+    const cab = '<thead><tr style="font-size:0.72rem; text-transform:uppercase; color:var(--cor-texto-secundario); text-align:left;"><th style="padding:6px;"></th><th style="padding:6px;">Nota recebida</th><th style="padding:6px;">Lançamento do Centro de Custo (sem Nº da NF)</th><th style="padding:6px; text-align:center;">Confiança</th></tr></thead>';
+    const secao = (nivel) => {
+        const lista = pares.map((p, i) => ({ p, i })).filter(x => x.p.nivel === nivel);
+        if (!lista.length) return '';
+        return `<h4 style="margin:18px 0 6px; color:${cores[nivel]};">${rot[nivel]} <small style="color:var(--cor-texto-secundario); font-weight:normal;">— ${lista.length} ${nivel === 1 ? '(já marcadas)' : '(confira e marque as que estiverem certas)'}</small></h4>
+        <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">${cab}<tbody>${lista.map(x => linha(x.p.n, x.p.g, x.p.nivel, x.p.dias, nivel === 1, `data-par="${x.i}"`)).join('')}</tbody></table>`;
+    };
+    let ambHtml = '';
+    if (ambiguos.length) {
+        ambHtml = `<h4 style="margin:18px 0 6px; color:#9b59b6;">Ambíguas <small style="color:var(--cor-texto-secundario); font-weight:normal;">— ${ambiguos.length}: mais de uma possibilidade, escolha (ou deixe em branco)</small></h4>` +
+        ambiguos.map((a, i) => `
+        <div style="border:1px solid var(--cor-borda); border-radius:8px; padding:8px 12px; margin-bottom:8px;">
+            <div style="font-size:0.85rem;"><b>NF ${esc(window.nfNumFmt(a.n.numero))}</b> · ${esc(_nfeDecodificaEntidades(a.n.emitente_nome))} · ${brl(a.n.valor_total)} · venc. ${vencNota(a.n)}</div>
+            <select class="nf-conc-amb" data-amb="${i}" onchange="window._nfConcContar()" style="margin-top:6px; width:100%; padding:6px; background:var(--cor-fundo-input, #0b2036); color:inherit; border:1px solid var(--cor-borda); border-radius:6px;">
+                <option value="">— não vincular —</option>
+                ${a.opcoes.map((o, j) => `<option value="${j}">${esc(o.g.fornecedor || '-')} · ${brl(o.g.valorTotal)} · venc. ${esc(o.g.venc.slice().sort().map(dBr).join(', '))} · ${esc((mapaUn || {})[o.g.cc] || '')}</option>`).join('')}
+            </select>
+        </div>`).join('');
+    }
+    if (!pares.length && !ambiguos.length) {
+        corpo.style.textAlign = 'center';
+        corpo.innerHTML = '<i class="fa-solid fa-circle-check" style="color:#2ecc71;"></i> Não encontrei nenhum lançamento antigo sem Nº da NF que combine com as notas desta lista.';
+        return;
+    }
+    corpo.style.textAlign = 'left'; corpo.style.padding = '0';
+    corpo.innerHTML = `
+        <div style="font-size:0.85rem; color:var(--cor-texto-secundario);">${pares.length} par(es) sugerido(s) · ${ambiguos.length} ambíguo(s)</div>
+        ${secao(1)}${secao(2)}${secao(3)}${ambHtml}
+        <div style="position:sticky; bottom:0; background:rgba(0,25,51,0.97); padding:12px 0 4px; margin-top:14px; display:flex; gap:10px; justify-content:flex-end; align-items:center;">
+            <span id="nf-conc-contador" style="font-size:0.85rem; color:var(--cor-texto-secundario); margin-right:auto;"></span>
+            <button type="button" class="btn-secondary" onclick="document.getElementById('modal-nf-conciliar').remove()">Cancelar</button>
+            <button type="button" id="nf-conc-btn" class="btn-success" onclick="window.nfConciliarGravar()"><i class="fa-solid fa-link"></i> Vincular selecionadas</button>
+        </div>`;
+    window._nfConcContar();
+};
+
+window._nfConcSelecionados = function() {
+    const { pares, ambiguos } = window.__nfConc;
+    const sel = [];
+    document.querySelectorAll('#nf-conc-corpo .nf-conc-chk:checked').forEach(c => { const p = pares[parseInt(c.dataset.par, 10)]; if (p) sel.push({ n: p.n, g: p.g }); });
+    document.querySelectorAll('#nf-conc-corpo .nf-conc-amb').forEach(s => {
+        if (s.value === '') return;
+        const a = ambiguos[parseInt(s.dataset.amb, 10)]; const o = a && a.opcoes[parseInt(s.value, 10)];
+        if (o) sel.push({ n: a.n, g: o.g });
+    });
+    return sel;
+};
+window._nfConcContar = function() {
+    const sel = window._nfConcSelecionados();
+    // mesmo lançamento escolhido por 2 notas = conflito
+    const usados = new Map(); sel.forEach(x => usados.set(x.g.key, (usados.get(x.g.key) || 0) + 1));
+    const conflito = [...usados.values()].some(v => v > 1);
+    const el = document.getElementById('nf-conc-contador');
+    if (el) el.innerHTML = `${sel.length} selecionada(s)` + (conflito ? ' <b style="color:#e74c3c;">— o mesmo lançamento está escolhido por mais de uma nota, ajuste.</b>' : '');
+    const b = document.getElementById('nf-conc-btn'); if (b) b.disabled = !sel.length || conflito;
+};
+
+window.nfConciliarGravar = async function() {
+    const sel = window._nfConcSelecionados();
+    if (!sel.length) return;
+    const ok = await mostrarConfirmacao(`Vincular ${sel.length} nota(s) aos lançamentos escolhidos?\n\nIsso só preenche o Nº da NF nos lançamentos que estão sem número. Nada é apagado.`, 'Vincular notas');
+    if (!ok) return;
+    const btn = document.getElementById('nf-conc-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Vinculando...'; }
+    let feitos = 0; const falhas = []; const ids = [];
+    for (const { n, g } of sel) {
+        try {
+            const numero = window.nfNumRaw(n.numero);
+            if (!numero) throw new Error('nota sem número');
+            let q = supabaseClient.from('financeiro_lancamentos').update({ numero_nf: numero });
+            q = g.grupo_id ? q.eq('grupo_id', g.grupo_id) : q.in('id', g.ids);
+            const { error } = await q.or('numero_nf.is.null,numero_nf.eq.');
+            if (error) throw new Error(error.message);
+            // chave de acesso (se a coluna existir; erro aqui é ignorado de propósito)
+            if (n.chave_acesso) {
+                try {
+                    let q2 = supabaseClient.from('financeiro_lancamentos').update({ chave_acesso: n.chave_acesso });
+                    q2 = g.grupo_id ? q2.eq('grupo_id', g.grupo_id) : q2.in('id', g.ids);
+                    await q2.or('chave_acesso.is.null,chave_acesso.eq.');
+                } catch (_) {}
+            }
+            feitos++; ids.push(n.id);
+        } catch (e) { falhas.push('NF ' + window.nfNumFmt(n.numero) + ' (' + (e.message || e) + ')'); }
+    }
+    // Recalcula o status das notas vinculadas (Parcial → Lançada quando tudo estiver feito)
+    for (const id of ids) { try { await window._nfRecalcularStatus(id); } catch (_) {} }
+    document.getElementById('modal-nf-conciliar')?.remove();
+    let msg = `<b>${feitos}</b> nota(s) vinculada(s) com sucesso.`;
+    if (falhas.length) msg += `<br><br><b style="color:#e74c3c;">Não consegui vincular:</b><br>${falhas.join('<br>')}`;
+    await mostrarAlerta(msg, falhas.length ? 'aviso' : 'sucesso');
+    if (window.carregarNotasRecebidasNFeCloud) window.carregarNotasRecebidasNFeCloud();
 };
 
 // Estado atual dos destinos dessa nota (consulta o banco na hora).
