@@ -2177,6 +2177,12 @@
                     #tela-notas-fiscais .nf-selo.ok { color:#2ecc71; }
                     #tela-notas-fiscais .nf-selo.erro { color:#e74c3c; }
                     #tela-notas-fiscais .nf-selo.pend { color:var(--cor-texto-secundario); cursor:default; }
+                    #tela-notas-fiscais .nf-dest { display:flex; gap:4px; margin-top:5px; flex-wrap:wrap; }
+                    #tela-notas-fiscais .nf-dest-chip { display:inline-flex; align-items:center; gap:4px; font-size:0.68rem; font-weight:700; padding:2px 7px; border-radius:20px; border:1px solid; line-height:1.3; white-space:nowrap; }
+                    #tela-notas-fiscais .nf-dest-chip i { font-size:0.62rem; }
+                    #tela-notas-fiscais .nf-dest-chip.ok { color:#2ecc71; border-color:rgba(46,204,113,.45); background:rgba(46,204,113,.10); }
+                    #tela-notas-fiscais .nf-dest-chip.falta { color:#ff9800; border-color:rgba(255,152,0,.5); background:rgba(255,152,0,.10); }
+                    #tela-notas-fiscais .nf-dest-chip.na { color:var(--cor-texto-secundario); border-color:var(--cor-borda); background:transparent; }
                     #tela-notas-fiscais .nf-status-select { padding:6px 10px; font-size:0.8rem; font-weight:bold; min-width:125px; border-radius:7px; }
                     #tela-notas-fiscais .nf-vazio { text-align:center; padding:45px 20px; color: var(--cor-texto-secundario); }
                     #tela-notas-fiscais .nf-vazio i { font-size:2rem; color: var(--cor-acento); opacity:0.6; display:block; margin-bottom:12px; }
@@ -11153,6 +11159,34 @@ window.carregarNotasRecebidasNFeCloud = async function() {
 
     window._nfAtualizarKpis();
     window.renderizarNotasRecebidas();
+    try { window._nfCarregarDestinosLista(); } catch (e) { console.warn(e); }
+};
+
+// Estado dos destinos (Almoxarifado / Centro de Custo) de todas as notas da lista, em poucas buscas, pra mostrar os selos na linha.
+window._nfCarregarDestinosLista = async function() {
+    const lista = (window.__notasRecebidasLista || []).filter(n => n.tipo === 'NFe' || n.tipo === 'NFSe');
+    if (!lista.length) return;
+    const norm = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
+    const sz = (t) => String(t || '').replace(/\D/g, '').replace(/^0+/, '');
+    let almox = null, lanc = null, disp = {};
+    try { const r = await supabaseClient.from('almoxarifado_notas').select('chave_acesso, numero_nf, fornecedor').limit(8000); if (!r.error) almox = r.data || []; } catch (_) {}
+    try { const r = await supabaseClient.from('financeiro_lancamentos').select('*').or('chave_acesso.not.is.null,numero_nf.not.is.null').limit(15000); if (!r.error) lanc = r.data || []; } catch (_) {}
+    try { const r = await supabaseClient.from('nfecloud_documentos').select('id, destinos_dispensados').not('destinos_dispensados', 'is', null).limit(5000); if (!r.error) (r.data || []).forEach(x => { if (Array.isArray(x.destinos_dispensados) && x.destinos_dispensados.length) disp[x.id] = x.destinos_dispensados; }); } catch (_) {}
+    const porChaveA = new Set((almox || []).map(a => a.chave_acesso).filter(Boolean));
+    const porNumA = new Set((almox || []).map(a => sz(a.numero_nf) + '|' + norm(a.fornecedor)));
+    const porChaveL = new Set((lanc || []).map(l => l.chave_acesso).filter(Boolean));
+    const porNumL = new Map(); (lanc || []).forEach(l => { const k = sz(l.numero_nf); if (k) { if (!porNumL.has(k)) porNumL.set(k, []); porNumL.get(k).push(l); } });
+    const out = {};
+    lista.forEach(n => {
+        const forn = norm(_nfeDecodificaEntidades(n.emitente_nome)), num = sz(n.numero), valor = Number(n.valor_total) || 0;
+        const ok = { na: disp[n.id] || [] };
+        ok.almox = almox ? !!((n.chave_acesso && porChaveA.has(n.chave_acesso)) || (n.tipo === 'NFe' && num && porNumA.has(num + '|' + forn))) : null;
+        ok.cc = lanc ? !!((n.chave_acesso && porChaveL.has(n.chave_acesso)) || (num && (porNumL.get(num) || []).some(l => (forn && (norm(l.fornecedor_nome) === forn || norm(l.descricao).includes(forn))) || (valor && Number(l.valor_total) === valor)))) : null;
+        if (ok.almox === null || ok.cc === null) return; // não deu pra consultar: não afirma nada
+        out[n.id] = ok;
+    });
+    window.__nfDest = out;
+    if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true);
 };
 
 // Cartões de resumo (sobre todas as notas carregadas, não só o filtro).
@@ -11362,6 +11396,19 @@ window.renderizarNotasRecebidas = function(manterPagina) {
         const tomadorCte = n.tipo === 'CTe' && n.destinatario_nome ? 'Tomador: ' + n.destinatario_nome : '';
         const subEmit = [_nfeFormatarCnpj(n.emitente_cnpj), unidade].filter(Boolean).map(esc).join(' · ');
         const status = n.status_revisao || 'Pendente';
+        const dst = (window.__nfDest || {})[n.id];
+        let parcial = false, chipsDest = '', faltaDest = false;
+        if (dst && status !== 'Ignorada' && (n.tipo === 'NFe' || n.tipo === 'NFSe')) {
+            const nomes = { almox: 'Almox.', cc: 'C. Custo' }, nomesLg = { almox: 'Almoxarifado', cc: 'Centro de Custo' };
+            const est = window._nfDestinosNecessarios(n).map(d => ({ d, st: dst.na.includes(d) ? 'na' : (dst[d] ? 'ok' : 'falta') }));
+            const feitos = est.filter(e => e.st !== 'falta').length, faltam = est.length - feitos;
+            faltaDest = faltam > 0;
+            parcial = est.length > 1 && feitos > 0 && faltam > 0;
+            // selos só quando há algo a avisar: já lançou parte e falta outra, ou está "Já Lançada" sem estar completa
+            if (faltam > 0 && (parcial || status === 'Lançada')) {
+                chipsDest = '<div class="nf-dest">' + est.map(e => `<span class="nf-dest-chip ${e.st}" title="${nomesLg[e.d]}: ${e.st === 'ok' ? 'lançado' : e.st === 'na' ? 'não se aplica' : 'ainda não lançado'}"><i class="fa-solid ${e.st === 'ok' ? 'fa-check' : e.st === 'na' ? 'fa-minus' : 'fa-xmark'}"></i> ${nomes[e.d]}${e.st === 'falta' ? ' falta' : ''}</span>`).join('') + '</div>';
+            }
+        }
         return `<tr class="${sit.chave === 'cancelada' ? 'nf-linha-cancelada' : ''}">
             <td><div class="nf-num">${esc((window._nfTipoDe(n) === 'NFe' ? window.nfNumFmt(n.numero) : String(n.numero || '')) || '-')}${n.serie ? `<span style="color:var(--cor-texto-secundario); font-weight:normal;"> / ${esc(n.serie)}</span>` : ''}</div><span class="nf-tipo">${esc(n.tipo)}</span></td>
             <td><div class="nf-emit">${esc(_nfeDecodificaEntidades(n.emitente_nome) || '-')}</div>${subEmit ? `<div class="nf-sub">${subEmit}</div>` : ''}${tomadorCte ? `<div class="nf-sub nf-sub-quebra">${esc(tomadorCte)}</div>` : ''}${window.nfCategoriaChip(n)}</td>
@@ -11371,13 +11418,13 @@ window.renderizarNotasRecebidas = function(manterPagina) {
             <td class="nf-col-situacao">${situacaoFmt}</td>
             <td class="nf-col-manif">${manifestacaoFmt}</td>
             <td>
-                <select class="modern-input nf-status-select" style="color:${corStatus[status] || 'inherit'}; border-color:${corStatus[status] || 'var(--cor-borda)'};" onchange="window.atualizarStatusRevisaoNFeCloud('${n.id}', this.value)">
-                    <option value="Pendente" ${status === 'Pendente' ? 'selected' : ''}>Pendente</option>
+                <select class="modern-input nf-status-select" style="color:${(parcial && status === 'Pendente') ? '#f5a623' : (corStatus[status] || 'inherit')}; border-color:${(parcial && status === 'Pendente') ? '#f5a623' : (corStatus[status] || 'var(--cor-borda)')};" onchange="window.atualizarStatusRevisaoNFeCloud('${n.id}', this.value)">
+                    <option value="Pendente" ${status === 'Pendente' ? 'selected' : ''}>${parcial ? 'Parcial' : 'Pendente'}</option>
                     <option value="Lançada" ${status === 'Lançada' ? 'selected' : ''}>Já Lançada</option>
                     <option value="Ignorada" ${status === 'Ignorada' ? 'selected' : ''}>Ignorada</option>
-                </select>
+                </select>${chipsDest}
             </td>
-            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${((n.tipo === 'NFe' || n.tipo === 'NFSe') && temXmlCompleto && sit.chave === 'autorizada' && status !== 'Lançada') ? `<button class="nf-arq nf-arq-lancar" title="Lançar essa nota no sistema (Almoxarifado / Centro de Custo)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
+            <td><div class="nf-arquivos">${btnXml}${btnPdf}${(n.tipo === 'NFe' && temXmlCompleto) ? window._nfeSeloHtml(n.id) : ''}${((n.tipo === 'NFe' || n.tipo === 'NFSe') && temXmlCompleto && sit.chave === 'autorizada' && (status !== 'Lançada' || faltaDest)) ? `<button class="nf-arq nf-arq-lancar" title="Lançar essa nota no sistema (Almoxarifado / Centro de Custo)" onclick="window.lancarNotaRecebida('${n.id}')"><i class="fa-solid fa-arrow-right-to-bracket"></i> Lançar</button>` : ''}</div></td>
         </tr>`;
     }).join('');
     window._nfeConferirSelos(window.__nfFonteLista === 'view' ? pagLista.map(n => n.id) : undefined);
@@ -11952,6 +11999,8 @@ window._nfRecalcularStatus = async function(id) {
         const { error } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: 'Lançada' }).eq('id', id);
         if (!error) n.status_revisao = 'Lançada';
     }
+    window.__nfDest = window.__nfDest || {};
+    window.__nfDest[id] = { almox: !!est.almox, cc: !!est.cc, na: est.na || [] };
     if (window._nfAtualizarKpis) window._nfAtualizarKpis();
     if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true);
     return completo;
@@ -13668,7 +13717,7 @@ window.atualizarStatusRevisaoNFeCloud = async function(id, novoStatus) {
     const { error } = await supabaseClient.from('nfecloud_documentos').update({ status_revisao: novoStatus }).eq('id', id);
     if (error) {
         mostrarAlerta('Não consegui salvar o status dessa nota: ' + error.message, 'erro');
-        window.renderizarNotasRecebidas && window.renderizarNotasRecebidas(); // volta o select pro valor salvo
+        window.renderizarNotasRecebidas && window.renderizarNotasRecebidas(true); // volta o select pro valor salvo
         return;
     }
     // Atualiza na memória e redesenha (cor do select + cartão "Pendentes")
@@ -13676,7 +13725,7 @@ window.atualizarStatusRevisaoNFeCloud = async function(id, novoStatus) {
     const n = (window.__notasNFeCloudPorId || {})[id];
     if (n) n.status_revisao = novoStatus;
     if (window._nfAtualizarKpis) window._nfAtualizarKpis();
-    if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas();
+    if (window.renderizarNotasRecebidas) window.renderizarNotasRecebidas(true); // true = continua na mesma página
 };
 
 // =====================================================================
