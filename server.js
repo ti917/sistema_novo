@@ -89,7 +89,7 @@ function onMsg(c, op, payload) {
       const old = clients.get(code);
       if (old && old !== c) drop(old);
       c.code = code;
-      c.name = String(m.name || "Jogador").slice(0, 16);
+      c.name = String(m.name || "Jogador").slice(0, 15);
       clients.set(code, c);
       sendJ(c, { t: "welcome", code, online: clients.size });
       const box = mailbox.get(code);
