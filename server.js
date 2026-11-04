@@ -161,6 +161,35 @@ function onMsg(c, op, payload) {
       break;
     }
     case "lleave": leaveParty(c); break;
+    case "lcreate": { // cria um lobby de amigos (sem procurar partida ainda)
+      if (!c.code || c.room) return;
+      unqueue(c); setStatus(c, "online");
+      const game = m.game === "truco" ? "truco" : "sinuca";
+      if (c.party && c.party.leader === c) {
+        if (!m.four && c.party.members.length > 2) return sendLobby(c.party, "1 contra 1 é só com 2 no lobby.");
+        c.party.game = game; c.party.four = !!m.four;
+        return sendLobby(c.party);
+      }
+      leaveParty(c);
+      const p = { id: nextParty++, leader: c, members: [c], game, four: !!m.four };
+      c.party = p;
+      sendLobby(p, "Lobby criado! Chame seus amigos.");
+      break;
+    }
+    case "lstart": { // líder começa já: só com quem está no lobby, a IA completa os lugares vazios
+      const p = c.party;
+      if (!p || p.leader !== c || c.room) break;
+      unqueue(c);
+      if (!p.four) {
+        if (p.members.length !== 2) return sendLobby(p, "Para o 1 contra 1 precisa ter 2 no lobby.");
+        const ms = p.members.slice();
+        matchN(ms, p.game);
+        break;
+      }
+      if (p.members.length < 2) return sendLobby(p, "Chame pelo menos 1 amigo para jogar junto.");
+      matchSeats(seatUnits([c]), p.game + "4");
+      break;
+    }
     case "lset": { // líder trocou jogo/mesa no lobby (sem procurar ainda)
       const p = c.party;
       if (!p || p.leader !== c) break;
@@ -221,7 +250,7 @@ function onMsg(c, op, payload) {
       const f = clients.get(String(m.code || "").toUpperCase());
       if (!f || f === c) return sendJ(c, { t: "invite_fail", msg: "Amigo offline" });
       if (f.room) return sendJ(c, { t: "invite_fail", msg: "Amigo está jogando" });
-      if (m.lobby && c.party && c.party.members.length >= 4) return sendJ(c, { t: "invite_fail", msg: "O lobby já está cheio" });
+      if (m.lobby && c.party && c.party.members.length >= (c.party.four ? 4 : 2)) return sendJ(c, { t: "invite_fail", msg: "O lobby já está cheio" });
       sendJ(f, { t: "invited", from: c.code, name: c.name, game: m.game === "truco" ? "truco" : "sinuca", lobby: !!m.lobby });
       sendJ(c, { t: "invite_ok", name: f.name, lobby: !!m.lobby });
       break;
@@ -239,7 +268,7 @@ function onMsg(c, op, payload) {
           p = { id: nextParty++, leader: f, members: [f], game: m.game === "truco" ? "truco" : "sinuca", four: true };
           f.party = p;
         }
-        if (p.members.length >= 4) return sendJ(c, { t: "invite_fail", msg: "O lobby já está cheio" });
+        if (p.members.length >= (p.four ? 4 : 2)) return sendJ(c, { t: "invite_fail", msg: "O lobby já está cheio" });
         p.members.push(c);
         c.party = p;
         // se o líder estava numa fila 1x1, para a busca (o lobby é para 2x2)
@@ -336,16 +365,7 @@ function leaveParty(c) {
     }
     return;
   }
-  if (p.members.length <= 1) {
-    const last = p.members[0];
-    endParty(p);
-    if (last) {
-      sendJ(last, { t: "lobby", members: [], leader: "", msg: c.name + " saiu do lobby." });
-      if (wasLeader) setStatus(last, "online");
-    }
-    return;
-  }
-  if (wasLeader) { p.leader = p.members[0]; setStatus(p.leader, "online"); }
+  // um convidado saiu: o lobby continua (mesmo que fique só o dono)
   sendLobby(p, c.name + " saiu do lobby.");
 }
 
