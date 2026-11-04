@@ -12038,13 +12038,15 @@ window._nfConcNorm = function(t) {
     return String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
 };
 window._nfConcFornOk = function(a, b) {
-    const stop = new Set(['LTDA', 'ME', 'EPP', 'SA', 'S', 'A', 'EIRELI', 'COMERCIO', 'COM', 'DE', 'DA', 'DO', 'E', 'INDUSTRIA', 'IND', 'SERVICOS', 'EMPRESA', 'CIA']);
+    const stop = new Set(['LTDA', 'ME', 'EPP', 'SA', 'S', 'A', 'EIRELI', 'COMERCIO', 'COM', 'DE', 'DA', 'DO', 'E', 'INDUSTRIA', 'IND', 'SERVICOS', 'EMPRESA', 'CIA', 'PJ', 'MEI', 'RECORRENTE']);
     const A = window._nfConcNorm(a), B = window._nfConcNorm(b);
     if (!A || !B) return false;
     if (A === B || A.includes(B) || B.includes(A)) return true;
-    const ta = new Set(A.split(' ').filter(x => x.length > 1 && !stop.has(x))), tb = new Set(B.split(' ').filter(x => x.length > 1 && !stop.has(x)));
+    // ignora os números do começo do emitente de MEI (prefixo do CNPJ) e palavras genéricas
+    const ta = new Set(A.split(' ').filter(x => x.length > 1 && !stop.has(x) && !/^\d+$/.test(x))), tb = new Set(B.split(' ').filter(x => x.length > 1 && !stop.has(x) && !/^\d+$/.test(x)));
     if (!ta.size || !tb.size) return false;
-    let comum = 0; ta.forEach(x => { if (tb.has(x)) comum++; });
+    // palavra igual OU diferente por uma letra (erro de digitação: RODRIGES x RODRIGUES)
+    let comum = 0; ta.forEach(x => { if (tb.has(x) || [...tb].some(y => window._nfTokenParecido(x, y))) comum++; });
     return comum / Math.min(ta.size, tb.size) >= 0.6 && comum >= 1;
 };
 window._nfConcDias = function(isoA, isoB) {
@@ -12339,6 +12341,17 @@ window._nfNormTokens = function(t) {
     return String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
 };
 // Contas fixas ativas cujo NOME bate com o do emitente (todas as palavras da conta aparecem no nome do emitente).
+// Dois "pedaços" de nome são parecidos quando são iguais OU diferem em UMA letra (erro de digitação, ex.: RODRIGES x RODRIGUES).
+// Só vale para palavras com 5+ letras (pra não confundir nomes curtos diferentes, tipo ANA x ANE).
+window._nfTokenParecido = function(a, b) {
+    if (a === b) return true;
+    if (a.length < 5 || b.length < 5 || Math.abs(a.length - b.length) > 1) return false;
+    let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);      // 1 letra trocada
+    const [maior, menor] = a.length > b.length ? [a, b] : [b, a];
+    return maior.slice(i + 1) === menor.slice(i);                              // 1 letra a mais/menos
+};
+
 window._nfContasFixasDoPrestador = async function(n) {
     const IGN = new Set(['PJ', 'RECORRENTE', 'LTDA', 'ME', 'EPP', 'MEI', 'EIRELI', 'SA', 'DE', 'DA', 'DO', 'DAS', 'DOS', 'E']);
     const emit = new Set(window._nfNormTokens(_nfeDecodificaEntidades(n.emitente_nome || '')).filter(t => !/^\d+$/.test(t)));
@@ -12347,10 +12360,21 @@ window._nfContasFixasDoPrestador = async function(n) {
         const { data, error } = await supabaseClient.from('financeiro_contas_fixas').select('*').eq('ativo', true);
         window.__contasFixasCache = { t: Date.now(), lista: error ? [] : (data || []) };
     }
-    return window.__contasFixasCache.lista.filter(c => {
+    const emitLista = [...emit];
+    const achadas = [];
+    window.__contasFixasCache.lista.forEach(c => {
         const toks = [...new Set([...window._nfNormTokens(c.descricao), ...window._nfNormTokens(c.fornecedor_nome)])].filter(t => !IGN.has(t) && !/^\d+$/.test(t));
-        return toks.length >= 2 && toks.every(t => emit.has(t));
+        if (toks.length < 2) return;
+        let parecidas = 0;
+        const todas = toks.every(t => {
+            if (emit.has(t)) return true;
+            if (emitLista.some(e => window._nfTokenParecido(t, e))) { parecidas++; return true; }
+            return false;
+        });
+        // exato = como sempre; com 1 letra diferente (no máx. 1 palavra) também entra, marcado pra pessoa conferir
+        if (todas && parecidas <= 1) achadas.push(parecidas ? Object.assign({}, c, { _nomeParecido: true }) : c);
     });
+    return achadas;
 };
 // Lançamentos recorrentes ainda sem NF, perto da data de emissão, das contas fixas desse prestador.
 window._nfBuscarRecorrenteDaNota = async function(n) {
@@ -12365,7 +12389,7 @@ window._nfBuscarRecorrenteDaNota = async function(n) {
     const DIA = 86400000;
     return data.map(l => {
         const venc = new Date(String(l.data_vencimento).slice(0, 10) + 'T12:00:00-03:00').getTime();
-        return { lanc: l, conta: contas.find(c => c.id === l.conta_fixa_id), dist: Math.abs(venc - emissao) / DIA, valorIgual: Math.abs((Number(l.valor_total) || 0) - valorNota) < 0.01 };
+        return { lanc: l, conta: contas.find(c => c.id === l.conta_fixa_id), nomeParecido: !!(contas.find(c => c.id === l.conta_fixa_id) || {})._nomeParecido, dist: Math.abs(venc - emissao) / DIA, valorIgual: Math.abs((Number(l.valor_total) || 0) - valorNota) < 0.01 };
     }).filter(x => x.dist <= 60 && x.conta).sort((a, b) => (b.valorIgual - a.valorIgual) || (a.dist - b.dist)).slice(0, 4);
 };
 
@@ -12380,7 +12404,7 @@ window._nfEscolherRecorrente = function(n, cands) {
             <label style="display:flex; gap:10px; align-items:flex-start; border:1px solid var(--cor-borda); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer;">
                 <input type="radio" name="nf-rec-cand" value="${i}" ${i === 0 ? 'checked' : ''} style="width:auto; margin-top:4px;">
                 <span style="font-size:0.85rem; line-height:1.4;"><b>${esc(c.conta.descricao)}</b> — ${esc(cc(c.lanc.centro_custo_id))}<br>
-                Vence <b>${esc(String(c.lanc.data_vencimento).slice(0, 10).split('-').reverse().join('/'))}</b> · ${brl(c.lanc.valor_total)} · ${esc(c.lanc.status)}
+                Vence <b>${esc(String(c.lanc.data_vencimento).slice(0, 10).split('-').reverse().join('/'))}</b> · ${brl(c.lanc.valor_total)} · ${esc(c.lanc.status)}${c.nomeParecido ? `<br><span style="color:#f1c40f;"><i class="fa-solid fa-triangle-exclamation"></i> O nome do lançamento é <b>parecido</b> (difere em uma letra) do emitente da nota: <b>${esc(String(_nfeDecodificaEntidades(n.emitente_nome || '')).replace(/^[\d.\s\/-]+/, ''))}</b>. Confira se é a mesma pessoa antes de vincular.</span>` : ''}
                 ${c.valorIgual ? '<span style="color:#2ecc71;"> · valor igual ao da nota</span>' : `<span style="color:#e67e22;"> · valor da nota é ${brl(n.valor_total)}</span>`}</span>
             </label>`).join('');
         const div = document.createElement('div');
