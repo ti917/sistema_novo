@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 10000;
 const clients = new Map(); // code -> client
 const queues = { sinuca: [], truco: [], sinuca4: [], truco4: [] };
 const GAMES = ["sinuca", "truco", "sinuca4", "truco4"];
-const FILL_AFTER = 25000; // 2x2: depois de 25 s completa a mesa com a IA
+const FILL_AFTER = 40000; // 2x2: depois de 40 s completa a mesa com a IA
 let nextRoom = 1;
 let nextParty = 1;
 // mensagens de amizade para quem está offline (em memória; os celulares também reenviam ao conectar)
@@ -204,6 +204,8 @@ function onMsg(c, op, payload) {
         // se o líder estava numa fila 1x1, para a busca (o lobby é para 2x2)
         const lq = queueOf(p.leader);
         if (lq && !lq.endsWith("4")) { unqueue(p.leader); setStatus(p.leader, "online"); }
+        // a contagem da IA começa quando o 2º jogador real chega (aqui, o amigo)
+        if (lq && lq.endsWith("4")) p.leader.qsince = Date.now();
         sendLobby(p, c.name + " entrou no lobby!");
         if (lq && lq.endsWith("4")) tryTable(lq, false);
         break;
