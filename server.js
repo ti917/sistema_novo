@@ -15,6 +15,34 @@ let nextRoom = 1;
 let nextParty = 1;
 // mensagens de amizade para quem está offline (em memória; os celulares também reenviam ao conectar)
 const mailbox = new Map(); // code -> [{kind, from, name}]
+// cadastro de todos os jogadores que já entraram (para achar pelo nome mesmo offline)
+const fs = require("fs");
+const DATA_FILE = process.env.DATA_FILE || __dirname + "/dados.json";
+const players = new Map(); // code -> {name, seen}
+try {
+  const d = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  for (const [k, v] of d.players || []) players.set(k, v);
+  for (const [k, v] of d.mailbox || []) mailbox.set(k, v);
+  console.log("cadastro carregado: " + players.size + " jogadores");
+} catch (e) {}
+let saveTimer = null;
+function saveSoon() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const d = JSON.stringify({ players: [...players], mailbox: [...mailbox] });
+    fs.writeFile(DATA_FILE + ".tmp", d, (err) => { if (!err) fs.rename(DATA_FILE + ".tmp", DATA_FILE, () => {}); });
+  }, 3000);
+}
+function remember(c) {
+  if (!c.code) return;
+  players.set(c.code, { name: c.name, seen: Date.now() });
+  if (players.size > 100000) { // limpa os mais antigos
+    const old = [...players].sort((a, b) => a[1].seen - b[1].seen).slice(0, 10000);
+    for (const [k] of old) players.delete(k);
+  }
+  saveSoon();
+}
 
 // ------------------------------------------------------------ WebSocket mínimo
 function accept(req, socket) {
@@ -91,10 +119,12 @@ function onMsg(c, op, payload) {
       c.code = code;
       c.name = String(m.name || "Jogador").slice(0, 15);
       clients.set(code, c);
+      remember(c);
       sendJ(c, { t: "welcome", code, online: clients.size });
       const box = mailbox.get(code);
       if (box) {
         mailbox.delete(code);
+        saveSoon();
         for (const x of box) sendJ(c, { t: "fmsg", kind: x.kind, from: x.from, name: x.name });
       }
       break;
@@ -157,6 +187,16 @@ function onMsg(c, op, payload) {
         if (norm(f.name).includes(q)) list.push({ code: f.code, name: f.name, online: true, status: f.room ? "jogando" : f.status });
         if (list.length >= 20) break;
       }
+      // quem está offline também aparece (do cadastro), os vistos há menos tempo primeiro
+      if (list.length < 20) {
+        const off = [];
+        for (const [code, p] of players) {
+          if (code === c.code || clients.has(code)) continue;
+          if (norm(p.name).includes(q)) off.push({ code, name: p.name, online: false, status: "offline", seen: p.seen });
+        }
+        off.sort((a, b) => b.seen - a.seen);
+        for (const o of off.slice(0, 20 - list.length)) list.push(o);
+      }
       sendJ(c, { t: "search", q: m.q, list });
       break;
     }
@@ -171,6 +211,7 @@ function onMsg(c, op, payload) {
         const box = (mailbox.get(to) || []).filter((x) => x.from !== c.code);
         box.push({ kind, from: c.code, name: c.name });
         if (box.length > 50) box.shift();
+        saveSoon();
         mailbox.set(to, box);
       }
       sendJ(c, { t: "fsent", kind, to: String(m.to || "").toUpperCase(), delivered: !!(f && f !== c) });
@@ -413,6 +454,7 @@ function drop(c) {
   unqueue(c);
   leaveParty(c);
   leaveRoom(c);
+  if (c.code && clients.get(c.code) === c) remember(c);
   if (c.code && clients.get(c.code) === c) clients.delete(c.code);
   try { c.socket.destroy(); } catch (e) {}
 }
