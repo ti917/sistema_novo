@@ -1483,7 +1483,16 @@
                 });
                 palco.appendChild(pag);
                 ajustarNome(pag);
-                await Promise.all(Array.from(pag.querySelectorAll('img')).map((im) => im.complete ? 1 : new Promise((r) => { im.onload = im.onerror = r; })));
+                await Promise.all(Array.from(pag.querySelectorAll('img')).map(async (im) => {
+                    const carregou = () => im.complete && im.naturalWidth > 0;
+                    if (!carregou()) await new Promise((r) => { im.onload = im.onerror = r; setTimeout(r, 15000); });
+                    if (!carregou()) {   // uma nova tentativa (ignora o cache) antes de desistir
+                        const orig = im.src.split('#')[0];
+                        await new Promise((r) => { im.onload = im.onerror = r; setTimeout(r, 15000); im.src = orig + (orig.indexOf('?') > -1 ? '&' : '?') + 'r=' + Date.now(); });
+                    }
+                    // Antes a imagem que falhava era ignorada e o PDF saía SEM a assinatura (sem avisar): agora para e avisa.
+                    if (!carregou()) throw new Error('uma imagem (assinatura/carimbo) não carregou, então o PDF não foi gerado. Verifique a internet e tente de novo.');
+                }));
                 const canvas = await window.html2canvas(pag, { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
                 if (n > 0) pdf.addPage();
                 pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
