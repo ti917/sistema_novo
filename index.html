@@ -23594,6 +23594,74 @@ async function escutarTempoReal() {
             document.getElementById('modal-novo-salario').classList.remove('hidden');
         };
 
+// 📜 HISTÓRICO SALARIAL — guarda em dados_admissao.historico_salarial o que o colaborador tinha ANTES de cada mudança.
+// Só registra se o valor realmente mudou. Nunca apaga entradas antigas.
+window._registrarHistoricoSalarial = function(adm, novo) {
+    try {
+        if (!adm || !novo) return false;
+        const num = (v) => { const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace('R$', '').replace(/\./g, '').replace(',', '.')); return isNaN(n) ? 0 : n; };
+        const salAnt = num(adm.salario), salNovo = num(novo.salario);
+        const insAnt = adm.insalubridade != null ? String(adm.insalubridade) : '', perAnt = adm.periculosidade != null ? String(adm.periculosidade) : '';
+        const mudouSal = Math.abs(salAnt - salNovo) > 0.004;
+        const mudouIns = novo.insalubridade !== undefined && String(novo.insalubridade) !== insAnt && !(insAnt === '' && String(novo.insalubridade) === '0%');
+        const mudouPer = novo.periculosidade !== undefined && String(novo.periculosidade) !== perAnt && !(perAnt === '' && String(novo.periculosidade) === 'Não');
+        if (!mudouSal && !mudouIns && !mudouPer) return false;
+        if (!Array.isArray(adm.historico_salarial)) adm.historico_salarial = [];
+        adm.historico_salarial.push({
+            data: new Date().toISOString(),
+            salario_anterior: salAnt, salario_novo: salNovo,
+            insalubridade_anterior: insAnt || '0%', insalubridade_nova: novo.insalubridade !== undefined ? String(novo.insalubridade) : (insAnt || '0%'),
+            periculosidade_anterior: perAnt || 'Não', periculosidade_nova: novo.periculosidade !== undefined ? String(novo.periculosidade) : (perAnt || 'Não'),
+            origem: novo.origem || 'Edição manual',
+            por: (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) ? usuarioAtual.nome : ''
+        });
+        return true;
+    } catch (e) { console.warn('Histórico salarial:', e); return false; }
+};
+
+window.abrirHistoricoSalarial = async function(idColab) {
+    const { data: colab, error } = await supabaseClient.from('perfis').select('nome, dados_admissao').eq('id', idColab).maybeSingle();
+    if (error || !colab) return mostrarAlerta('Não consegui carregar o colaborador.', 'erro');
+    const adm = colab.dados_admissao || {};
+    const hist = (Array.isArray(adm.historico_salarial) ? adm.historico_salarial : []).slice().sort((a, b) => String(b.data).localeCompare(String(a.data)));
+    const fm = (v) => 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const salAtual = parseFloat(adm.salario) || 0;
+    let linhas = `
+        <div style="border-left: 3px solid #28a745; padding: 12px 15px; margin-bottom: 14px; background: rgba(40,167,69,0.08); border-radius: 0 8px 8px 0;">
+            <div style="font-size: 0.75rem; color: #28a745; font-weight: bold;">ATUAL</div>
+            <div style="font-size: 1.1rem; font-weight: bold; color: var(--cor-acento);">${fm(salAtual)}</div>
+            <div style="font-size: 0.75rem; color: var(--cor-texto-secundario);">Insalubridade: ${esc(adm.insalubridade || '0%')} · Periculosidade: ${esc(adm.periculosidade || 'Não')}</div>
+        </div>`;
+    if (hist.length === 0) {
+        linhas += `<p style="font-size: 0.85rem; color: var(--cor-texto-secundario); text-align: center; padding: 10px 0;">Nenhuma alteração de salário registrada ainda.<br>As próximas mudanças ficam guardadas aqui automaticamente.</p>`;
+    } else {
+        hist.forEach(h => {
+            const d = new Date(h.data); const dt = isNaN(d) ? '-' : d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const sobe = (Number(h.salario_novo) || 0) >= (Number(h.salario_anterior) || 0);
+            const extra = [];
+            if (h.insalubridade_anterior !== h.insalubridade_nova) extra.push(`Insalubridade: ${esc(h.insalubridade_anterior)} → ${esc(h.insalubridade_nova)}`);
+            if (h.periculosidade_anterior !== h.periculosidade_nova) extra.push(`Periculosidade: ${esc(h.periculosidade_anterior)} → ${esc(h.periculosidade_nova)}`);
+            linhas += `
+            <div style="border-left: 3px solid var(--cor-borda); padding: 10px 15px; margin-bottom: 10px; background: rgba(255,255,255,0.02); border-radius: 0 8px 8px 0;">
+                <div style="font-size: 0.75rem; color: var(--cor-texto-secundario);">${dt}${h.por ? ' · por ' + esc(h.por) : ''}</div>
+                <div style="font-size: 1rem; font-weight: bold; margin-top: 3px;">${fm(h.salario_anterior)} <span style="color: ${sobe ? '#28a745' : '#dc3545'};">→</span> ${fm(h.salario_novo)}</div>
+                ${extra.length ? `<div style="font-size: 0.75rem; color: var(--cor-texto-secundario); margin-top: 2px;">${extra.join(' · ')}</div>` : ''}
+                <div style="font-size: 0.7rem; color: var(--cor-texto-secundario); margin-top: 2px;">${esc(h.origem || '')}</div>
+            </div>`;
+        });
+    }
+    const old = document.getElementById('modal-historico-salarial'); if (old) old.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-historico-salarial" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 520px; max-height: 85vh; overflow-y: auto; border: 1px solid #28a745; position: relative;">
+            <h3 style="color: #28a745; margin-bottom: 18px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;"><i class="fa-solid fa-sack-dollar"></i> Histórico Salarial: ${esc(colab.nome)}</h3>
+            ${linhas}
+            <button class="btn-secondary" style="width: 100%; height: 46px; margin-top: 10px;" onclick="document.getElementById('modal-historico-salarial').remove()">Fechar</button>
+        </div>
+    </div>`);
+};
+
         async function salvarSalarioBase() {
     const empresa = document.getElementById('gestao-salario-empresa').value;
     const unidade = document.getElementById('gestao-salario-unidade').value;
@@ -23625,25 +23693,45 @@ async function escutarTempoReal() {
     try {
         const jaExiste = tabelaSalariosGlobais.find(s => s.empresa === empresa && s.unidade === unidade && s.cargo === cargo);
         if (jaExiste) {
-            await supabaseClient.from('salarios_base').update({ valor: valorLimpo, insalubridade: insalubridade, periculosidade: periculosidade }).eq('id', jaExiste.id);
+            const { error: errTab } = await supabaseClient.from('salarios_base').update({ valor: valorLimpo, insalubridade: insalubridade, periculosidade: periculosidade }).eq('id', jaExiste.id);
+            if (errTab) throw new Error('Tabela salarial: ' + errTab.message);
         } else {
-            await supabaseClient.from('salarios_base').insert([{ empresa, unidade, cargo, valor: valorLimpo, insalubridade: insalubridade, periculosidade: periculosidade }]);
+            const { error: errTab } = await supabaseClient.from('salarios_base').insert([{ empresa, unidade, cargo, valor: valorLimpo, insalubridade: insalubridade, periculosidade: periculosidade }]);
+            if (errTab) throw new Error('Tabela salarial: ' + errTab.message);
         }
 
-        const { data: colaboradores } = await supabaseClient.from('perfis').select('*').eq('perfil', 'Colaborador').eq('empresa', empresa).eq('unidade', unidade);
+        const { data: colaboradores, error: errBusca } = await supabaseClient.from('perfis').select('id, nome, status, dados_admissao').eq('perfil', 'Colaborador').eq('empresa', empresa).eq('unidade', unidade);
+        if (errBusca) throw new Error('Não consegui listar os colaboradores: ' + errBusca.message);
         
-        let atualizados = 0;
-        for (let colab of colaboradores) {
-            if (colab.dados_admissao && colab.dados_admissao.cargo === cargo) {
-                colab.dados_admissao.salario = valorLimpo;
-                colab.dados_admissao.insalubridade = insalubridade; // <-- Salva no JSON do colaborador
-                colab.dados_admissao.periculosidade = periculosidade; // <-- 🔺 NOVO: salva no JSON do colaborador
-                await supabaseClient.from('perfis').update({ dados_admissao: colab.dados_admissao }).eq('id', colab.id);
+        let atualizados = 0, ignoradosDesligados = 0;
+        const falhas = [];
+        for (let colabLista of (colaboradores || [])) {
+            if (!colabLista.dados_admissao || colabLista.dados_admissao.cargo !== cargo) continue;
+            // Desligado não muda: o salário dele é base de rescisão/histórico e não pode ser reescrito por tabela nova
+            if (colabLista.status === 'Desligado') { ignoradosDesligados++; continue; }
+            try {
+                // Relê o cadastro NA HORA de gravar, pra não sobrescrever uma edição que aconteceu enquanto o loop rodava
+                const { data: fresco, error: errFresco } = await supabaseClient.from('perfis').select('id, status, dados_admissao').eq('id', colabLista.id).maybeSingle();
+                if (errFresco || !fresco || !fresco.dados_admissao) throw new Error(errFresco ? errFresco.message : 'cadastro não encontrado');
+                if (fresco.status === 'Desligado' || fresco.dados_admissao.cargo !== cargo) continue;
+                const adm = fresco.dados_admissao;
+                // 📜 Guarda o que ele tinha antes (só se algo mudou de fato)
+                window._registrarHistoricoSalarial(adm, { salario: valorLimpo, insalubridade, periculosidade, origem: 'Tabela Salarial (' + cargo + ' · ' + unidade + ')' });
+                adm.salario = valorLimpo;
+                adm.insalubridade = insalubridade; // <-- Salva no JSON do colaborador
+                adm.periculosidade = periculosidade; // <-- 🔺 NOVO: salva no JSON do colaborador
+                const { error: errUp } = await supabaseClient.from('perfis').update({ dados_admissao: adm }).eq('id', fresco.id);
+                if (errUp) throw new Error(errUp.message);
                 atualizados++;
+            } catch (e) {
+                falhas.push(colabLista.nome || colabLista.id);
             }
         }
 
-        await mostrarAlerta(`Sucesso! Salário base configurado e ${atualizados} colaborador(es) atualizado(s) com o novo salário!`, "sucesso");
+        let msgFinal = `Sucesso! Salário base configurado e ${atualizados} colaborador(es) atualizado(s) com o novo salário!`;
+        if (ignoradosDesligados > 0) msgFinal += `<br><br><small>${ignoradosDesligados} desligado(s) com esse cargo foram mantidos com o salário antigo (não mudam).</small>`;
+        if (falhas.length > 0) msgFinal += `<br><br><b style="color:#ff6b6b;">Atenção:</b> não consegui atualizar ${falhas.length} colaborador(es): ${falhas.join(', ')}. Salve de novo para tentar outra vez.`;
+        await mostrarAlerta(msgFinal, falhas.length > 0 ? "aviso" : "sucesso");
         document.getElementById('gestao-salario-valor').value = '';
         document.getElementById('gestao-salario-insalubridade').value = '0%'; // Reseta
         window.preencherCamposPericulosidade('Não'); // 🔺 NOVO: Reseta Periculosidade
@@ -36028,6 +36116,9 @@ window.abrirModalHubUsuario = function(idUser) {
                 <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; font-size: 1rem; border-color: #a6b0cf; color: #a6b0cf;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalHistoricoJornada('${u.id}')">
                     <i class="fa-solid fa-calendar-days" style="width: 30px;"></i> Ver Histórico de Jornadas (Escala)
                 </button>
+                <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; font-size: 1rem; border-color: #28a745; color: #28a745;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirHistoricoSalarial('${u.id}')">
+                    <i class="fa-solid fa-sack-dollar" style="width: 30px;"></i> Ver Histórico Salarial
+                </button>
                 <button class="btn-secondary" style="width: 100%; height: 50px; justify-content: flex-start; font-size: 1rem; border-color: #4fc3f7; color: #4fc3f7;" onclick="document.getElementById('modal-hub-usuario').remove(); abrirModalExcecoesPontuaisPainel('${u.id}')">
                     <i class="fa-solid fa-calendar-day" style="width: 30px;"></i> Exceções Pontuais Lançadas
                 </button>
@@ -44404,6 +44495,7 @@ window.editarAdmissaoAdmin = async function(idColab) {
 
         let salStr = document.getElementById('edit-adm-salario').value;
         const salLimpoEdit = salStr ? parseFloat(salStr.replace('R$ ', '').replace(/\./g, '').replace(',', '.')) : 0;
+        window._registrarHistoricoSalarial(adm, { salario: salLimpoEdit, origem: 'Edição da admissão' });
         adm.salario = salLimpoEdit;
 
         const santanderAntes = (adm.banco || {}).tem_santander;
@@ -52227,6 +52319,7 @@ window.renderizarGridSemanalAplicAlt = function(escalaAtual = {}) {
             const cargoParaGravar = segurarMudancaLocalOuFuncao ? cargoAntigo : cargo;
 
             adm.cargo = cargoParaGravar;
+            window._registrarHistoricoSalarial(adm, { salario: salarioLimpo, insalubridade, origem: 'Pedido de alteração (cargo/unidade/salário)' });
             adm.salario = salarioLimpo;
             adm.insalubridade = insalubridade;
 
