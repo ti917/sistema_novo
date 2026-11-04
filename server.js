@@ -285,6 +285,16 @@ function leaveParty(c) {
   c.party = null;
   if (!c.dropped) sendJ(c, { t: "lobby", members: [], leader: "", msg: "" });
   if (wasLeader && q) unqueue(c);
+  if (wasLeader) {
+    // o dono saiu: o lobby acaba para todos e cada um fica livre para procurar sozinho
+    const rest = p.members.slice();
+    endParty(p);
+    for (const o of rest) {
+      if (!o.room) o.status = "online";
+      sendJ(o, { t: "lobby", members: [], leader: "", msg: "O dono do lobby (" + c.name + ") saiu. O lobby foi fechado." });
+    }
+    return;
+  }
   if (p.members.length <= 1) {
     const last = p.members[0];
     endParty(p);
