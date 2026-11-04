@@ -2077,6 +2077,7 @@
                                 <strong style="color: var(--cor-texto-principal); font-size: 0.95rem;">Saldo Atual em Estoque (por Unidade)</strong>
                                 <span id="contador-estoque-almox" style="font-size:0.75rem; color: var(--cor-texto-secundario); background: rgba(32,201,151,0.15); padding: 3px 10px; border-radius: 20px;"></span>
                             </div>
+                            <button type="button" class="btn-secondary" onclick="window.abrirHistoricoTransferenciasEstoque()" style="padding:6px 14px; font-size:0.8rem;"><i class="fa-solid fa-clock-rotate-left"></i> Histórico de transferências</button>
                         </div>
                         <table style="width: 100%; border-collapse: collapse; text-align: left;">
                             <thead>
@@ -2088,10 +2089,11 @@
                                     <th style="padding: 15px;">Saldo Atual</th>
                                     <th style="padding: 15px;">Valor em Estoque</th>
                                     <th style="padding: 15px;">Status</th>
+                                    <th style="padding: 15px; text-align:center;">Ação</th>
                                 </tr>
                             </thead>
                             <tbody id="lista-estoque-almox-body">
-                                <tr><td colspan="7" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>
+                                <tr><td colspan="8" style="text-align: center; padding: 20px;"><i class="fa-solid fa-spinner fa-spin fa-2x" style="color: var(--cor-acento);"></i></td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -14548,7 +14550,7 @@ window.importarZipNFeCloud = async function(fileList) {
 window.carregarEstoqueAlmoxarifado = async function() {
     const tbody = document.getElementById('lista-estoque-almox-body');
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr>';
     if (todosCentrosCustoGlobais.length === 0) await carregarCentrosCusto(true);
 
     // Popula o select de filtro por unidade (reaproveita a lista de Centros de Custo)
@@ -14566,7 +14568,7 @@ window.carregarEstoqueAlmoxarifado = async function() {
         supabaseClient.from('estoque_saidas').select('*')
     ]);
     if (errEnt || errSai) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-perigo);">Erro ao carregar estoque: ${(errEnt || errSai).message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--cor-perigo);">Erro ao carregar estoque: ${(errEnt || errSai).message}</td></tr>`;
         return;
     }
 
@@ -14624,14 +14626,15 @@ window.filtrarEstoqueAlmoxarifadoLocal = function() {
 
     linhas.sort((a, b) => a.unidade.localeCompare(b.unidade) || a.produto.localeCompare(b.produto));
 
+    window.__estoqueLinhasTela = linhas;
     if (contador) contador.textContent = `${linhas.length} ${linhas.length === 1 ? 'item' : 'itens'}`;
 
     if (linhas.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhum item em estoque neste filtro.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhum item em estoque neste filtro.</td></tr>';
         return;
     }
 
-    tbody.innerHTML = linhas.map(l => {
+    tbody.innerHTML = linhas.map((l, idxLinha) => {
         let valorEmEstoque = '-';
         if (l.custo && l.custo.qtde > 0) {
             const custoMedioUnitario = l.custo.valorTotal / l.custo.qtde;
@@ -14650,9 +14653,139 @@ window.filtrarEstoqueAlmoxarifadoLocal = function() {
             <td style="padding:12px; font-weight:bold;">${l.qtde}</td>
             <td style="padding:12px; font-weight:bold; color: var(--cor-acento);">${valorEmEstoque}</td>
             <td style="padding:12px;">${status}</td>
+            <td style="padding:12px; text-align:center;">${l.qtde > 0 ? `<button type="button" class="btn-secondary" style="padding:5px 10px; font-size:0.75rem;" onclick="window.abrirTransferenciaEstoque(${idxLinha})" title="Transferir para outra unidade"><i class="fa-solid fa-right-left"></i> Transferir</button>` : '<span style="color:var(--cor-texto-secundario);">-</span>'}</td>
         </tr>`;
     }).join('');
 };
+
+// ============================================================
+// TRANSFERÊNCIA DE ESTOQUE ENTRE UNIDADES (04/11/2026)
+// Grava (via função do banco, tudo ou nada) 1 saída na origem + 1 entrada no destino
+// + 1 registro no histórico com quem transferiu, quando e o motivo.
+// Precisa do SQL sql_extra/estoque_transferencias.sql rodado no Supabase.
+// ============================================================
+window.abrirTransferenciaEstoque = function(idx) {
+    const l = (window.__estoqueLinhasTela || [])[idx];
+    if (!l) return mostrarAlerta('Item não encontrado. Atualize a tela e tente de novo.', 'erro');
+    if (!(l.qtde > 0)) return mostrarAlerta('Este item não tem saldo para transferir.', 'erro');
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const destinos = (todosCentrosCustoGlobais || []).map(c => c.nome_unidade).filter(n => n && n !== l.unidade)
+        .filter((n, i, a) => a.indexOf(n) === i).sort((a, b) => a.localeCompare(b));
+    if (destinos.length === 0) return mostrarAlerta('Não há outra unidade cadastrada para receber a transferência.', 'erro');
+    window.__transfEstoqueAtual = l;
+    document.getElementById('modal-transf-estoque')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-transf-estoque" class="modal-overlay" style="z-index:100060; display:flex; justify-content:center; align-items:center; padding:20px;">
+        <div class="glass-card" style="width:100%; max-width:480px; position:relative; border:1px solid var(--cor-acento); max-height:90vh; overflow-y:auto;">
+            <button type="button" onclick="document.getElementById('modal-transf-estoque').remove()" style="position:absolute; top:12px; right:14px; background:none; border:none; color:#fff; font-size:1.2rem; cursor:pointer;">&times;</button>
+            <h3 style="color:var(--cor-acento); margin-bottom:14px;"><i class="fa-solid fa-right-left"></i> Transferir para outra unidade</h3>
+            <div style="font-size:0.85rem; background:rgba(0,0,0,0.25); padding:10px 12px; border-radius:8px; margin-bottom:14px; line-height:1.6;">
+                Produto: <b>${esc(l.produto)}</b> <span style="color:var(--cor-texto-secundario);">(${esc(l.categoria)})</span><br>
+                Origem: <b>${esc(l.unidade)}</b><br>
+                Saldo disponível: <b style="color:var(--cor-acento);">${l.qtde} ${esc(l.medida)}</b>
+            </div>
+            <label style="font-size:0.8rem; font-weight:bold; color:var(--cor-texto-secundario);">Unidade de destino</label>
+            <select id="transf-destino" class="modern-input" style="margin-bottom:12px;">
+                <option value="">Selecione...</option>
+                ${destinos.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}
+            </select>
+            <label style="font-size:0.8rem; font-weight:bold; color:var(--cor-texto-secundario);">Quantidade (${esc(l.medida)})</label>
+            <input type="number" id="transf-qtd" class="modern-input" min="0" max="${l.qtde}" step="any" placeholder="Máx. ${l.qtde}" style="margin-bottom:12px;">
+            <label style="font-size:0.8rem; font-weight:bold; color:var(--cor-texto-secundario);">Motivo da transferência *</label>
+            <textarea id="transf-motivo" class="modern-input" rows="3" maxlength="300" placeholder="Ex.: Entregue na sede, mas a unidade destino precisava" style="margin-bottom:6px;"></textarea>
+            <div style="font-size:0.75rem; color:var(--cor-texto-secundario); margin-bottom:14px;">Fica registrado: quem transferiu, data/hora e o motivo. A transferência não pode ser apagada depois; para corrigir, faça uma transferência de volta.</div>
+            <button type="button" id="btn-confirmar-transf" class="btn-success" onclick="window.confirmarTransferenciaEstoque()" style="width:100%; height:46px; font-weight:bold;"><i class="fa-solid fa-check"></i> Confirmar transferência</button>
+        </div>
+    </div>`);
+};
+
+window.confirmarTransferenciaEstoque = async function() {
+    const l = window.__transfEstoqueAtual;
+    if (!l) return;
+    const destino = (document.getElementById('transf-destino').value || '').trim();
+    const qtd = parseFloat(String(document.getElementById('transf-qtd').value).replace(',', '.'));
+    const motivo = (document.getElementById('transf-motivo').value || '').trim();
+    if (!destino) return mostrarAlerta('Escolha a unidade de destino.', 'erro');
+    if (destino === l.unidade) return mostrarAlerta('O destino precisa ser diferente da origem.', 'erro');
+    if (!(qtd > 0)) return mostrarAlerta('Informe uma quantidade maior que zero.', 'erro');
+    if (qtd > l.qtde + 1e-9) return mostrarAlerta(`Quantidade maior que o saldo disponível (${l.qtde}).`, 'erro');
+    if (motivo.length < 3) return mostrarAlerta('Informe o motivo da transferência.', 'erro');
+
+    const btn = document.getElementById('btn-confirmar-transf');
+    btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Transferindo...';
+    try {
+        // custo médio da origem (mantém o "valor em estoque" coerente nas duas unidades)
+        const valorUnit = (l.custo && l.custo.qtde > 0) ? Math.round((l.custo.valorTotal / l.custo.qtde) * 10000) / 10000 : null;
+        const { error } = await supabaseClient.rpc('fn_transferir_estoque', {
+            p_origem: l.unidade, p_destino: destino, p_produto: l.produto, p_categoria: l.categoria, p_medida: l.medida,
+            p_quantidade: qtd, p_valor_unitario: valorUnit, p_motivo: motivo,
+            p_usuario: (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) ? usuarioAtual.nome : ''
+        });
+        if (error) throw error;
+        document.getElementById('modal-transf-estoque')?.remove();
+        mostrarAlerta(`Transferido: ${qtd} ${l.medida} de ${l.produto} de "${l.unidade}" para "${destino}".`, 'sucesso');
+        await window.carregarEstoqueAlmoxarifado();
+    } catch (e) {
+        const msg = String(e.message || e);
+        const faltaSql = /fn_transferir_estoque|schema cache|does not exist|transferencia_id/i.test(msg);
+        mostrarAlerta(faltaSql ? 'Falta rodar o SQL "estoque_transferencias.sql" no Supabase (ou atualizar o cache). Detalhe: ' + msg : 'Não foi possível transferir: ' + msg, 'erro');
+        btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-check"></i> Confirmar transferência';
+    }
+};
+
+window.abrirHistoricoTransferenciasEstoque = async function() {
+    document.getElementById('modal-hist-transf')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-hist-transf" class="modal-overlay" style="z-index:100060; display:flex; justify-content:center; align-items:center; padding:20px;">
+        <div class="glass-card" style="width:100%; max-width:1000px; position:relative; border:1px solid var(--cor-acento); max-height:90vh; display:flex; flex-direction:column;">
+            <button type="button" onclick="document.getElementById('modal-hist-transf').remove()" style="position:absolute; top:12px; right:14px; background:none; border:none; color:#fff; font-size:1.2rem; cursor:pointer;">&times;</button>
+            <h3 style="color:var(--cor-acento); margin-bottom:12px;"><i class="fa-solid fa-clock-rotate-left"></i> Histórico de transferências de estoque</h3>
+            <input type="text" id="hist-transf-busca" class="modern-input" placeholder="Buscar por produto, unidade, motivo ou quem transferiu..." onkeyup="window.renderHistoricoTransferenciasEstoque()" style="margin-bottom:12px;">
+            <div style="overflow:auto; flex:1;">
+                <table style="width:100%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+                    <thead><tr style="background:rgba(0,51,40,0.8); color:var(--cor-texto-secundario); font-size:0.75rem; text-transform:uppercase;">
+                        <th style="padding:10px;">Data/hora</th><th style="padding:10px;">Produto</th><th style="padding:10px;">Qtde</th>
+                        <th style="padding:10px;">De</th><th style="padding:10px;">Para</th><th style="padding:10px;">Motivo</th><th style="padding:10px;">Quem transferiu</th>
+                    </tr></thead>
+                    <tbody id="hist-transf-body"><tr><td colspan="7" style="text-align:center; padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i></td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>`);
+    const { data, error } = await supabaseClient.from('estoque_transferencias').select('*').order('criado_em', { ascending: false }).limit(1000);
+    const tb = document.getElementById('hist-transf-body');
+    if (!tb) return;
+    if (error) {
+        tb.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-perigo);">${/estoque_transferencias|schema cache|does not exist/i.test(error.message || '') ? 'Falta rodar o SQL "estoque_transferencias.sql" no Supabase.' : 'Erro: ' + String(error.message).replace(/</g, '&lt;')}</td></tr>`;
+        return;
+    }
+    window.__histTransfEstoque = data || [];
+    window.renderHistoricoTransferenciasEstoque();
+};
+
+window.renderHistoricoTransferenciasEstoque = function() {
+    const tb = document.getElementById('hist-transf-body');
+    if (!tb) return;
+    const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const norm = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const termo = norm(document.getElementById('hist-transf-busca')?.value || '');
+    const lista = (window.__histTransfEstoque || []).filter(t => !termo ||
+        norm([t.produto, t.unidade_origem, t.unidade_destino, t.motivo, t.transferido_por].join(' ')).includes(termo));
+    if (lista.length === 0) {
+        tb.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px; color:var(--cor-texto-secundario);">Nenhuma transferência encontrada.</td></tr>';
+        return;
+    }
+    tb.innerHTML = lista.map(t => `<tr style="border-bottom:1px solid var(--cor-borda);">
+        <td style="padding:10px; white-space:nowrap;">${esc(new Date(t.criado_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }))}</td>
+        <td style="padding:10px;"><b>${esc(t.produto)}</b></td>
+        <td style="padding:10px; white-space:nowrap;">${esc(t.quantidade)} ${esc(t.medida)}</td>
+        <td style="padding:10px;">${esc(t.unidade_origem)}</td>
+        <td style="padding:10px;">${esc(t.unidade_destino)}</td>
+        <td style="padding:10px;">${esc(t.motivo)}</td>
+        <td style="padding:10px;">${esc(t.transferido_por)}</td>
+    </tr>`).join('');
+};
+
 
 window.abrirModalNotaAlmoxarifado = async function(id = null) {
     window.__almoxOrigemNotaId = null;
