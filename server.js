@@ -111,7 +111,7 @@ function onMsg(c, op, payload) {
         const grp = queues[g].splice(0, need);
         matchN(grp, g);
       } else if (need === 4) {
-        for (const o of queues[g]) sendJ(o, { t: "waiting", have: queues[g].length, need });
+        sendWaiting(g);
       }
       break;
     }
@@ -225,15 +225,22 @@ function leaveRoom(c) {
   for (const p of r.members) if (!p.socket.destroyed) sendJ(p, { t: "peer_left", peer: left, end: false });
 }
 
+function sendWaiting(g) {
+  const q = queues[g];
+  if (!q.length) return;
+  const left = q.length >= 2 ? Math.max(0, FILL_AFTER - (Date.now() - q[1].qsince)) : -1;
+  for (const o of q) sendJ(o, { t: "waiting", have: q.length, need: 4, left });
+}
+
 // 2x2 com pouca gente: depois de um tempo, completa a mesa com a IA
 setInterval(() => {
   const now = Date.now();
   for (const g of ["sinuca4", "truco4"]) {
     queues[g] = queues[g].filter((o) => !o.room && clients.get(o.code) === o);
     const q = queues[g];
-    if (q.length >= 2 && now - q[0].qsince >= FILL_AFTER) {
+    if (q.length >= 2 && now - q[1].qsince >= FILL_AFTER) {
       matchN(q.splice(0, 4), g);
-    }
+    } else if (q.length) sendWaiting(g);
   }
 }, 2000);
 
