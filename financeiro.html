@@ -6759,8 +6759,10 @@ window.removerLinhaPagamento = function(idLinha) {
         window.setarFiltroDataPadrao = function() {
             if (window.fpCentroPeriodo) {
                 const hj = new Date();
-                const primeiroDia = new Date(hj.getFullYear(), hj.getMonth(), 1);
-                const ultimoDia = new Date(hj.getFullYear(), hj.getMonth() + 1, 0);
+                let primeiroDia = new Date(hj.getFullYear(), hj.getMonth(), 1);
+                let ultimoDia = new Date(hj.getFullYear(), hj.getMonth() + 1, 0);
+                // vindo do atalho "Ver no C. Custo": mostra o mês do lançamento em vez do mês atual
+                if (window.__ccPeriodoForcado) { primeiroDia = window.__ccPeriodoForcado.ini; ultimoDia = window.__ccPeriodoForcado.fim; window.__ccPeriodoForcado = null; }
                 window.fpCentroPeriodo.setDate([primeiroDia, ultimoDia]);
             }
             
@@ -7053,7 +7055,7 @@ window.removerLinhaPagamento = function(idLinha) {
             }
 
             htmlLinhasCc += `
-                <tr style="background: ${corLinha}; border-bottom: 1px solid var(--cor-borda);">
+                <tr data-lanc-id="${lanc.id}" style="background: ${corLinha}; border-bottom: 1px solid var(--cor-borda);">
                     <td style="padding: 12px; font-weight: bold; white-space: nowrap;">
                         <span title="Data de vencimento"><i class="fa-regular fa-calendar-xmark" style="color:#e67e22; font-size:0.8em; margin-right:4px;"></i>${dataBr}</span><br>
                         ${lanc.data_pagamento ? `<small style="color: var(--cor-sucesso); font-weight: 600;" title="Pago em"><i class="fa-regular fa-circle-check"></i> ${formatarDataBr(lanc.data_pagamento)}</small><br>` : ''}
@@ -7081,6 +7083,7 @@ window.removerLinhaPagamento = function(idLinha) {
             `;
         });
         tbody.innerHTML = htmlLinhasCc;
+        if (typeof window._finAplicarDestaquePendente === 'function') window._finAplicarDestaquePendente();
     }
 
     const formatarM = (v) => v.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
@@ -10067,6 +10070,7 @@ window.filtrarAlmoxarifadoLocal = function() {
 
     window._dadosFiltradosAlmoxarifado = filtrados; // 👇 usado pela exportação (Excel/CSV/PDF) — a exportação já lista item a item, então não precisa desse ajuste
     renderizarListaAlmoxarifado(filtrados, termo);
+    if (typeof window._finAplicarDestaquePendente === 'function') window._finAplicarDestaquePendente();
 };
 
 // =====================================================================
@@ -10138,7 +10142,7 @@ function renderizarListaAlmoxarifado(lista, termo) {
             ? `<div style="font-weight:600;">${esc(n.criado_por || 'não registrado')}</div><div style="color:var(--cor-texto-secundario); font-size:0.75rem;">${esc(_quandoFmt || '-')}</div>`
             : '<span style="color:var(--cor-texto-secundario);">-</span>';
         const dataFmt = n.data_compra ? new Date(n.data_compra + 'T00:00:00').toLocaleDateString('pt-BR') : '-';
-        return `<tr style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
+        return `<tr data-almox-nota-id="${n.id}" style="border-bottom: 1px solid var(--cor-borda); transition: 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.02)'" onmouseout="this.style.background='transparent'">
             <td style="padding:12px;">${cc ? cc.nome_unidade : '<i style="color:var(--cor-perigo);">Unidade removida</i>'}</td>
             <td style="padding:12px;">${n.fornecedor || '-'}</td>
             <td style="padding:12px;">${window.nfNumFmt(n.numero_nf) || '-'}</td>
@@ -12010,16 +12014,47 @@ window._nfObterNotaPorId = function(id) {
 window._nfAcharNotaAlmox = async function(n) {
     const norm = (t) => String(t || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]+/g, ' ').trim();
     if (n.chave_acesso) {
-        const r = await supabaseClient.from('almoxarifado_notas').select('id, centro_custo_id').eq('chave_acesso', n.chave_acesso).limit(1);
+        const r = await supabaseClient.from('almoxarifado_notas').select('id, centro_custo_id, data_compra').eq('chave_acesso', n.chave_acesso).limit(1);
         if (!r.error && r.data && r.data.length) return r.data[0];
     }
     const raw = String(n.numero || '').replace(/\D/g, '');
     if (!raw) return null;
     const variantes = [...new Set([raw, raw.replace(/^0+/, ''), window.nfNumFmt(raw)].filter(Boolean))];
-    const r2 = await supabaseClient.from('almoxarifado_notas').select('id, centro_custo_id, numero_nf, fornecedor').in('numero_nf', variantes).limit(100);
+    const r2 = await supabaseClient.from('almoxarifado_notas').select('id, centro_custo_id, data_compra, numero_nf, fornecedor').in('numero_nf', variantes).limit(100);
     if (r2.error || !r2.data) return null;
     const forn = norm(_nfeDecodificaEntidades(n.emitente_nome));
     return r2.data.find(a => forn && norm(a.fornecedor) === forn) || null;
+};
+
+// Destaque (brilho verde que pulsa por ~5s, como nas notificações do RH): marca a linha e rola até ela
+window._finGarantirCssDestaque = function() {
+    if (document.getElementById('fin-css-destaque')) return;
+    const st = document.createElement('style');
+    st.id = 'fin-css-destaque';
+    st.textContent = '@keyframes finDestaquePulso { 0%,100% { box-shadow: inset 0 0 0 2px rgba(46,204,113,.95), 0 0 14px rgba(46,204,113,.55); } 50% { box-shadow: inset 0 0 0 2px rgba(46,204,113,.95), 0 0 30px rgba(46,204,113,.95); } }'
+        + ' tr.fin-destaque > td { background: rgba(46,204,113,.18) !important; }'
+        + ' tr.fin-destaque { animation: finDestaquePulso 1s ease-in-out infinite; position: relative; }';
+    document.head.appendChild(st);
+};
+// Guarda o que deve ser destacado; a próxima vez que a lista for desenhada com essa linha, ela é marcada.
+window._finDestacarDepois = function(tipo, id) {
+    window.__finDestaquePendente = { tipo, id, ate: Date.now() + 20000 };
+};
+window._finAplicarDestaquePendente = function() {
+    const p = window.__finDestaquePendente;
+    if (!p) return;
+    if (Date.now() > p.ate) { window.__finDestaquePendente = null; return; }
+    const tr = p.tipo === 'almox'
+        ? document.querySelector('#lista-almoxarifado-body tr[data-almox-nota-id="' + p.id + '"]')
+        : document.querySelector('#lista-lancamentos-body tr[data-lanc-id="' + p.id + '"]');
+    if (!tr) return; // essa desenhada ainda não tem a linha: espera a próxima
+    window.__finDestaquePendente = null;
+    window._finGarantirCssDestaque();
+    setTimeout(() => {
+        tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        tr.classList.add('fin-destaque');
+        setTimeout(() => tr.classList.remove('fin-destaque'), 5000);
+    }, 300);
 };
 
 window.nfIrParaAlmoxarifado = async function(idNota) {
@@ -12028,13 +12063,21 @@ window.nfIrParaAlmoxarifado = async function(idNota) {
     try {
         const alvo = await window._nfAcharNotaAlmox(n);
         if (!alvo) return mostrarAlerta('Não encontrei essa nota no Almoxarifado (ela pode ter sido marcada como lançada sem ter o lançamento).', 'aviso');
-        document.querySelector('.sidebar-item[data-target="tela-almoxarifado"]')?.click(); // troca de tela
+        window._finDestacarDepois('almox', alvo.id);
+        document.querySelector('.sidebar-item[data-target="tela-almoxarifado"]')?.click(); // troca de tela (e inicia a carga)
+        // filtros que poderiam esconder a nota: limpa busca/unidade e põe o período no mês da compra
+        const busca = document.getElementById('filtro-almox-busca'); if (busca) busca.value = '';
+        const uni = document.getElementById('filtro-almox-unidade'); if (uni) { if (uni.tomselect) uni.tomselect.setValue('', true); uni.value = ''; }
+        if (window.fpAlmoxPeriodo && alvo.data_compra) {
+            const [a, m] = String(alvo.data_compra).slice(0, 7).split('-').map(Number);
+            window.fpAlmoxPeriodo.setDate([new Date(a, m - 1, 1), new Date(a, m, 0)], false);
+        }
         await window.carregarAlmoxarifado();
         if (!(window.almoxarifadoNotasEmMemoria || []).some(x => x.id === alvo.id)) {
+            window.__finDestaquePendente = null;
             return mostrarAlerta('A nota está no Almoxarifado, mas não aparece com o filtro de empresa atual. Troque para "Todas as Empresas" e tente de novo.', 'aviso');
         }
-        await window.abrirModalNotaAlmoxarifado(alvo.id);
-    } catch (e) { mostrarAlerta('Não consegui abrir a nota no Almoxarifado: ' + (e.message || e), 'erro'); }
+    } catch (e) { window.__finDestaquePendente = null; mostrarAlerta('Não consegui abrir o Almoxarifado: ' + (e.message || e), 'erro'); }
 };
 
 window.nfIrParaCentroCusto = async function(idNota) {
@@ -12045,12 +12088,12 @@ window.nfIrParaCentroCusto = async function(idNota) {
         if (!lanc) return mostrarAlerta('Não encontrei o lançamento dessa nota no Centro de Custo (ela pode ter sido marcada como lançada sem ter o lançamento).', 'aviso');
         if (!todosCentrosCustoGlobais || !todosCentrosCustoGlobais.some(c => c.id === lanc.centro_custo_id)) await carregarCentrosCusto(true);
         if (!todosCentrosCustoGlobais.some(c => c.id === lanc.centro_custo_id)) return mostrarAlerta('O lançamento está em uma unidade que não aparece com o filtro de empresa atual. Troque para "Todas as Empresas" e tente de novo.', 'aviso');
+        // abre a unidade já no mês do lançamento (a lista é filtrada por período) e marca a linha
+        const ref = String(lanc[window.colunaPeriodoFinanceiro || 'data_vencimento'] || lanc.data_vencimento || lanc.data_pagamento || '').slice(0, 7);
+        if (/^\d{4}-\d{2}$/.test(ref)) { const [a, m] = ref.split('-').map(Number); window.__ccPeriodoForcado = { ini: new Date(a, m - 1, 1), fim: new Date(a, m, 0) }; }
+        window._finDestacarDepois('cc', lanc.id);
         window.abrirDetalheUnidade(lanc.centro_custo_id);
-        // o lançamento pode ser de outro mês que o da tela: garante que ele está na memória pra abrir
-        window.lancamentosAtuaisEmMemoria = window.lancamentosAtuaisEmMemoria || [];
-        if (!window.lancamentosAtuaisEmMemoria.some(x => x.id === lanc.id)) window.lancamentosAtuaisEmMemoria.push(lanc);
-        await window.abrirModalEdicaoLancamento(lanc.id);
-    } catch (e) { mostrarAlerta('Não consegui abrir o lançamento: ' + (e.message || e), 'erro'); }
+    } catch (e) { window.__finDestaquePendente = null; mostrarAlerta('Não consegui abrir o Centro de Custo: ' + (e.message || e), 'erro'); }
 };
 
 window._ccBuscarLancamentoDaNota = async function(n) {
