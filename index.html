@@ -83987,6 +83987,14 @@ window.baixarTodosAvulsosAssinadosPDF = async function() {
     }
 };
 
+// 🚫 Cobrança de termo avulso NÃO vai para quem já foi desligado (a lista continua MOSTRANDO o termo normalmente).
+// Quem está cumprindo aviso prévio (último dia ainda não chegou) continua sendo cobrado.
+window.colabPodeReceberCobranca = function(perfil) {
+    if (!perfil) return true;
+    if (perfil.status !== 'Desligado') return true;
+    return typeof window.estaCumprindoAviso === 'function' && window.estaCumprindoAviso(perfil);
+};
+
 // 👇 NOVA FUNÇÃO: O MOTOR TURBO EM MASSA PARA AVULSOS 👇
 window.reenviarTermoAvulsoMassa = async function() {
     // 1. Pega EXATAMENTE os caras que estão filtrados na tela (respeita busca e unidade atual do select)
@@ -84023,9 +84031,10 @@ window.reenviarTermoAvulsoMassa = async function() {
     try {
         // Busca os telefones pra agilizar
         const idsColabs = [...new Set(pendentes.map(p => p.colaborador_id))];
-        const { data: perfis } = await supabaseClient.from('perfis').select('id, empresa, dados_admissao').in('id', idsColabs);
+        const { data: perfis } = await supabaseClient.from('perfis').select('id, empresa, status, dados_rescisao, dados_admissao').in('id', idsColabs);
 
         const tamanhoLote = 10;
+        let ignoradosDesligados = 0;
 
         // 3. Disparo Lote a Lote
         for (let i = 0; i < pendentes.length; i += tamanhoLote) {
@@ -84035,6 +84044,8 @@ window.reenviarTermoAvulsoMassa = async function() {
                 const perfil = perfis.find(x => x.id === doc.colaborador_id);
                 const telefone = perfil?.dados_admissao?.telefone;
 
+                // 🚫 Desligado (fora do aviso prévio): não cobra, e não conta como falha
+                if (!window.colabPodeReceberCobranca(perfil)) { ignoradosDesligados++; return null; }
                 if (!telefone) return false;
 
                 const primeiroNome = (doc.nome_colaborador || doc.nome || 'Colaborador').split(' ')[0];
@@ -84059,14 +84070,14 @@ window.reenviarTermoAvulsoMassa = async function() {
             });
 
             const resultados = await Promise.all(promessasLote);
-            resultados.forEach(ok => { if (ok) sucessos++; else falhas++; });
+            resultados.forEach(ok => { if (ok === null) return; if (ok) sucessos++; else falhas++; });
 
             if (i + tamanhoLote < pendentes.length) {
                 await new Promise(r => setTimeout(r, 1000)); // Proteção da Meta (Anti-Spam)
             }
         }
 
-        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>`, "sucesso");
+        mostrarAlerta(`Cobrança em massa concluída!<br>Sucessos: <b>${sucessos}</b> | Falhas: <b>${falhas}</b>` + (ignoradosDesligados > 0 ? `<br>Não cobrados (colaborador desligado): <b>${ignoradosDesligados}</b>` : ''), "sucesso");
     } catch (err) {
         mostrarAlerta("Erro durante o processo em massa: " + err.message, "erro");
     } finally {
@@ -84275,7 +84286,8 @@ window.baixarPdfDocumentoAvulso = async function(id, nome) {
 window.reenviarUnicoAvulso = async function(idColaborador, nomeColaborador, tituloDoc, token) {
     mostrarAlerta("A procurar telefone do colaborador...", "aviso");
     try {
-        const { data: perfil } = await supabaseClient.from('perfis').select('empresa, dados_admissao').eq('id', idColaborador).single();
+        const { data: perfil } = await supabaseClient.from('perfis').select('empresa, status, dados_rescisao, dados_admissao').eq('id', idColaborador).single();
+        if (!window.colabPodeReceberCobranca(perfil)) return mostrarAlerta("Este colaborador já foi desligado: a cobrança não é enviada.", "aviso");
         const telefone = perfil?.dados_admissao?.telefone;
         
         if (!telefone) return mostrarAlerta("Telefone não encontrado!", "erro");
