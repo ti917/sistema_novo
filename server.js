@@ -8,7 +8,9 @@ const crypto = require("crypto");
 
 const PORT = process.env.PORT || 10000;
 const clients = new Map(); // code -> client
-const queues = { sinuca: [], truco: [] };
+const queues = { sinuca: [], truco: [], sinuca4: [], truco4: [] };
+const GAMES = ["sinuca", "truco", "sinuca4", "truco4"];
+const FILL_AFTER = 25000; // 2x2: depois de 25 s completa a mesa com a IA
 let nextRoom = 1;
 // mensagens de amizade para quem está offline (em memória; os celulares também reenviam ao conectar)
 const mailbox = new Map(); // code -> [{kind, from, name}]
@@ -98,15 +100,19 @@ function onMsg(c, op, payload) {
     }
     case "queue": {
       if (!c.code || c.room) return;
-      const g = m.game === "truco" ? "truco" : "sinuca";
+      const g = GAMES.includes(m.game) ? m.game : "sinuca";
       unqueue(c);
       c.status = "procurando";
-      const q = queues[g];
-      const other = q.find((o) => o !== c && !o.room && clients.get(o.code) === o);
-      if (other) {
-        queues[g] = q.filter((o) => o !== other);
-        match(other, c, g);
-      } else q.push(c);
+      c.qsince = Date.now();
+      queues[g] = queues[g].filter((o) => !o.room && clients.get(o.code) === o);
+      queues[g].push(c);
+      const need = g.endsWith("4") ? 4 : 2;
+      if (queues[g].length >= need) {
+        const grp = queues[g].splice(0, need);
+        matchN(grp, g);
+      } else if (need === 4) {
+        for (const o of queues[g]) sendJ(o, { t: "waiting", have: queues[g].length, need });
+      }
       break;
     }
     case "unqueue": unqueue(c); c.status = "online"; break;
@@ -157,7 +163,7 @@ function onMsg(c, op, payload) {
       const f = clients.get(String(m.from || "").toUpperCase());
       if (!f || f.room || c.room) return sendJ(c, { t: "invite_fail", msg: "Convite expirou" });
       unqueue(f); unqueue(c);
-      match(f, c, m.game === "truco" ? "truco" : "sinuca");
+      matchN([f, c], m.game === "truco" ? "truco" : "sinuca");
       break;
     }
     case "decline": {
@@ -174,31 +180,62 @@ function norm(t) {
   return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
-function match(host, guest, game) {
-  const room = { id: nextRoom++, host, guest, game };
-  host.room = room; host.peer = 1; host.status = "jogando";
-  guest.room = room; guest.peer = 2; guest.status = "jogando";
-  sendJ(host, { t: "match", role: "host", peer: 1, game, opp: { name: guest.name, code: guest.code } });
-  sendJ(guest, { t: "match", role: "guest", peer: 2, game, opp: { name: host.name, code: host.code } });
+// sala com 2 a 4 jogadores; o primeiro é o anfitrião (peer 1), os outros são 2, 3, 4
+function matchN(list, game) {
+  const room = { id: nextRoom++, members: list.slice(), game, seats: game.endsWith("4") ? 4 : 2 };
+  const players = list.map((p, i) => ({ peer: i + 1, name: p.name, code: p.code }));
+  list.forEach((p, i) => {
+    p.room = room; p.peer = i + 1; p.status = "jogando";
+  });
+  list.forEach((p, i) => {
+    const opp = list[i === 0 ? 1 : 0];
+    sendJ(p, { t: "match", role: i === 0 ? "host" : "guest", peer: i + 1, game, seats: room.seats, players, opp: { name: opp.name, code: opp.code } });
+  });
 }
 
-// pacote da partida: [1 byte destino/origem][dados...]; o servidor troca o destino pela origem
+// pacote da partida: [1 byte destino][dados]; destino 0 = todos. O servidor troca o destino pela origem
 function relay(c, payload) {
   const r = c.room;
   if (!r || payload.length < 1) return;
-  const other = r.host === c ? r.guest : r.host;
+  const dest = payload[0];
   const out = Buffer.from(payload);
   out[0] = c.peer;
-  sendRaw(other, 2, out);
+  for (const p of r.members) {
+    if (p !== c && (dest === 0 || p.peer === dest)) sendRaw(p, 2, out);
+  }
 }
 
 function leaveRoom(c) {
   const r = c.room;
   if (!r) return;
-  const other = r.host === c ? r.guest : r.host;
-  for (const p of [r.host, r.guest]) { p.room = null; p.peer = 0; p.status = "online"; }
-  if (other && !other.socket.destroyed) sendJ(other, { t: "peer_left" });
+  const wasHost = c.peer === 1;
+  r.members = r.members.filter((p) => p !== c);
+  const left = c.peer;
+  c.room = null; c.peer = 0; c.status = "online";
+  if (wasHost || r.members.length < 2 && r.seats === 2 || r.members.length < 1) {
+    // sem anfitrião (ou 1x1 sem adversário): a partida acaba para todos
+    for (const p of r.members) {
+      p.room = null; p.peer = 0; p.status = "online";
+      if (!p.socket.destroyed) sendJ(p, { t: "peer_left", peer: left, end: true });
+    }
+    r.members = [];
+    return;
+  }
+  // 2x2: os outros continuam (o anfitrião coloca a IA no lugar)
+  for (const p of r.members) if (!p.socket.destroyed) sendJ(p, { t: "peer_left", peer: left, end: false });
 }
+
+// 2x2 com pouca gente: depois de um tempo, completa a mesa com a IA
+setInterval(() => {
+  const now = Date.now();
+  for (const g of ["sinuca4", "truco4"]) {
+    queues[g] = queues[g].filter((o) => !o.room && clients.get(o.code) === o);
+    const q = queues[g];
+    if (q.length >= 2 && now - q[0].qsince >= FILL_AFTER) {
+      matchN(q.splice(0, 4), g);
+    }
+  }
+}, 2000);
 
 function unqueue(c) {
   for (const g of Object.keys(queues)) queues[g] = queues[g].filter((o) => o !== c);
