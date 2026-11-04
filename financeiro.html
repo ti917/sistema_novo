@@ -6845,6 +6845,11 @@ window.removerLinhaPagamento = function(idLinha) {
             }
 
             window.lancamentosAtuaisEmMemoria = data || [];
+
+            // 🔴 Vencidas de TODOS os meses desta unidade (não só do período do calendário): alimentam o aviso/card
+            // e, com o filtro "somente vencidas" ligado, entram na lista pra poder pagar/editar daqui mesmo.
+            await window._ccCarregarVencidasTodas(idCc);
+            if (window.somenteVencidosCc) window._ccJuntarVencidasNaLista();
             
             // Popula os Dropdowns Dinâmicos com base nos dados que chegaram
             popularDropdownsDeFiltro(window.lancamentosAtuaisEmMemoria);
@@ -16206,17 +16211,47 @@ window.filtrarPorKpiDash = function (chave) {
     filtrarDashboardLocal();
 };
 
-/** Alterna a visão "somente contas vencidas" dentro de um Centro de Custo (card de KPI ou banner). */
-window.filtrarSomenteVencidosCc = function () {
+// Busca TODAS as contas vencidas (não pagas, vencimento antes de hoje) do centro de custo, de qualquer mês.
+window._vencidasCcTodas = [];
+window._ccCarregarVencidasTodas = async function (idCc) {
+    try {
+        const hoje = window.hojeISO();
+        const campo = window.colunaPeriodoFinanceiro || 'data_vencimento';
+        const r = await window.buscarTudoPaginado(() => supabaseClient
+            .from('financeiro_lancamentos').select('*')
+            .eq('centro_custo_id', idCc).neq('status', 'Pago').lt(campo, hoje)
+            .order(campo, { ascending: false }));
+        window._vencidasCcTodas = r.error ? [] : (r.data || []);
+    } catch (e) { console.warn('Vencidas (todos os meses):', e); window._vencidasCcTodas = []; }
+    return window._vencidasCcTodas;
+};
+// Junta, na lista em memória, as vencidas que estão fora do período (sem duplicar) — assim editar/pagar continua funcionando.
+window._ccJuntarVencidasNaLista = function () {
+    const base = window.lancamentosAtuaisEmMemoria || [];
+    const ids = new Set(base.map(l => l.id));
+    (window._vencidasCcTodas || []).forEach(l => { if (!ids.has(l.id)) base.push(l); });
+    window.lancamentosAtuaisEmMemoria = base;
+};
+
+/** Alterna a visão "somente contas vencidas" dentro de um Centro de Custo (card de KPI ou banner).
+ *  Mostra as vencidas de TODOS os meses da unidade, ignorando o período do calendário. */
+window.filtrarSomenteVencidosCc = async function () {
     window.somenteVencidosCc = !window.somenteVencidosCc;
     const card = document.getElementById('card-vencido-cc');
     if (card) {
         card.style.boxShadow = window.somenteVencidosCc ? '0 0 0 2px #ff4757' : '';
     }
+    const idCc = (document.getElementById('detalhe-unidade-nome') || {}).dataset ? document.getElementById('detalhe-unidade-nome').dataset.id : null;
     if (window.somenteVencidosCc) {
-        mostrarAlerta('Mostrando somente as contas vencidas desta unidade. Clique de novo no card para voltar.', 'aviso', 'Filtro ativo');
+        if (idCc) await window._ccCarregarVencidasTodas(idCc);
+        window._ccJuntarVencidasNaLista();
+        mostrarAlerta('Mostrando as contas vencidas de <b>todos os meses</b> desta unidade (o período do calendário não vale aqui). Clique de novo no card para voltar.', 'aviso', 'Filtro ativo');
+        if (typeof aplicarFiltrosLocais === 'function') aplicarFiltrosLocais();
+    } else if (idCc && typeof window.carregarLancamentosDoCentro === 'function') {
+        window.carregarLancamentosDoCentro(idCc); // volta pro período normal (descarta as de outros meses)
+    } else if (typeof aplicarFiltrosLocais === 'function') {
+        aplicarFiltrosLocais();
     }
-    if (typeof aplicarFiltrosLocais === 'function') aplicarFiltrosLocais();
 };
 
 /**
@@ -16226,7 +16261,8 @@ window.filtrarSomenteVencidosCc = function () {
  * na tabela — só respeita o período selecionado no calendário do topo).
  */
 window.atualizarAvisoVencidasCc = function () {
-    const lista = window.lancamentosAtuaisEmMemoria || [];
+    // Todas as vencidas da unidade (de qualquer mês) — o período do calendário não esconde mais nada em atraso
+    const lista = (window._vencidasCcTodas && window._vencidasCcTodas.length) ? window._vencidasCcTodas : (window.lancamentosAtuaisEmMemoria || []);
     let qtd = 0, total = 0, maiorAtraso = 0;
 
     lista.forEach(l => {
