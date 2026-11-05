@@ -36,7 +36,7 @@ AS $$
           JOIN public.unidades_oficiais u
             ON u.empresa = v.empresa AND u.ativo = true
           CROSS JOIN LATERAL (
-                SELECT regexp_match(split_part(coalesce(u.endereco,''), ' - CEP:', 1), '([^,/]+)/([A-Za-z]{2})\s*$') AS m
+                SELECT regexp_match(split_part(coalesce(u.endereco,''), ' - CEP:', 1), '([^,/]+)\s*[/–-]\s*([A-Za-z]{2})\s*$') AS m
           ) a
          WHERE v.ativa = true
            AND btrim(coalesce(v.titulo,'')) <> ''
