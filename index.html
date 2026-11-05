@@ -5090,6 +5090,7 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         <label>Cargo da Vaga <span style="color: var(--cor-perigo);">*</span></label>
         <select id="vaga-titulo" required><option value="">Selecione a unidade primeiro...</option></select>
         <small style="color: var(--cor-texto-secundario);">Só aparecem os cargos cadastrados nos Limites de Lotação da unidade escolhida — é assim que o site liga a vaga ao formulário de currículo.</small>
+        <small id="vaga-cargo-aviso" style="display:none; color:#ff9800; margin-top:6px;"></small>
     </div>
     
     <div class="form-group">
@@ -105111,10 +105112,55 @@ window.carregarUnidadesVaga = async function() {
         optHtml += `<option value="${window.rsEsc(u.nome)}">${window.rsEsc(u.nome)}</option>`;
     });
     selectUnidade.innerHTML = optHtml;
-    window.aoEscolherUnidadeVaga();
+    await window.vagaAtualizarCargosPublicados();
 };
 
 // Escolheu a unidade → cargos = os cadastrados nos Limites de Lotação dela; cidade/UF = do endereço dela.
+// Cargos que já têm vaga lançada (por empresa) — não podem ser lançados de novo: pra mudar as unidades, é "Editar".
+window._vagasPublicadasChaves = new Map();
+window.vagaAtualizarCargosPublicados = async function() {
+    const empresa = document.getElementById('vaga-empresa')?.value;
+    window._vagasPublicadasChaves = new Map();
+    if (empresa) {
+        const { data } = await supabaseClient.from('vagas_site').select('titulo, ativa').eq('empresa', empresa);
+        (data || []).forEach(r => {
+            const k = window.removerAcentos(String(r.titulo || '').trim());
+            const ant = window._vagasPublicadasChaves.get(k);
+            window._vagasPublicadasChaves.set(k, { ativa: !!(r.ativa || (ant && ant.ativa)) });
+        });
+    }
+    window.aoEscolherUnidadeVaga();
+};
+// Separa os cargos livres dos que já estão no site e mostra o aviso ao lado do campo.
+window._vagaFiltrarCargos = function(cargos) {
+    const pub = window._vagasPublicadasChaves || new Map();
+    const livres = [], bloqueados = [];
+    cargos.forEach(c => (pub.has(window.removerAcentos(String(c).trim())) ? bloqueados : livres).push(c));
+    window._vagaBloqueadosAtuais = bloqueados;
+    const av = document.getElementById('vaga-cargo-aviso');
+    if (av) {
+        if (bloqueados.length) {
+            av.style.display = 'block';
+            av.innerHTML = '<i class="fa-solid fa-circle-info"></i> Os cargos em cinza já estão lançados no site e não podem ser lançados de novo. Pra mudar as unidades ou o texto deles, use o botão <b>Editar</b> em Vagas Cadastradas.';
+        } else { av.style.display = 'none'; av.innerHTML = ''; }
+    }
+    return livres;
+};
+// Opções do select de cargo: os livres normais + os já lançados em cinza (ao escolher, mostra o aviso e não seleciona).
+window._vagaOpcoesCargos = function(livres, vazioTxt) {
+    const bloq = window._vagaBloqueadosAtuais || [];
+    if (!livres.length && !bloq.length) return `<option value="">${vazioTxt}</option>`;
+    return '<option value="">Selecione o cargo...</option>'
+        + livres.map(c => `<option value="${window.rsEsc(c)}">${window.rsEsc(c)}</option>`).join('')
+        + bloq.map(c => `<option value="__JA__${window.rsEsc(c)}" style="color:#7d8799;">${window.rsEsc(c)} — já lançada no site</option>`).join('');
+};
+document.addEventListener('change', function(e) {
+    const el = e.target;
+    if (!el || el.id !== 'vaga-titulo' || !String(el.value).startsWith('__JA__')) return;
+    const nome = el.value.slice(6);
+    el.value = '';
+    mostrarAlerta(`O cargo "${nome}" já está lançado no site. Pra mudar as unidades ou o texto dele, use o botão Editar em Vagas Cadastradas.`, 'aviso');
+});
 window.vagaMarcarUnidades = function(marcar) {
     document.querySelectorAll('.vaga-un-check').forEach(c => { c.checked = !!marcar; });
     window.aoEscolherUnidadeVaga();
@@ -105157,11 +105203,9 @@ window.aoEscolherUnidadeVaga = function() {
                 if (!setCargos.has(ch)) setCargos.set(ch, t);
             });
         });
-        const todos = Array.from(setCargos.values()).sort((x, y) => x.localeCompare(y, 'pt-BR'));
+        const todos = window._vagaFiltrarCargos(Array.from(setCargos.values()).sort((x, y) => x.localeCompare(y, 'pt-BR')));
         const cargoAtual = selCargo.value;
-        selCargo.innerHTML = todos.length
-            ? '<option value="">Selecione o cargo...</option>' + todos.map(c => `<option value="${window.rsEsc(c)}">${window.rsEsc(c)}</option>`).join('')
-            : `<option value="">${nome === '__ALGUMAS__' ? 'Marque as unidades acima...' : 'Nenhuma unidade tem cargos nos Limites de Lotação'}</option>`;
+        selCargo.innerHTML = window._vagaOpcoesCargos(todos, nome === '__ALGUMAS__' ? 'Marque as unidades acima...' : 'Nenhuma unidade tem cargos nos Limites de Lotação');
         if (cargoAtual && todos.includes(cargoAtual)) selCargo.value = cargoAtual;
         if (window._vagaCargoPendente) {
             const alvo = window.removerAcentos(window._vagaCargoPendente);
@@ -105174,6 +105218,7 @@ window.aoEscolherUnidadeVaga = function() {
     if (!u) {
         selCargo.innerHTML = '<option value="">Selecione a unidade primeiro...</option>';
         campoCidade.value = '';
+        const av0 = document.getElementById('vaga-cargo-aviso'); if (av0) { av0.style.display = 'none'; av0.innerHTML = ''; }
         return;
     }
     const m = String(u.endereco || '').split(' - CEP:')[0].match(/([^,\/]+?)\s*[\/\-–]\s*([A-Za-z]{2})\s*$/);
@@ -105182,10 +105227,8 @@ window.aoEscolherUnidadeVaga = function() {
 
     let limites = {};
     try { limites = typeof u.limites_cargos === 'string' ? JSON.parse(u.limites_cargos || '{}') : (u.limites_cargos || {}); } catch (e) { limites = {}; }
-    const cargos = Object.keys(limites).filter(k => k.trim() && !(Number(String(limites[k]).replace(/\D/g, '')) === 0 && String(limites[k]).trim() !== '')).sort((x, y) => x.localeCompare(y, 'pt-BR'));
-    selCargo.innerHTML = cargos.length
-        ? '<option value="">Selecione o cargo...</option>' + cargos.map(c => `<option value="${window.rsEsc(c)}">${window.rsEsc(c)}</option>`).join('')
-        : '<option value="">Esta unidade não tem cargos nos Limites de Lotação</option>';
+    const cargos = window._vagaFiltrarCargos(Object.keys(limites).filter(k => k.trim() && !(Number(String(limites[k]).replace(/\D/g, '')) === 0 && String(limites[k]).trim() !== '')).sort((x, y) => x.localeCompare(y, 'pt-BR')));
+    selCargo.innerHTML = window._vagaOpcoesCargos(cargos, 'Esta unidade não tem cargos nos Limites de Lotação');
     if (window._vagaCargoPendente) {
         const alvo = window.removerAcentos(window._vagaCargoPendente);
         const achou = cargos.find(c => window.removerAcentos(c) === alvo);
@@ -105274,6 +105317,7 @@ window.carregarVagasAdmin = async function() {
             `;
         });
         container.innerHTML = html;
+        if (typeof window.vagaAtualizarCargosPublicados === 'function') window.vagaAtualizarCargosPublicados();
 
     } catch (err) {
         container.innerHTML = `<p style="text-align:center; color: var(--cor-perigo);">Erro ao carregar as vagas: ${err.message}</p>`;
@@ -105298,6 +105342,7 @@ document.getElementById('form-nova-vaga')?.addEventListener('submit', async (e) 
         const empresaVaga = document.getElementById('vaga-empresa').value;
         const tituloVaga = document.getElementById('vaga-titulo').value.trim();
         if (!tituloVaga) throw new Error('Escolha o cargo da vaga.');
+        if ((window._vagasPublicadasChaves || new Map()).has(window.removerAcentos(tituloVaga))) throw new Error('Esse cargo já está lançado no site. Use o botão Editar na vaga cadastrada pra mudar as unidades.');
         const _descHtml = window.vagaDescSanitizar(document.getElementById('vaga-descricao-editor').innerHTML);
         if (!document.getElementById('vaga-descricao-editor').innerText.trim()) throw new Error('Escreva a descrição / requisitos da vaga.');
         let unidadesMarcadas = [];
