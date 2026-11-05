@@ -9202,6 +9202,12 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                     <button type="button" id="btn-ler-doc-ia" class="btn-success" style="width: 100%; border: none; font-weight: bold; background: #4fc3f7; color: #000; height: 50px; font-size: 1rem; border-radius: 8px; box-shadow: 0 4px 15px rgba(79, 195, 247, 0.3); transition: transform 0.2s;" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='none'" onclick="lerDocumentoComIA()">
                         <i class="fa-solid fa-bolt"></i> Extrair Dados e Preencher Ficha
                     </button>
+                    <div id="wrap-separar-doc-ia" class="hidden" style="margin-top: 12px; padding: 12px 14px; border: 1px dashed #4fc3f7; border-radius: 10px; background: rgba(79,195,247,0.06);">
+                        <p style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin: 0 0 10px 0;"><i class="fa-solid fa-circle-info" style="color:#4fc3f7;"></i> A ficha já está preenchida (pré-cadastro). Se não quiser que a Clara preencha nada, use esta opção: ela só <b>separa os documentos</b> e coloca cada um no anexo certo do item 6, sem mexer nos campos.</p>
+                        <button type="button" id="btn-separar-doc-ia" class="btn-secondary" style="width: 100%; font-weight: bold; border-color: #4fc3f7; color: #4fc3f7; height: 44px; border-radius: 8px;" onclick="lerDocumentoComIA('separar')">
+                            <i class="fa-solid fa-folder-tree"></i> Só separar os documentos (sem preencher a ficha)
+                        </button>
+                    </div>
                 </div>
 
                 <!-- 👤 BLOCO: IDENTIFICAÇÃO E ACESSO -->
@@ -81326,9 +81332,13 @@ function atualizarBadgeChat(numero) {
         }
     };
 
-     window.lerDocumentoComIA = async function() {
+     window.lerDocumentoComIA = async function(modo) {
+    // modo 'separar' = a Clara só diz a que tipo cada página pertence e anexa no item 6, SEM preencher
+    // nenhum campo da ficha (usado quando o pré-cadastro já preencheu tudo). Sem argumento = comportamento normal.
+    const somenteSeparar = (modo === 'separar');
     const fileInput = document.getElementById('doc-ia-leitura');
-    const btn = document.getElementById('btn-ler-doc-ia');
+    const btn = document.getElementById(somenteSeparar ? 'btn-separar-doc-ia' : 'btn-ler-doc-ia');
+    const rotuloOriginalBtn = btn.innerHTML;
 
     if (!fileInput.files || fileInput.files.length === 0) {
         return mostrarAlerta("Anexe pelo menos um documento em PDF!", "aviso");
@@ -81507,7 +81517,15 @@ const travarCampoPreenchido = (id) => {
 
         const response = await Promise.race([
             supabaseClient.functions.invoke('gemini-ocr-admissao', {
-                body: { arquivos: listaArquivosBase64 }
+                body: somenteSeparar
+                    ? { arquivos: listaArquivosBase64, somente_separar: true, contexto: {
+                        nome: (document.getElementById('novo-nome')?.value || '').trim(),
+                        nome_mae: (document.getElementById('adm-mae')?.value || '').trim(),
+                        estado_civil: document.getElementById('adm-estadocivil')?.value || '',
+                        conjuge_nome: (document.getElementById('adm-conjuge-nome')?.value || '').trim(),
+                        dependentes: Array.from(document.querySelectorAll('.dep-nome')).map(i => (i.value || '').trim()).filter(Boolean)
+                    } }
+                    : { arquivos: listaArquivosBase64 }
             }),
             criarTimeout(140000) // Tempo de tolerância estendido para 140 segundos
         ]);
@@ -81524,6 +81542,22 @@ const travarCampoPreenchido = (id) => {
         }
 
         const data = response.data;
+
+        // 👇 MODO "SÓ SEPARAR": não toca em nenhum campo da ficha — só distribui os documentos
+        // nos anexos do item 6 usando a classificação de páginas que a Clara devolveu.
+        if (somenteSeparar) {
+            if (!data || !Array.isArray(data.classificacao_paginas) || typeof window.separarDocumentosAdmissaoPorTipo !== 'function') {
+                throw new Error('A Clara não devolveu a separação dos documentos. Tente novamente ou anexe manualmente no item 6.');
+            }
+            const resultadoSep = await window.separarDocumentosAdmissaoPorTipo(paginasComMetadados, data.classificacao_paginas);
+            if (resultadoSep.resumo.length > 0) {
+                const nomeTipo = (id) => ((window.CONFIG_ANEXOS_ADMISSAO || []).find(c => c.id === id)?.label || id);
+                mostrarAlerta(`Clara separou os documentos (nenhum campo foi alterado): ${resultadoSep.resumo.map(r => nomeTipo(r.tipo)).join(', ')}. Role até o item 6 e confira antes de enviar!`, 'sucesso');
+            } else {
+                mostrarAlerta('A Clara não encontrou documentos para separar nos arquivos enviados.', 'aviso');
+            }
+            return;
+        }
 
         // 👇 NOVO: 2ª camada de proteção contra a IA confundir Filiação (pai/mãe do
         // titular) com Cônjuge. Compara os nomes já normalizados (maiúsculo, sem
@@ -81913,9 +81947,20 @@ const travarCampoPreenchido = (id) => {
         clearTimeout(timer3);
 
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-microchip"></i> Extrair Dados com Clara IA';
+        btn.innerHTML = somenteSeparar ? rotuloOriginalBtn : '<i class="fa-solid fa-microchip"></i> Extrair Dados com Clara IA';
     }
 };
+
+// Mostra o botão "Só separar os documentos" apenas quando a ficha já veio preenchida (pré-cadastro):
+// nome, CPF e nome da mãe preenchidos.
+window.atualizarBotaoSepararClara = function() {
+    const wrap = document.getElementById('wrap-separar-doc-ia');
+    if (!wrap) return;
+    const v = (id) => (document.getElementById(id)?.value || '').trim();
+    const preenchida = v('novo-nome') && v('adm-cpf').replace(/\D/g, '').length >= 11 && v('adm-mae');
+    wrap.classList.toggle('hidden', !preenchida);
+};
+setInterval(() => { if (document.getElementById('bloco-ia-admissao') && !document.getElementById('bloco-ia-admissao').classList.contains('hidden')) window.atualizarBotaoSepararClara(); }, 1500);
 
     window.lerAtestadoComIA = async function(tipoTela) {
     // Define os prefixos dos IDs dependendo de qual tela chamou a função (Gestor ou Admin)
