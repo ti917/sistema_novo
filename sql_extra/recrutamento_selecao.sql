@@ -4,7 +4,7 @@
 --
 -- 1) Colunas novas em banco_curriculos (lido/não lido, entrevista, arquivo)
 -- 2) Marca os currículos ANTIGOS no novo fluxo (nada some)
--- 3) RPC pública pro site: lista cargo + cidade/UF das unidades (sem nomes de unidade)
+-- 3) RPC pública pro site: lista cargo + cidade/UF das vagas ATIVAS do RH (sem nome de unidade)
 --
 -- Pra desfazer: DROP FUNCTION public.rs_vagas_publicas(); e DROP das colunas abaixo.
 -- =====================================================================
@@ -43,11 +43,12 @@ UPDATE public.banco_curriculos
 CREATE INDEX IF NOT EXISTS idx_banco_curriculos_rs ON public.banco_curriculos (rs_etapa, lido);
 
 -- ---------------------------------------------------------------------
--- RPC pro SITE PÚBLICO: devolve só (cargo, cidade, uf) das unidades ativas
--- que têm o cargo cadastrado nos "Limites de Lotação" (limites_cargos).
--- NÃO devolve nome nem endereço da unidade.
+-- RPC pro SITE PÚBLICO: devolve só (cargo, cidade, uf) das VAGAS ATIVAS publicadas
+-- pelo RH em "Gestão de Vagas Abertas" (tabela vagas_site). O candidato só consegue
+-- se candidatar a uma vaga que o RH publicou. NÃO devolve unidade/empresa.
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.rs_vagas_publicas()
+DROP FUNCTION IF EXISTS public.rs_vagas_publicas();
+CREATE FUNCTION public.rs_vagas_publicas()
 RETURNS TABLE (cargo text, cidade text, uf text)
 LANGUAGE sql
 STABLE
@@ -55,22 +56,16 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
     SELECT DISTINCT
-           btrim(k.key)                                                                  AS cargo,
-           btrim(m[1])                                                                   AS cidade,
-           upper(m[2])                                                                   AS uf
-      FROM public.unidades_oficiais u
+           btrim(v.titulo)                                             AS cargo,
+           COALESCE(btrim(m[1]), btrim(v.cidade))                      AS cidade,
+           COALESCE(upper(m[2]), '')                                   AS uf
+      FROM public.vagas_site v
       CROSS JOIN LATERAL (
-            SELECT regexp_match(split_part(coalesce(u.endereco,''), ' - CEP:', 1),
-                                '([^,/]+)/([A-Za-z]{2})\s*$') AS m
+            SELECT regexp_match(btrim(coalesce(v.cidade,'')), '^(.*?)\s*[/\-–,]\s*([A-Za-z]{2})$') AS m
       ) a
-      CROSS JOIN LATERAL jsonb_each_text(
-            CASE WHEN u.limites_cargos IS NULL OR btrim(u.limites_cargos::text) = '' THEN '{}'::jsonb
-                 ELSE u.limites_cargos::text::jsonb END
-      ) k
-     WHERE coalesce(u.ativo, true) = true
-       AND a.m IS NOT NULL
-       AND btrim(k.key) <> ''
-       AND coalesce(nullif(regexp_replace(k.value, '[^0-9]', '', 'g'), ''), '1')::int > 0
+     WHERE v.ativa = true
+       AND btrim(coalesce(v.titulo,'')) <> ''
+       AND btrim(coalesce(v.cidade,'')) <> ''
      ORDER BY 1, 3, 2;
 $$;
 
