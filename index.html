@@ -15757,20 +15757,11 @@ window.filtrarAtivosE_AvisoPrevio = function(colaboradores) {
             document.getElementById('adm-precisa-vt').value = (vtInd && vtInd.precisa) || 'Não';
             document.getElementById('adm-precisa-vt').dispatchEvent(new Event('change'));
 
-            if (vtInd && vtInd.precisa === 'Sim' && linhasVtInd.length > 0 && typeof window.carregarOpcoesVTDaUnidade === 'function') {
+            // Guarda as linhas indicadas; quem aplica é carregarOpcoesVTDaUnidade (assim que a lista de VTs da unidade carrega),
+            // seja agora (unidade já escolhida) ou mais tarde (se o RH escolher a unidade depois).
+            window._vtIndicadoPendente = (vtInd && vtInd.precisa === 'Sim' && linhasVtInd.length > 0) ? linhasVtInd : null;
+            if (window._vtIndicadoPendente && typeof window.carregarOpcoesVTDaUnidade === 'function') {
                 await window.carregarOpcoesVTDaUnidade();
-                setTimeout(() => {
-                    const linhasParaDefinir = linhasVtInd.map((l) => {
-                        const naUnidade = (window.opcoesVTDestaUnidade || []).find((o) => o.nome === l.empresa);
-                        return naUnidade ? { nome: naUnidade.nome, valor: naUnidade.valor, quantidade: parseInt(l.qtd_passagens_dia, 10) } : null;
-                    }).filter(Boolean);
-                    if (linhasParaDefinir.length > 0) {
-                        window.vtMultiDefinir('admissao', linhasParaDefinir);
-                    }
-                    // Se nenhuma linha bateu (nome não bate ou a unidade não tem essa
-                    // linha cadastrada), não mexe em nada -- fica igual já ficava antes
-                    // desse conserto, só com o aviso de texto acima pra avisar o Gestor.
-                }, 500); // mesmo fôlego que corrigirFichaDevolvida já dá pro Supabase carregar a lista de VTs da unidade
             }
 
             // 9. dependentes -- agora o Flow do WhatsApp já manda nome/CPF/nascimento
@@ -33523,6 +33514,7 @@ document.getElementById('novo-perfil').addEventListener('change', async function
         }
     } else {
         boxVt.classList.add('hidden');
+        window._vtIndicadoPendente = null;
         // Limpa os valores se ele desistir
         document.getElementById('adm-vt-empresa-select').value = '';
         document.getElementById('adm-vt-qtd-select').value = '';
@@ -67216,7 +67208,30 @@ window.vtMontarObjeto = function(linhas) {
 
         window.opcoesVTDestaUnidade = []; 
 
+// 🆕 Linhas de VT que o colaborador indicou no WhatsApp (pré-cadastro). Ficam guardadas aqui e são aplicadas assim que a lista de
+// VTs da unidade carregar — não importa se a unidade já estava escolhida ou se o RH escolhe depois.
+window._vtIndicadoPendente = null;
+window.vtAplicarIndicadoPendente = function() {
+    const pend = window._vtIndicadoPendente;
+    if (!Array.isArray(pend) || pend.length === 0) return;
+    if (document.getElementById('adm-precisa-vt')?.value !== 'Sim') return;
+    const opcoes = window.opcoesVTDestaUnidade || [];
+    if (opcoes.length === 0) return;
+    const norm = (t) => (typeof window.removerAcentos === 'function' ? window.removerAcentos(String(t || '')) : String(t || '').toLowerCase()).replace(/\s+/g, ' ').trim();
+    const linhas = pend.map((l) => {
+        const nomeInd = norm(l.empresa);
+        const o = opcoes.find((x) => norm(x.nome) === nomeInd) || opcoes.find((x) => nomeInd && (norm(x.nome).includes(nomeInd) || nomeInd.includes(norm(x.nome))));
+        const qtd = parseInt(l.qtd_passagens_dia, 10);
+        return (o && qtd > 0) ? { nome: o.nome, valor: o.valor, quantidade: qtd } : null;
+    }).filter(Boolean);
+    if (linhas.length > 0) {
+        window.vtMultiDefinir('admissao', linhas);
+        window._vtIndicadoPendente = null;
+    }
+};
+
 window.carregarOpcoesVTDaUnidade = async function() {
+    const meuTokenVT = (window._vtLoadSeq = (window._vtLoadSeq || 0) + 1);
     const unidadeNome = document.getElementById('novo-unidade-select').value;
     const selectEmpresa = document.getElementById('adm-vt-empresa-select');
     const selectQtd = document.getElementById('adm-vt-qtd-select');
@@ -67246,6 +67261,9 @@ window.carregarOpcoesVTDaUnidade = async function() {
 
     // Vai no banco buscar as empresas cadastradas exatamente para esta unidade
     const { data, error } = await supabaseClient.from('unidades_oficiais').select('empresa_vt').eq('nome', unidadeNome).maybeSingle();
+
+    // Se outra chamada começou enquanto esta buscava (ex.: o 'change' do Sim + a chamada explícita), esta é obsoleta: não duplica as opções.
+    if (meuTokenVT !== window._vtLoadSeq) return;
 
     if (error || !data || !data.empresa_vt) {
         selectEmpresa.innerHTML = '<option value="">Nenhum VT cadastrado para esta Unidade</option>';
@@ -67277,6 +67295,9 @@ window.carregarOpcoesVTDaUnidade = async function() {
 
     // Revalida as linhas ja adicionadas com os valores da unidade escolhida
     window.vtMultiReconciliar('admissao');
+
+    // 🆕 Preenche sozinho a(s) linha(s) que o colaborador indicou (empresa + passagens/dia) e o Custo Diário Total
+    if (typeof window.vtAplicarIndicadoPendente === 'function') window.vtAplicarIndicadoPendente();
 };
 
 // Mantida para compatibilidade: hoje o custo diario e a SOMA de todas as linhas
