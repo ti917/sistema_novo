@@ -36797,13 +36797,13 @@ window.abrirModalModulosAcesso = async function(idUser) {
         const nivel = document.getElementById('edit-nivel-comercial').value;
 
         // Injeta as informações no JSON de permissões do usuário
-permissoesAtuais.sistemas_permitidos = modulo;
+const patchSistemas = { sistemas_permitidos: modulo };
 if (['Comercial', 'Ambos', 'Comercial_Financeiro', 'Todos'].includes(modulo)) {
-    permissoesAtuais.nivel_comercial = nivel;
+    patchSistemas.nivel_comercial = nivel;
 }
 
         try {
-            const { error: errUpdate } = await supabaseClient.from('perfis').update({ permissoes: permissoesAtuais }).eq('id', idUser);
+            const { error: errUpdate } = await window.salvarPermissoesSeguro(idUser, patchSistemas);
 
             if (errUpdate) throw errUpdate;
 
@@ -36852,6 +36852,9 @@ window.abrirModalColaboradorVinculado = async function(idUser) {
         const rotulo = `${c.nome}${c.dados_admissao?.cargo ? ' — ' + c.dados_admissao.cargo : ''}${c.unidade ? ' (' + c.unidade + ')' : ''}`;
         opcoesColabsRapido += `<option value="${c.id}" ${c.id === vinculoAtualId ? 'selected' : ''}>${rotulo}</option>`;
     });
+    if (vinculoAtualId && !colaboradoresParaVinculo.some(c => c.id === vinculoAtualId)) {
+        opcoesColabsRapido += `<option value="${vinculoAtualId}" selected>(vínculo atual mantido)</option>`;
+    }
 
     const modalHtml = `
     <div id="modal-colaborador-vinculado" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,25,51,0.95); z-index: 10005; display: flex; justify-content: center; align-items: center; padding: 20px;">
@@ -36893,9 +36896,7 @@ window.abrirModalColaboradorVinculado = async function(idUser) {
     document.getElementById('form-colaborador-vinculado').addEventListener('submit', async (e) => {
         e.preventDefault();
         const novoValor = selRapido.value || null;
-        const novasPermissoes = { ...permissoesAtuais, colaborador_vinculado_id: novoValor };
-
-        const { error: errSalvar } = await supabaseClient.from('perfis').update({ permissoes: novasPermissoes }).eq('id', idUser);
+        const { error: errSalvar } = await window.salvarPermissoesSeguro(idUser, { colaborador_vinculado_id: novoValor });
         if (errSalvar) {
             mostrarAlerta("Erro ao salvar vínculo.", "erro");
         } else {
@@ -36903,6 +36904,16 @@ window.abrirModalColaboradorVinculado = async function(idUser) {
             document.getElementById('modal-colaborador-vinculado').remove();
         }
     });
+};
+
+// 🛡️ Salva permissões SEM apagar o que já existia: lê o JSON fresco do banco, aplica só o que mudou
+// (patch) e grava o conjunto completo. Se não conseguir ler o atual, NÃO grava (evita zerar permissões).
+window.salvarPermissoesSeguro = async function(idUser, patch) {
+    const { data: fresco, error: errLer } = await supabaseClient.from('perfis').select('permissoes').eq('id', idUser).single();
+    if (errLer || !fresco) return { error: errLer || new Error('Não foi possível ler as permissões atuais.') };
+    const mescladas = { ...(fresco.permissoes || {}), ...patch };
+    const { error } = await supabaseClient.from('perfis').update({ permissoes: mescladas }).eq('id', idUser);
+    return { error, permissoes: mescladas };
 };
 
 window.abrirModalPermissoes = async function(idUser) {
@@ -37048,6 +37059,10 @@ const menus = u.perfil === 'Admin' ? [
             const rotulo = `${c.nome}${c.dados_admissao?.cargo ? ' — ' + c.dados_admissao.cargo : ''}${c.unidade ? ' (' + c.unidade + ')' : ''}`;
             opcoesColabs += `<option value="${c.id}" ${c.id === vinculoAtualId ? 'selected' : ''}>${rotulo}</option>`;
         });
+        // Se o vínculo atual não veio na lista (falha/limite da busca), mantém ele como opção pra NÃO ser apagado ao salvar
+        if (vinculoAtualId && !colaboradoresParaVinculo.some(c => c.id === vinculoAtualId)) {
+            opcoesColabs += `<option value="${vinculoAtualId}" selected>(vínculo atual mantido)</option>`;
+        }
 
         cardColaboradorVinculado = `
             <div style="margin-top: 20px; background: rgba(155, 89, 182, 0.1); padding: 15px; border-radius: 8px; border: 1px dashed #9b59b6;">
@@ -37142,7 +37157,7 @@ const menus = u.perfil === 'Admin' ? [
             novoJsonPermissoes.colaborador_vinculado_id = selColabVinculadoSubmit.value || null;
         }
 
-        const { error } = await supabaseClient.from('perfis').update({ permissoes: novoJsonPermissoes }).eq('id', idUser);
+        const { error } = await window.salvarPermissoesSeguro(idUser, novoJsonPermissoes);
 
         if (error) {
             mostrarAlerta("Erro ao salvar permissões.", "erro");
@@ -81571,7 +81586,7 @@ function atualizarBadgeChat(numero) {
             telefone: telefoneClara
         };
 
-        const { error: errUpdate } = await supabaseClient.from('perfis').update({ permissoes: permissoes }).eq('id', userId);
+        const { error: errUpdate } = await window.salvarPermissoesSeguro(userId, { alertas_clara: permissoes.alertas_clara });
 
         if (errUpdate) {
             mostrarAlerta("Erro ao salvar preferências: " + errUpdate.message, "erro");
@@ -85472,14 +85487,15 @@ window.carregarUnidadesAvulso = async function() {
             selecionados.push(chk.value);
         });
 
+        let patchRecebe;
         // Se marcou tudo, salvamos null pra economizar espaço e aplicar o default
         if (selecionados.length === categorias.length) {
-            permissoesAtuais.recebe_solicitacoes = null;
+            patchRecebe = null;
         } else {
-            permissoesAtuais.recebe_solicitacoes = selecionados;
+            patchRecebe = selecionados;
         }
 
-        const { error } = await supabaseClient.from('perfis').update({ permissoes: permissoesAtuais }).eq('id', idUser);
+        const { error } = await window.salvarPermissoesSeguro(idUser, { recebe_solicitacoes: patchRecebe });
 
         if (error) {
             mostrarAlerta("Erro ao salvar.", "erro");
