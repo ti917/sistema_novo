@@ -23320,9 +23320,17 @@ async function escutarTempoReal() {
         // chegam em TEMPO REAL pela tabela mensagens_whatsapp_log (agora no Realtime), no lugar dos relógios de
         // 20s/30s que ficavam consultando o banco. Canal próprio e pequeno (1 monitoramento). Só mexe na tela se
         // o Chat da Clara estiver visível.
-        supabaseClient
-            .channel('escuta-admin-geral-5')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'mensagens_whatsapp_log' }, (payload) => {
+        // ⚡ (09/11/2026) O canal do Chat da Clara agora só fica ABERTO enquanto a aba "Chat da Clara" está na tela.
+        // Antes ficava aberto o tempo todo pra todo Admin, e o Realtime do Supabase (56% do trabalho do banco)
+        // processava cada mudança de status (enviado/entregue/lido) pra todo mundo, mesmo sem ninguém olhando.
+        // Mesmos handlers e mesmo comportamento na tela; só liga/desliga a escuta conforme a aba aparece/some.
+        window._claraMsgRT = window._claraMsgRT || { canal: null, desligando: false };
+        window.claraMsgRTLigar = function() {
+            if (window._claraMsgRT.canal) return;
+            window._claraMsgRT.desligando = false;
+            window._claraMsgRT.canal = supabaseClient
+                .channel('escuta-admin-geral-5')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'mensagens_whatsapp_log' }, (payload) => {
                 const reg = payload.new;
                 if (!reg) return;
                 const aba = document.getElementById('aba-zap-chat-clara');
@@ -23344,8 +23352,39 @@ async function escutarTempoReal() {
                         window.carregarChatClaraLista(true);
                     }, 5000);
                 }
-            })
-            .subscribe(window._rtStatus('admin-geral-5'));
+                })
+                .subscribe((status, err) => {
+                    if (window._claraMsgRT.desligando) return; // fechamos de propósito: não é falha de conexão
+                    window._rtStatus('admin-geral-5')(status, err);
+                    // Acabou de conectar com o chat aberto: põe os tiques em dia (pode ter mudado durante a conexão)
+                    if (status === 'SUBSCRIBED' && window.chatClaraSelecionado && typeof window.claraAgendarAtualizacaoStatus === 'function') {
+                        window.claraAgendarAtualizacaoStatus();
+                    }
+                });
+        };
+        window.claraMsgRTDesligar = function() {
+            const st = window._claraMsgRT;
+            if (!st.canal) return;
+            st.desligando = true;
+            try { supabaseClient.removeChannel(st.canal); } catch (e) {}
+            st.canal = null;
+            delete window._rtEstado['admin-geral-5']; // não conta como canal "caído" no relógio de segurança
+        };
+        window.claraMsgRTAvaliar = function() {
+            const aba = document.getElementById('aba-zap-chat-clara');
+            const telaWpp = document.getElementById('tela-whatsapp');
+            const visivel = !!(aba && telaWpp && !telaWpp.classList.contains('hidden') && !aba.classList.contains('hidden'));
+            if (visivel) window.claraMsgRTLigar(); else window.claraMsgRTDesligar();
+        };
+        // Observa a aba e a tela do WhatsApp: qualquer jeito de abrir/fechar (clique, atalho, código) liga/desliga.
+        if (!window._claraMsgRTObs) {
+            window._claraMsgRTObs = new MutationObserver(() => window.claraMsgRTAvaliar());
+            const _abaEl = document.getElementById('aba-zap-chat-clara');
+            const _telaEl = document.getElementById('tela-whatsapp');
+            if (_abaEl) window._claraMsgRTObs.observe(_abaEl, { attributes: true, attributeFilter: ['class'] });
+            if (_telaEl) window._claraMsgRTObs.observe(_telaEl, { attributes: true, attributeFilter: ['class'] });
+        }
+        window.claraMsgRTAvaliar();
     } else if (usuarioAtual.perfil === 'Gestor') {
         
         // MÁGICA MÁXIMA: Escudo inteligente que entende se ele é Global ou não
