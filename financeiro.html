@@ -22337,7 +22337,7 @@ window.precarregarListasFinanceiro = async function () {
 <script>
 (function(){
   var CB = { txs: [], lancs: [], notas: [], res: [], aba: 'falta', arquivo: '' };
-  var LS_IGN = 'cb_ignorados_v1', LS_SUG = 'cb_sugestoes_v1';
+  var LS_IGN = 'cb_ignorados_v1', LS_SUG = 'cb_sugestoes_v1', LS_REJ = 'cb_rejeitados_v1';
   function ls(k){ try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch(e){ return {}; } }
   function lsSet(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
   function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
@@ -22346,6 +22346,9 @@ window.precarregarListasFinanceiro = async function () {
   function dias(a,b){ return Math.abs((new Date(a+'T12:00:00') - new Date(b+'T12:00:00'))/86400000); }
   function addDias(iso,n){ var d = new Date(iso+'T12:00:00'); d.setDate(d.getDate()+n); return d.toISOString().substring(0,10); }
   function chaveMemo(m){ return String(m||'').toUpperCase().replace(/[0-9]+/g,'').replace(/\s+/g,' ').trim().substring(0,28); }
+  var STOP = {PIX:1,ENVIADO:1,RECEBIDO:1,PAGAMENTO:1,BOLETO:1,OUTROS:1,BANCOS:1,BANCO:1,TED:1,DOC:1,TRANSFERENCIA:1,COMPRA:1,DEBITO:1,CREDITO:1,CONTA:1,LTDA:1,EIRELI:1,PARA:1,PELO:1,PELA:1,COM:1,DOS:1,DAS:1,NOTA:1,RECEBER:1,RECEBIMENTO:1,PARCELA:1,MES:1,TARIFA:1,SERVICOS:1,SERVICO:1,COMERCIO:1};
+  function tokens(txt){ return String(txt||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').split(/[^A-Z0-9]+/).filter(function(w){ return w.length >= 4 && !STOP[w] && !/^[0-9]+$/.test(w); }); }
+  function chaveTx(t){ return t.data+'|'+t.valor+'|'+t.memo; }
   function limpaMemo(m){ return String(m||'').replace(/\s+/g,' ').trim(); }
 
   // ---------- Leitura do OFX ----------
@@ -22394,12 +22397,12 @@ window.precarregarListasFinanceiro = async function () {
       var d = l.data_pagamento || l.data_vencimento; if (!d) return;
       var v = Number(l.valor_parcela) || 0;
       var ccx = (todosCentrosCustoGlobais || []).find(function(x){ return String(x.id) === String(l.centro_custo_id); });
-      c.push({ src:'lanc', id:l.id, tipo:l.tipo, valores:[v, v + (Number(l.juros)||0)], data:String(d).substring(0,10), desc:(l.descricao||l.categoria||''), forn:l.fornecedor_nome||'', cc:ccx ? ccx.nome_unidade : '', cat:l.categoria||'', parcela:(l.total_parcelas>1 ? l.parcela_atual+'/'+l.total_parcelas : ''), criado:l.criado_por||'', origem:'Lançamento', status:l.status, usado:false });
+      c.push({ src:'lanc', id:l.id, tipo:l.tipo, valores:[v, v + (Number(l.juros)||0)], data:String(d).substring(0,10), desc:(l.descricao||l.categoria||''), forn:l.fornecedor_nome||'', cc:ccx ? ccx.nome_unidade : '', cat:l.categoria||'', parcela:(l.total_parcelas>1 ? l.parcela_atual+'/'+l.total_parcelas : ''), criado:l.criado_por||'', origem:'Lançamento', status:l.status, usado:false, tok: tokens((l.fornecedor_nome||'')+' '+(l.descricao||'')+' '+(l.categoria||'')+' '+(ccx ? ccx.nome_unidade : '')) });
     });
     CB.notas.forEach(function(n){
       if (!n.data_pagamento) return;
       var vs = [Number(n.valor_real_pago)||0, Number(n.valor_liquido)||0, Number(n.valor_bruto)||0].filter(function(x){ return x > 0; });
-      c.push({ src:'nota', id:n.id, tipo:'Receita', valores:vs, data:String(n.data_pagamento).substring(0,10), desc:(n.descricao||''), forn:n.nome_empresa_cliente||'', cc:'', cat:'', parcela:'', criado:n.criado_por||'', origem:'Nota a receber', status:n.situacao, usado:false });
+      c.push({ src:'nota', id:n.id, tipo:'Receita', valores:vs, data:String(n.data_pagamento).substring(0,10), desc:(n.descricao||''), forn:n.nome_empresa_cliente||'', cc:'', cat:'', parcela:'', criado:n.criado_por||'', origem:'Nota a receber', status:n.situacao, usado:false, tok: tokens((n.nome_empresa_cliente||'')+' '+(n.descricao||'')) });
     });
     return c;
   }
@@ -22408,17 +22411,23 @@ window.precarregarListasFinanceiro = async function () {
     var ordenadas = CB.txs.slice().sort(function(a,b){ return a.data < b.data ? -1 : 1; });
     CB.res = [];
     // 1a passada: data próxima (até 7 dias); 2a: mesmo valor com data mais distante (até 45 dias)
+    var rej = ls(LS_REJ);
     [7, 45].forEach(function(janela, passo){
       ordenadas.forEach(function(t){
         if (t._m) return;
-        var tipo = t.valor < 0 ? 'Despesa' : 'Receita', amt = Math.abs(t.valor), melhor = null, md = 1e9;
+        var tipo = t.valor < 0 ? 'Despesa' : 'Receita', amt = Math.abs(t.valor), melhor = null, mscore = -1e9, tt = tokens(t.memo);
         cands.forEach(function(c){
           if (c.usado || c.tipo !== tipo) return;
+          if (rej[chaveTx(t)+'#'+c.src+c.id]) return;
           if (!c.valores.some(function(x){ return Math.abs(x - amt) < 0.015; })) return;
           var dd = dias(c.data, t.data);
-          if (dd <= janela && dd < md){ melhor = c; md = dd; }
+          var ov = tt.filter(function(w){ return c.tok.indexOf(w) >= 0; }).length;
+          if (dd > janela) return;
+          if (dd > 7 && ov === 0) return;   // data muito distante só casa se o nome bater
+          var sc = ov * 100 - dd;
+          if (sc > mscore){ melhor = c; mscore = sc; melhor._ov = ov; melhor._dd = dd; }
         });
-        if (melhor){ melhor.usado = true; t._m = melhor; t._exato = passo === 0; }
+        if (melhor){ melhor.usado = true; t._m = melhor; t._exato = melhor._dd <= 1; t._nome = melhor._ov > 0; t._conferir = !(melhor._ov > 0 || melhor._dd <= 1); }
       });
     });
     ordenadas.forEach(function(t){
@@ -22459,7 +22468,7 @@ window.precarregarListasFinanceiro = async function () {
     var h = '<div style="background:var(--cor-fundo-caixa);border:1px solid var(--cor-borda);border-radius:12px;padding:16px 18px;margin-bottom:16px;">'
       + '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:baseline;"><div style="font-size:1.05rem;font-weight:800;color:var(--cor-texto-principal);"><i class="fa-solid fa-file-lines" style="color:var(--cor-acento);"></i> Extrato de '+dbr(datas[0])+' a '+dbr(datas[datas.length-1])+'</div><div style="font-size:.82rem;color:var(--cor-texto-secundario);">'+esc(CB.arquivo)+' · '+CB.txs.length+' movimentos</div></div>'
       + '<div style="height:12px;background:rgba(255,255,255,.08);border-radius:8px;overflow:hidden;margin:12px 0 8px;display:flex;"><div style="width:'+pct+'%;background:#2ecc71;"></div><div style="width:'+(100-pct)+'%;background:#e67e22;"></div></div>'
-      + '<div style="font-size:.84rem;color:var(--cor-texto-principal);"><b style="color:#2ecc71;">'+ok.length+' já lançados ('+pct+'%)</b> &nbsp;·&nbsp; <b style="color:#e67e22;">'+falta.length+' faltam lançar</b>'+(ig.length?' &nbsp;·&nbsp; <span style="color:var(--cor-texto-secundario);">'+ig.length+' ignorados</span>':'')+'</div></div>'
+      + '<div style="font-size:.84rem;color:var(--cor-texto-principal);"><b style="color:#2ecc71;">'+ok.length+' já lançados ('+pct+'%)</b>'+(ok.filter(function(t){ return t._conferir; }).length ? ' <span style="color:#e74c3c;font-weight:700;">(' + ok.filter(function(t){ return t._conferir; }).length + ' para conferir o nome)</span>' : '')+' &nbsp;·&nbsp; <b style="color:#e67e22;">'+falta.length+' faltam lançar</b>'+(ig.length?' &nbsp;·&nbsp; <span style="color:var(--cor-texto-secundario);">'+ig.length+' ignorados</span>':'')+'</div></div>'
       + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:18px;">'
       + card('Já lançados', ok.length+' movimentos', 'Saídas <b>'+money(soma(ok,-1))+'</b><br>Entradas <b>'+money(soma(ok,1))+'</b>', '#2ecc71', 'fa-circle-check')
       + card('Falta lançar', falta.length+' movimentos', 'Saídas <b>'+money(soma(falta,-1))+'</b><br>Entradas <b>'+money(soma(falta,1))+'</b>', '#e67e22', 'fa-triangle-exclamation')
@@ -22469,7 +22478,7 @@ window.precarregarListasFinanceiro = async function () {
     h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">' + abas.map(function(a){
       var at = CB.aba === a[0];
       return '<button onclick="CB_aba(\''+a[0]+'\')" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:9px 16px;border-radius:30px;font-weight:700;font-size:.85rem;border:1px solid '+(at?a[3]:'var(--cor-borda)')+';background:'+(at?a[3]+'33':'transparent')+';color:var(--cor-texto-principal);">'+a[1]+' <span style="background:'+a[3]+';color:#fff;border-radius:20px;padding:1px 9px;font-size:.75rem;">'+a[2]+'</span></button>'; }).join('') + '</div>';
-    var dicas = { falta:'Estes movimentos estão no banco e <b>não foram encontrados</b> no sistema. Escolha o centro de custo e a categoria e clique em Lançar (entra como pago).', ok:'Estes movimentos do banco <b>já estão lançados</b> no sistema (mesmo valor e data próxima). À direita você vê o lançamento encontrado: o que é, o centro de custo e a categoria.', sobra:'Lançamentos <b>pagos no sistema dentro do período do extrato</b> que não aparecem nele (podem ser de outro banco, dinheiro ou valor diferente). Só para conferência: veja se falta algo no banco ou se foi lançado errado.', ign:'Movimentos que você marcou para <b>não lançar</b> (ex.: transferência entre contas). Dá para devolver à lista.' };
+    var dicas = { falta:'Estes movimentos estão no banco e <b>não foram encontrados</b> no sistema. Escolha o centro de custo e a categoria e clique em Lançar (entra como pago).', ok:'Estes movimentos do banco <b>já estão lançados</b> no sistema (mesmo valor e data próxima). Quando aparecer <b>"Conferir: nome não bate"</b>, o valor é igual mas o nome é diferente: se não for o mesmo pagamento, clique em "Não é esse" que ele volta para Falta lançar. À direita você vê o lançamento encontrado: o que é, o centro de custo e a categoria.', sobra:'Lançamentos <b>pagos no sistema dentro do período do extrato</b> que não aparecem nele (podem ser de outro banco, dinheiro ou valor diferente). Só para conferência: veja se falta algo no banco ou se foi lançado errado.', ign:'Movimentos que você marcou para <b>não lançar</b> (ex.: transferência entre contas). Dá para devolver à lista.' };
     h += '<div style="font-size:.84rem;color:var(--cor-texto-secundario);margin:6px 2px 14px;">'+dicas[CB.aba]+'</div>';
     if (CB.aba === 'falta') h += tabelaFalta(falta);
     else if (CB.aba === 'ok') h += tabelaOk(ok);
@@ -22525,7 +22534,7 @@ window.precarregarListasFinanceiro = async function () {
     lista.forEach(function(t){ var m = t._m;
       h += '<tr><td style="'+TD+'white-space:nowrap;">'+dbr(t.data)+'</td><td style="'+TD+'">'+tipoTxt(t)+'</td><td style="'+TD+'">'+esc(t.memo)+'</td><td style="'+TD+'">'+vtxt(t)+'</td>'
         + '<td style="'+TD+'min-width:280px;">'+detalheLanc(m)+'</td><td style="'+TD+'white-space:nowrap;">'+dbr(m.data)+'</td>'
-        + '<td style="'+TD+'">'+(t._exato ? badge('Confere','#2ecc71') : badge('Data diferente','#e67e22'))+(m.status && m.status!=='Pago' ? ' '+badge('No sistema: '+esc(m.status),'#e74c3c') : '')+'</td></tr>'; });
+        + '<td style="'+TD+'">'+(t._conferir ? badge('Conferir: nome não bate','#e74c3c') + ' <button class="btn-export" style="padding:3px 9px;font-size:.72rem;" onclick="CB_naoEEsse('+idx(t)+')">Não é esse</button>' : (t._exato || t._nome ? badge('Confere','#2ecc71') : badge('Data diferente','#e67e22')))+(m.status && m.status!=='Pago' ? ' '+badge('No sistema: '+esc(m.status),'#e74c3c') : '')+'</td></tr>'; });
     return h + '</tbody></table></div>';
   }
   function tabelaSobra(){
@@ -22542,6 +22551,13 @@ window.precarregarListasFinanceiro = async function () {
   }
 
   // ---------- Ações ----------
+  window.CB_naoEEsse = function(i){
+    var t = CB.txs[i]; if (!t || !t._m) return;
+    var rej = ls(LS_REJ); rej[chaveTx(t)+'#'+t._m.src+t._m.id] = 1; lsSet(LS_REJ, rej);
+    CB.txs.forEach(function(x){ delete x._m; delete x._exato; delete x._nome; delete x._conferir; });
+    cruzar(); render();
+    mostrarAlerta('Ok, esse movimento foi para "Falta lançar".', 'sucesso');
+  };
   window.CB_aba = function(a){ CB.aba = a; render(); };
   window.CB_ver = function(src, id){
     if (src === 'nota'){
@@ -22592,7 +22608,7 @@ window.precarregarListasFinanceiro = async function () {
   async function lancarLista(ids){
     var ok = 0, erro = null;
     for (var k = 0; k < ids.length; k++){ try { await lancarUm(ids[k]); ok++; } catch(e){ erro = e.message || String(e); break; } }
-    CB.txs.forEach(function(t){ delete t._m; delete t._exato; });
+    CB.txs.forEach(function(t){ delete t._m; delete t._exato; delete t._nome; delete t._conferir; });
     cruzar(); render();
     if (ok) mostrarAlerta(ok + ' lançamento(s) criado(s) como pago.', 'sucesso');
     if (erro) mostrarAlerta('Parei no erro: ' + erro, 'erro');
