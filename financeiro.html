@@ -1010,6 +1010,11 @@
             <span>DRE Gerencial</span>
         </div>
 
+        <div class="sidebar-item" data-target="tela-conciliacao-bancaria">
+            <i class="fa-solid fa-building-columns"></i>
+            <span>Conciliação Bancária</span>
+        </div>
+
         <!-- ============ NOVO: LOG DE AUDITORIA ============ -->
         <div class="sidebar-item" data-target="tela-auditoria">
             <i class="fa-solid fa-clipboard-list"></i>
@@ -2538,6 +2543,21 @@
             <!-- ============================================================ -->
             <!-- NOVA TELA: LOG DE AUDITORIA                                  -->
             <!-- ============================================================ -->
+            <!-- ============ CONCILIAÇÃO BANCÁRIA (OFX) ============ -->
+            <section id="tela-conciliacao-bancaria" class="view-section hidden">
+                <div style="margin-bottom: 18px;">
+                    <h2 style="margin: 0; color: var(--cor-texto-principal);"><i class="fa-solid fa-building-columns" style="color: var(--cor-acento);"></i> Conciliação Bancária</h2>
+                    <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-top: 5px;">Importe o extrato do banco (arquivo OFX), veja o que já está lançado e o que falta, e lance direto no centro de custo.</p>
+                </div>
+                <div class="box-filtros" style="margin-bottom: 20px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                    <label class="btn-export" style="cursor:pointer;"><i class="fa-solid fa-file-import"></i> Escolher extrato (.ofx)
+                        <input type="file" accept=".ofx,.OFX,text/plain" style="display:none;" onchange="CB_importar(this)">
+                    </label>
+                    <span style="font-size:0.8rem; color:var(--cor-texto-secundario);">Nada é gravado até você clicar em "Lançar". Entradas e saídas são comparadas.</span>
+                </div>
+                <div id="cb-resultado"></div>
+            </section>
+
             <section id="tela-auditoria" class="view-section hidden">
 
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
@@ -4556,6 +4576,7 @@ let jurosDaParcela = lanc.juros || 0;
             'tela-notas-fiscais': 'notas-fiscais',
             'tela-dre': 'dre',
             'tela-auditoria': 'auditoria',
+            'tela-conciliacao-bancaria': 'conciliacao-bancaria',
             'tela-centro-custos': 'centros-de-custo',
             'tela-cartoes-corporativos': 'cartoes-corporativos',
             'tela-licitacoes': 'licitacoes',
@@ -4625,6 +4646,7 @@ let jurosDaParcela = lanc.juros || 0;
                     // NOVO: telas de DRE e Auditoria
                     if (btn.dataset.target === 'tela-dre')       { carregarDRE(); }
                     if (btn.dataset.target === 'tela-auditoria') { carregarAuditoria(); }
+                    if (btn.dataset.target === 'tela-conciliacao-bancaria' && window.carregarConciliacaoBancaria) { carregarConciliacaoBancaria(); }
                     // NOVO: telas de Cartões Corporativos e Configurar Usuários (ETAPA 1)
                     if (btn.dataset.target === 'tela-cartoes-corporativos') { renderizarCartoesCorporativos(); }
                     // NOVO: tela de Licitações (ETAPA 2)
@@ -22310,6 +22332,265 @@ window.precarregarListasFinanceiro = async function () {
 </script>
 <!-- ============ FIM MODULO CONTRATOS ============ -->
 
+
+<!-- ============ MODULO CONCILIACAO BANCARIA (OFX) ============ -->
+<script>
+(function(){
+  var CB = { txs: [], lancs: [], notas: [], res: [], aba: 'falta', arquivo: '' };
+  var LS_IGN = 'cb_ignorados_v1', LS_SUG = 'cb_sugestoes_v1';
+  function ls(k){ try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch(e){ return {}; } }
+  function lsSet(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function money(v){ return Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
+  function dbr(iso){ if(!iso) return ''; var p = String(iso).substring(0,10).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
+  function dias(a,b){ return Math.abs((new Date(a+'T12:00:00') - new Date(b+'T12:00:00'))/86400000); }
+  function addDias(iso,n){ var d = new Date(iso+'T12:00:00'); d.setDate(d.getDate()+n); return d.toISOString().substring(0,10); }
+  function chaveMemo(m){ return String(m||'').toUpperCase().replace(/[0-9]+/g,'').replace(/\s+/g,' ').trim().substring(0,28); }
+  function limpaMemo(m){ return String(m||'').replace(/\s+/g,' ').trim(); }
+
+  // ---------- Leitura do OFX ----------
+  function parseOFX(txt){
+    var blocos = txt.match(/<STMTTRN>[\s\S]*?(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>)/g) || [];
+    var out = [];
+    blocos.forEach(function(b){
+      function tag(n){ var m = b.match(new RegExp('<'+n+'>([^<\\r\\n]*)')); return m ? m[1].trim() : ''; }
+      var dt = tag('DTPOSTED').substring(0,8);
+      var vs = tag('TRNAMT').replace(/\./g,'').replace(',','.');
+      if (tag('TRNAMT').indexOf(',') < 0) vs = tag('TRNAMT');
+      var v = parseFloat(vs);
+      if (!/^\d{8}$/.test(dt) || isNaN(v)) return;
+      out.push({ fitid: tag('FITID'), data: dt.substring(0,4)+'-'+dt.substring(4,6)+'-'+dt.substring(6,8), valor: Math.round(v*100)/100, memo: limpaMemo(tag('MEMO')) });
+    });
+    return out;
+  }
+
+  // ---------- Busca no sistema ----------
+  async function buscarSistema(){
+    var datas = CB.txs.map(function(t){ return t.data; }).sort();
+    var ini = addDias(datas[0], -10), fim = addDias(datas[datas.length-1], 10);
+    var lancs = [], from = 0, passo = 1000;
+    for (var guard = 0; guard < 30; guard++){
+      var q = supabaseClient.from('financeiro_lancamentos').select('*')
+        .or('and(data_pagamento.gte.'+ini+',data_pagamento.lte.'+fim+'),and(data_pagamento.is.null,data_vencimento.gte.'+ini+',data_vencimento.lte.'+fim+')')
+        .order('id', { ascending: true }).range(from, from+passo-1);
+      if (empresaFinanceiraSelecionada !== 'Todas') q = q.eq('empresa', empresaFinanceiraSelecionada);
+      var r = await q;
+      if (r.error) throw r.error;
+      lancs = lancs.concat(r.data || []);
+      if (!r.data || r.data.length < passo) break;
+      from += passo;
+    }
+    CB.lancs = lancs;
+    var qn = supabaseClient.from('financeiro_notas_receber').select('*').gte('data_pagamento', ini).lte('data_pagamento', fim).limit(2000);
+    if (empresaFinanceiraSelecionada !== 'Todas') qn = qn.eq('empresa', empresaFinanceiraSelecionada);
+    var rn = await qn;
+    CB.notas = rn.error ? [] : (rn.data || []);
+  }
+
+  // ---------- Cruzamento ----------
+  function candidatos(){
+    var c = [];
+    CB.lancs.forEach(function(l){
+      var d = l.data_pagamento || l.data_vencimento; if (!d) return;
+      var v = Number(l.valor_parcela) || 0;
+      c.push({ src:'lanc', id:l.id, tipo:l.tipo, valores:[v, v + (Number(l.juros)||0)], data:String(d).substring(0,10), desc:(l.fornecedor_nome ? l.fornecedor_nome+' - ' : '')+(l.descricao||l.categoria||''), status:l.status, usado:false });
+    });
+    CB.notas.forEach(function(n){
+      if (!n.data_pagamento) return;
+      var vs = [Number(n.valor_real_pago)||0, Number(n.valor_liquido)||0, Number(n.valor_bruto)||0].filter(function(x){ return x > 0; });
+      c.push({ src:'nota', id:n.id, tipo:'Receita', valores:vs, data:String(n.data_pagamento).substring(0,10), desc:'Nota a receber - '+(n.nome_empresa_cliente||''), status:n.situacao, usado:false });
+    });
+    return c;
+  }
+  function cruzar(){
+    var ign = ls(LS_IGN), cands = candidatos();
+    var ordenadas = CB.txs.slice().sort(function(a,b){ return a.data < b.data ? -1 : 1; });
+    CB.res = [];
+    // 1a passada: data próxima (até 7 dias); 2a: mesmo valor com data mais distante (até 45 dias)
+    [7, 45].forEach(function(janela, passo){
+      ordenadas.forEach(function(t){
+        if (t._m) return;
+        var tipo = t.valor < 0 ? 'Despesa' : 'Receita', amt = Math.abs(t.valor), melhor = null, md = 1e9;
+        cands.forEach(function(c){
+          if (c.usado || c.tipo !== tipo) return;
+          if (!c.valores.some(function(x){ return Math.abs(x - amt) < 0.015; })) return;
+          var dd = dias(c.data, t.data);
+          if (dd <= janela && dd < md){ melhor = c; md = dd; }
+        });
+        if (melhor){ melhor.usado = true; t._m = melhor; t._exato = passo === 0; }
+      });
+    });
+    ordenadas.forEach(function(t){
+      t._ign = !!ign[(t.data+'|'+t.valor+'|'+t.memo)];
+      CB.res.push(t);
+    });
+    CB.sobras = cands.filter(function(c){ return !c.usado && c.src === 'lanc' && String(c.status) === 'Pago'; });
+  }
+
+  // ---------- Telas ----------
+  function elCC(sel){ var h = '<option value="">Centro de custo...</option>'; (window.todosCentrosCustoGlobais || todosCentrosCustoGlobais || []).forEach(function(cc){ h += '<option value="'+esc(cc.id)+'"'+(String(cc.id)===String(sel)?' selected':'')+'>'+esc(cc.nome_unidade)+'</option>'; }); return h; }
+  function elCat(tipo, sel){
+    var h = '<option value="">Categoria...</option>';
+    (todasCategoriasGlobais || []).forEach(function(c){
+      if (c.aplicacao === 'Notas a Receber') return;
+      if (c.tipo === tipo || c.tipo === 'Ambos') h += '<option value="'+esc(c.nome)+'"'+(c.nome===sel?' selected':'')+'>'+esc(c.nome)+'</option>';
+    });
+    return h;
+  }
+  function elForn(ccId, sel){
+    var h = '<option value="">Sem fornecedor</option>', cc = (todosCentrosCustoGlobais || []).find(function(x){ return String(x.id) === String(ccId); });
+    if (cc){ var arr = []; try { arr = typeof cc.fornecedores === 'string' ? JSON.parse(cc.fornecedores) : cc.fornecedores; } catch(e){}
+      (Array.isArray(arr) ? arr : []).forEach(function(f){ var n = typeof f === 'string' ? f : f.nome; if (n) h += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>'; }); }
+    return h;
+  }
+  function idx(t){ return CB.txs.indexOf(t); }
+
+  function render(){
+    var box = document.getElementById('cb-resultado'); if (!box) return;
+    if (!CB.res.length){ box.innerHTML = ''; return; }
+    var falta = CB.res.filter(function(t){ return !t._m && !t._ign; });
+    var ok = CB.res.filter(function(t){ return t._m && !t._ign; });
+    var ig = CB.res.filter(function(t){ return t._ign; });
+    function soma(a, sinal){ return a.filter(function(t){ return sinal > 0 ? t.valor > 0 : t.valor < 0; }).reduce(function(s,t){ return s + Math.abs(t.valor); }, 0); }
+    var datas = CB.txs.map(function(t){ return t.data; }).sort();
+    var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:18px;">'
+      + card('Período do extrato', dbr(datas[0])+' a '+dbr(datas[datas.length-1]), CB.txs.length+' movimentos', '#3498db')
+      + card('Já lançados', ok.length+' movimentos', 'Saídas '+money(soma(ok,-1))+' | Entradas '+money(soma(ok,1)), '#27ae60')
+      + card('Falta lançar', falta.length+' movimentos', 'Saídas '+money(soma(falta,-1))+' | Entradas '+money(soma(falta,1)), '#e67e22')
+      + card('Lançado e não achei no extrato', CB.sobras.length+' lançamentos', 'Pagos no período sem par no extrato', '#8e44ad')
+      + '</div>';
+    var abas = [['falta','Falta lançar ('+falta.length+')'],['ok','Já lançados ('+ok.length+')'],['sobra','Lançados sem extrato ('+CB.sobras.length+')'],['ign','Ignorados ('+ig.length+')']];
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">' + abas.map(function(a){
+      var at = CB.aba === a[0];
+      return '<button class="btn-export" style="'+(at?'background:var(--cor-acento);color:#fff;':'')+'" onclick="CB_aba(\''+a[0]+'\')">'+a[1]+'</button>'; }).join('') + '</div>';
+    if (CB.aba === 'falta') h += tabelaFalta(falta);
+    else if (CB.aba === 'ok') h += tabelaOk(ok);
+    else if (CB.aba === 'sobra') h += tabelaSobra();
+    else h += tabelaIgn(ig);
+    box.innerHTML = h;
+  }
+  function card(t, a, b, cor){ return '<div style="background:var(--cor-fundo-card,#fff);border:1px solid var(--cor-borda,#ddd);border-left:4px solid '+cor+';border-radius:8px;padding:12px 14px;"><div style="font-size:.75rem;color:var(--cor-texto-secundario);font-weight:700;">'+t+'</div><div style="font-size:1.05rem;font-weight:800;margin:3px 0;">'+a+'</div><div style="font-size:.76rem;color:var(--cor-texto-secundario);">'+b+'</div></div>'; }
+  var TH = 'padding:8px;text-align:left;font-size:.78rem;border-bottom:2px solid var(--cor-borda,#ddd);white-space:nowrap;';
+  var TD = 'padding:7px 8px;border-bottom:1px solid var(--cor-borda,#eee);font-size:.82rem;vertical-align:middle;';
+  function tabelaFalta(lista){
+    if (!lista.length) return '<p style="padding:20px;text-align:center;color:var(--cor-texto-secundario);">Nada pendente: tudo do extrato já está lançado.</p>';
+    var sug = ls(LS_SUG);
+    var h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">'
+      + '<select id="cb-cc-massa" class="modern-input" style="max-width:240px;">'+elCC('')+'</select>'
+      + '<select id="cb-cat-massa-d" class="modern-input" style="max-width:220px;"><option value="">Categoria (saídas)...</option>'+elCat('Despesa','')+'</select>'
+      + '<select id="cb-cat-massa-r" class="modern-input" style="max-width:220px;"><option value="">Categoria (entradas)...</option>'+elCat('Receita','')+'</select>'
+      + '<button class="btn-export" onclick="CB_aplicarMassa()">Aplicar nos marcados</button>'
+      + '<button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CB_lancarMarcados()"><i class="fa-solid fa-check"></i> Lançar marcados como pago</button>'
+      + '<button class="btn-export" onclick="CB_ignorarMarcados(true)">Ignorar marcados</button></div>';
+    h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;min-width:1000px;"><thead><tr>'
+      + '<th style="'+TH+'"><input type="checkbox" onchange="CB_marcarTodos(this.checked)"></th><th style="'+TH+'">Data</th><th style="'+TH+'">Descrição no banco</th><th style="'+TH+'">Valor</th><th style="'+TH+'">Centro de custo</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Fornecedor</th><th style="'+TH+'"></th></tr></thead><tbody>';
+    lista.forEach(function(t){
+      var i = idx(t), tipo = t.valor < 0 ? 'Despesa' : 'Receita', s = sug[chaveMemo(t.memo)] || {};
+      h += '<tr><td style="'+TD+'"><input type="checkbox" class="cb-chk" data-i="'+i+'"></td>'
+        + '<td style="'+TD+'">'+dbr(t.data)+'</td><td style="'+TD+'max-width:300px;">'+esc(t.memo)+'</td>'
+        + '<td style="'+TD+'font-weight:700;color:'+(t.valor<0?'#c0392b':'#27ae60')+';white-space:nowrap;">'+(t.valor<0?'- ':'+ ')+money(Math.abs(t.valor))+'</td>'
+        + '<td style="'+TD+'"><select id="cb-cc-'+i+'" class="modern-input" onchange="CB_trocouCC('+i+')">'+elCC(s.cc)+'</select></td>'
+        + '<td style="'+TD+'"><select id="cb-cat-'+i+'" class="modern-input">'+elCat(tipo, s.cat)+'</select></td>'
+        + '<td style="'+TD+'">'+(tipo==='Despesa' ? '<select id="cb-for-'+i+'" class="modern-input">'+elForn(s.cc, s.forn)+'</select>' : '<span style="color:var(--cor-texto-secundario);">-</span>')+'</td>'
+        + '<td style="'+TD+'white-space:nowrap;"><button class="btn-export" onclick="CB_lancar('+i+')">Lançar</button> <button class="btn-export" title="Ignorar (ex.: transferência entre contas)" onclick="CB_ignorar('+i+',true)"><i class="fa-solid fa-eye-slash"></i></button></td></tr>';
+    });
+    return h + '</tbody></table></div>';
+  }
+  function tabelaOk(lista){
+    if (!lista.length) return '<p style="padding:20px;text-align:center;color:var(--cor-texto-secundario);">Nenhum movimento casou com lançamentos do sistema.</p>';
+    var h = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;min-width:900px;"><thead><tr><th style="'+TH+'">Data banco</th><th style="'+TH+'">Descrição no banco</th><th style="'+TH+'">Valor</th><th style="'+TH+'">Lançamento no sistema</th><th style="'+TH+'">Situação</th></tr></thead><tbody>';
+    lista.forEach(function(t){ var m = t._m;
+      h += '<tr><td style="'+TD+'">'+dbr(t.data)+'</td><td style="'+TD+'">'+esc(t.memo)+'</td><td style="'+TD+'white-space:nowrap;">'+(t.valor<0?'- ':'+ ')+money(Math.abs(t.valor))+'</td>'
+        + '<td style="'+TD+'">'+esc(m.desc)+' <span style="color:var(--cor-texto-secundario);">('+dbr(m.data)+')</span></td>'
+        + '<td style="'+TD+'">'+(t._exato ? '<span style="color:#27ae60;font-weight:700;">Confere</span>' : '<span style="color:#e67e22;font-weight:700;">Data diferente</span>')+(m.status && m.status!=='Pago' ? ' <span style="color:#c0392b;">- no sistema está '+esc(m.status)+'</span>' : '')+'</td></tr>'; });
+    return h + '</tbody></table></div>';
+  }
+  function tabelaSobra(){
+    if (!CB.sobras.length) return '<p style="padding:20px;text-align:center;color:var(--cor-texto-secundario);">Todos os lançamentos pagos do período foram achados no extrato.</p>';
+    var h = '<p style="font-size:.8rem;color:var(--cor-texto-secundario);">Lançamentos pagos no sistema que não têm par neste extrato (podem ser de outra conta/banco, dinheiro ou valor diferente).</p><div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr><th style="'+TH+'">Data</th><th style="'+TH+'">Tipo</th><th style="'+TH+'">Descrição</th><th style="'+TH+'">Valor</th></tr></thead><tbody>';
+    CB.sobras.forEach(function(c){ h += '<tr><td style="'+TD+'">'+dbr(c.data)+'</td><td style="'+TD+'">'+esc(c.tipo)+'</td><td style="'+TD+'">'+esc(c.desc)+'</td><td style="'+TD+'">'+money(c.valores[0])+'</td></tr>'; });
+    return h + '</tbody></table></div>';
+  }
+  function tabelaIgn(lista){
+    if (!lista.length) return '<p style="padding:20px;text-align:center;color:var(--cor-texto-secundario);">Nenhum movimento ignorado.</p>';
+    var h = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr><th style="'+TH+'">Data</th><th style="'+TH+'">Descrição</th><th style="'+TH+'">Valor</th><th style="'+TH+'"></th></tr></thead><tbody>';
+    lista.forEach(function(t){ h += '<tr><td style="'+TD+'">'+dbr(t.data)+'</td><td style="'+TD+'">'+esc(t.memo)+'</td><td style="'+TD+'">'+(t.valor<0?'- ':'+ ')+money(Math.abs(t.valor))+'</td><td style="'+TD+'"><button class="btn-export" onclick="CB_ignorar('+idx(t)+',false)">Voltar para a lista</button></td></tr>'; });
+    return h + '</tbody></table></div>';
+  }
+
+  // ---------- Ações ----------
+  window.CB_aba = function(a){ CB.aba = a; render(); };
+  window.CB_trocouCC = function(i){ var f = document.getElementById('cb-for-'+i); if (f) f.innerHTML = elForn(document.getElementById('cb-cc-'+i).value, ''); };
+  window.CB_marcarTodos = function(v){ document.querySelectorAll('.cb-chk').forEach(function(c){ c.checked = v; }); };
+  function marcados(){ return Array.prototype.slice.call(document.querySelectorAll('.cb-chk:checked')).map(function(c){ return parseInt(c.dataset.i,10); }); }
+  window.CB_aplicarMassa = function(){
+    var cc = document.getElementById('cb-cc-massa').value, cd = document.getElementById('cb-cat-massa-d').value, cr = document.getElementById('cb-cat-massa-r').value;
+    var m = marcados(); if (!m.length) return mostrarAlerta('Marque pelo menos um movimento.', 'aviso');
+    m.forEach(function(i){ var t = CB.txs[i];
+      if (cc){ document.getElementById('cb-cc-'+i).value = cc; window.CB_trocouCC(i); }
+      var c = t.valor < 0 ? cd : cr; if (c) document.getElementById('cb-cat-'+i).value = c; });
+  };
+  window.CB_ignorar = function(i, v){ var t = CB.txs[i], ign = ls(LS_IGN), k = (t.data+'|'+t.valor+'|'+t.memo); if (v) ign[k] = 1; else delete ign[k]; lsSet(LS_IGN, ign); t._ign = !!v; render(); };
+  window.CB_ignorarMarcados = function(v){ var m = marcados(); if (!m.length) return mostrarAlerta('Marque pelo menos um movimento.', 'aviso'); var ign = ls(LS_IGN); m.forEach(function(i){ var t = CB.txs[i]; ign[(t.data+'|'+t.valor+'|'+t.memo)] = 1; t._ign = true; }); lsSet(LS_IGN, ign); render(); };
+
+  async function lancarUm(i){
+    var t = CB.txs[i], tipo = t.valor < 0 ? 'Despesa' : 'Receita';
+    var cc = document.getElementById('cb-cc-'+i).value, cat = document.getElementById('cb-cat-'+i).value;
+    var fe = document.getElementById('cb-for-'+i), forn = fe ? (fe.value || null) : null;
+    if (!cc) throw new Error('Escolha o centro de custo ('+t.memo.substring(0,30)+').');
+    if (!cat) throw new Error('Escolha a categoria ('+t.memo.substring(0,30)+').');
+    var v = Math.abs(t.valor), p = t.data.split('-');
+    var payload = {
+      grupo_id: 'GRP-' + Date.now() + '-' + Math.random().toString(36).substring(2,8).toUpperCase(),
+      centro_custo_id: cc, tipo: tipo, categoria: cat, fornecedor_nome: forn,
+      descricao: t.memo.substring(0,200), data_vencimento: t.data, data_pagamento: t.data,
+      mes_referencia: p[1]+'/'+p[0], valor_parcela: v, juros: 0, parcela_atual: 1, total_parcelas: 1, valor_total: v,
+      status: 'Pago', anexos: [], empresa: empresaFinanceiraSelecionada === 'Todas' ? null : empresaFinanceiraSelecionada,
+      criado_por: usuarioAtual.nome, forma_pagamento: null, pix_chave: null, numero_nf: null, chave_acesso: null
+    };
+    var r = await supabaseClient.from('financeiro_lancamentos').insert([payload]).select('*');
+    if (r.error && /chave_acesso/i.test(r.error.message || '')){ delete payload.chave_acesso; r = await supabaseClient.from('financeiro_lancamentos').insert([payload]).select('*'); }
+    if (r.error) throw r.error;
+    CB.lancs.push((r.data && r.data[0]) || payload);
+    var sug = ls(LS_SUG); sug[chaveMemo(t.memo)] = { cc: cc, cat: cat, forn: forn || '' }; lsSet(LS_SUG, sug);
+  }
+  async function lancarLista(ids){
+    var ok = 0, erro = null;
+    for (var k = 0; k < ids.length; k++){ try { await lancarUm(ids[k]); ok++; } catch(e){ erro = e.message || String(e); break; } }
+    CB.txs.forEach(function(t){ delete t._m; delete t._exato; });
+    cruzar(); render();
+    if (ok) mostrarAlerta(ok + ' lançamento(s) criado(s) como pago.', 'sucesso');
+    if (erro) mostrarAlerta('Parei no erro: ' + erro, 'erro');
+  }
+  window.CB_lancar = function(i){ lancarLista([i]); };
+  window.CB_lancarMarcados = function(){
+    var m = marcados(); if (!m.length) return mostrarAlerta('Marque pelo menos um movimento.', 'aviso');
+    if (!confirm('Lançar ' + m.length + ' movimento(s) como PAGO no centro de custo escolhido em cada linha?')) return;
+    lancarLista(m);
+  };
+
+  window.CB_importar = function(input){
+    var f = input.files && input.files[0]; if (!f) return;
+    var rd = new FileReader();
+    rd.onload = async function(){
+      var box = document.getElementById('cb-resultado');
+      try {
+        var txs = parseOFX(String(rd.result));
+        if (!txs.length) { box.innerHTML = ''; return mostrarAlerta('Não encontrei movimentos nesse arquivo. Use o extrato em formato OFX.', 'erro'); }
+        box.innerHTML = '<p style="padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i> Comparando com os lançamentos do sistema...</p>';
+        if (!todosCentrosCustoGlobais || !todosCentrosCustoGlobais.length) await carregarCentrosCusto(true);
+        if (!todasCategoriasGlobais || !todasCategoriasGlobais.length) await carregarCategorias(true);
+        CB.txs = txs; CB.arquivo = f.name; CB.aba = 'falta';
+        await buscarSistema(); cruzar(); render();
+      } catch(e){ box.innerHTML = ''; mostrarAlerta('Erro na conciliação: ' + (e.message || e), 'erro'); }
+    };
+    rd.readAsText(f, 'windows-1252');
+    input.value = '';
+  };
+  window.carregarConciliacaoBancaria = function(){ /* tela só trabalha depois de importar o arquivo */ };
+})();
+</script>
+<!-- ============ FIM MODULO CONCILIACAO BANCARIA ============ -->
 
 </body>
 </html>
