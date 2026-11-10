@@ -18,7 +18,7 @@ Premissas (o leiaute nao especifica; documentadas aqui):
     001-073, concatenados + hash do tipo 7 anterior do arquivo, se houver ).
   * CRC-16/KERMIT calculado sobre o texto do registro ate antes do campo CRC.
 """
-import argparse, base64, datetime as dt, hashlib, json, os, subprocess, sys, tempfile
+import re, argparse, base64, datetime as dt, hashlib, json, os, subprocess, sys, tempfile
 import urllib.request, urllib.parse, urllib.error
 
 FUSO = dt.timezone(dt.timedelta(hours=-3))  # Brasil (sem horario de verao desde 2019)
@@ -124,14 +124,67 @@ def _lat(s, n):
     return str(s or "").encode("latin-1", "replace").decode("latin-1")[:n]
 
 
+DIAS_SEMANA = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+
+
+def _hm_min(t):
+    h, m = str(t).split(":")
+    return int(h) * 60 + int(m)
+
+
+def _horario_do_dia(jornada, d):
+    """Horario contratual vigente no dia d (date) -> (entrada, saida, refeicao|None) ou None.
+    Mesma regra do sistema: jornada raiz, sobrescrita pelo historico_alteracoes mais recente
+    cuja data_inicio <= d. 12x36 usa 'horario'; 44h usa escala[dia da semana]."""
+    if not isinstance(jornada, dict):
+        return None
+    vig = jornada
+    for h in sorted(jornada.get("historico_alteracoes") or [], key=lambda x: str(x.get("data_inicio") or "")):
+        if str(d) >= str(h.get("data_inicio") or "9999"):
+            vig = h
+    tipo = str(vig.get("tipo") or "")
+    ref = vig.get("refeicao")
+    if tipo.startswith("12"):
+        hor = vig.get("horario")
+    else:
+        dia = (vig.get("escala") or {}).get(DIAS_SEMANA[d.weekday()]) or {}
+        hor = dia.get("horario")
+        ref = dia.get("refeicao") or ref
+    m = re.match(r"\s*(\d{1,2}:\d{2})\s*às\s*(\d{1,2}:\d{2})", str(hor or ""))
+    if not m:
+        return None
+    r = (ref["inicio"], ref["fim"]) if isinstance(ref, dict) and ref.get("inicio") and ref.get("fim") else None
+    return (m.group(1).rjust(5, "0"), m.group(2).rjust(5, "0"), r)
+
+
+def _duracao_min(ent, sai, ref):
+    """Minutos da jornada contratual, sem refeicao; horas noturnas (22h-5h) contadas pela
+    hora reduzida de 52min30s (CLT art. 73 par.1) — premissa: nota 3 do registro 04."""
+    e = _hm_min(ent)
+    total = (_hm_min(sai) - e) % 1440 or 1440
+    fora = set()
+    if ref:
+        r0 = _hm_min(ref[0])
+        fora = {(r0 + i) % 1440 for i in range((_hm_min(ref[1]) - r0) % 1440)}
+    dia = noite = 0
+    for i in range(total):
+        mm = (e + i) % 1440
+        if mm in fora:
+            continue
+        if mm >= 1320 or mm < 300:
+            noite += 1
+        else:
+            dia += 1
+    return dia + int(round(noite * 60 / 52.5))
+
+
 def montar_aej(emp, batidas, perfis, ini, fim, gerado_em, inpi, dev):
-    """Registros 01, 02, 03, 05, 08 e 99 (campos separados por '|', sem '|' no fim).
-    PENDENTE: registro 04 (horario contratual) e 07 (ausencias/banco) — ver avisos."""
-    avisos = ["registro 04 (horario contratual) nao gerado: marcacoes sem codHorContratual",
-              "registro 07 (ausencias/banco de horas) nao gerado"]
+    """Registros 01, 02, 03, 04, 05, 08 e 99 (campos separados por '|', sem '|' no fim).
+    PENDENTE: registro 07 (ausencias/banco de horas) — depende do tratamento de ponto."""
+    avisos = ["registro 07 (ausencias/banco de horas) nao gerado"]
     cnpj = num(emp["cnpj"], 14)
-    L = ["|".join(["01", "1", cnpj, "", "", _lat(emp["razao"], 150), ini, fim, dh(gerado_em), "002"]),
-         "|".join(["02", "1", "3", num(inpi, 17)])]
+    cab = ["|".join(["01", "1", cnpj, "", "", _lat(emp["razao"], 150), ini, fim, dh(gerado_em), "002"]),
+           "|".join(["02", "1", "3", num(inpi, 17)])]
     cont = {k: 0 for k in range(1, 9)}
     cont[1], cont[2] = 1, 1
 
@@ -141,20 +194,23 @@ def montar_aej(emp, batidas, perfis, ini, fim, gerado_em, inpi, dev):
         if not cpf:
             raise SystemExit("batida NSR %s sem CPF do colaborador — AEJ nao gerado." % b["nsr"])
         por_cpf.setdefault(cpf, []).append(b)
-    vinc = {}
+    vinc, vincs = {}, []
     for i, cpf in enumerate(sorted(por_cpf), 1):
         vinc[cpf] = i
-        nome = next((perfis[x]["nome"] for x in perfis if perfis[x]["cpf"] == cpf), "")
-        L.append("|".join(["03", str(i), num(cpf, 11), _lat(nome, 150)]))
+        pf = next((perfis[x] for x in perfis if perfis[x]["cpf"] == cpf), {})
+        vincs.append("|".join(["03", str(i), num(cpf, 11), _lat(pf.get("nome"), 150)]))
         cont[3] += 1
 
+    codigos = {}   # (ent, sai, ref, dur) -> codigo
+    marcas = []
+    sem_horario = 0
     for cpf, lst in sorted(por_cpf.items(), key=lambda kv: vinc[kv[0]]):
         lst.sort(key=lambda x: int(x["nsr"]))
-        ultimo_tipo, ultimo_ts, seq = None, None, 0
+        jornada = next((perfis[x].get("jornada") for x in perfis if perfis[x]["cpf"] == cpf), None)
+        ultimo_tipo, ultimo_ts, seq, aberto = None, None, 0, False
         for b in lst:
             ts = parse_ts(b["data_hora"])
-            nova = ultimo_tipo is None or ultimo_tipo == "saida" or (ts - ultimo_ts) > dt.timedelta(hours=14)
-            if nova:
+            if ultimo_tipo is None or ultimo_tipo == "saida" or (ts - ultimo_ts) > dt.timedelta(hours=14):
                 seq, aberto = 0, False
             t = b["tipo"]
             if t in ("entrada", "volta_refeicao"):
@@ -168,12 +224,31 @@ def montar_aej(emp, batidas, perfis, ini, fim, gerado_em, inpi, dev):
                 aberto = True
             else:
                 aberto = False
-            L.append("|".join(["05", str(vinc[cpf]), dh(b["data_hora"]), "1", tp, str(max(seq, 1)).rjust(3, "0"), "O", "", ""]))
+            cod = ""
+            if tp == "E" and seq == 1:
+                h = _horario_do_dia(jornada, ts.date())
+                if h:
+                    chave = (h[0], h[1], h[2], _duracao_min(*h))
+                    cod = codigos.setdefault(chave, "H%d" % (len(codigos) + 1))
+                else:
+                    sem_horario += 1
+            marcas.append("|".join(["05", str(vinc[cpf]), dh(b["data_hora"]), "1", tp, str(max(seq, 1)).rjust(3, "0"), "O", cod, ""]))
             cont[5] += 1
             ultimo_tipo, ultimo_ts = t, ts
 
+    horarios = []
+    for (ent, sai, ref, dur), cod in sorted(codigos.items(), key=lambda kv: int(kv[1][1:])):
+        if ref:
+            pares = [ent, ref[0], ref[1], sai]
+        else:
+            pares = [ent, sai, "", ""]
+        horarios.append("|".join(["04", cod, str(dur)] + [x.replace(":", "") for x in pares]))
+        cont[4] += 1
+    if sem_horario:
+        avisos.append("%d jornada(s) sem horario contratual cadastrado (folga/sem jornada): codHorContratual vazio" % sem_horario)
     if not dev.get("email"):
         avisos.append("registro 08 sem e-mail do desenvolvedor (defina DEV_EMAIL)")
+    L = cab + vincs + horarios + marcas
     L.append("|".join(["08", _lat(dev["nome"], 150), _lat(dev["versao"], 8), "1", num(dev["cnpj"], 14),
                        _lat(dev["razao"], 150), _lat(dev.get("email"), 50)]))
     cont[8] = 1
@@ -228,7 +303,8 @@ def carregar_perfis(sb, ids):
                     da = json.loads(da)
                 except Exception:
                     da = {}
-            perfis[p["id"]] = {"nome": p.get("nome"), "cpf": "".join(c for c in str(da.get("cpf") or "") if c.isdigit())}
+            perfis[p["id"]] = {"nome": p.get("nome"), "cpf": "".join(c for c in str(da.get("cpf") or "") if c.isdigit()),
+                               "jornada": da.get("jornada")}
     return perfis
 
 
