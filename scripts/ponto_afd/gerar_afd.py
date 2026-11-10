@@ -119,6 +119,69 @@ def montar_afd(emp, eventos, batidas, perfis, ini, fim, gerado_em, inpi):
     return "\r\n".join(saidas) + "\r\n", cont, ultimo
 
 
+# ---------------------------------------------------------------- AEJ (Anexo VI / gov.br, versao 002)
+def _lat(s, n):
+    return str(s or "").encode("latin-1", "replace").decode("latin-1")[:n]
+
+
+def montar_aej(emp, batidas, perfis, ini, fim, gerado_em, inpi, dev):
+    """Registros 01, 02, 03, 05, 08 e 99 (campos separados por '|', sem '|' no fim).
+    PENDENTE: registro 04 (horario contratual) e 07 (ausencias/banco) — ver avisos."""
+    avisos = ["registro 04 (horario contratual) nao gerado: marcacoes sem codHorContratual",
+              "registro 07 (ausencias/banco de horas) nao gerado"]
+    cnpj = num(emp["cnpj"], 14)
+    L = ["|".join(["01", "1", cnpj, "", "", _lat(emp["razao"], 150), ini, fim, dh(gerado_em), "002"]),
+         "|".join(["02", "1", "3", num(inpi, 17)])]
+    cont = {k: 0 for k in range(1, 9)}
+    cont[1], cont[2] = 1, 1
+
+    por_cpf = {}
+    for b in batidas:
+        cpf = perfis.get(b["colaborador_id"], {}).get("cpf")
+        if not cpf:
+            raise SystemExit("batida NSR %s sem CPF do colaborador — AEJ nao gerado." % b["nsr"])
+        por_cpf.setdefault(cpf, []).append(b)
+    vinc = {}
+    for i, cpf in enumerate(sorted(por_cpf), 1):
+        vinc[cpf] = i
+        nome = next((perfis[x]["nome"] for x in perfis if perfis[x]["cpf"] == cpf), "")
+        L.append("|".join(["03", str(i), num(cpf, 11), _lat(nome, 150)]))
+        cont[3] += 1
+
+    for cpf, lst in sorted(por_cpf.items(), key=lambda kv: vinc[kv[0]]):
+        lst.sort(key=lambda x: int(x["nsr"]))
+        ultimo_tipo, ultimo_ts, seq = None, None, 0
+        for b in lst:
+            ts = parse_ts(b["data_hora"])
+            nova = ultimo_tipo is None or ultimo_tipo == "saida" or (ts - ultimo_ts) > dt.timedelta(hours=14)
+            if nova:
+                seq, aberto = 0, False
+            t = b["tipo"]
+            if t in ("entrada", "volta_refeicao"):
+                tp = "E"
+            elif t in ("ida_refeicao", "saida"):
+                tp = "S"
+            else:  # batida extra: alterna com a anterior
+                tp = "S" if aberto else "E"
+            if tp == "E":
+                seq += 1
+                aberto = True
+            else:
+                aberto = False
+            L.append("|".join(["05", str(vinc[cpf]), dh(b["data_hora"]), "1", tp, str(max(seq, 1)).rjust(3, "0"), "O", "", ""]))
+            cont[5] += 1
+            ultimo_tipo, ultimo_ts = t, ts
+
+    if not dev.get("email"):
+        avisos.append("registro 08 sem e-mail do desenvolvedor (defina DEV_EMAIL)")
+    L.append("|".join(["08", _lat(dev["nome"], 150), _lat(dev["versao"], 8), "1", num(dev["cnpj"], 14),
+                       _lat(dev["razao"], 150), _lat(dev.get("email"), 50)]))
+    cont[8] = 1
+    L.append("|".join(["99"] + [str(cont[k]) for k in range(1, 9)]))
+    L.append(alfa("ASSINATURA_DIGITAL_EM_ARQUIVO_P7S", 100))
+    return "\r\n".join(L) + "\r\n", cont, avisos
+
+
 # ---------------------------------------------------------------- Supabase (REST)
 class Supa:
     def __init__(self, url, key):
@@ -246,14 +309,23 @@ def main():
     os.makedirs(pasta, exist_ok=True)
     caminho = os.path.join(pasta, nome)
     open(caminho, "wb").write(texto.encode("latin-1"))
-    arquivos = [caminho]
+    dev = {"nome": "Soul Gestao - Ponto", "versao": os.environ.get("PTRP_VERSAO", "1.0"), "cnpj": emp["cnpj"],
+           "razao": emp["razao"], "email": os.environ.get("DEV_EMAIL", "")}
+    aej, cont_aej, avisos = montar_aej(emp, batidas, perfis, a.ini, a.fim, gerado, a.inpi, dev)
+    print("AEJ registros:", cont_aej)
+    for av in avisos:
+        print("AVISO AEJ:", av)
+    caminho_aej = os.path.join(pasta, "AEJ%s%s%s.txt" % (num(emp["cnpj"], 14), a.ini.replace("-", ""), "" if a.inpi else "_RASCUNHO"))
+    open(caminho_aej, "wb").write(aej.encode("latin-1"))
+    arquivos = [caminho, caminho_aej]
     if not a.sem_assinar:
-        arquivos.append(assinar_p7s(caminho, os.environ["SEFAZ_CERT_PFX_BASE64"], os.environ["SEFAZ_CERT_SENHA"]))
-        print("assinado (.p7s).")
+        for f in list(arquivos):
+            arquivos.append(assinar_p7s(f, os.environ["SEFAZ_CERT_PFX_BASE64"], os.environ["SEFAZ_CERT_SENHA"]))
+        print("assinados (.p7s).")
     if not a.sem_upload:
         for f in arquivos:
-            sb.upload("afd/%s/%s" % (a.ini[:7], os.path.basename(f)), open(f, "rb").read(), "application/octet-stream")
-        print("enviado para o bucket privado ponto-fiscal/afd/%s/" % a.ini[:7])
+            sb.upload("%s/%s/%s" % ("aej" if os.path.basename(f).startswith("AEJ") else "afd", a.ini[:7], os.path.basename(f)), open(f, "rb").read(), "application/octet-stream")
+        print("enviados para o bucket privado ponto-fiscal (afd/ e aej/ em %s)." % a.ini[:7])
 
 
 if __name__ == "__main__":
