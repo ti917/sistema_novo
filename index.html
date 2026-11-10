@@ -13477,6 +13477,10 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                     <label>Valor (R$)</label>
                     <input type="number" id="be-valor" step="0.01" min="0" placeholder="0,00">
                 </div>
+                <div class="form-group" style="flex: 1;">
+                    <label title="Opcional. Deixe vazio se a pessoa já recebe há tempo. Preencha quando o direito começou numa data específica (ex.: troca de cargo) para pagar retroativo/proporcional.">A partir de (opcional)</label>
+                    <input type="date" id="be-data-inicio">
+                </div>
                 <button type="button" class="btn-success" style="background-color: #ffc107; color: #000; border: none; padding: 10px 20px; margin-bottom: 15px;" onclick="adicionarAtribuicaoBeneficio()">
                     <i class="fa-solid fa-plus"></i> Adicionar
                 </button>
@@ -118300,6 +118304,10 @@ window.renderizarListaAtribuicoesBeneficiosExtras = function() {
         <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(255,193,7,0.06); border: 1px solid rgba(255,193,7,0.25); border-radius: 8px; padding: 8px 12px;">
             <div style="font-size: 0.85rem;">
                 ${alvo} — ${a.nome_beneficio}: <b>R$ ${Number(a.valor).toFixed(2).replace('.', ',')}</b>
+                <span style="display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 0.75rem; color: var(--cor-texto-secundario);" title="A partir de quando a pessoa tem direito (vazio = sempre teve). Usado para pagar retroativo/proporcional.">
+                    <i class="fa-solid fa-calendar-day"></i> desde
+                    <input type="date" value="${a.data_inicio || ''}" onchange="definirDataInicioAtribuicao('${a.id}', this.value)" style="padding: 2px 6px; font-size: 0.75rem; width: auto;">
+                </span>
             </div>
             <button type="button" onclick="removerAtribuicaoBeneficio('${a.id}')" style="background: none; border: none; color: #dc3545; cursor: pointer;">
                 <i class="fa-solid fa-trash"></i>
@@ -118314,6 +118322,7 @@ window.adicionarAtribuicaoBeneficio = async function() {
     const escopo = document.getElementById('escopo-beneficio-extra').value;
     const catalogoId = document.getElementById('be-nome-beneficio').value;
     const valor = parseFloat(document.getElementById('be-valor').value);
+    const dataInicioBE = (document.getElementById('be-data-inicio') || {}).value || '';
 
     if (!unidade) return mostrarAlerta('Selecione a unidade.', 'aviso');
     if (!catalogoId) return mostrarAlerta('Selecione (ou crie) o nome do benefício.', 'aviso');
@@ -118348,6 +118357,9 @@ window.adicionarAtribuicaoBeneficio = async function() {
         }];
     }
 
+    // Só manda a data quando preenchida (vazio = comportamento de sempre)
+    if (dataInicioBE) registros.forEach(r => { r.data_inicio = dataInicioBE; });
+
     const { error } = await supabaseClient
         .from('config_beneficios_extras_atribuicoes')
         .insert(registros);
@@ -118358,9 +118370,23 @@ window.adicionarAtribuicaoBeneficio = async function() {
     }
 
     document.getElementById('be-valor').value = '';
+    if (document.getElementById('be-data-inicio')) document.getElementById('be-data-inicio').value = '';
     document.querySelectorAll('.chk-be-colaborador:checked').forEach(chk => chk.checked = false);
     mostrarAlerta('Benefício adicionado!', 'sucesso');
     await carregarAtribuicoesBeneficiosExtras();
+};
+
+window.definirDataInicioAtribuicao = async function(id, valor) {
+    const { error } = await supabaseClient
+        .from('config_beneficios_extras_atribuicoes')
+        .update({ data_inicio: valor || null })
+        .eq('id', id);
+    if (error) {
+        console.error(error);
+        return mostrarAlerta('Erro ao salvar a data: ' + error.message, 'erro');
+    }
+    const a = (window.atribuicoesBeneficiosExtras || []).find(x => x.id === id);
+    if (a) a.data_inicio = valor || null;
 };
 
 window.removerAtribuicaoBeneficio = async function(id) {
@@ -118484,13 +118510,73 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
             // 👇 NOVO: cada benefício individual (ex.: "Ajuda de Custo") guarda também o seu
             // próprio "valorRateado" — usa a MESMA proporção (diasPagos/diasPadrao) do total,
             // pra poder separar por aba/coluna no Excel sem perder o rateio de cada um.
+            const notasDataBE = [];
+            let algumComData = false;
+            const brData = (iso) => String(iso).split('-').reverse().join('/');
             const beneficiosComRateio = beneficiosDoColab.map(b => {
                 const valorBase = Number(b.valor) || 0;
-                const valorRateado = tipo === 'vr'
+                let valorRateado = tipo === 'vr'
                     ? (diasPadrao > 0 ? (valorBase / diasPadrao) * diasPagos : 0)
                     : (retidoNoVA ? 0 : valorBase);
+
+                // 👇 DATA DE INÍCIO DO DIREITO (opcional): vazio = sempre teve (comportamento de sempre).
+                const D = b.data_inicio ? String(b.data_inicio).slice(0, 10) : '';
+                if (D) {
+                    algumComData = true;
+                    try {
+                        if (tipo === 'vr') {
+                            const dIni = (document.getElementById('vr-data-inicio') || {}).value || '';
+                            const dFim = (document.getElementById('vr-data-fim') || {}).value || '';
+                            if (dIni && dFim && !semApuracaoVR && diasPadrao > 0) {
+                                if (D > dFim) {
+                                    valorRateado = 0;
+                                    notasDataBE.push(`${b.nome_beneficio}: começa em ${brData(D)} — entra no período seguinte`);
+                                } else if (D >= dIni) {
+                                    // Começou DENTRO do período: paga retroativo dos dias de trabalho da data até o fim do mês de referência
+                                    // (mesma conta do retroativo de troca de unidade: dias + 0,5, limitado ao teto), somado ao crédito normal.
+                                    const [aF, mF] = dFim.split('-').map(Number);
+                                    const fimMes = new Date(aF, mF, 0, 23, 59, 59);
+                                    let t = new Date(D + 'T00:00:00');
+                                    let diasRetroB = 0;
+                                    while (t <= fimMes) {
+                                        const isoT = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+                                        if (!window.isDiaDeFolga(c, isoT)) diasRetroB++;
+                                        t.setDate(t.getDate() + 1);
+                                    }
+                                    if (diasRetroB > 0) diasRetroB += 0.5;
+                                    if (diasRetroB > diasPadrao) diasRetroB = diasPadrao;
+                                    valorRateado = (valorBase / diasPadrao) * (diasPagos + diasRetroB);
+                                    notasDataBE.push(`${b.nome_beneficio}: desde ${brData(D)} — retroativo +${diasRetroB.toFixed(1)} dia(s)`);
+                                }
+                            }
+                        } else {
+                            const mesVA = (document.getElementById('va-mes') || {}).value || '';
+                            if (mesVA) {
+                                const [aV, mV] = mesVA.split('-').map(Number);
+                                const ultimoDiaMes = new Date(aV, mV, 0).getDate();
+                                const mesAnt = new Date(aV, mV - 2, 1);
+                                const mesAntStr = `${mesAnt.getFullYear()}-${String(mesAnt.getMonth() + 1).padStart(2, '0')}`;
+                                const ultimoDiaAnt = new Date(mesAnt.getFullYear(), mesAnt.getMonth() + 1, 0).getDate();
+                                if (D > `${mesVA}-31`) {
+                                    valorRateado = 0;
+                                    notasDataBE.push(`${b.nome_beneficio}: começa em ${brData(D)} — entra no mês seguinte`);
+                                } else if (D >= `${mesVA}-01`) {
+                                    const fracMes = (ultimoDiaMes - parseInt(D.slice(8, 10)) + 1) / ultimoDiaMes;
+                                    if (!retidoNoVA) valorRateado = valorBase * fracMes;
+                                    notasDataBE.push(`${b.nome_beneficio}: desde ${brData(D)} — proporcional ${(fracMes * 100).toFixed(0)}% do mês`);
+                                } else if (D.slice(0, 7) === mesAntStr) {
+                                    const fracAnt = (ultimoDiaAnt - parseInt(D.slice(8, 10)) + 1) / ultimoDiaAnt;
+                                    if (!retidoNoVA) valorRateado = valorBase + valorBase * fracAnt;
+                                    notasDataBE.push(`${b.nome_beneficio}: desde ${brData(D)} — retroativo do mês anterior (${(fracAnt * 100).toFixed(0)}%)`);
+                                }
+                            }
+                        }
+                    } catch (eBE) { console.warn('Data de início do benefício extra ignorada (erro):', eBE); }
+                }
                 return { nome: b.nome_beneficio, valor: valorBase, valorRateado };
             });
+            // Só recalcula o total quando algum benefício tem data de início — sem data, o total segue exatamente como antes.
+            if (algumComData) valorTotal = beneficiosComRateio.reduce((acc, x) => acc + (x.valorRateado || 0), 0);
 
             // Motivos (igual à explicação que o VR já mostra): proporcional, retroativo, férias, faltas
             const motivos = [];
@@ -118504,6 +118590,8 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
                 if (outrosM > 0) motivos.push(`Faltas/afastamentos: -${outrosM.toFixed(1)} dia(s)`);
                 if (motivos.length === 0) motivos.push('Base cheia');
             }
+            if (tipo === 'vr') notasDataBE.forEach(n => motivos.push(n));
+            else if (notasDataBE.length > 0) situacaoVA = (situacaoVA ? situacaoVA + ' | ' : '') + notasDataBE.join('; ');
             resultado.push({
                 motivos,
                 id: c.id,
