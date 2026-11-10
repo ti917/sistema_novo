@@ -5838,6 +5838,9 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                     <button class="btn-secondary" style="border-color: #25D366; color: #25D366; padding: 8px 16px; font-size: 0.85rem;" onclick="window.atualizarBatimentosPontoWhatsapp(this)">
                         <i class="fa-solid fa-rotate"></i> Atualizar
                     </button>
+                    <button class="btn-secondary" style="border-color: #ff9800; color: #ff9800; padding: 8px 16px; font-size: 0.85rem;" onclick="window.abrirAlertasPonto()">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Alertas
+                    </button>
                 </div>
             </div>
             <p style="font-size: 0.82rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">Uma linha por colaborador/dia — últimos 30 dias, mais recentes primeiro. Clique num horário pra ver a data exata daquele ponto (importante à noite, quando o ponto pode cair no dia seguinte).</p>
@@ -114437,6 +114440,80 @@ window.abrirDetalhesPontoDia = function(idCartao) {
 // FOTO TIRADA NA HORA DO PONTO — abre num lightbox por cima do modal de detalhes,
 // sem precisar sair do site pra ver a imagem (mesma foto salva/comprimida pelo app).
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// ALERTAS DE PONTO (REP-P) — só leitura. Mostra, dos últimos 30 dias, as batidas que o app/quiosque
+// registrou COM sinalização (fora do raio, foto escura, rosto não reconhecido, batida extra) e as
+// tentativas do quiosque em que o rosto não foi reconhecido (sem nome). Ninguém é bloqueado: o ponto
+// vale e o RH confere aqui. Só o perfil Admin lê essas tabelas (política no banco).
+// -----------------------------------------------------------------------
+window.abrirAlertasPonto = async function() {
+    const esc = function(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+    const fmt = function(iso) { return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(iso)); };
+    const ROT_ALERTA = { fora_do_raio: 'Fora do raio da unidade', unidade_sem_localizacao: 'Unidade sem localização cadastrada', foto_escura: 'Foto escura', sem_rosto: 'Sem rosto na foto', rosto_nao_reconhecido: 'Rosto não reconhecido', batida_extra: 'Batida extra' };
+    const ROT_TIPO = { entrada: 'Entrada', ida_refeicao: 'Ida para Refeição', volta_refeicao: 'Volta da Refeição', saida: 'Saída', extra: 'Batida extra' };
+
+    const antigo = document.getElementById('modal-alertas-ponto');
+    if (antigo) antigo.remove();
+    document.body.insertAdjacentHTML('beforeend',
+        '<div id="modal-alertas-ponto" style="position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 106600; display: flex; align-items: center; justify-content: center; padding: 16px;">'
+        + '<div class="glass-card" style="width: 100%; max-width: 920px; max-height: 88vh; overflow-y: auto; padding: 20px; position: relative;">'
+        + '<button onclick="document.getElementById(\'modal-alertas-ponto\').remove()" style="position:absolute; top:12px; right:16px; background:none; border:none; color:#fff; font-size:1.6rem; cursor:pointer;">&times;</button>'
+        + '<h3 style="margin:0 0 4px; color:#ff9800;"><i class="fa-solid fa-triangle-exclamation"></i> Alertas de ponto</h3>'
+        + '<p style="font-size:0.82rem; color:var(--cor-texto-secundario); margin:0 0 14px;">Últimos 30 dias. O ponto de quem aparece aqui foi registrado normalmente — a lista serve pra você conferir.</p>'
+        + '<div id="conteudo-alertas-ponto"><p style="text-align:center; padding:20px;"><i class="fa-solid fa-circle-notch fa-spin"></i></p></div>'
+        + '</div></div>');
+    const alvo = document.getElementById('conteudo-alertas-ponto');
+
+    try {
+        const desde = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const [rBat, rTent] = await Promise.all([
+            supabaseClient.from('ponto_batidas').select('nsr, colaborador_id, unidade, tipo, data_hora, distancia_m, fora_do_raio, foto_url, alerta, origem').not('alerta', 'is', null).gte('data_hora', desde).order('data_hora', { ascending: false }).limit(300),
+            supabaseClient.from('ponto_tentativas_quiosque').select('id, unidade, data_hora, foto_url, motivo').gte('data_hora', desde).order('data_hora', { ascending: false }).limit(200)
+        ]);
+        if (rBat.error) throw rBat.error;
+        if (rTent.error) throw rTent.error;
+        const batidas = rBat.data || [];
+        const tentativas = rTent.data || [];
+
+        const ids = Array.from(new Set(batidas.map(function(b) { return b.colaborador_id; }).filter(Boolean)));
+        const nomes = {};
+        if (ids.length) {
+            const { data: perf } = await supabaseClient.from('perfis').select('id, nome').in('id', ids);
+            (perf || []).forEach(function(pf) { nomes[pf.id] = pf.nome; });
+        }
+
+        const botaoFoto = function(url, rot, dh) {
+            return url ? '<button type="button" class="btn-secondary" style="padding:3px 10px; font-size:0.72rem; border-color:#ffb300; color:#ffb300;" onclick="window.abrirFotoPontoModal(\'' + String(url).replace(/'/g, "\\'") + '\', \'' + esc(rot) + '\', \'' + esc(dh) + '\')"><i class="fa-solid fa-camera"></i> Foto</button>' : '';
+        };
+        const badge = function(txt) { return '<span class="badge" style="background:rgba(255,152,0,0.15); color:#ff9800; border:1px solid #ff9800; font-size:0.68rem; padding:2px 8px; border-radius:10px; margin:1px 3px 1px 0; display:inline-block;">' + esc(txt) + '</span>'; };
+
+        let html = '<h4 style="margin:6px 0 8px;">Batidas sinalizadas (' + batidas.length + ')</h4>';
+        if (!batidas.length) {
+            html += '<p style="color:var(--cor-texto-secundario); font-size:0.85rem;">Nenhuma batida sinalizada nos últimos 30 dias.</p>';
+        } else {
+            html += '<div style="overflow-x:auto;"><table class="tabela-padrao" style="width:100%; font-size:0.82rem;"><thead><tr><th style="text-align:left;">Colaborador</th><th style="text-align:left;">Unidade</th><th>Batida</th><th>Data/hora</th><th style="text-align:left;">Alerta</th><th>NSR</th><th></th></tr></thead><tbody>'
+                + batidas.map(function(b) {
+                    const alertas = String(b.alerta || '').split(',').filter(Boolean).map(function(a) { return badge(ROT_ALERTA[a] || a) + (a === 'fora_do_raio' && b.distancia_m != null ? '<span style="font-size:0.72rem; color:var(--cor-texto-secundario);">(' + esc(b.distancia_m) + ' m)</span>' : ''); }).join('');
+                    return '<tr><td>' + esc(nomes[b.colaborador_id] || 'Colaborador') + '</td><td>' + esc(b.unidade || '-') + (b.origem === 'quiosque' ? ' <span style="color:var(--cor-texto-secundario); font-size:0.7rem;">(quiosque)</span>' : '') + '</td><td style="text-align:center;">' + esc(ROT_TIPO[b.tipo] || b.tipo) + '</td><td style="text-align:center; white-space:nowrap;">' + fmt(b.data_hora) + '</td><td>' + alertas + '</td><td style="text-align:center;">' + esc(b.nsr) + '</td><td>' + botaoFoto(b.foto_url, nomes[b.colaborador_id] || 'Ponto', fmt(b.data_hora)) + '</td></tr>';
+                }).join('') + '</tbody></table></div>';
+        }
+
+        html += '<h4 style="margin:20px 0 8px;">Quiosque: rosto não reconhecido (' + tentativas.length + ')</h4>';
+        if (!tentativas.length) {
+            html += '<p style="color:var(--cor-texto-secundario); font-size:0.85rem;">Nenhuma tentativa sem reconhecimento nos últimos 30 dias.</p>';
+        } else {
+            html += '<p style="font-size:0.78rem; color:var(--cor-texto-secundario); margin:0 0 6px;">Sem nome, porque o rosto não foi reconhecido. O quiosque pediu pra pessoa justificar o dia.</p>'
+                + '<div style="overflow-x:auto;"><table class="tabela-padrao" style="width:100%; font-size:0.82rem;"><thead><tr><th style="text-align:left;">Unidade</th><th>Data/hora</th><th style="text-align:left;">Motivo</th><th></th></tr></thead><tbody>'
+                + tentativas.map(function(t) {
+                    return '<tr><td>' + esc(t.unidade || '-') + '</td><td style="text-align:center; white-space:nowrap;">' + fmt(t.data_hora) + '</td><td>' + badge(ROT_ALERTA[t.motivo] || t.motivo || 'Rosto não reconhecido') + '</td><td>' + botaoFoto(t.foto_url, 'Tentativa no quiosque', fmt(t.data_hora)) + '</td></tr>';
+                }).join('') + '</tbody></table></div>';
+        }
+        alvo.innerHTML = html;
+    } catch (e) {
+        alvo.innerHTML = '<p style="color:var(--cor-perigo); padding:16px;">Não consegui carregar os alertas agora' + (e && e.message ? ': ' + esc(e.message) : '') + '. Só o perfil Admin tem acesso a essa lista.</p>';
+    }
+};
+
 window.abrirFotoPontoModal = function(urlFoto, rotulo, dataHora) {
     const existente = document.getElementById('modal-foto-ponto-whatsapp');
     if (existente) existente.remove();
