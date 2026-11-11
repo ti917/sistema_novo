@@ -11864,6 +11864,12 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                 <option value="">Selecione a Unidade...</option>
             </select>
         </div>
+        <button type="button" class="btn-primary" onclick="window.exportarRelatorioControleFerias()" title="Gera um Excel com quem já tirou férias, quem precisa tirar e o prazo limite. Com unidade escolhida = só ela; sem unidade = todas." style="height: 45px; padding: 0 18px; white-space: nowrap;">
+            <i class="fa-solid fa-file-excel"></i> Relatório Excel
+        </button>
+        <button type="button" class="btn-primary" onclick="window.gerarPDFControleFerias()" title="PDF para imprimir ou enviar: resumo no topo e a lista de quem já tirou, quem precisa tirar e o prazo limite." style="height: 45px; padding: 0 18px; white-space: nowrap; background: #dc3545; border-color: #dc3545;">
+            <i class="fa-solid fa-file-pdf"></i> Relatório PDF
+        </button>
     </div>
 
     <div id="container-radar-vencimentos-ferias" class="hidden" style="margin-bottom: 25px;">
@@ -95595,6 +95601,274 @@ window.filtrarExtratoBHGestorVisual = function() {
       // =========================================================================
 // MOTOR DE VARREDURA E CÁLCULO DE VENCIMENTOS DE FÉRIAS (FIFO)
 // =========================================================================
+
+// =====================================================================
+// 📊 RELATÓRIO DE CONTROLE DE FÉRIAS (pedido do RH): quem já tirou, quem precisa tirar e o
+// prazo limite. Mesma regra de cálculo da tela de Vencimentos (30 dias, descontando faltas,
+// abono pecuniário e frações lançadas). Só LÊ dados — não altera nada no sistema.
+// =====================================================================
+window._coletarControleFerias = async function() {
+    try {
+        const unidadeSel = (document.getElementById('filtro-unidade-venc-ferias') || {}).value || '';
+        let unidades = [];
+        if (unidadeSel) unidades = [unidadeSel];
+        else unidades = Array.from(document.querySelectorAll('#filtro-unidade-venc-ferias option')).map(o => o.value).filter(Boolean);
+        if (unidades.length === 0) { mostrarAlerta("Nenhuma unidade disponível para o relatório.", "aviso"); return null; }
+
+        mostrarAlerta("Montando o relatório de controle de férias... pode levar alguns segundos.", "aviso");
+
+        const { data: colabs, error: errC } = await supabaseClient.from('perfis')
+            .select('id, nome, unidade, empresa, dados_admissao, status')
+            .eq('perfil', 'Colaborador').eq('status', 'Ativo').in('unidade', unidades);
+        if (errC) throw errC;
+        if (!colabs || colabs.length === 0) { mostrarAlerta("Nenhum colaborador ativo encontrado.", "aviso"); return null; }
+
+        const ids = colabs.map(c => c.id);
+        let todasAusencias = [], todasFerias = [];
+        for (let i = 0; i < ids.length; i += 80) {
+            const lote = ids.slice(i, i + 80);
+            const [rA, rF] = await Promise.all([
+                supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').eq('sigla', 'FA').in('colaborador_id', lote),
+                supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias, periodo_aquisitivo_inicio, periodo_aquisitivo_fim, observacao, status').neq('status', 'Reprovado').in('colaborador_id', lote)
+            ]);
+            if (rA.data) todasAusencias = todasAusencias.concat(rA.data);
+            if (rF.data) todasFerias = todasFerias.concat(rF.data);
+        }
+
+        const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+        const iso = (d) => d.toISOString().split('T')[0];
+        const br = (v) => { if (!v) return ''; const [y, m, d] = String(v).slice(0, 10).split('-'); return `${d}/${m}/${y}`; };
+        const linhas = [];
+
+        colabs.forEach(c => {
+            const adm = c.dados_admissao || {};
+            const dataInicioStr = adm.jornada?.data_inicio || adm.data_inicio;
+            if (!dataInicioStr) return;
+            const dAdm = new Date(dataInicioStr + 'T00:00:00');
+            let anos = hoje.getFullYear() - dAdm.getFullYear();
+            const aniv = new Date(dAdm); aniv.setFullYear(hoje.getFullYear());
+            if (hoje < aniv) anos--;
+
+            for (let i = 0; i <= anos; i++) {
+                const paIni = new Date(dAdm); paIni.setFullYear(paIni.getFullYear() + i);
+                const paFim = new Date(paIni); paFim.setFullYear(paFim.getFullYear() + 1); paFim.setDate(paFim.getDate() - 1);
+                if (hoje <= paFim) continue; // período ainda em aquisição: ainda não gera direito
+                const sIni = iso(paIni), sFim = iso(paFim);
+                const prazoLegal = new Date(paFim); prazoLegal.setFullYear(prazoLegal.getFullYear() + 1);
+
+                const faltas = todasAusencias
+                    .filter(a => a.colaborador_id === c.id && a.data_inicio >= sIni && a.data_inicio <= sFim)
+                    .reduce((soma, a) => {
+                        const d1 = new Date(a.data_inicio + 'T00:00:00');
+                        const d2 = new Date((a.data_fim || a.data_inicio) + 'T00:00:00');
+                        return soma + (Math.floor((d2 - d1) / 86400000) + 1);
+                    }, 0);
+                let direito = 30;
+                if (faltas >= 6 && faltas <= 14) direito = 24;
+                else if (faltas >= 15 && faltas <= 23) direito = 18;
+                else if (faltas >= 24 && faltas <= 32) direito = 12;
+                else if (faltas > 32) direito = 0;
+
+                const fr = todasFerias.filter(f => f.colaborador_id === c.id && f.periodo_aquisitivo_inicio === sIni && f.periodo_aquisitivo_fim === sFim);
+                let gozados = 0, programados = 0, vendidos = 0, proxInicio = '';
+                fr.forEach(f => {
+                    const d1 = new Date(f.data_inicio_ferias + 'T00:00:00');
+                    const d2 = new Date(f.data_fim_ferias + 'T00:00:00');
+                    const dias = Math.floor((d2 - d1) / 86400000) + 1;
+                    if (f.observacao && f.observacao.includes('Abono Pecuniário')) vendidos += Math.floor(direito / 3);
+                    if (d1 <= hoje) gozados += dias;
+                    else { programados += dias; if (!proxInicio || f.data_inicio_ferias < proxInicio) proxInicio = f.data_inicio_ferias; }
+                });
+                const saldo = Math.max(0, direito - gozados - programados - vendidos);
+                const diasParaPrazo = Math.ceil((prazoLegal - hoje) / 86400000);
+
+                let situacao, ordem;
+                if (direito === 0) { situacao = 'Sem direito (excesso de faltas)'; ordem = 9; }
+                else if (saldo === 0 && programados === 0) { situacao = 'JÁ TIROU (quitadas)'; ordem = 7; }
+                else if (saldo === 0 && programados > 0) { situacao = 'Programadas (já marcadas)'; ordem = 6; }
+                else if (diasParaPrazo < 0) { situacao = 'VENCIDA — risco de pagar em dobro'; ordem = 1; }
+                else if (diasParaPrazo <= 90) { situacao = `URGENTE — vence em ${diasParaPrazo} dias`; ordem = 2; }
+                else { situacao = 'PRECISA TIRAR (dentro do prazo)'; ordem = 3; }
+
+                linhas.push({ ordem, diasParaPrazo, nome: c.nome, unidade: c.unidade, empresa: c.empresa || '', cargo: adm.cargo || '',
+                    admissao: dataInicioStr, paIni: sIni, paFim: sFim, direito, gozados, programados, vendidos, saldo,
+                    prazoLegal: iso(prazoLegal), proxInicio, situacao });
+            }
+        });
+
+        if (linhas.length === 0) { mostrarAlerta("Nenhum período aquisitivo concluído encontrado para o relatório.", "aviso"); return null; }
+        linhas.sort((a, b) => (a.ordem - b.ordem) || (a.diasParaPrazo - b.diasParaPrazo) || a.nome.localeCompare(b.nome));
+        return { linhas, unidadeSel };
+    } catch (err) {
+        console.error(err);
+        mostrarAlerta("Erro ao montar o relatório de férias: " + (err.message || err), "erro");
+        return null;
+    }
+};
+
+window.exportarRelatorioControleFerias = async function() {
+    try {
+        const dados = await window._coletarControleFerias();
+        if (!dados) return;
+        const { linhas, unidadeSel } = dados;
+        const br = (v) => { if (!v) return ''; const [y, m, d] = String(v).slice(0, 10).split('-'); return `${d}/${m}/${y}`; };
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'RH Portal';
+        const sheet = workbook.addWorksheet('Controle de Férias');
+        const cols = ['COLABORADOR', 'UNIDADE', 'EMPRESA', 'CARGO', 'ADMISSÃO', 'PERÍODO AQUISITIVO (INÍCIO)', 'PERÍODO AQUISITIVO (FIM)', 'DIREITO (DIAS)', 'JÁ GOZADOS (DIAS)', 'PROGRAMADOS (DIAS)', 'VENDIDOS / ABONO (DIAS)', 'SALDO A TIRAR (DIAS)', 'PRAZO LIMITE (CLT)', 'DIAS ATÉ O PRAZO', 'PRÓXIMA FÉRIAS MARCADA', 'SITUAÇÃO'];
+        const nCols = cols.length;
+        const ultCol = String.fromCharCode(64 + nCols);
+
+        const cont = (t) => linhas.filter(l => l.ordem === t).length;
+        sheet.mergeCells(`A1:${ultCol}1`);
+        sheet.getCell('A1').value = 'RELATÓRIO DE CONTROLE DE FÉRIAS — QUEM JÁ TIROU, QUEM PRECISA TIRAR E PRAZO LIMITE';
+        sheet.getCell('A1').font = { size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+        sheet.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF002347' } };
+        sheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+        sheet.getRow(1).height = 28;
+        sheet.mergeCells(`A2:${ultCol}2`);
+        sheet.getCell('A2').value = `Gerado em ${new Date().toLocaleDateString('pt-BR')}  |  ${unidadeSel ? 'Unidade: ' + unidadeSel : 'Todas as unidades'}  |  Vencidas: ${cont(1)}  |  Urgentes (≤ 90 dias): ${cont(2)}  |  A tirar no prazo: ${cont(3)}  |  Programadas: ${cont(6)}  |  Já tiraram: ${cont(7)}`;
+        sheet.getCell('A2').font = { size: 11, bold: true, color: { argb: 'FF002347' } };
+        sheet.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+        sheet.getCell('A2').alignment = { vertical: 'middle', horizontal: 'center' };
+        sheet.getRow(2).height = 22;
+        sheet.mergeCells(`A3:${ultCol}3`);
+        sheet.getCell('A3').value = 'Prazo limite = 1 ano após o fim do período aquisitivo (limite concessivo da CLT). Só entram períodos aquisitivos já concluídos. Saldo considera faltas, férias lançadas e dias vendidos (abono).';
+        sheet.getCell('A3').font = { size: 9, italic: true, color: { argb: 'FF555555' } };
+        sheet.getCell('A3').alignment = { vertical: 'middle', horizontal: 'center' };
+
+        const header = sheet.getRow(5);
+        header.values = cols;
+        header.height = 34;
+        header.eachCell(cell => {
+            cell.font = { bold: true, color: { argb: 'FF000000' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF00BCD4' } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+            cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        });
+
+        const cores = { 1: 'FFF8D7DA', 2: 'FFFFE5B4', 3: 'FFFFF8CC', 6: 'FFDDEBF7', 7: 'FFD4EDDA', 9: 'FFEDEDED' };
+        linhas.forEach(l => {
+            const r = sheet.addRow([l.nome, l.unidade, l.empresa, l.cargo, br(l.admissao), br(l.paIni), br(l.paFim), l.direito, l.gozados, l.programados, l.vendidos, l.saldo, br(l.prazoLegal), l.diasParaPrazo, br(l.proxInicio), l.situacao]);
+            r.eachCell((cell, n) => {
+                cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+                cell.alignment = { vertical: 'middle', horizontal: (n >= 5 && n <= 15) ? 'center' : 'left', wrapText: n === 16 };
+            });
+            const sit = r.getCell(nCols);
+            sit.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: cores[l.ordem] || 'FFFFFFFF' } };
+            sit.font = { bold: true };
+        });
+
+        const larguras = [34, 30, 20, 24, 12, 16, 16, 10, 12, 13, 14, 13, 14, 12, 16, 38];
+        larguras.forEach((w, i) => { sheet.getColumn(i + 1).width = w; });
+        sheet.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5 + linhas.length, column: nCols } };
+        sheet.views = [{ state: 'frozen', ySplit: 5 }];
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Controle_Ferias_${new Date().toISOString().split('T')[0]}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+        mostrarAlerta(`Relatório gerado com ${linhas.length} período(s).`, "sucesso");
+    } catch (err) {
+        console.error(err);
+        mostrarAlerta("Erro ao gerar o relatório de férias: " + (err.message || err), "erro");
+    }
+};
+
+
+window.gerarPDFControleFerias = async function() {
+    try {
+        const dados = await window._coletarControleFerias();
+        if (!dados) return;
+        const { linhas, unidadeSel } = dados;
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const W = doc.internal.pageSize.getWidth();
+        const H = doc.internal.pageSize.getHeight();
+        const br = (v) => { if (!v) return '-'; const [y, m, d] = String(v).slice(0, 10).split('-'); return `${d}/${m}/${y}`; };
+        const cont = (t) => linhas.filter(l => l.ordem === t).length;
+
+        // Faixa do topo
+        doc.setFillColor(0, 35, 71); doc.rect(0, 0, W, 26, 'F');
+        doc.setFillColor(255, 193, 7); doc.rect(0, 26, W, 1.4, 'F');
+        doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(17);
+        doc.text('CONTROLE DE FÉRIAS', 12, 12);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+        doc.text('Quem já tirou, quem precisa tirar e o prazo limite (CLT)', 12, 19);
+        doc.setFontSize(9);
+        doc.text(`Gerado em ${new Date().toLocaleDateString('pt-BR')}`, W - 12, 12, { align: 'right' });
+        doc.text(unidadeSel ? `Unidade: ${unidadeSel}` : 'Todas as unidades', W - 12, 19, { align: 'right' });
+
+        // Cartões de resumo
+        const cards = [
+            { t: 'VENCIDAS', n: cont(1), c: [220, 53, 69], d: 'risco de pagar em dobro' },
+            { t: 'URGENTES', n: cont(2), c: [255, 140, 0], d: 'vencem em até 90 dias' },
+            { t: 'PRECISAM TIRAR', n: cont(3), c: [214, 168, 0], d: 'dentro do prazo' },
+            { t: 'PROGRAMADAS', n: cont(6), c: [41, 128, 185], d: 'já estão marcadas' },
+            { t: 'JÁ TIRARAM', n: cont(7), c: [40, 167, 69], d: 'períodos quitados' }
+        ];
+        const gap = 4, cw = (W - 24 - gap * (cards.length - 1)) / cards.length;
+        cards.forEach((k, i) => {
+            const x = 12 + i * (cw + gap), y = 33;
+            doc.setFillColor(248, 249, 251); doc.roundedRect(x, y, cw, 22, 2, 2, 'F');
+            doc.setFillColor(k.c[0], k.c[1], k.c[2]); doc.rect(x, y, 2, 22, 'F');
+            doc.setTextColor(90, 100, 115); doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5);
+            doc.text(k.t, x + 6, y + 6);
+            doc.setTextColor(k.c[0], k.c[1], k.c[2]); doc.setFontSize(18);
+            doc.text(String(k.n), x + 6, y + 15);
+            doc.setTextColor(120, 130, 145); doc.setFont('helvetica', 'normal'); doc.setFontSize(7);
+            doc.text(k.d, x + 6, y + 19.5);
+        });
+
+        const cores = { 1: [248, 215, 218], 2: [255, 229, 180], 3: [255, 248, 204], 6: [221, 235, 247], 7: [212, 237, 218], 9: [237, 237, 237] };
+        const corTxt = { 1: [150, 20, 35], 2: [150, 80, 0], 3: [110, 85, 0], 6: [20, 80, 130], 7: [20, 100, 40], 9: [90, 90, 90] };
+
+        doc.autoTable({
+            startY: 60,
+            margin: { left: 12, right: 12, bottom: 16 },
+            head: [['Colaborador', 'Unidade', 'Período aquisitivo', 'Direito', 'Gozados', 'Program.', 'Vendidos', 'Saldo a tirar', 'Prazo limite', 'Dias p/ prazo', 'Situação']],
+            body: linhas.map(l => [l.nome, l.unidade, `${br(l.paIni)} a ${br(l.paFim)}`, l.direito + 'd', l.gozados + 'd', l.programados + 'd', l.vendidos + 'd', l.saldo + 'd', br(l.prazoLegal), String(l.diasParaPrazo), l.situacao]),
+            theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.8, valign: 'middle', lineColor: [220, 225, 232], lineWidth: 0.15, textColor: [30, 40, 55] },
+            headStyles: { fillColor: [0, 35, 71], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center', fontSize: 7.5 },
+            alternateRowStyles: { fillColor: [250, 251, 253] },
+            columnStyles: {
+                0: { cellWidth: 48, fontStyle: 'bold' }, 1: { cellWidth: 40 }, 2: { cellWidth: 35, halign: 'center' },
+                3: { cellWidth: 14, halign: 'center' }, 4: { cellWidth: 15, halign: 'center' }, 5: { cellWidth: 15, halign: 'center' },
+                6: { cellWidth: 18, halign: 'center' }, 7: { cellWidth: 17, halign: 'center', fontStyle: 'bold' },
+                8: { cellWidth: 20, halign: 'center' }, 9: { cellWidth: 16, halign: 'center' }, 10: { cellWidth: 'auto', fontStyle: 'bold' }
+            },
+            didParseCell: function (d) {
+                if (d.section === 'body' && d.column.index === 10) {
+                    const o = linhas[d.row.index].ordem;
+                    d.cell.styles.fillColor = cores[o] || [255, 255, 255];
+                    d.cell.styles.textColor = corTxt[o] || [30, 40, 55];
+                }
+                if (d.section === 'body' && d.column.index === 9) {
+                    const l = linhas[d.row.index];
+                    if (l.ordem <= 3 && l.diasParaPrazo < 0) d.cell.styles.textColor = [200, 30, 45];
+                }
+            },
+            didDrawPage: function () {
+                const pg = doc.internal.getCurrentPageInfo().pageNumber;
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(130, 140, 155);
+                doc.text('Documento confidencial — uso interno do RH. Prazo limite = 1 ano após o fim do período aquisitivo (limite concessivo da CLT).', 12, H - 8);
+                doc.text('Página ' + pg, W - 12, H - 8, { align: 'right' });
+            }
+        });
+
+        doc.save(`Controle_Ferias_${new Date().toISOString().split('T')[0]}.pdf`);
+        mostrarAlerta("PDF do controle de férias gerado.", "sucesso");
+    } catch (err) {
+        console.error(err);
+        mostrarAlerta("Erro ao gerar o PDF: " + (err.message || err), "erro");
+    }
+};
+
 window.carregarVencimentosFeriasAdmin = async function() {
     const select = document.getElementById('filtro-unidade-venc-ferias');
     
