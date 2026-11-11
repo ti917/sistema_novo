@@ -353,6 +353,7 @@
             <div class="form-group" data-passo="5" style="padding: 20px; background: rgba(0,0,0,0.2); border: 1px dashed rgba(255, 255, 255, 0.2); border-radius: 16px; margin-top: 5px;">
                 <label id="lbl-anexo" style="color: var(--cor-texto);"><i class="fa-solid fa-paperclip"></i> Anexar Atestado / Comprovante <span style="color: var(--cor-perigo);">(obrigatório - Máx 3MB)</span></label>
                 <input type="file" id="doc-opcional" accept="image/*,.pdf" style="margin-top: 8px; width: 100%; border: none; padding: 0; background: transparent; font-size: 0.95rem;">
+                <div id="leitura-atestado" class="hidden" style="margin-top: 12px; padding: 12px 14px; border-radius: 12px; background: rgba(79,195,247,0.08); border: 1px solid rgba(79,195,247,0.35); font-size: 0.88rem; line-height: 1.5;"></div>
             </div>
 
             <div class="form-group" data-passo="6" style="margin-top: 35px;">
@@ -1476,6 +1477,51 @@
     }
 
     iniciarSistema();
+    </script>
+    <script>
+    // Leitura do atestado pela Clara (só para o colaborador CONFERIR). O RH confere de novo no sistema
+    // e pode devolver se a foto estiver ruim. Qualquer falha aqui é silenciosa: o envio segue normal.
+    (function () {
+        const inp = document.getElementById('doc-opcional');
+        const box = document.getElementById('leitura-atestado');
+        if (!inp || !box) return;
+        const br = (d) => d ? d.split('-').reverse().join('/') : '';
+        const esc = (t) => String(t == null ? '' : t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        let seq = 0;
+        inp.addEventListener('change', async () => {
+            const meu = ++seq;
+            box.classList.add('hidden'); box.innerHTML = '';
+            const f = inp.files && inp.files[0];
+            if (!f || !/^image\//.test(f.type) || f.size > 3 * 1024 * 1024) return;
+            box.classList.remove('hidden');
+            box.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> A Clara está lendo o seu atestado...';
+            try {
+                const bmp = await new Promise((ok, no) => { const im = new Image(); const u = URL.createObjectURL(f); im.onload = () => { URL.revokeObjectURL(u); ok(im); }; im.onerror = no; im.src = u; });
+                const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+                const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+                cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+                const du = cv.toDataURL('image/jpeg', 0.8);
+                const resp = await Promise.race([
+                    supabaseClient.functions.invoke('gemini-ocr-atestado', { body: { arquivos: [{ base64Puro: du.substring(du.indexOf(';base64,') + 8), mimeType: 'image/jpeg' }] } }),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('tempo')), 45000))
+                ]);
+                if (meu !== seq) return;
+                const d = resp && resp.data;
+                if (resp.error || !d || !(d.data_inicio || d.qtd_dias || d.nome_paciente)) throw new Error('sem leitura');
+                let fim = d.data_fim;
+                if (d.data_inicio && d.qtd_dias && !isNaN(d.qtd_dias)) { const x = new Date(d.data_inicio + 'T12:00:00'); x.setDate(x.getDate() + parseInt(d.qtd_dias) - 1); fim = x.toISOString().substring(0, 10); }
+                const linhas = [];
+                if (d.nome_paciente) linhas.push('Nome: <b>' + esc(d.nome_paciente) + '</b>');
+                if (d.data_inicio) linhas.push('Período: <b>' + br(d.data_inicio) + (fim && fim !== d.data_inicio ? ' a ' + br(fim) : '') + '</b>');
+                if (d.qtd_dias) linhas.push('Dias de afastamento: <b>' + esc(d.qtd_dias) + '</b>');
+                box.innerHTML = '<b style="color:#4fc3f7;"><i class="fa-solid fa-wand-magic-sparkles"></i> A Clara leu o seu atestado:</b><br>' + linhas.join('<br>') +
+                    '<br><span style="opacity:.8;">Confira se está certo. Se estiver errado ou a foto estiver ruim, tire outra foto mais nítida antes de enviar. O RH também vai conferir.</span>';
+            } catch (e) {
+                if (meu !== seq) return;
+                box.classList.add('hidden'); box.innerHTML = '';
+            }
+        });
+    })();
     </script>
 </body>
 </html>
