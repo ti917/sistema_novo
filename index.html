@@ -72494,7 +72494,7 @@ window.estadoVazio = function(icone, titulo, texto, cor) {
 // dos perfis que o proprio painel ja carregou. Nao dispara consulta nova.
 // =========================================================================
 
-window.pendenciasDerivadas = { asoAdmissional: 0, asoPeriodicoVencido: 0, contratoAssinatura: 0, contratoRH: 0, contratoProrrogacao: 0 };
+window.pendenciasDerivadas = { asoAdmissional: 0, asoDemissional: 0, asoPeriodicoVencido: 0, contratoAssinatura: 0, contratoRH: 0, contratoProrrogacao: 0 };
 window.pendenciasGestor = window.pendenciasGestor || {};
 
 // Leva o usuario direto para a tela (e aba) responsavel pela pendencia
@@ -72666,6 +72666,7 @@ window.montarItensPendencia = function() {
         // no painel "Precisa de Você" mesmo aparecendo na Central de Solicitações.
         { n: p.vagaExcedente,      cor: '#ff9800', icone: 'fa-lock',            titulo: 'Vagas Excedentes',          sub: 'Aguardando autorização',     alvo: 'tela-solicitacoes', grupo: 'Vaga Excedente' },
         { n: d.asoAdmissional,     cor: '#00bcd4', icone: 'fa-notes-medical',   titulo: 'ASO admissional',           sub: 'Exame ainda não anexado',    alvo: 'tela-admissoes', aba: 'aba-aso-admin', subAba: 'admissional', filtroSelect: 'filtro-status-aso', filtroValor: 'Pendentes' },
+        { n: d.asoDemissional,     cor: '#ef5350', icone: 'fa-user-slash',      titulo: 'ASO demissional',           sub: 'Exame ainda não anexado',    alvo: 'tela-admissoes', aba: 'aba-aso-admin', subAba: 'demissional', filtroSelect: 'filtro-status-aso', filtroValor: 'Pendentes' },
         { n: d.asoPeriodicoVencido, cor: '#dc3545', icone: 'fa-calendar-check', titulo: 'ASO Periódico',             sub: 'Exame anual vencido',        alvo: 'tela-admissoes', aba: 'aba-aso-admin', subAba: 'periodico', filtroSelect: 'filtro-status-aso', filtroValor: 'Vencido' },
         { n: d.contratoAssinatura, cor: '#8b5cf6', icone: 'fa-file-signature',  titulo: 'Contratos Admissional',     sub: 'Aguardando assinatura',      alvo: 'tela-admissoes', aba: 'aba-contratos-admin', filtroSelect: 'filtro-status-contratos-admin', filtroValor: 'Aguardando Assinatura' },
         { n: d.contratoRH,         cor: '#a78bfa', icone: 'fa-file-arrow-up',   titulo: 'Contratos a enviar',        sub: 'RH ainda não anexou',        alvo: 'tela-admissoes', aba: 'aba-contratos-admin', filtroSelect: 'filtro-status-contratos-admin', filtroValor: 'Aguardando RH' },
@@ -72841,6 +72842,7 @@ window.carregarDashboardInicio = async function() {
         // Pendências derivadas dos perfis que já buscamos acima (sem consulta extra)
         let countAsoPendente = 0;
         let countAsoPeriodicoVencido = 0;
+        let countAsoDemissional = 0;
         let countContratoAssinatura = 0;
         let countContratoRH = 0;
         let countContratoProrrogacao = 0;
@@ -72864,6 +72866,14 @@ window.carregarDashboardInicio = async function() {
         (resPerfis.data || []).forEach(function(c) {
             // Não cobra tarefa de quem está em unidade/empresa desativada
             if (window.colaboradorForaDoEscopo(c)) return;
+
+            // ASO demissional: desligado / em processo de rescisão sem o "Exame ASO Demissional" anexado
+            if (c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') {
+                const admDem = c.dados_admissao || {};
+                const docDem = !!(admDem.documentos_extras && admDem.documentos_extras['Rescisão'] &&
+                    admDem.documentos_extras['Rescisão'].some(function(d) { return d && d.nome && d.nome.includes('Exame ASO Demissional'); }));
+                if (admDem.isenta_aso !== true && !docDem) countAsoDemissional++;
+            }
 
             // ASO admissional
             if (window.asoAdmissionalPendente(c)) countAsoPendente++;
@@ -72983,6 +72993,7 @@ window.carregarDashboardInicio = async function() {
         // Alimenta a faixa "Precisa de você" com o que apuramos aqui
         window.pendenciasDerivadas = {
             asoAdmissional: countAsoPendente,
+            asoDemissional: countAsoDemissional,
             asoPeriodicoVencido: countAsoPeriodicoVencido,
             contratoAssinatura: countContratoAssinatura,
             contratoRH: countContratoRH,
@@ -103036,7 +103047,7 @@ window.checarAvisoAsoPendenteAdmin = async function() {
     let queryColabs = supabaseClient.from('perfis')
         .select('id, nome, unidade, empresa, dados_admissao, status, status_aprovacao')
         .eq('perfil', 'Colaborador')
-        .in('status', ['Ativo', 'Aguardando ASO']);
+        .in('status', ['Ativo', 'Aguardando ASO', 'Desligado']);
 
     if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro && empresaSelecionadaFiltro !== 'Todas' && usuarioAtual.empresa === 'Todas') {
         queryColabs = queryColabs.eq('empresa', empresaSelecionadaFiltro);
@@ -103055,10 +103066,19 @@ window.checarAvisoAsoPendenteAdmin = async function() {
     ]);
     const colabs = resColabs.data;
 
-    let qtdAdmissional = 0, qtdPeriodico = 0;
+    let qtdAdmissional = 0, qtdPeriodico = 0, qtdDemissional = 0;
 
     (colabs || []).forEach(c => {
-        if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
+        // 👇 ASO DEMISSIONAL: quem está desligado / em processo de rescisão e ainda não tem o
+        // "Exame ASO Demissional" anexado entra na contagem (mesma regra da aba Demissional).
+        if (c.status === 'Desligado' || c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') {
+            const admD = c.dados_admissao || {};
+            if (admD.isenta_aso === true) return;
+            const temDocDem = !!(admD.documentos_extras && admD.documentos_extras['Rescisão'] &&
+                admD.documentos_extras['Rescisão'].some(function(d) { return d && d.nome && d.nome.includes('Exame ASO Demissional'); }));
+            if (!temDocDem) qtdDemissional++;
+            return;
+        }
         if (window.asoColabAindaNaoAprovado(c)) return; // admissão ainda não aprovada não entra na contagem
 
         const adm = c.dados_admissao || {};
@@ -103090,11 +103110,12 @@ window.checarAvisoAsoPendenteAdmin = async function() {
     const avisoAntigo = document.getElementById('aviso-alerta-aso-admin');
     if (avisoAntigo) avisoAntigo.remove();
 
-    if (qtdAdmissional + qtdPeriodico === 0) return;
+    if (qtdAdmissional + qtdPeriodico + qtdDemissional === 0) return;
 
     const partes = [];
     if (qtdAdmissional > 0) partes.push(`${qtdAdmissional} ASO Admissional(is) sem anexar`);
     if (qtdPeriodico > 0) partes.push(`${qtdPeriodico} ASO Periódico(s) vencido(s)`);
+    if (qtdDemissional > 0) partes.push(`${qtdDemissional} ASO Demissional(is) sem anexar`);
 
     // 👇 X pra fechar: some da tela na hora (e o cabeçalho/conteúdo sobem de volta
     // sozinhos, o observador de avisos já cuida disso). NÃO fica lembrado — é só um
