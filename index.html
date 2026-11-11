@@ -55348,7 +55348,11 @@ window.filtrarJustificativasZap = function() {
         // Ações de Botões Inferiores (Devolver, Arquivar, Excluir, etc)
         let botoesAcao = '';
         if (j.status === 'Pendente') {
-            botoesAcao = `
+            const ehAtestadoComAnexo = String(j.justificativa || '').includes('[TIPO_OFICIAL:Atestado]') && String(j.justificativa || '').includes('|||ANEXO|||');
+            botoesAcao = (ehAtestadoComAnexo ? `
+                <button class="btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px; border-color: #ff9800; color: #ff9800; font-weight: bold;" onclick="rhAnalisarAtestado('${j.id}')" title="A Clara lê o atestado e preenche o lançamento de ausência para você conferir">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Analisar atestado
+                </button>` : '') + `
                 <button class="btn-danger-mini" style="padding: 6px 12px; font-size: 0.75rem; border-radius: 6px;" onclick="devolverJustificativa('${j.id}', '${j.nome}', '${j.colaborador_id}', '${j.data_falha}')">
                     <i class="fa-solid fa-rotate-left"></i> Devolver
                 </button>
@@ -96016,7 +96020,7 @@ window.ocoFechar = function(voltar) {
     if (voltar === true && window.__ocoCtx && window.__ocoCtx.escondeuDetalhes) {
         document.getElementById('modal-sistema-overlay')?.classList.remove('hidden');
     }
-    if (window.__ocoCtx) window.__ocoCtx.escondeuDetalhes = false;
+    if (window.__ocoCtx) { window.__ocoCtx.escondeuDetalhes = false; window.__ocoCtx.justificativaId = null; }
 };
 
 window.ocoAbrir = async function(idColab, nome, dataIso) {
@@ -96145,12 +96149,22 @@ window.ocoLerComClara = async function(sigla) {
     const fileInput = document.getElementById('oco-arq');
     const btn = document.getElementById('oco-btn-clara');
     if (!fileInput.files || fileInput.files.length === 0) return mostrarAlerta('Anexe o PDF do atestado/laudo médico!', 'aviso');
-    if (!window.validarSomentePdf(fileInput)) return;
+    const veioDoColab = !!(window.__ocoCtx && window.__ocoCtx.justificativaId);
+    if (!veioDoColab && !window.validarSomentePdf(fileInput)) return;
     const textoBtn = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Lendo documento...';
     const marcar = (id) => { const e = document.getElementById(id); if (e) { e.style.backgroundColor = 'rgba(40,167,69,0.05)'; e.style.borderColor = '#28a745'; e.style.fontWeight = 'bold'; } };
     try {
         const rasterizar = async (file) => {
+            if (file.type && file.type.indexOf('image/') === 0) {
+                // Foto do atestado enviada pelo colaborador: reduz e manda como imagem
+                const bmp = await new Promise((ok, no) => { const im = new Image(); const u = URL.createObjectURL(file); im.onload = () => { URL.revokeObjectURL(u); ok(im); }; im.onerror = () => no(new Error('Não foi possível abrir a imagem do atestado.')); im.src = u; });
+                const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+                const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+                cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+                const du = cv.toDataURL('image/jpeg', 0.8);
+                return [{ base64Puro: du.substring(du.indexOf(';base64,') + 8), mimeType: 'image/jpeg' }];
+            }
             const pdfDoc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
             const total = Math.min(pdfDoc.numPages, 20), paginas = [];
             for (let i = 1; i <= total; i++) {
@@ -96216,6 +96230,34 @@ window.ocoLerComClara = async function(sigla) {
         mostrarAlerta('Erro ao ler o documento: ' + err.message, 'erro');
     } finally {
         btn.disabled = false; btn.innerHTML = textoBtn;
+    }
+};
+
+// Acompanhamento de Ponto → "Analisar atestado": baixa o anexo do colaborador, abre o lançamento de
+// ausência (Atestado Médico) e pede pra Clara preencher. O RH confere e lança; ao lançar, a
+// justificativa é arquivada. Se o atestado estiver ruim, o RH usa "Devolver" como sempre.
+window.rhAnalisarAtestado = async function(id) {
+    const j = (typeof todasJustificativasZap !== 'undefined' ? todasJustificativasZap : []).find(x => x.id === id);
+    if (!j) return mostrarAlerta('Justificativa não encontrada. Recarregue a lista.', 'erro');
+    const m = String(j.justificativa || '').split('|||ANEXO|||');
+    const url = m[1] ? m[1].trim() : '';
+    if (!url) return mostrarAlerta('Esta justificativa não tem anexo do atestado.', 'aviso');
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('Não consegui baixar o anexo (' + resp.status + ').');
+        const blob = await resp.blob();
+        const ext = (url.split('?')[0].split('.').pop() || '').toLowerCase();
+        const tipo = blob.type || (ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : 'image/jpeg'));
+        const arquivo = new File([blob], 'atestado_' + id + '.' + (ext || 'jpg'), { type: tipo });
+        await window.ocoAbrir(j.colaborador_id, j.nome, j.data_falha);
+        window.__ocoCtx.justificativaId = id;
+        window.ocoAbrirForm('ATM');
+        const inp = document.getElementById('oco-arq');
+        if (!inp) throw new Error('Formulário de atestado não abriu.');
+        const dt = new DataTransfer(); dt.items.add(arquivo); inp.files = dt.files;
+        await window.ocoLerComClara('ATM');
+    } catch (err) {
+        mostrarAlerta('Não foi possível analisar o atestado: ' + err.message, 'erro');
     }
 };
 
@@ -96306,6 +96348,13 @@ window.ocoSalvar = async function(sigla) {
         if (cobObj) await window.inserirCoberturasDaAusencia(nova.id, [cobObj]);
         await supabaseClient.from('notificacoes').insert([{ colaborador_id: idColab, nome, unidade: p?.unidade, lida: false, tipo: 'Ausência_Admin', referencia_id: nova.id }]);
 
+        const idJustVinc = window.__ocoCtx && window.__ocoCtx.justificativaId;
+        if (idJustVinc) {
+            try {
+                await supabaseClient.from('ocorrencias_ponto').update({ status: 'Concluído', concluido_por: usuarioAtual.nome }).eq('id', idJustVinc);
+                if (typeof carregarJustificativasZap === 'function') carregarJustificativasZap(true);
+            } catch (e) { console.warn('Não arquivou a justificativa vinculada:', e); }
+        }
         mostrarAlerta('Lançamento enviado para aprovação em Solicitações!', 'sucesso');
         window.ocoFechar();
         document.getElementById('modal-sistema-overlay')?.classList.add('hidden');
