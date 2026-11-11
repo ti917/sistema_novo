@@ -40134,6 +40134,42 @@ window.abrirAdvertenciaDestacadaGestor = async function() {
         } else {
             data.forEach(c => { c._afastamentoAbertoResc = null; });
         }
+
+        // 🩹 CORREÇÃO: se o afastamento que gerou o ajuste automático do Último Dia foi APAGADO
+        // (ou deixou de ser afastamento em aberto) sem o RH confirmar um retorno, a âncora
+        // (ultimo_dia_base) continua salva e o Último Dia ficava "preso" na data ajustada.
+        // Aqui desfazemos: volta pro Último Dia original, recalcula a Data Limite de Pagamento
+        // (9 dias corridos, regra da contabilidade) e limpa a âncora. Quando o retorno é
+        // confirmado de verdade (salvarRetornoTrabalho) a âncora já é limpa lá, então este bloco
+        // só mexe em quem ficou com a âncora órfã.
+        try {
+            const fBRRev = (d) => String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+            data.forEach(c => {
+                const resc = c.dados_rescisao || {};
+                if (!resc.ultimo_dia_base || mapAfastamentosAbertosResc.has(c.id)) return;
+                const bM = String(resc.ultimo_dia_base).match(/(\d{2})\/(\d{2})\/(\d{4})/);
+                if (!bM) return;
+                const dBase = new Date(parseInt(bM[3]), parseInt(bM[2]) - 1, parseInt(bM[1]));
+                const baseStr = fBRRev(dBase);
+                const mudouUD = resc.ultimo_dia !== baseStr;
+                let novoPgto = resc.data_pagamento;
+                const historicoRev = Array.isArray(resc.historico_ajustes) ? [...resc.historico_ajustes] : [];
+                if (mudouUD) {
+                    const dPg = new Date(dBase);
+                    dPg.setDate(dPg.getDate() + 9);
+                    novoPgto = fBRRev(anteciparDiaUtil(dPg));
+                    historicoRev.push({
+                        data: new Date().toLocaleDateString('pt-BR'),
+                        texto: `Afastamento (ATM/AF) não existe mais em aberto — Último Dia voltou de ${resc.ultimo_dia} para ${baseStr} (e Data Limite p/ Pagamento de ${resc.data_pagamento || '-'} para ${novoPgto}).`,
+                        por: 'Sistema (automático)'
+                    });
+                }
+                const novoRescRev = { ...resc, ultimo_dia: baseStr, data_pagamento: novoPgto, historico_ajustes: historicoRev, ultimo_dia_base: null };
+                supabaseClient.from('perfis').update({ dados_rescisao: novoRescRev }).eq('id', c.id)
+                    .then(({ error: erroRev }) => { if (erroRev) console.error('Erro ao desfazer ajuste de Último Dia órfão:', erroRev); });
+                c.dados_rescisao = novoRescRev;
+            });
+        } catch (eRevAj) { console.error('Erro ao desfazer ajustes órfãos de Último Dia:', eRevAj); }
     } catch (eAfastResc) {
         console.error("Erro ao buscar afastamentos em aberto p/ Histórico de Desligamentos:", eAfastResc);
         data.forEach(c => { if (c._afastamentoAbertoResc === undefined) c._afastamentoAbertoResc = null; });
