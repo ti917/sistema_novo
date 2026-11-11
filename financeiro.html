@@ -22411,10 +22411,28 @@ window.precarregarListasFinanceiro = async function () {
     var ordenadas = CB.txs.slice().sort(function(a,b){ return a.data < b.data ? -1 : 1; });
     CB.res = [];
     // 1a passada: data próxima (até 7 dias); 2a: mesmo valor com data mais distante (até 45 dias)
+    // --- Folha (PAGSAL): soma os lançamentos de FOLHA do mesmo dia e compara com o débito do banco
+    CB.grupos = [];
+    var r2 = function(x){ return Math.round(x*100)/100; }, porDia = {};
+    ordenadas.forEach(function(t){ delete t._g; if (t.valor < 0 && /PAGSAL|PAGAMENTO DE SALARIO/i.test(t.memo)) (porDia[t.data] = porDia[t.data] || []).push(t); });
+    Object.keys(porDia).forEach(function(d){
+      var txsD = porDia[d];
+      var folha = cands.filter(function(c){ return !c.usado && c.src === 'lanc' && c.tipo === 'Despesa' && /FOLHA/i.test(c.cat || '') && c.data === d && String(c.status) === 'Pago'; });
+      if (!folha.length) return;
+      var totalBanco = r2(txsD.reduce(function(a,t){ return a + Math.abs(t.valor); }, 0)), soma = r2(folha.reduce(function(a,c){ return a + c.valores[0]; }, 0));
+      var g = { idx: CB.grupos.length, data: d, txs: txsD, lancs: folha, totalBanco: totalBanco, soma: soma, dif: r2(totalBanco - soma) };
+      folha.forEach(function(c){ c.usado = true; });
+      txsD.forEach(function(t){ t._g = g; });
+      CB.grupos.push(g);
+    });
+    var ccComFolha = {}, dd0 = CB.txs.map(function(t){ return t.data; }).sort(), fIni = dd0[0], fFim = dd0[dd0.length-1];
+    cands.forEach(function(c){ if (c.src === 'lanc' && /FOLHA/i.test(c.cat || '')) ccComFolha[c.cc] = 1; });
+    CB.ccSemFolha = (todosCentrosCustoGlobais || []).map(function(x){ return x.nome_unidade; }).filter(function(n){ return n && !ccComFolha[n]; });
+    CB.folhaOutroDia = cands.filter(function(c){ return !c.usado && c.src === 'lanc' && /FOLHA/i.test(c.cat || '') && c.data >= fIni && c.data <= fFim; });
     var rej = ls(LS_REJ);
     [7, 45].forEach(function(janela, passo){
       ordenadas.forEach(function(t){
-        if (t._m) return;
+        if (t._m || t._g) return;
         var tipo = t.valor < 0 ? 'Despesa' : 'Receita', amt = Math.abs(t.valor), melhor = null, mscore = -1e9, tt = tokens(t.memo);
         cands.forEach(function(c){
           if (c.usado || c.tipo !== tipo) return;
@@ -22459,8 +22477,8 @@ window.precarregarListasFinanceiro = async function () {
   function render(){
     var box = document.getElementById('cb-resultado'); if (!box) return;
     if (!CB.res.length){ box.innerHTML = ''; return; }
-    var falta = CB.res.filter(function(t){ return !t._m && !t._ign; });
-    var ok = CB.res.filter(function(t){ return t._m && !t._ign; });
+    var falta = CB.res.filter(function(t){ return !t._m && !t._g && !t._ign; });
+    var ok = CB.res.filter(function(t){ return (t._m || t._g) && !t._ign; });
     var ig = CB.res.filter(function(t){ return t._ign; });
     function soma(a, sinal){ return a.filter(function(t){ return sinal > 0 ? t.valor > 0 : t.valor < 0; }).reduce(function(s,t){ return s + Math.abs(t.valor); }, 0); }
     var datas = CB.txs.map(function(t){ return t.data; }).sort();
@@ -22528,10 +22546,44 @@ window.precarregarListasFinanceiro = async function () {
     });
     return h + '</tbody></table></div>';
   }
+  function linhaGrupo(g){
+    var itens = g.lancs.map(function(c){ return '<div style="padding:4px 0;border-bottom:1px dashed var(--cor-borda);display:flex;justify-content:space-between;gap:12px;align-items:center;"><span>'+esc(c.forn||c.desc||c.cat)+' '+(c.cc?badge('CC: '+esc(c.cc),'#9b59b6'):'')+'</span><span style="white-space:nowrap;">'+money(c.valores[0])+' <button class="btn-export" style="padding:2px 8px;font-size:.7rem;" onclick="CB_ver(\'lanc\',\''+esc(c.id)+'\')">Ver</button></span></div>'; }).join('');
+    var sit;
+    if (Math.abs(g.dif) < 0.02) sit = badge('Confere: a folha bate','#2ecc71');
+    else if (g.dif > 0) sit = badge('Não bateu: falta lançar '+money(g.dif),'#e67e22')
+      + '<div style="font-size:.76rem;color:var(--cor-texto-secundario);margin-top:6px;max-width:300px;line-height:1.5;">O banco pagou mais do que a soma dos lançamentos de folha deste dia.'
+      + (CB.folhaOutroDia.length ? '<br><b>Folhas lançadas em outro dia (ainda sem par):</b> '+CB.folhaOutroDia.slice(0,12).map(function(c){ return esc(c.cc||c.forn||'?')+' '+dbr(c.data)+' '+money(c.valores[0]); }).join('; ')+(CB.folhaOutroDia.length>12?' ...':'') : '')
+      + (CB.ccSemFolha.length ? '<br><b>Centros de custo sem nenhuma folha lançada no período:</b> '+CB.ccSemFolha.slice(0,25).map(esc).join(', ')+(CB.ccSemFolha.length>25?' ...':'') : '')
+      + '</div>'
+      + '<div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;max-width:260px;"><select id="cb-gcc-'+g.idx+'" class="modern-input">'+elCC('')+'</select><select id="cb-gcat-'+g.idx+'" class="modern-input">'+elCat('Despesa','FOLHA DE PAGAMENTO')+'</select><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CB_lancarDif('+g.idx+')">Lançar a diferença como pago</button></div>';
+    else sit = badge('Não bateu: lançado a mais '+money(-g.dif),'#e74c3c') + '<div style="font-size:.76rem;color:var(--cor-texto-secundario);margin-top:6px;max-width:300px;">A soma dos lançamentos de folha deste dia é maior que o débito do banco. Confira a lista ao lado (pode ter lançamento duplicado ou de outro dia).</div>';
+    return '<tr><td style="'+TD+'white-space:nowrap;">'+dbr(g.data)+'</td><td style="'+TD+'">'+badge('Saída','#ff6b5b')+'</td>'
+      + '<td style="'+TD+'">Pagamento de salário (PAGSAL)'+(g.txs.length>1 ? ' <span style="color:var(--cor-texto-secundario);">· '+g.txs.length+' débitos no dia</span>' : '')+'</td>'
+      + '<td style="'+TD+'"><span style="font-weight:800;color:#ff6b5b;white-space:nowrap;">− '+money(g.totalBanco)+'</span></td>'
+      + '<td style="'+TD+'min-width:320px;"><details><summary style="cursor:pointer;font-weight:700;">'+g.lancs.length+' lançamentos de folha, soma '+money(g.soma)+'</summary><div style="margin-top:6px;">'+itens+'</div></details></td>'
+      + '<td style="'+TD+'white-space:nowrap;">'+dbr(g.data)+'</td><td style="'+TD+'">'+sit+'</td></tr>';
+  }
+  window.CB_lancarDif = async function(gi){
+    var g = CB.grupos[gi]; if (!g) return;
+    var cc = document.getElementById('cb-gcc-'+gi).value, cat = document.getElementById('cb-gcat-'+gi).value;
+    if (!cc) return mostrarAlerta('Escolha o centro de custo.', 'aviso');
+    if (!cat) return mostrarAlerta('Escolha a categoria.', 'aviso');
+    var p = g.data.split('-'), v = g.dif;
+    var payload = { grupo_id: 'GRP-' + Date.now() + '-' + Math.random().toString(36).substring(2,8).toUpperCase(), centro_custo_id: cc, tipo: 'Despesa', categoria: cat, fornecedor_nome: null,
+      descricao: 'Diferença da folha (PAGSAL do extrato)', data_vencimento: g.data, data_pagamento: g.data, mes_referencia: p[1]+'/'+p[0], valor_parcela: v, juros: 0, parcela_atual: 1, total_parcelas: 1, valor_total: v,
+      status: 'Pago', anexos: [], empresa: empresaFinanceiraSelecionada === 'Todas' ? null : empresaFinanceiraSelecionada, criado_por: usuarioAtual.nome, forma_pagamento: null, pix_chave: null, numero_nf: null, chave_acesso: null };
+    var r = await supabaseClient.from('financeiro_lancamentos').insert([payload]).select('*');
+    if (r.error && /chave_acesso/i.test(r.error.message || '')){ delete payload.chave_acesso; r = await supabaseClient.from('financeiro_lancamentos').insert([payload]).select('*'); }
+    if (r.error) return mostrarAlerta('Erro ao lançar: ' + r.error.message, 'erro');
+    CB.lancs.push((r.data && r.data[0]) || payload);
+    CB.txs.forEach(function(t){ delete t._m; delete t._exato; delete t._nome; delete t._conferir; delete t._g; });
+    cruzar(); render();
+    mostrarAlerta('Diferença de ' + money(v) + ' lançada como pago.', 'sucesso');
+  };
   function tabelaOk(lista){
     if (!lista.length) return '<p style="padding:20px;text-align:center;color:var(--cor-texto-secundario);">Nenhum movimento casou com lançamentos do sistema.</p>';
     var h = '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:900px;"><thead><tr><th style="'+TH+'">Data banco</th><th style="'+TH+'">Tipo</th><th style="'+TH+'">Descrição no banco</th><th style="'+TH+'">Valor</th><th style="'+TH+'">Como está lançado no sistema</th><th style="'+TH+'">Data lançada</th><th style="'+TH+'">Situação</th></tr></thead><tbody>';
-    lista.forEach(function(t){ var m = t._m;
+    lista.forEach(function(t){ if (t._g){ if (t._g.txs[0] === t) h += linhaGrupo(t._g); return; } var m = t._m;
       h += '<tr><td style="'+TD+'white-space:nowrap;">'+dbr(t.data)+'</td><td style="'+TD+'">'+tipoTxt(t)+'</td><td style="'+TD+'">'+esc(t.memo)+'</td><td style="'+TD+'">'+vtxt(t)+'</td>'
         + '<td style="'+TD+'min-width:280px;">'+detalheLanc(m)+'</td><td style="'+TD+'white-space:nowrap;">'+dbr(m.data)+'</td>'
         + '<td style="'+TD+'">'+(t._conferir ? badge('Conferir: nome não bate','#e74c3c') + ' <button class="btn-export" style="padding:3px 9px;font-size:.72rem;" onclick="CB_naoEEsse('+idx(t)+')">Não é esse</button>' : (t._exato || t._nome ? badge('Confere','#2ecc71') : badge('Data diferente','#e67e22')))+(m.status && m.status!=='Pago' ? ' '+badge('No sistema: '+esc(m.status),'#e74c3c') : '')+'</td></tr>'; });
@@ -22554,7 +22606,7 @@ window.precarregarListasFinanceiro = async function () {
   window.CB_naoEEsse = function(i){
     var t = CB.txs[i]; if (!t || !t._m) return;
     var rej = ls(LS_REJ); rej[chaveTx(t)+'#'+t._m.src+t._m.id] = 1; lsSet(LS_REJ, rej);
-    CB.txs.forEach(function(x){ delete x._m; delete x._exato; delete x._nome; delete x._conferir; });
+    CB.txs.forEach(function(x){ delete x._m; delete x._exato; delete x._nome; delete x._conferir; delete x._g; });
     cruzar(); render();
     mostrarAlerta('Ok, esse movimento foi para "Falta lançar".', 'sucesso');
   };
@@ -22608,7 +22660,7 @@ window.precarregarListasFinanceiro = async function () {
   async function lancarLista(ids){
     var ok = 0, erro = null;
     for (var k = 0; k < ids.length; k++){ try { await lancarUm(ids[k]); ok++; } catch(e){ erro = e.message || String(e); break; } }
-    CB.txs.forEach(function(t){ delete t._m; delete t._exato; delete t._nome; delete t._conferir; });
+    CB.txs.forEach(function(t){ delete t._m; delete t._exato; delete t._nome; delete t._conferir; delete t._g; });
     cruzar(); render();
     if (ok) mostrarAlerta(ok + ' lançamento(s) criado(s) como pago.', 'sucesso');
     if (erro) mostrarAlerta('Parei no erro: ' + erro, 'erro');
