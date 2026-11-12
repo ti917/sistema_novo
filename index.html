@@ -116787,6 +116787,122 @@ window.abrirDetalhesEscalaPontoDia = function(dataStr) {
     window.mostrarInfoPlantao(colaboradorId, nome, dataStr, diaEscala.horario, diaEscala.sigla, diaEscala.obsHPlus, diaEscala.nomeFeriado);
 };
 
+// =========================================================================
+// SALDO DO PONTO DIA A DIA (estilo Espelho / Ponto Mais)
+// Mesma regra do relatório "Espelho de Ponto": meta da jornada (menos refeição) x horas trabalhadas
+// com as batidas efetivas (correção vale, desconsiderada não). O saldo SOMA dia a dia e ZERA no dia
+// seguinte ao fim de cada fechamento do Banco de Horas (banco_horas_fechamentos) da unidade.
+// Abono "dia todo" ou ausência justificada não gera débito. Só leitura: não grava nada.
+// =========================================================================
+window.fmtSaldoPonto = function(min) {
+    min = Math.round(min || 0);
+    const a = Math.abs(min);
+    return (min > 0 ? '+' : (min < 0 ? '-' : '')) + String(Math.floor(a / 60)).padStart(2, '0') + ':' + String(a % 60).padStart(2, '0');
+};
+window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
+    const res = { dias: {}, creditoMes: 0, debitoMes: 0, saldoAtual: 0, fechamentosNoMes: [] };
+    try {
+        const pad = function(n) { return String(n).padStart(2, '0'); };
+        const iniMes = ano + '-' + pad(mes + 1) + '-01';
+        const fimMes = ano + '-' + pad(mes + 1) + '-' + pad(new Date(ano, mes + 1, 0).getDate());
+        const colab = (window.pontoColabsGlobais || []).find(function(x) { return x.id === colabId; });
+        const unidade = colab ? colab.unidade : null;
+        const [perfil, rCfg, rFech] = await Promise.all([
+            window.obterPerfilPontoCache(colabId),
+            supabaseClient.from('config_ponto_whatsapp').select('data_inicio_ponto, habilitado').eq('colaborador_id', colabId).maybeSingle(),
+            supabaseClient.from('banco_horas_fechamentos').select('numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('periodo_fim')
+        ]);
+        const jornadaRaiz = (perfil && perfil.dados_admissao && perfil.dados_admissao.jornada) || null;
+        if (!jornadaRaiz) return res;
+        const dataInicioPonto = rCfg && rCfg.data ? rCfg.data.data_inicio_ponto : null;
+        const fechs = ((rFech && rFech.data) || []).filter(function(f) { return unidade && (f.unidades || []).includes(unidade); });
+        // começa depois do último fechamento que terminou antes do mês (saldo já zerado ali)
+        let inicio = iniMes;
+        const anteriores = fechs.filter(function(f) { return f.periodo_fim < iniMes; });
+        if (anteriores.length) {
+            const d = new Date(anteriores[anteriores.length - 1].periodo_fim + 'T12:00:00'); d.setDate(d.getDate() + 1);
+            inicio = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+        } else if (dataInicioPonto && dataInicioPonto < iniMes) {
+            inicio = dataInicioPonto;
+        }
+        if (dataInicioPonto && inicio < dataInicioPonto) inicio = dataInicioPonto;
+        if (inicio > fimMes) return res;
+        const [rPontos, rAus] = await Promise.all([
+            supabaseClient.from('pontos_diarios_whatsapp').select('*').eq('colaborador_id', colabId).gte('data', inicio).lte('data', fimMes),
+            supabaseClient.from('ausencias').select('sigla, motivo, data_inicio, data_fim').eq('colaborador_id', colabId).eq('status', 'Aprovado').lte('data_inicio', fimMes).gte('data_fim', inicio)
+        ]);
+        const pontos = {}; ((rPontos && rPontos.data) || []).forEach(function(p) { pontos[p.data] = p; });
+        const auss = (rAus && rAus.data) || [];
+        const nomesDia = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        const parseHorario = function(txt) { const m = (txt || '').match(/(\d{2}):(\d{2})\s*às\s*(\d{2}):(\d{2})/); if (!m) return 0; return ((+m[3] * 60 + +m[4]) - (+m[1] * 60 + +m[2]) + 1440) % 1440; };
+        const minEntre = function(a, b) { if (!a || !b) return 0; const d = (new Date(b) - new Date(a)) / 60000; return d > 0 ? d : 0; };
+        const hojeStr = window.dataSPPontoWhatsapp(new Date().toISOString());
+        let saldo = 0;
+        const cursor = new Date(inicio + 'T12:00:00');
+        const fim = new Date(fimMes + 'T12:00:00');
+        let guarda = 0;
+        while (cursor <= fim && guarda++ < 800) {
+            const ds = cursor.getFullYear() + '-' + pad(cursor.getMonth() + 1) + '-' + pad(cursor.getDate());
+            // zera no dia seguinte ao fim de um fechamento
+            if (fechs.some(function(f) { const n = new Date(f.periodo_fim + 'T12:00:00'); n.setDate(n.getDate() + 1); return (n.getFullYear() + '-' + pad(n.getMonth() + 1) + '-' + pad(n.getDate())) === ds; })) saldo = 0;
+            const fechDia = fechs.find(function(f) { return f.periodo_ini <= ds && ds <= f.periodo_fim; }) || null;
+            let credito = 0, debito = 0, contar = ds <= hojeStr;
+            if (contar) {
+                const jor = window.obterJornadaVigenteNaData(jornadaRaiz, ds) || {};
+                let target = 0, folga = false;
+                if (jor.tipo === '12x36') {
+                    if (jor.data_inicio) {
+                        const diff = Math.round((new Date(ds + 'T00:00:00') - new Date(jor.data_inicio + 'T00:00:00')) / 86400000);
+                        const primeiroTrab = (jor.status_inicio || 'Trabalho') === 'Trabalho';
+                        const trabalha = (diff % 2 === 0) ? primeiroTrab : !primeiroTrab;
+                        if (trabalha && jor.horario) target = parseHorario(jor.horario); else folga = true;
+                    }
+                } else if (jor.escala && jor.escala[nomesDia[cursor.getDay()]]) {
+                    const c = jor.escala[nomesDia[cursor.getDay()]];
+                    if (c.status === 'Folga') folga = true; else target = parseHorario(c.horario);
+                }
+                if (!folga && target > 0) {
+                    let ref = 60;
+                    if (jor.refeicao && jor.refeicao.inicio && jor.refeicao.fim) {
+                        const [hi, mi] = jor.refeicao.inicio.split(':').map(Number); const [hf, mf] = jor.refeicao.fim.split(':').map(Number);
+                        ref = ((hf * 60 + mf) - (hi * 60 + mi) + 1440) % 1440;
+                    }
+                    target = Math.max(0, target - ref);
+                }
+                const p = pontos[ds] || null;
+                const ent1 = p ? window.pontoHoraEfetiva(p, 'entrada') : null, sai1 = p ? window.pontoHoraEfetiva(p, 'ida_refeicao') : null;
+                const ent2 = p ? window.pontoHoraEfetiva(p, 'volta_refeicao') : null, sai2 = p ? window.pontoHoraEfetiva(p, 'saida') : null;
+                let trab = 0;
+                if (ent1 && sai2) trab = Math.max(0, minEntre(ent1, sai2) - minEntre(sai1, ent2));
+                else if (ent1 && sai1 && !ent2 && !sai2) trab = minEntre(ent1, sai1);
+                const aus = auss.find(function(a) { return ds >= a.data_inicio && ds <= (a.data_fim || a.data_inicio); });
+                let justificado = !!aus && String(aus.sigla || '').toUpperCase() !== 'FA';
+                // abonos lançados no dia
+                const abonos = (p && p.correcoes && p.correcoes._abonos) || [];
+                abonos.forEach(function(a) {
+                    if (!a.periodo || a.periodo === 'Dia todo') { justificado = true; }
+                    else { const m = String(a.periodo).match(/(\d{2}):(\d{2}) às (\d{2}):(\d{2})/); if (m) target = Math.max(0, target - (((+m[3] * 60 + +m[4]) - (+m[1] * 60 + +m[2]) + 1440) % 1440)); }
+                });
+                const hojePendente = ds === hojeStr && !sai2 && !(ent1 && sai1 && !ent2);
+                if (!folga && target > 0 && !hojePendente) {
+                    if (trab > target) credito = trab - target;
+                    else if (trab < target && !justificado) debito = p ? (target - trab) : target;
+                }
+                res.dias[ds] = { meta: target, trab: trab, temPonto: !!p, folga: folga };
+            }
+            saldo += credito - debito;
+            const d = res.dias[ds] || (res.dias[ds] = {});
+            d.credito = credito; d.debito = debito; d.saldo = saldo; d.fechado = fechDia;
+            if (fechDia && ds === fechDia.periodo_fim) { d.saldoFechamento = saldo; res.fechamentosNoMes.push({ numero: fechDia.numero, fim: ds, saldo: saldo }); }
+            if (ds >= iniMes) { res.creditoMes += credito; res.debitoMes += debito; }
+            res.saldoAtual = saldo;
+            cursor.setDate(cursor.getDate() + 1);
+        }
+        res.fechamentosNoMes = res.fechamentosNoMes.filter(function(x) { return x.fim >= iniMes; });
+    } catch (e) { console.warn('Saldo do ponto indisponível:', e); }
+    return res;
+};
+
 window.carregarCalendarioPontoWhatsapp = async function() {
     const grade = document.getElementById('grade-calendario-ponto');
     const rotuloMes = document.getElementById('rotulo-mes-calendario-ponto');
@@ -116832,6 +116948,10 @@ window.carregarCalendarioPontoWhatsapp = async function() {
         const mapaDiasEscala = (mapaEscala && mapaEscala.dias) || {};
         const mapaHorasExtras = (mapaEscala && mapaEscala.horasExtras) || {};
         window.pontoCalendarioMapaEscala = mapaDiasEscala;
+        const saldosMes = await window.calcularSaldoPontoMes(estado.colaboradorId, estado.ano, estado.mes);
+        const infoSaldo = function(ds) { return (saldosMes.dias && saldosMes.dias[ds]) || null; };
+        const iconeCadeado = function(f) { return f ? '<i class="fa-solid fa-lock" style="color:#e74c3c; font-size:0.66rem;" title="Banco de Horas fechado (Fechamento nº ' + f.numero + ')"></i>' : ''; };
+        const corSaldo = function(m) { return m > 0 ? '#2ecc71' : (m < 0 ? '#ff6b6b' : 'var(--cor-texto-secundario)'); };
 
         const porDia = {};
         (data || []).forEach(function(b) {
@@ -116841,7 +116961,21 @@ window.carregarCalendarioPontoWhatsapp = async function() {
         window.pontoCalendarioPorDiaAtual = porDia;
 
         const diasSemana = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-        let html = '<div style="display:grid; grid-template-columns: repeat(7, 1fr); gap: 9px; margin-bottom: 10px;">'
+        const cartaoResumo = function(titulo, valor, cor, sub) {
+            return '<div style="flex:1; min-width:150px; border:1px solid var(--cor-borda); border-radius:12px; padding:10px 14px; background:rgba(255,255,255,0.03);">'
+                + '<div style="font-size:0.7rem; color:var(--cor-texto-secundario);">' + titulo + '</div>'
+                + '<div style="font-size:1.25rem; font-weight:800; color:' + cor + '; font-variant-numeric: tabular-nums;">' + valor + '</div>'
+                + (sub ? '<div style="font-size:0.68rem; color:var(--cor-texto-secundario);">' + sub + '</div>' : '') + '</div>';
+        };
+        const hhmm0 = function(m) { m = Math.abs(Math.round(m || 0)); return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
+        const ultFech = saldosMes.fechamentosNoMes && saldosMes.fechamentosNoMes.length ? saldosMes.fechamentosNoMes[saldosMes.fechamentosNoMes.length - 1] : null;
+        let html = '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">'
+            + cartaoResumo('Créditos no mês', '+' + hhmm0(saldosMes.creditoMes), '#2ecc71', '')
+            + cartaoResumo('Débitos no mês', '-' + hhmm0(saldosMes.debitoMes), '#ff6b6b', '')
+            + cartaoResumo('Saldo atual', (window.fmtSaldoPonto(saldosMes.saldoAtual) || '00:00'), corSaldo(saldosMes.saldoAtual), 'acumulado desde o último fechamento')
+            + (ultFech ? cartaoResumo('Último fechamento', '<i class="fa-solid fa-lock" style="font-size:0.9rem;"></i> nº ' + ultFech.numero, '#e74c3c', 'fechou com ' + (window.fmtSaldoPonto(ultFech.saldo) || '00:00') + ' em ' + ultFech.fim.split('-').reverse().join('/')) : '')
+            + '</div>'
+            + '<div style="display:grid; grid-template-columns: repeat(7, 1fr); gap: 9px; margin-bottom: 10px;">'
             + diasSemana.map(function(d) { return '<div style="text-align:center; font-size:0.74rem; letter-spacing:.04em; text-transform:uppercase; color:var(--cor-texto-secundario); font-weight:800; padding:8px 0; border-bottom:1px solid var(--cor-borda);">' + d + '</div>'; }).join('')
             + '</div>';
 
@@ -116895,6 +117029,7 @@ window.carregarCalendarioPontoWhatsapp = async function() {
                         + '<span style="font-weight:700;">' + dia + '</span>'
                         + '<i class="fa-solid fa-xmark" style="color:#dc3545; font-size:0.85rem;"></i>'
                         + '<span style="font-size:0.6rem;">sem ponto</span>'
+                        + (function() { const sd = infoSaldo(dataStr); if (!sd || sd.saldo == null) return ''; return '<span style="font-size:0.66rem; font-weight:700; color:' + corSaldo(sd.saldo) + ';">' + iconeCadeado(sd.fechado) + ' Saldo ' + (window.fmtSaldoPonto(sd.saldo) || '00:00') + '</span>'; })()
                         + '</button>';
                 } else if (ehDiaSemCobranca) {
                     const corSigla = window.CORES_SIGLA_ESCALA_PONTO[(diaEscala && diaEscala.cssClass) || ''] || 'var(--cor-texto-secundario)';
@@ -116947,7 +117082,8 @@ window.carregarCalendarioPontoWhatsapp = async function() {
                     else if (en && sa && !ir && !vr) ms = sa - en;
                     if (ms == null || ms < 0) return '';
                     const mins = Math.round(ms / 60000);
-                    return '<div style="margin-top:5px; padding-top:5px; border-top:1px dashed var(--cor-borda); display:flex; justify-content:space-between; font-size:0.7rem; font-weight:700;"><span>Trabalhado</span><span>' + String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0') + '</span></div>';
+                    return '<div style="margin-top:5px; padding-top:5px; border-top:1px dashed var(--cor-borda); display:flex; justify-content:space-between; font-size:0.7rem; font-weight:700;"><span>Trabalhado</span><span>' + String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0') + '</span></div>'
+                        + (function() { const sd = infoSaldo(dataStr); if (!sd || sd.saldo == null) return ''; return '<div style="display:flex; justify-content:space-between; align-items:center; font-size:0.7rem; font-weight:700; color:' + corSaldo(sd.saldo) + ';"><span>Saldo ' + iconeCadeado(sd.fechado) + '</span><span style="font-variant-numeric: tabular-nums;">' + (window.fmtSaldoPonto(sd.saldo) || '00:00') + '</span></div>' + (sd.saldoFechamento != null ? '<div style="font-size:0.62rem; color:#e74c3c;">Fechou: ' + (window.fmtSaldoPonto(sd.saldoFechamento) || '00:00') + '</div>' : ''); })();
                 })()
                 + '</div>'
                 + '</button>';
