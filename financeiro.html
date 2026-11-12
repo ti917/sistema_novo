@@ -12607,8 +12607,28 @@ window._nfBuscarRecorrenteDaNota = async function(n) {
     }).filter(x => x.dist <= 60 && x.conta).sort((a, b) => (b.valorIgual - a.valorIgual) || (a.dist - b.dist)).slice(0, 4);
 };
 
+// Lançamentos JÁ FEITOS (ex.: pelas solicitações / Clara no WhatsApp) que ainda estão sem Nº da NF, com o MESMO valor da nota
+// e vencimento/pagamento perto da emissão. Só sugere — quem decide é a pessoa, na tela de escolha.
+window._nfBuscarLancamentoSemNfDaNota = async function(n) {
+    const valorNota = Number(n.valor_total) || 0;
+    if (!valorNota) return [];
+    const emissao = window._nfeInstanteEmissao(n);
+    if (!emissao) return [];
+    const { data, error } = await supabaseClient.from('financeiro_lancamentos').select('*')
+        .gte('valor_total', valorNota - 0.005).lte('valor_total', valorNota + 0.005)
+        .is('numero_nf', null).limit(50);
+    if (error || !data) return [];
+    const DIA = 86400000;
+    return data.filter(l => !l.chave_acesso && !l.conta_fixa_id).map(l => {
+        const ref = String(l.data_vencimento || l.data_pagamento || '').slice(0, 10);
+        const t = ref ? new Date(ref + 'T12:00:00-03:00').getTime() : NaN;
+        return { lanc: l, conta: { descricao: l.fornecedor_nome || l.descricao || 'Lançamento' }, nomeParecido: false, dist: isNaN(t) ? 999 : Math.abs(t - emissao) / DIA, valorIgual: true };
+    }).filter(x => x.dist <= 45).sort((a, b) => a.dist - b.dist).slice(0, 4);
+};
+
 // Tela pra escolher: vincular ao lançamento recorrente (recomendado) ou criar um novo. Resolve {acao, cand} ou null (cancelou).
-window._nfEscolherRecorrente = function(n, cands) {
+window._nfEscolherRecorrente = function(n, cands, opts) {
+    opts = opts || {};
     return new Promise((resolver) => {
         document.getElementById('modal-nf-recorrente')?.remove();
         const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -12617,15 +12637,15 @@ window._nfEscolherRecorrente = function(n, cands) {
         const linhas = cands.map((c, i) => `
             <label style="display:flex; gap:10px; align-items:flex-start; border:1px solid var(--cor-borda); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer;">
                 <input type="radio" name="nf-rec-cand" value="${i}" ${i === 0 ? 'checked' : ''} style="width:auto; margin-top:4px;">
-                <span style="font-size:0.85rem; line-height:1.4;"><b>${esc(c.conta.descricao)}</b> — ${esc(cc(c.lanc.centro_custo_id))}<br>
+                <span style="font-size:0.85rem; line-height:1.4;"><b>${esc(c.conta.descricao)}</b> — ${esc(cc(c.lanc.centro_custo_id))}${c.lanc.criado_por ? ' · lançado por ' + esc(c.lanc.criado_por) : ''}<br>
                 Vence <b>${esc(String(c.lanc.data_vencimento).slice(0, 10).split('-').reverse().join('/'))}</b> · ${brl(c.lanc.valor_total)} · ${esc(c.lanc.status)}${c.nomeParecido ? `<br><span style="color:#f1c40f;"><i class="fa-solid fa-triangle-exclamation"></i> O nome do lançamento é <b>parecido</b> (difere em uma letra) do emitente da nota: <b>${esc(String(_nfeDecodificaEntidades(n.emitente_nome || '')).replace(/^[\d.\s\/-]+/, ''))}</b>. Confira se é a mesma pessoa antes de vincular.</span>` : ''}
                 ${c.valorIgual ? '<span style="color:#2ecc71;"> · valor igual ao da nota</span>' : `<span style="color:#e67e22;"> · valor da nota é ${brl(n.valor_total)}</span>`}</span>
             </label>`).join('');
         const div = document.createElement('div');
         div.id = 'modal-nf-recorrente'; div.className = 'modal-overlay'; div.style.zIndex = 100060;
         div.innerHTML = `<div class="glass-card" style="width:100%; max-width:520px; border-top:4px solid #2ecc71; padding:24px; position:relative;">
-            <h3 style="margin:0 0 6px; color:#2ecc71;"><i class="fa-solid fa-link"></i> Essa nota já tem lançamento recorrente</h3>
-            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 14px; line-height:1.45;">O prestador tem <b>conta fixa</b> cadastrada e o sistema já lança o valor todo mês. Vincule a nota ao lançamento do mês — o número, a chave e o PDF entram nele, <b>sem criar outro lançamento</b>.</p>
+            <h3 style="margin:0 0 6px; color:#2ecc71;"><i class="fa-solid fa-link"></i> ${opts.titulo || 'Essa nota já tem lançamento recorrente'}</h3>
+            <p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin:0 0 14px; line-height:1.45;">${opts.texto || 'O prestador tem <b>conta fixa</b> cadastrada e o sistema já lança o valor todo mês. Vincule a nota ao lançamento do mês — o número, a chave e o PDF entram nele, <b>sem criar outro lançamento</b>.'}</p>
             ${linhas}
             <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; margin-top:12px;">
                 <button type="button" class="btn-secondary" data-r="cancelar">Cancelar</button>
@@ -12854,6 +12874,28 @@ window.lancarNotaNoCentroCusto = async function(id) {
             contaFixaDaNota = esc.cand.conta; // "criar novo": o novo lançamento já nasce ligado à conta fixa (o gerador automático não repete o mês)
         }
     } catch (eRec) { console.warn('Checagem de recorrente falhou (segue lançamento normal):', eRec); }
+
+    // Já existe lançamento feito por outro caminho (solicitações/WhatsApp) sem número de NF, com o mesmo valor?
+    if (!contaFixaDaNota) {
+        try {
+            const candsSem = await window._nfBuscarLancamentoSemNfDaNota(n);
+            if (candsSem.length) {
+                const esc2 = await window._nfEscolherRecorrente(n, candsSem, {
+                    titulo: 'Parece que essa nota já foi lançada',
+                    texto: 'Encontrei lançamento(s) <b>sem número de NF</b>, com o <b>mesmo valor</b> da nota e data próxima (ex.: feito pelas solicitações / WhatsApp). Se for o mesmo gasto, vincule: o número, a chave e o PDF entram nele, <b>sem criar outro lançamento</b>. Se for outro gasto, escolha "Criar lançamento novo".'
+                });
+                if (!esc2) return; // cancelou
+                if (esc2.acao === 'vincular') {
+                    try {
+                        const r = await window._nfVincularARecorrente(n, esc2.cand);
+                        mostrarAlerta('Nota vinculada ao lançamento já feito' + (r.anexou ? ' (PDF anexado)' : ' — o PDF não foi anexado sozinho, anexe no lançamento se precisar') + '.', 'sucesso');
+                    } catch (eV) { mostrarAlerta('Não consegui vincular: ' + eV.message, 'erro'); return; }
+                    await window._nfRecalcularStatus(id);
+                    return;
+                }
+            }
+        } catch (eSem) { console.warn('Checagem de lançamento sem NF falhou (segue lançamento normal):', eSem); }
+    }
 
     window.__lancNotaOrigem = { id, contaFixaId: contaFixaDaNota ? contaFixaDaNota.id : null };
     await window.abrirModalLancamento({ centroId: ccId });
