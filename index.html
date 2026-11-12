@@ -117558,8 +117558,8 @@ window.carregarApoioRelatorios = async function() {
 window.relMinToHr = function(mins) {
     mins = mins || 0;
     const isNeg = mins < 0; const abs = Math.abs(mins);
-    const h = Math.floor(abs / 60); const m = Math.round(abs % 60);
-    return (isNeg ? '-' : '') + String(h).padStart(2, '0') + 'h ' + String(m).padStart(2, '0') + 'm';
+    const tot = Math.round(abs); const h = Math.floor(tot / 60); const m = tot % 60; // arredonda o TOTAL (evita '08h 60m')
+    return (isNeg && tot > 0 ? '-' : '') + String(h).padStart(2, '0') + 'h ' + String(m).padStart(2, '0') + 'm';
 };
 
 window.inicializarRelatoriosAdmin = function() {
@@ -117935,9 +117935,6 @@ window.baixarPdfRelatorioAdmin = async function() {
             alternateRowStyles: { fillColor: [248, 250, 252] },
             didDrawPage: function() {
                 desenharCabecalho();
-                const pagina = doc.internal.getNumberOfPages();
-                doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(148, 163, 184);
-                doc.text(`Página ${pagina}`, larguraPagina - MARGEM, alturaPagina - 6, { align: 'right' });
             }
         };
 
@@ -118007,38 +118004,96 @@ window.baixarPdfRelatorioAdmin = async function() {
             nomesGrupos.forEach((g, idx) => {
                 if (idx > 0) doc.addPage();
 
-                doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(0, 35, 71);
-                doc.text(g, MARGEM, ALTURA_CABECALHO + 4);
+                const linhasG = grupos[g];
+                const limpa = function(v) { return String(v == null ? '' : v).replace(/<[^>]*>/g, '').replace(/\s*✎\s*$/, '').trim(); };
+                const info = (linhasG[0] && linhasG[0]._info) || {};
+
+                // Identificação do colaborador
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(0, 35, 71);
+                doc.text(g, MARGEM, ALTURA_CABECALHO + 5);
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(71, 85, 105);
+                doc.text('Unidade: ' + (info.unidade || '-') + '   |   Cargo: ' + (info.cargo || '-') + '   |   Empresa: ' + (info.empresa || '-'), MARGEM, ALTURA_CABECALHO + 9.5);
+
+                // Resumo do período (caixinhas)
+                const diasComBatida = linhasG.filter(l => limpa(l.ent1) !== '-' && limpa(l.ent1) !== '').length;
+                const diasFalta = linhasG.filter(l => /^Falta/i.test(limpa(l.motivo))).length;
+                const diasAlterados = linhasG.filter(l => l._editadosCampos && Object.values(l._editadosCampos).some(Boolean)).length;
+                const somaMinG = function(k) { return linhasG.reduce(function(a, l) { return a + ((l._min && l._min[k]) || 0); }, 0); };
+                const saldoFinalTxt = linhasG.length ? limpa(linhasG[linhasG.length - 1].saldoFmt) : '00h 00m';
+                const caixas = [
+                    ['Dias com batida', String(diasComBatida), [0, 35, 71]],
+                    ['Faltas', String(diasFalta), diasFalta ? [185, 28, 28] : [0, 35, 71]],
+                    ['Dias corrigidos', String(diasAlterados), diasAlterados ? [14, 125, 165] : [0, 35, 71]],
+                    ['Crédito', window.relMinToHr(somaMinG('credito')), [21, 128, 61]],
+                    ['Débito', window.relMinToHr(somaMinG('debito')), [185, 28, 28]],
+                    ['Saldo do período', saldoFinalTxt, /^-/.test(saldoFinalTxt) ? [185, 28, 28] : [21, 128, 61]]
+                ];
+                const yCx = ALTURA_CABECALHO + 12.5, hCx = 10, gapCx = 2;
+                const wCx = (larguraPagina - MARGEM * 2 - gapCx * (caixas.length - 1)) / caixas.length;
+                caixas.forEach(function(cx, i) {
+                    const x = MARGEM + i * (wCx + gapCx);
+                    doc.setFillColor(244, 247, 251); doc.setDrawColor(210, 218, 228); doc.setLineWidth(0.2);
+                    doc.roundedRect(x, yCx, wCx, hCx, 1.2, 1.2, 'FD');
+                    doc.setFont('helvetica', 'normal'); doc.setFontSize(5.8); doc.setTextColor(100, 116, 139);
+                    doc.text(cx[0], x + wCx / 2, yCx + 3.6, { align: 'center' });
+                    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(cx[2][0], cx[2][1], cx[2][2]);
+                    doc.text(cx[1], x + wCx / 2, yCx + 8, { align: 'center' });
+                });
 
                 doc.autoTable(Object.assign({}, estiloTabela, {
                     head: [colunasSemColaborador.map(c => cabecalhosCurtosPdf[c.key] || c.header)],
-                    body: grupos[g].map(l => colunasSemColaborador.map(c => valorCelulaJornadaPdf(l, c))).concat([(function() {
+                    body: linhasG.map(l => colunasSemColaborador.map(c => valorCelulaJornadaPdf(l, c))).concat([(function() {
                         // Linha TOTAIS (igual ao Ponto Mais): soma do período de cada coluna de horas
-                        const somaMin = function(k) { return grupos[g].reduce(function(a, l) { return a + ((l._min && l._min[k]) || 0); }, 0); };
+                        const somaMin = function(k) { return linhasG.reduce(function(a, l) { return a + ((l._min && l._min[k]) || 0); }, 0); };
                         const chaveMin = { creditoFmt: 'credito', debitoFmt: 'debito', intervaloFmt: 'intervalo', normaisFmt: 'normais', he50Fmt: 'he50', he100Fmt: 'he100', noturnoFmt: 'noturno' };
                         return colunasSemColaborador.map(function(c, ci) {
-                            const st = { fontStyle: 'bold', fillColor: [236, 238, 241] };
+                            const st = { fontStyle: 'bold', fillColor: [226, 232, 240] };
                             if (ci === 0) return { content: 'TOTAIS', styles: st };
+                            if (c.key === 'saldoFmt') return { content: saldoFinalTxt, styles: st };
                             return { content: chaveMin[c.key] ? window.relMinToHr(somaMin(chaveMin[c.key])) : '', styles: st };
                         });
                     })()]),
-                    startY: ALTURA_CABECALHO + 7,
+                    startY: yCx + hCx + 4,
                     margin: { left: MARGEM, right: MARGEM, top: ALTURA_CABECALHO, bottom: 14 },
                     styles: Object.assign({}, estiloTabela.styles, { fontSize: 5.8, cellPadding: { top: 0.9, right: 0.9, bottom: 0.9, left: 0.9 }, halign: 'center' }),
-                    headStyles: Object.assign({}, estiloTabela.headStyles, { fontSize: 5.6 }),
-                    columnStyles: columnStylesJornada
+                    headStyles: Object.assign({}, estiloTabela.headStyles, { fontSize: 5.6, fillColor: [0, 35, 71], textColor: [255, 255, 255], lineColor: [0, 35, 71] }),
+                    columnStyles: columnStylesJornada,
+                    // Cores por tipo de dia: falta em vermelho claro, folga em cinza, saldo vermelho/verde
+                    didParseCell: function(d) {
+                        if (d.section !== 'body') return;
+                        const l = linhasG[d.row.index];
+                        if (!l) return; // linha TOTAIS
+                        const chave = colunasSemColaborador[d.column.index] && colunasSemColaborador[d.column.index].key;
+                        const mot = limpa(l.motivo);
+                        if (/^Falta/i.test(mot)) {
+                            d.cell.styles.fillColor = [254, 242, 242];
+                            if (chave === 'motivo' || chave === 'debitoFmt') { d.cell.styles.textColor = [185, 28, 28]; d.cell.styles.fontStyle = 'bold'; }
+                        } else if (/^Folga/i.test(mot)) {
+                            d.cell.styles.fillColor = [241, 243, 246];
+                            d.cell.styles.textColor = [120, 130, 145];
+                        }
+                        if (chave === 'saldoFmt') {
+                            const t = limpa(l.saldoFmt);
+                            if (/^-/.test(t)) { d.cell.styles.textColor = [185, 28, 28]; d.cell.styles.fontStyle = 'bold'; }
+                            else if (t && t !== '00h 00m') { d.cell.styles.textColor = [21, 128, 61]; d.cell.styles.fontStyle = 'bold'; }
+                        }
+                    }
                 }));
 
-                let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 6;
-                // Legenda só aparece na página de quem realmente teve algum horário corrigido —
-                // não poluir a folha de quem bateu tudo certinho sem nenhuma correção do RH.
-                const teveCorrecaoNestaPagina = grupos[g].some(l => l._editadosCampos && Object.values(l._editadosCampos).some(Boolean));
+                let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 5;
+                // Legenda: só em quem teve horário corrigido (não polui a folha de quem bateu tudo certo)
+                const teveCorrecaoNestaPagina = linhasG.some(l => l._editadosCampos && Object.values(l._editadosCampos).some(Boolean));
                 if (teveCorrecaoNestaPagina) {
                     doc.setFont('helvetica', 'italic'); doc.setFontSize(6.2); doc.setTextColor(14, 125, 165);
-                    doc.text('* Horário corrigido pelo RH — o horário batido originalmente pelo colaborador continua guardado no sistema.', MARGEM, y);
-                    y += 6;
+                    doc.text('* Horário corrigido pelo RH (com justificativa registrada) — o horário batido originalmente pelo colaborador continua guardado no sistema.', MARGEM, y);
+                    y += 5;
                 }
-                desenharAssinatura(y + 32); // espaço pra assinar à caneta
+                // Declaração de conferência + assinaturas (mantém tudo junto na mesma página)
+                if (y + 42 > alturaPagina - 14) { doc.addPage(); desenharCabecalho(); y = ALTURA_CABECALHO + 6; }
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(71, 85, 105);
+                doc.text('Declaro que conferi os registros de ponto acima, referentes ao período indicado, e estou de acordo, salvo as ressalvas que fiz por escrito.', MARGEM, y + 4);
+                doc.text('Data: ____ / ____ / ________', MARGEM, y + 10);
+                desenharAssinatura(y + 28); // espaço pra assinar à caneta
             });
         } else {
             // Monta o corpo da tabela, com uma linha "faixa" para cada grupo (quando agrupado)
@@ -118076,6 +118131,15 @@ window.baixarPdfRelatorioAdmin = async function() {
                 const y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : ALTURA_CABECALHO) + 32;
                 desenharAssinatura(y);
             }
+        }
+
+        // Rodapé de todas as páginas: "Página X de Y" + aviso de que o documento foi gerado pelo sistema.
+        const totalPaginas = doc.internal.getNumberOfPages();
+        for (let pg = 1; pg <= totalPaginas; pg++) {
+            doc.setPage(pg);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(148, 163, 184);
+            doc.text('RH Soul - Gestão Inteligente', MARGEM, alturaPagina - 6);
+            doc.text(`Página ${pg} de ${totalPaginas}`, larguraPagina - MARGEM, alturaPagina - 6, { align: 'right' });
         }
 
         const nomeArquivo = `Relatorio_${(tipoTxt || 'Relatorio').replace(/[^\w]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.pdf`;
@@ -118742,7 +118806,8 @@ window.gerarRelatorioAdmin = async function() {
                         motivo: motivo || '-',
                         _editadosCampos: camposEditadosDia,
                         _min: { credito: credito, debito: debito, intervalo: minIntervalo, normais: normais, he50: he50, he100: he100, noturno: minNoturno },
-                        _grupo: colab.nome
+                        _grupo: colab.nome,
+                        _info: { unidade: colab.unidade || '-', cargo: (colab.dados_admissao && colab.dados_admissao.cargo) || '-', empresa: colab.empresa || '-' }
                     });
                 });
             });
