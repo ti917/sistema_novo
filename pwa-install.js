@@ -48,11 +48,11 @@
         : 'Instale o ' + NOMES[sis] + ' ' + onde + ': abre em janela própria, com atalho na ' + (ehCelular ? 'tela inicial' : 'área de trabalho') + ' e sem precisar procurar o site.';
       var css = document.createElement('style'); css.id = 'pwa-aviso-css';
       css.textContent =
-        '#pwa-aviso{position:fixed;z-index:9000;right:22px;bottom:22px;width:min(400px,calc(100vw - 28px));box-sizing:border-box;padding:18px 18px 16px;border-radius:18px;color:#f3f6fb;font-family:Inter,Roboto,Segoe UI,Arial,sans-serif;background:linear-gradient(160deg,rgba(14,26,44,.97),rgba(5,12,24,.98));border:1px solid rgba(255,255,255,.10);box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 1px ' + COR[0] + '33;opacity:0;transform:translateY(24px);transition:opacity .35s ease,transform .35s ease}'
+        '#pwa-aviso{position:fixed;z-index:9000;right:22px;bottom:104px;width:min(400px,calc(100vw - 28px));box-sizing:border-box;padding:18px 18px 16px;border-radius:18px;color:#f3f6fb;font-family:Inter,Roboto,Segoe UI,Arial,sans-serif;background:linear-gradient(160deg,rgba(14,26,44,.97),rgba(5,12,24,.98));border:1px solid rgba(255,255,255,.10);box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 1px ' + COR[0] + '33;opacity:0;transform:translateY(24px);transition:opacity .35s ease,transform .35s ease}'
       + '#pwa-aviso.on{opacity:1;transform:none}'
       + '#pwa-aviso:before{content:"";position:absolute;left:18px;right:18px;top:0;height:3px;border-radius:0 0 4px 4px;background:linear-gradient(90deg,' + COR[0] + ',' + COR[1] + ')}'
       + '#pwa-aviso .pa-topo{display:flex;gap:14px;align-items:center}'
-      + '#pwa-aviso .pa-ic{flex:0 0 auto;width:58px;height:58px;border-radius:15px;box-shadow:0 6px 18px ' + COR[0] + '55}'
+      + '#pwa-aviso .pa-ic{flex:0 0 auto;width:58px;height:58px;border-radius:15px;box-shadow:0 6px 18px rgba(226,78,34,.35)}'
       + '#pwa-aviso .pa-t{font-weight:800;font-size:1.02rem;line-height:1.25;margin:0}'
       + '#pwa-aviso .pa-s{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:' + COR[0] + ';font-weight:700;margin:0 0 3px}'
       + '#pwa-aviso .pa-p{font-size:.85rem;line-height:1.5;color:#b8c4d6;margin:12px 0 14px}'
@@ -63,7 +63,7 @@
       + '#pwa-aviso .pa-no:hover{color:#fff;background:rgba(255,255,255,.06)}'
       + '#pwa-aviso .pa-x{position:absolute;top:10px;right:10px;width:28px;height:28px;border:0;border-radius:50%;cursor:pointer;background:rgba(255,255,255,.06);color:#9fb0c8;font-size:15px;line-height:1}'
       + '#pwa-aviso .pa-x:hover{background:rgba(255,255,255,.14);color:#fff}'
-      + '@media (max-width:640px){#pwa-aviso{left:12px;right:12px;bottom:12px;width:auto}}';
+      + '@media (max-width:640px){#pwa-aviso{left:12px;right:12px;bottom:96px;width:auto}}';
       document.head.appendChild(css);
       caixa = document.createElement('div'); caixa.id = 'pwa-aviso'; caixa.setAttribute('role', 'dialog'); caixa.setAttribute('aria-label', 'Instalar aplicativo');
       caixa.innerHTML =
