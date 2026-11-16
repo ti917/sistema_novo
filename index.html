@@ -23295,6 +23295,22 @@ async function escutarTempoReal() {
 
                 const chaveGrupo = msg.colaborador_id || `tel_${msg.telefone_normalizado}`;
 
+                // 👁 "Visto por": copia quem viu / quando pra mensagem em memória e redesenha o chat se estiver aberto
+                try {
+                    const mMem = (window.todasConversasClaraLog || []).find(x => x.id === msg.id);
+                    if (mMem && (mMem.lida_por !== (msg.lida_por || null) || mMem.lida_em !== (msg.lida_em || null))) {
+                        mMem.lida_por = msg.lida_por || null; mMem.lida_em = msg.lida_em || null;
+                        clearTimeout(window._claraRedesenhoVisto);
+                        window._claraRedesenhoVisto = setTimeout(() => {
+                            const sel = window.chatClaraSelecionado;
+                            if (sel && sel.chave === chaveGrupo && typeof window.abrirChatClaraColaborador === 'function') window.abrirChatClaraColaborador(sel);
+                        }, 600);
+                    }
+                } catch (eV) {}
+
+                // Gravação do "Visto por" (passo intermediário: a mensagem ainda consta não lida por instantes) — não é "marcar como não lida"
+                if (!msg.lida && msg.lida_por) return;
+
                 // Alguém marcou a conversa como NÃO lida: devolve a bolinha pros demais usuários também
                 if (!msg.lida) {
                     const estaAbertaAgora = window.chatClaraSelecionado && window.chatClaraSelecionado.chave === chaveGrupo;
@@ -53940,22 +53956,46 @@ window.abrirChatClaraColaboradorPorChave = function(chave) {
  * o servidor) e depois persiste no banco em segundo plano, sem travar a tela. */
 window.marcarClaraConversaComoLida = function(grupo) {
     if (!grupo) return;
+    const eraNaoLidaAntes = (window.claraNaoLidasPorChave?.[grupo.chave] || 0) > 0;
     if (window.claraNaoLidasPorChave?.[grupo.chave]) {
         delete window.claraNaoLidasPorChave[grupo.chave];
         window.atualizarBadgesChatClaraNaoLidas();
     }
+    // 👁 "Visto por": quem abriu a conversa e quando, só das mensagens que AINDA estavam não lidas
+    // (as que já tinham sido vistas por alguém continuam com o nome de quem viu primeiro).
+    const nomeQuemViu = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) ? String(usuarioAtual.nome) : null;
+    const agoraIso = new Date().toISOString();
+    let tinhaNaoLida = !!eraNaoLidaAntes;
     (window.todasConversasClaraLog || []).forEach(m => {
         const chaveMsg = m.colaborador_id || `tel_${m.telefone_normalizado}`;
-        if (chaveMsg === grupo.chave && m.direcao === 'entrada') m.lida = true;
+        if (chaveMsg === grupo.chave && m.direcao === 'entrada') {
+            if (m.lida !== true && !m._wa) { tinhaNaoLida = true; if (nomeQuemViu) { m.lida_por = nomeQuemViu; m.lida_em = agoraIso; } }
+            m.lida = true;
+        }
     });
 
-    supabaseClient.functions.invoke('smooth-service', {
+    const marcarNoServidor = () => supabaseClient.functions.invoke('smooth-service', {
         body: {
             action: 'marcar_lida_clara',
             colaboradorId: grupo.colaboradorId || null,
             telefoneNormalizado: grupo.telefoneNormalizado || null,
         }
     }).catch(e => console.warn('Não consegui marcar como lida no servidor:', e));
+
+    if (nomeQuemViu && tinhaNaoLida) {
+        // Primeiro grava quem viu (enquanto ainda estão "não lidas"), depois a função marca como lidas.
+        // Se esta parte falhar (ex.: colunas ainda não criadas), a leitura funciona igual, só não mostra o nome.
+        let qVisto = supabaseClient.from('clara_conversas_log')
+            .update({ lida_por: nomeQuemViu, lida_em: agoraIso })
+            .eq('direcao', 'entrada').eq('lida', false);
+        qVisto = grupo.colaboradorId ? qVisto.eq('colaborador_id', grupo.colaboradorId) : qVisto.eq('telefone_normalizado', grupo.telefoneNormalizado);
+        Promise.resolve(qVisto.select('id'))
+            .then(r => { if (r && r.error) console.warn('Visto por (não gravou):', r.error.message || r.error); })
+            .catch(e => console.warn('Visto por (não gravou):', e))
+            .then(marcarNoServidor);
+    } else {
+        marcarNoServidor();
+    }
 };
 
 /** Alterna lida / não lida de uma conversa direto na lista do Chat da Clara.
@@ -53997,18 +54037,29 @@ window.claraAlternarLida = async function(chave, ev) {
     }
 
     // Reflete na tela na hora; se o banco recusar, desfaz logo abaixo
+    const vistoAntes = { por: ultimaEntrada.lida_por || null, em: ultimaEntrada.lida_em || null };
     ultimaEntrada.lida = false;
+    ultimaEntrada.lida_por = null;
+    ultimaEntrada.lida_em = null;
     window.claraNaoLidasPorChave[chave] = 1;
     window.atualizarBadgesChatClaraNaoLidas();
 
     try {
-        const { data, error } = await supabaseClient.from('clara_conversas_log')
-            .update({ lida: false }).eq('id', ultimaEntrada.id).select('id');
+        // Volta a ficar pendente: apaga também o "Visto por" dessa mensagem. Se as colunas ainda
+        // não existirem no banco, tenta de novo só com "lida: false" (funciona como sempre funcionou).
+        let resp = await supabaseClient.from('clara_conversas_log')
+            .update({ lida: false, lida_por: null, lida_em: null }).eq('id', ultimaEntrada.id).select('id');
+        if (resp.error && /lida_por|lida_em/.test(String(resp.error.message || ''))) {
+            resp = await supabaseClient.from('clara_conversas_log').update({ lida: false }).eq('id', ultimaEntrada.id).select('id');
+        }
+        const { data, error } = resp;
         if (error) throw error;
         if (!data || data.length === 0) throw new Error('0 linhas atualizadas (provável falta de permissão de UPDATE na tabela clara_conversas_log)');
     } catch (e) {
         console.error('Não consegui marcar como não lida:', e);
         ultimaEntrada.lida = true;
+        ultimaEntrada.lida_por = vistoAntes.por;
+        ultimaEntrada.lida_em = vistoAntes.em;
         delete window.claraNaoLidasPorChave[chave];
         window.atualizarBadgesChatClaraNaoLidas();
         mostrarAlerta('Não consegui salvar "não lida" no banco: ' + (e.message || e), 'erro');
@@ -54150,6 +54201,7 @@ window.abrirChatClaraColaborador = function(grupo) {
                     ${conteudoHtml}
                     ${m._wa ? window.claraStatusEntregaHtml(m._wa, m.criado_em) : ''}
                     <span class="clara-bubble-hora">${horaFormatada}</span>
+                    ${(isEntrada && m.lida_por) ? `<span class="clara-visto-por" title="Quem abriu esta mensagem no RH" style="display:block; margin-top:4px; font-size:0.7rem; opacity:0.85; font-weight:600;"><i class="fa-regular fa-eye"></i> Visto por ${String(m.lida_por).replace(/</g, '&lt;')}${m.lida_em ? ' · ' + new Date(m.lida_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(', ', ' às ') : ''}</span>` : ''}
                 </div>
             </div>
         `;
