@@ -20,23 +20,28 @@
 --                         public.compras_vinculos, public.compras_teto, public.compras_catalogo cascade;
 -- =====================================================================
 
--- 0) Função "é do Financeiro?" (a mesma usada em nfecloud_somente_financeiro.sql; recria igual se faltar)
-create or replace function public.eh_usuario_financeiro()
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-    select exists (
-        select 1 from public.perfis p
-        where p.id = auth.uid()
-          and (p.id = 'fa338e33-18c9-467e-bf3e-34880fd9324e'
-               or p.permissoes->>'sistemas_permitidos' in ('Financeiro', 'RH_Financeiro', 'Comercial_Financeiro', 'Todos'))
-    );
-$$;
-revoke all on function public.eh_usuario_financeiro() from public, anon;
-grant execute on function public.eh_usuario_financeiro() to authenticated;
+-- 0) Função "é do Financeiro?" — já existe no seu banco (usada por outras telas). Só cria se estiver FALTANDO;
+--    se já existir, NÃO mexe nela.
+do $$
+begin
+  if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                 where n.nspname = 'public' and p.proname = 'eh_usuario_financeiro') then
+    execute $f$
+      create function public.eh_usuario_financeiro()
+      returns boolean language sql stable security definer set search_path = public
+      as $b$
+        select exists (
+          select 1 from public.perfis p
+          where p.id = auth.uid()
+            and (p.id = 'fa338e33-18c9-467e-bf3e-34880fd9324e'
+                 or p.permissoes->>'sistemas_permitidos' in ('Financeiro', 'RH_Financeiro', 'Comercial_Financeiro', 'Todos'))
+        )
+      $b$
+    $f$;
+    revoke all on function public.eh_usuario_financeiro() from public, anon;
+    grant execute on function public.eh_usuario_financeiro() to authenticated;
+  end if;
+end $$;
 
 -- 1) Catálogo simples (o que o gestor enxerga: nome, categoria, como se pede)
 create table if not exists public.compras_catalogo (
