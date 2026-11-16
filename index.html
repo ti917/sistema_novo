@@ -5993,16 +5993,20 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 18px;">Escolha a unidade, adicione os produtos que precisam ser comprados e envie. O Financeiro analisa e você acompanha a situação logo abaixo.</p>
         <div class="form-group" style="max-width: 420px;"><label>Unidade <span style="color: var(--cor-perigo);">*</span></label>
             <select id="cmp-unidade"></select></div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin: 15px 0; align-items:end;">
-            <div class="form-group"><label>Buscar produto</label>
-                <input type="text" id="cmp-busca" placeholder="Digite para filtrar a lista..." oninput="cmpFiltrarProdutos()"></div>
+        <div class="form-group" style="margin: 15px 0 5px;"><label><i class="fa-solid fa-magnifying-glass"></i> Buscar produto</label>
+            <input type="text" id="cmp-busca" placeholder="Digite o nome ou parte dele (ex.: luva, papel, saco de lixo)..." oninput="cmpFiltrarProdutos()" autocomplete="off"></div>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 10px 0 15px; align-items:end;">
             <div class="form-group"><label>Produto <span style="color: var(--cor-perigo);">*</span></label>
-                <select id="cmp-produto"></select></div>
+                <select id="cmp-produto" onchange="cmpAoEscolherProduto()"></select></div>
+            <div class="form-group hidden" id="cmp-grupo-tamanho"><label>Tamanho <span style="color: var(--cor-perigo);">*</span></label>
+                <select id="cmp-tamanho"></select></div>
             <div class="form-group"><label>Quantidade <span style="color: var(--cor-perigo);">*</span></label>
                 <input type="number" id="cmp-quantidade" min="1" step="1" value="1"></div>
             <div class="form-group"><button type="button" class="btn-secondary" onclick="cmpAdicionarItem()" style="height:44px; width:100%; font-weight:bold;"><i class="fa-solid fa-plus"></i> Adicionar ao pedido</button></div>
         </div>
         <div id="cmp-itens" style="margin-bottom: 12px;"></div>
+        <div class="form-group"><label>Motivo da compra <span style="color: var(--cor-perigo);">*</span></label>
+            <textarea id="cmp-motivo" rows="2" maxlength="400" placeholder="Por que precisa comprar? Ex.: estoque acabou, reposição mensal, novo colaborador, item danificado..." style="width:100%; padding:10px; border-radius:8px;"></textarea></div>
         <div class="form-group"><label>Observação (opcional)</label>
             <textarea id="cmp-observacao" rows="2" maxlength="400" placeholder="Urgência, marca preferida, onde entregar..." style="width:100%; padding:10px; border-radius:8px;"></textarea></div>
         <button type="button" id="btn-enviar-compra" class="btn-success" onclick="cmpEnviarPedido()" style="margin-top: 12px; height: 46px; padding: 0 24px; font-weight: bold;"><i class="fa-solid fa-paper-plane"></i> Enviar pedido ao Financeiro</button>
@@ -84364,6 +84368,7 @@ window._cmpItens = [];
 window._cmpErroTabela = function(error) {
     return /compras_(catalogo|pedidos|pedido_itens)/i.test(error?.message || '') && /(exist|schema cache|relation)/i.test(error?.message || '');
 };
+window._cmpNorm = function(t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); };
 window.abrirTelaComprasPedido = async function() {
     const sel = document.getElementById('cmp-unidade');
     if (!sel) return;
@@ -84378,7 +84383,9 @@ window.abrirTelaComprasPedido = async function() {
     window._cmpUnidades = {};
     (data || []).forEach(u => { window._cmpUnidades[u.nome] = u; });
     sel.innerHTML = ((data || []).length === 1 ? '' : '<option value="">Selecione a unidade...</option>') + (data || []).map(u => `<option value="${window.rsEsc(u.nome)}">${window.rsEsc(u.nome)}</option>`).join('');
-    const { data: cat, error } = await supabaseClient.from('compras_catalogo').select('id, nome, categoria, unidade_pedido').eq('ativo', true).order('nome');
+    // "variacoes" (tamanhos) só existe depois do SQL compras_variacoes: sem ele, busca sem a coluna
+    let { data: cat, error } = await supabaseClient.from('compras_catalogo').select('id, nome, categoria, unidade_pedido, palavras_chave, variacoes').eq('ativo', true).order('nome');
+    if (error && /variacoes/i.test(error.message || '')) ({ data: cat, error } = await supabaseClient.from('compras_catalogo').select('id, nome, categoria, unidade_pedido, palavras_chave').eq('ativo', true).order('nome'));
     if (error) {
         window._cmpCatalogo = [];
         document.getElementById('cmp-produto').innerHTML = '<option value="">Indisponível</option>';
@@ -84391,24 +84398,41 @@ window.abrirTelaComprasPedido = async function() {
     window.cmpRenderItens();
     window.carregarMeusPedidosCompra();
 };
+// Busca por palavras em qualquer ordem, no nome, na categoria e nas palavras-chave ("luva amarela", "papel toalha"...)
 window.cmpFiltrarProdutos = function() {
     const sel = document.getElementById('cmp-produto'); if (!sel) return;
-    const norm = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-    const termo = norm(document.getElementById('cmp-busca')?.value || '').trim();
-    const lista = (window._cmpCatalogo || []).filter(c => !termo || norm(c.nome + ' ' + (c.categoria || '')).includes(termo));
+    const palavras = window._cmpNorm(document.getElementById('cmp-busca')?.value || '').split(/\s+/).filter(Boolean);
+    const lista = (window._cmpCatalogo || []).filter(c => {
+        const alvo = window._cmpNorm(c.nome + ' ' + (c.categoria || '') + ' ' + (c.palavras_chave || ''));
+        return palavras.every(w => alvo.includes(w));
+    });
     sel.innerHTML = lista.length
-        ? '<option value="">Selecione o produto...</option>' + lista.map(c => `<option value="${c.id}">${window.rsEsc(c.nome)} — ${window.rsEsc(c.unidade_pedido || 'Unidade(s)')}</option>`).join('')
+        ? (lista.length === 1 ? '' : '<option value="">Selecione o produto (' + lista.length + ')...</option>') + lista.map(c => `<option value="${c.id}">${window.rsEsc(c.nome)} — ${window.rsEsc(c.unidade_pedido || 'Unidade(s)')}</option>`).join('')
         : '<option value="">Nenhum produto encontrado</option>';
+    window.cmpAoEscolherProduto();
+};
+window.cmpAoEscolherProduto = function() {
+    const id = document.getElementById('cmp-produto')?.value;
+    const c = (window._cmpCatalogo || []).find(x => x.id === id);
+    const tams = c && c.variacoes ? String(c.variacoes).split(',').map(x => x.trim()).filter(Boolean) : [];
+    const grupo = document.getElementById('cmp-grupo-tamanho'), selT = document.getElementById('cmp-tamanho');
+    if (!grupo || !selT) return;
+    if (!tams.length) { grupo.classList.add('hidden'); selT.innerHTML = ''; return; }
+    selT.innerHTML = '<option value="">Escolha o tamanho...</option>' + tams.map(t => `<option value="${window.rsEsc(t)}">${window.rsEsc(t)}</option>`).join('');
+    grupo.classList.remove('hidden');
 };
 window.cmpAdicionarItem = function() {
     const id = document.getElementById('cmp-produto').value;
     const qtd = parseFloat(document.getElementById('cmp-quantidade').value);
     if (!id) return mostrarAlerta('Escolha o produto.', 'aviso');
-    if (!qtd || qtd <= 0) return mostrarAlerta('Informe a quantidade.', 'aviso');
     const c = (window._cmpCatalogo || []).find(x => x.id === id); if (!c) return;
-    const ja = window._cmpItens.find(i => i.catalogo_id === id);
+    const temTam = !document.getElementById('cmp-grupo-tamanho').classList.contains('hidden');
+    const tam = temTam ? document.getElementById('cmp-tamanho').value : '';
+    if (temTam && !tam) return mostrarAlerta('Escolha o tamanho.', 'aviso');
+    if (!qtd || qtd <= 0) return mostrarAlerta('Informe a quantidade.', 'aviso');
+    const ja = window._cmpItens.find(i => i.catalogo_id === id && (i.variacao || '') === tam);
     if (ja) ja.quantidade += qtd;
-    else window._cmpItens.push({ catalogo_id: id, produto_nome: c.nome, unidade_pedido: c.unidade_pedido || 'Unidade(s)', quantidade: qtd });
+    else window._cmpItens.push({ catalogo_id: id, produto_nome: c.nome, variacao: tam, unidade_pedido: c.unidade_pedido || 'Unidade(s)', quantidade: qtd });
     document.getElementById('cmp-quantidade').value = '1';
     window.cmpRenderItens();
 };
@@ -84418,32 +84442,39 @@ window.cmpRenderItens = function() {
     if (!window._cmpItens.length) { box.innerHTML = '<p style="color:var(--cor-texto-secundario); font-size:0.85rem; margin:0;">Nenhum produto adicionado ainda.</p>'; return; }
     box.innerHTML = '<div style="border:1px solid var(--cor-borda); border-radius:10px; overflow:hidden;">' + window._cmpItens.map((it, i) =>
         `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:9px 12px; ${i ? 'border-top:1px solid var(--cor-borda);' : ''}">
-            <span><b>${window.rsEsc(it.produto_nome)}</b> <span style="color:var(--cor-texto-secundario);">× ${it.quantidade} ${window.rsEsc(it.unidade_pedido)}</span></span>
+            <span><b>${window.rsEsc(it.produto_nome)}</b>${it.variacao ? ` <span style="color:#ffb74d;">(tamanho ${window.rsEsc(it.variacao)})</span>` : ''} <span style="color:var(--cor-texto-secundario);">× ${it.quantidade} ${window.rsEsc(it.unidade_pedido)}</span></span>
             <button type="button" class="btn-secondary" onclick="cmpRemoverItem(${i})" title="Remover" style="padding:4px 10px;"><i class="fa-solid fa-trash"></i></button></div>`).join('') + '</div>';
 };
 window.cmpEnviarPedido = async function() {
     const unidade = document.getElementById('cmp-unidade').value;
     const obs = document.getElementById('cmp-observacao').value.trim();
+    const motivo = document.getElementById('cmp-motivo').value.trim();
     if (!unidade) return mostrarAlerta('Escolha a unidade.', 'aviso');
     if (!window._cmpItens.length) return mostrarAlerta('Adicione pelo menos um produto ao pedido.', 'aviso');
+    if (motivo.length < 5) return mostrarAlerta('Escreva o motivo da compra.', 'aviso');
     const u = window._cmpUnidades[unidade] || {};
     const btn = document.getElementById('btn-enviar-compra');
     btn.disabled = true;
     try {
-        const { data: ped, error } = await supabaseClient.from('compras_pedidos').insert([{
-            gestor_id: usuarioAtual.id, gestor_nome: usuarioAtual.nome, empresa: u.empresa || null, unidade, observacao: obs || null
-        }]).select('id').single();
+        const cab = { gestor_id: usuarioAtual.id, gestor_nome: usuarioAtual.nome, empresa: u.empresa || null, unidade, observacao: obs || null, motivo_compra: motivo };
+        let { data: ped, error } = await supabaseClient.from('compras_pedidos').insert([cab]).select('id').single();
+        if (error && /motivo_compra/i.test(error.message || '')) {
+            // SQL compras_variacoes ainda não rodado: não perde o motivo, grava junto da observação
+            const cab2 = { ...cab, observacao: 'MOTIVO: ' + motivo + (obs ? ' | ' + obs : '') }; delete cab2.motivo_compra;
+            ({ data: ped, error } = await supabaseClient.from('compras_pedidos').insert([cab2]).select('id').single());
+        }
         if (error) throw error;
         const { error: eIt } = await supabaseClient.from('compras_pedido_itens').insert(window._cmpItens.map(i => ({
-            pedido_id: ped.id, catalogo_id: i.catalogo_id, produto_nome: i.produto_nome, unidade_pedido: i.unidade_pedido, quantidade: i.quantidade
+            pedido_id: ped.id, catalogo_id: i.catalogo_id, produto_nome: i.produto_nome, unidade_pedido: i.unidade_pedido, quantidade: i.quantidade,
+            ...(i.variacao ? { variacao: i.variacao } : {})
         })));
         if (eIt) {
             // não deixa um pedido vazio: cancela o que acabou de criar
             await supabaseClient.from('compras_pedidos').update({ status: 'cancelado' }).eq('id', ped.id);
-            throw eIt;
+            throw /variacao/i.test(eIt.message || '') ? new Error('Os tamanhos ainda não foram ativados pelo Financeiro (falta rodar o SQL compras_variacoes).') : eIt;
         }
         mostrarAlerta('Pedido enviado ao Financeiro! Você acompanha a situação logo abaixo.', 'sucesso');
-        window._cmpItens = []; document.getElementById('cmp-observacao').value = '';
+        window._cmpItens = []; document.getElementById('cmp-observacao').value = ''; document.getElementById('cmp-motivo').value = '';
         window.cmpRenderItens();
         window.carregarMeusPedidosCompra();
     } catch (e) {
@@ -84459,21 +84490,22 @@ window.cmpCancelarPedido = async function(id) {
 window.carregarMeusPedidosCompra = async function() {
     const box = document.getElementById('cmp-lista-meus'); if (!box) return;
     box.innerHTML = '<p style="text-align:center; padding:15px;"><i class="fa-solid fa-circle-notch fa-spin"></i></p>';
-    const { data, error } = await supabaseClient.from('compras_pedidos').select('*, compras_pedido_itens(produto_nome, unidade_pedido, quantidade)').eq('gestor_id', usuarioAtual.id).order('criado_em', { ascending: false }).limit(100);
+    const { data, error } = await supabaseClient.from('compras_pedidos').select('*, compras_pedido_itens(*)').eq('gestor_id', usuarioAtual.id).order('criado_em', { ascending: false }).limit(100);
     if (error) { box.innerHTML = `<p style="color:var(--cor-texto-secundario); text-align:center;">${window._cmpErroTabela(error) ? 'Recurso ainda não ativado pelo Financeiro.' : 'Não foi possível carregar seus pedidos. ' + window.rsEsc(error.message || '')}</p>`; return; }
     if (!data || !data.length) { box.innerHTML = '<p style="text-align:center; color:var(--cor-texto-secundario); padding:20px;">Você ainda não fez nenhum pedido de compra.</p>'; return; }
     const ST = { enviado: ['Aguardando o Financeiro', '#4fc3f7', 'fa-hourglass-half'], aprovado: ['Aprovado', '#28a745', 'fa-circle-check'], comprado: ['Comprado', '#28a745', 'fa-bag-shopping'], recusado: ['Recusado', '#dc3545', 'fa-circle-xmark'], cancelado: ['Cancelado', '#9e9e9e', 'fa-ban'] };
     box.innerHTML = data.map(p => {
         const st = ST[p.status] || ST.enviado;
-        const itens = (p.compras_pedido_itens || []).map(i => `<li>${window.rsEsc(i.produto_nome)} <span style="color:var(--cor-texto-secundario);">× ${i.quantidade} ${window.rsEsc(i.unidade_pedido || '')}</span></li>`).join('');
+        const itens = (p.compras_pedido_itens || []).map(i => `<li>${window.rsEsc(i.produto_nome)}${i.variacao ? ` <span style="color:#ffb74d;">(tamanho ${window.rsEsc(i.variacao)})</span>` : ''} <span style="color:var(--cor-texto-secundario);">× ${i.quantidade} ${window.rsEsc(i.unidade_pedido || '')}</span></li>`).join('');
         return `<div class="admissao-card" style="padding:16px; border-radius:12px; border-left:4px solid ${st[1]}; display:flex; flex-direction:column; gap:8px; align-items:stretch;">
             <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
                 <strong style="color:${st[1]};"><i class="fa-solid ${st[2]}"></i> ${st[0]}</strong>
                 <span style="font-size:0.78rem; color:var(--cor-texto-secundario);">Pedido em ${new Date(p.criado_em).toLocaleDateString('pt-BR')}</span></div>
             <div style="font-size:0.82rem; color:var(--cor-texto-secundario);"><i class="fa-solid fa-building"></i> ${window.rsEsc(p.unidade)}</div>
             <ul style="margin:0; padding-left:18px; font-size:0.88rem;">${itens}</ul>
+            ${p.motivo_compra ? `<div style="font-size:0.82rem;"><b>Motivo:</b> ${window.rsEsc(p.motivo_compra)}</div>` : ''}
             ${p.observacao ? `<div style="font-size:0.8rem; color:var(--cor-texto-secundario);">Obs.: ${window.rsEsc(p.observacao)}</div>` : ''}
-            ${p.status === 'recusado' && p.motivo_recusa ? `<div style="font-size:0.85rem; color:#ef9a9a;"><b>Motivo:</b> ${window.rsEsc(p.motivo_recusa)}</div>` : ''}
+            ${p.status === 'recusado' && p.motivo_recusa ? `<div style="font-size:0.85rem; color:#ef9a9a;"><b>Motivo da recusa:</b> ${window.rsEsc(p.motivo_recusa)}</div>` : ''}
             ${p.status === 'enviado' ? `<div><button type="button" class="btn-secondary" onclick="cmpCancelarPedido('${p.id}')" style="padding:5px 12px; font-size:0.8rem;"><i class="fa-solid fa-ban"></i> Cancelar pedido</button></div>` : ''}
         </div>`;
     }).join('');

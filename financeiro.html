@@ -23016,7 +23016,7 @@ window.precarregarListasFinanceiro = async function () {
   // ---------- Aba Pedidos ----------
   async function carregarPedidos(){
     var box = $('cp-conteudo'); box.innerHTML = '<p style="padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando pedidos...</p>';
-    var r = await sb().from('compras_pedidos').select('*, compras_pedido_itens(id, produto_nome, unidade_pedido, quantidade, catalogo_id), compras_pedido_valores(item_id, valor_total)').order('criado_em', { ascending: false }).limit(300);
+    var r = await sb().from('compras_pedidos').select('*, compras_pedido_itens(*), compras_pedido_valores(item_id, valor_total)').order('criado_em', { ascending: false }).limit(300);
     if (r.error){ if (semTabela(r.error)) return avisoSql(box); box.innerHTML = '<p style="padding:20px;color:var(--cor-perigo);">Erro: '+esc(r.error.message)+'</p>'; return; }
     CP.pedidos = r.data || []; renderPedidos();
   }
@@ -23033,7 +23033,7 @@ window.precarregarListasFinanceiro = async function () {
     lista.forEach(function(p){
       var itens = p.compras_pedido_itens || [], tot = (p.compras_pedido_valores || []).reduce(function(s, v){ return s + Number(v.valor_total || 0); }, 0), st = ST[p.status] || ST.enviado;
       h += '<tr><td style="'+TD+'white-space:nowrap;">'+dbr(p.criado_em)+'</td><td style="'+TD+'"><b>'+esc(p.unidade)+'</b></td><td style="'+TD+'">'+esc(p.gestor_nome || '')+'</td>'
-        + '<td style="'+TD+'max-width:320px;">'+itens.map(function(i){ return esc(i.produto_nome)+' <span style="color:var(--cor-texto-secundario);">× '+Number(i.quantidade)+'</span>'; }).join('<br>')+'</td>'
+        + '<td style="'+TD+'max-width:320px;">'+itens.map(function(i){ return esc(i.produto_nome)+(i.variacao ? ' <b>('+esc(i.variacao)+')</b>' : '')+' <span style="color:var(--cor-texto-secundario);">× '+Number(i.quantidade)+'</span>'; }).join('<br>')+'</td>'
         + '<td style="'+TD+'white-space:nowrap;">'+(tot ? money(tot) : '-')+'</td><td style="'+TD+'">'+badge(st[0], st[1])+'</td>'
         + '<td style="'+TD+'white-space:nowrap;"><button class="btn-export" onclick="CP_abrir(\''+p.id+'\')">'+(p.status === 'enviado' ? 'Analisar' : 'Ver')+'</button></td></tr>';
     });
@@ -23042,7 +23042,7 @@ window.precarregarListasFinanceiro = async function () {
   window.CP_filtro = function(f){ CP.filtro = f; renderPedidos(); };
 
   // ---------- Sugestões do almoxarifado ----------
-  async function buscarOpcoes(cat, ccId, outras){
+  async function buscarOpcoes(cat, ccId, outras, tam){
     if (!cat) return [];
     var kws = norm(cat.palavras_chave || cat.nome).split(' ').filter(function(w){ return w.length >= 3; });
     if (!kws.length) return [];
@@ -23054,7 +23054,13 @@ window.precarregarListasFinanceiro = async function () {
       var n = i.almoxarifado_notas || {}, k = norm(i.produto)+'|'+norm(n.fornecedor);
       if (!mapa[k] || String(n.data_compra || '') > String(mapa[k].data || '')) mapa[k] = { produto: String(i.produto || '').trim(), fornecedor: String(n.fornecedor || '').trim(), medida: i.medida || '', valor: Number(i.valor_unitario) || 0, data: n.data_compra || '', cc: n.centro_custo_id };
     });
-    return Object.keys(mapa).map(function(k){ return mapa[k]; }).sort(function(a, b){ return String(b.data).localeCompare(String(a.data)); }).slice(0, outras ? 8 : 12);
+    var lista = Object.keys(mapa).map(function(k){ return mapa[k]; }).sort(function(a, b){ return String(b.data).localeCompare(String(a.data)); });
+    // tamanho pedido (ex.: G): só mostra os do almoxarifado que tenham esse tamanho no nome (palavra "G" sozinha, "TAM G", "N 40"...)
+    if (tam){
+      var T = norm(tam), com = lista.filter(function(o){ return norm(o.produto).split(' ').indexOf(T) >= 0; });
+      if (com.length) lista = com; else lista.forEach(function(o){ o.semTamanho = true; });
+    }
+    return lista.slice(0, outras ? 8 : 12);
   }
 
   // ---------- Modal de análise ----------
@@ -23073,7 +23079,7 @@ window.precarregarListasFinanceiro = async function () {
     var rv = await sb().from('compras_pedido_valores').select('*').eq('pedido_id', ped.id);
     var valores = {}; (rv.data || []).forEach(function(v){ valores[v.item_id] = v; });
     var cats = {}; (CP.catalogo.length ? CP.catalogo : ((await sb().from('compras_catalogo').select('*')).data || [])).forEach(function(c){ cats[c.id] = c; });
-    CP.cur.itens = itens.map(function(i){ return { id: i.id, nome: i.produto_nome, un: i.unidade_pedido || '', qtd: Number(i.quantidade) || 0, cat: cats[i.catalogo_id] || null, ops: [], outras: [], val: valores[i.id] || null }; });
+    CP.cur.itens = itens.map(function(i){ return { id: i.id, nome: i.produto_nome, variacao: i.variacao || '', un: i.unidade_pedido || '', qtd: Number(i.quantidade) || 0, cat: cats[i.catalogo_id] || null, ops: [], outras: [], val: valores[i.id] || null }; });
     await recarregarOpcoes();
   };
   async function recarregarOpcoes(){
@@ -23084,8 +23090,8 @@ window.precarregarListasFinanceiro = async function () {
       if (ids.length){ var rv = await sb().from('compras_vinculos').select('catalogo_id, produto_almox, fornecedor, usado_em').eq('centro_custo_id', String(c.ccId)).in('catalogo_id', ids); (rv.data || []).forEach(function(v){ (vinc[v.catalogo_id] = vinc[v.catalogo_id] || []).push(v); }); }
     }
     await Promise.all(c.itens.map(async function(it){
-      it.ops = c.ccId ? await buscarOpcoes(it.cat, c.ccId, false) : [];
-      it.outras = it.ops.length ? [] : await buscarOpcoes(it.cat, c.ccId, true);
+      it.ops = c.ccId ? await buscarOpcoes(it.cat, c.ccId, false, it.variacao) : [];
+      it.outras = it.ops.length ? [] : await buscarOpcoes(it.cat, c.ccId, true, it.variacao);
       var vs = (vinc[it.cat && it.cat.id] || []).map(function(v){ return norm(v.produto_almox)+'|'+norm(v.fornecedor); });
       it.ops.forEach(function(o){ o.aprendido = vs.indexOf(norm(o.produto)+'|'+norm(o.fornecedor)) >= 0; });
       it.ops.sort(function(a, b){ return (b.aprendido ? 1 : 0) - (a.aprendido ? 1 : 0); });
@@ -23100,7 +23106,7 @@ window.precarregarListasFinanceiro = async function () {
     var st = ST[p.status] || ST.enviado;
     var h = '<div style="padding:16px 20px;border-bottom:1px solid var(--cor-borda);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;">'
       + '<div><div style="font-size:1.1rem;font-weight:800;"><i class="fa-solid fa-cart-shopping" style="color:var(--cor-acento);"></i> Pedido de '+esc(p.unidade)+'</div>'
-      + '<div style="margin-top:4px;font-size:.84rem;color:var(--cor-texto-secundario);">Gestor: '+esc(p.gestor_nome || '')+' · '+dbr(p.criado_em)+(p.observacao ? ' · Obs.: '+esc(p.observacao) : '')+'</div></div>'+badge(st[0], st[1])+'</div>';
+      + '<div style="margin-top:4px;font-size:.84rem;color:var(--cor-texto-secundario);">Gestor: '+esc(p.gestor_nome || '')+' · '+dbr(p.criado_em)+(p.observacao ? ' · Obs.: '+esc(p.observacao) : '')+'</div>'+(p.motivo_compra ? '<div style="margin-top:6px;font-size:.86rem;"><b>Motivo da compra:</b> '+esc(p.motivo_compra)+'</div>' : '')+'</div>'+badge(st[0], st[1])+'</div>';
     h += '<div style="padding:12px 20px;border-bottom:1px solid var(--cor-borda);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><label style="font-weight:700;font-size:.84rem;">Centro de custo da unidade:</label>'
       + (c.edita ? '<select id="cp-cc" class="modern-input" style="max-width:340px;" onchange="CP_trocarCC(this.value)"><option value="">Escolha...</option>'+ccLista().slice().sort(function(a,b){ return String(a.nome_unidade).localeCompare(String(b.nome_unidade),'pt-BR'); }).map(function(x){ return '<option value="'+esc(x.id)+'"'+(String(x.id) === String(c.ccId) ? ' selected' : '')+'>'+esc(x.nome_unidade)+'</option>'; }).join('')+'</select>' : '<b>'+esc(ccNome(c.ccId) || '-')+'</b>')
       + '</div><div id="cp-teto" style="padding:12px 20px;border-bottom:1px solid var(--cor-borda);"></div>';
@@ -23108,9 +23114,9 @@ window.precarregarListasFinanceiro = async function () {
     c.itens.forEach(function(it, i){
       var v = it.val;
       h += '<div style="border:1px solid var(--cor-borda);border-radius:10px;padding:12px 14px;margin-bottom:12px;">'
-        + '<div style="font-weight:800;margin-bottom:8px;">'+esc(it.nome)+' <span style="font-weight:600;color:var(--cor-texto-secundario);">× '+it.qtd+' '+esc(it.un)+'</span></div>';
+        + '<div style="font-weight:800;margin-bottom:8px;">'+esc(it.nome)+(it.variacao ? ' <span style="color:#f1c40f;">— tamanho '+esc(it.variacao)+'</span>' : '')+' <span style="font-weight:600;color:var(--cor-texto-secundario);">× '+it.qtd+' '+esc(it.un)+'</span></div>';
       if (c.edita){
-        if (it.ops.length) h += '<div style="font-size:.76rem;color:var(--cor-texto-secundario);margin-bottom:4px;">Já comprado por esta unidade (clique para usar):</div>' + it.ops.map(function(o, k){ return opHtml(i, 'u', k, o); }).join('');
+        if (it.ops.length) h += '<div style="font-size:.76rem;color:var(--cor-texto-secundario);margin-bottom:4px;">Já comprado por esta unidade'+(it.variacao ? (it.ops.some(function(o){ return o.semTamanho; }) ? ' <span style="color:#e67e22;">(nenhum com tamanho '+esc(it.variacao)+' no nome: mostrando todos, confira)</span>' : ' (tamanho '+esc(it.variacao)+')') : '')+' — clique para usar:</div>' + it.ops.map(function(o, k){ return opHtml(i, 'u', k, o); }).join('');
         else if (it.outras.length) h += '<div style="font-size:.76rem;color:#e67e22;margin-bottom:4px;">Esta unidade nunca comprou este item. Comprado em OUTRAS unidades (clique para usar):</div>' + it.outras.map(function(o, k){ return opHtml(i, 'o', k, o); }).join('');
         else h += '<div style="font-size:.78rem;color:var(--cor-texto-secundario);margin-bottom:6px;">Nada parecido no almoxarifado. Digite o produto, o fornecedor e o valor abaixo.</div>';
         h += '<div style="display:grid;grid-template-columns:2fr 1.4fr 1fr 1fr;gap:8px;margin-top:8px;align-items:end;">'
@@ -23214,15 +23220,15 @@ window.precarregarListasFinanceiro = async function () {
       + '<button class="btn-export" onclick="CP_gerarLista()"><i class="fa-solid fa-wand-magic-sparkles"></i> Gerar lista inicial a partir do almoxarifado</button>'
       + '<span style="font-size:.8rem;color:var(--cor-texto-secundario);">Este é o nome simples que o gestor escolhe. As palavras-chave servem para achar os produtos parecidos no almoxarifado.</span></div>';
     if (!CP.catalogo.length){ box.innerHTML = h + '<p style="padding:24px;text-align:center;color:var(--cor-texto-secundario);">Nenhum produto cadastrado ainda. Use "Gerar lista inicial" para começar.</p>'; return; }
-    h += '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:760px;"><thead><tr><th style="'+TH+'">Produto (nome do gestor)</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Situação</th><th style="'+TH+'"></th></tr></thead><tbody>';
+    h += '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:760px;"><thead><tr><th style="'+TH+'">Produto (nome do gestor)</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Tamanhos</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Situação</th><th style="'+TH+'"></th></tr></thead><tbody>';
     CP.catalogo.forEach(function(c){
-      h += '<tr><td style="'+TD+'"><b>'+esc(c.nome)+'</b></td><td style="'+TD+'">'+esc(c.categoria || '-')+'</td><td style="'+TD+'">'+esc(c.unidade_pedido || '')+'</td><td style="'+TD+'">'+esc(c.palavras_chave || '')+'</td><td style="'+TD+'">'+(c.ativo ? badge('Ativo','#2ecc71') : badge('Inativo','#7f8c8d'))+'</td>'
+      h += '<tr><td style="'+TD+'"><b>'+esc(c.nome)+'</b></td><td style="'+TD+'">'+esc(c.categoria || '-')+'</td><td style="'+TD+'">'+esc(c.unidade_pedido || '')+'</td><td style="'+TD+'">'+esc(c.variacoes || '-')+'</td><td style="'+TD+'">'+esc(c.palavras_chave || '')+'</td><td style="'+TD+'">'+(c.ativo ? badge('Ativo','#2ecc71') : badge('Inativo','#7f8c8d'))+'</td>'
         + '<td style="'+TD+'white-space:nowrap;"><button class="btn-export" onclick="CP_editarProduto(\''+c.id+'\')">Editar</button></td></tr>';
     });
     box.innerHTML = h + '</tbody></table></div>';
   }
   window.CP_editarProduto = function(id){
-    var c = id ? CP.catalogo.find(function(x){ return x.id === id; }) : { nome: '', categoria: '', unidade_pedido: 'Unidade(s)', palavras_chave: '', ativo: true };
+    var c = id ? CP.catalogo.find(function(x){ return x.id === id; }) : { nome: '', categoria: '', unidade_pedido: 'Unidade(s)', palavras_chave: '', variacoes: '', ativo: true };
     if (!c) return;
     var m = document.createElement('div'); m.id = 'cp-modal2';
     m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -23233,25 +23239,55 @@ window.precarregarListasFinanceiro = async function () {
       + '<label style="font-size:.78rem;">Categoria</label><select id="cp-e-cat" class="modern-input" style="width:100%;margin-bottom:10px;"><option value="">— sem categoria —</option>'+cats.map(function(x){ return '<option value="'+esc(x.nome)+'"'+(c.categoria === x.nome ? ' selected' : '')+'>'+esc(x.nome)+'</option>'; }).join('')+'</select>'
       + '<label style="font-size:.78rem;">Como o gestor pede (unidade de pedido)</label><select id="cp-e-un" class="modern-input" style="width:100%;margin-bottom:10px;">'+medidas().map(function(x){ return '<option'+(c.unidade_pedido === x ? ' selected' : '')+'>'+esc(x)+'</option>'; }).join('')+'</select>'
       + '<label style="font-size:.78rem;">Palavras-chave para achar no almoxarifado (separe por espaço; ex.: PAPEL TOA)</label><input id="cp-e-kw" class="modern-input" style="width:100%;margin-bottom:10px;" value="'+esc(c.palavras_chave || '')+'">'
+      + '<label style="font-size:.78rem;">Tamanhos disponíveis (separe por vírgula, ex.: P, M, G. Deixe vazio se não tem)</label><input id="cp-e-tam" class="modern-input" style="width:100%;margin-bottom:10px;" value="'+esc(c.variacoes || '')+'">'
       + '<label style="display:flex;gap:8px;align-items:center;font-size:.84rem;margin-bottom:14px;"><input type="checkbox" id="cp-e-ativo"'+(c.ativo ? ' checked' : '')+'> Ativo (aparece para os gestores)</label>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn-export" onclick="document.getElementById(\'cp-modal2\').remove()">Cancelar</button><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_salvarProduto('+(id ? '\''+id+'\'' : 'null')+')">Salvar</button></div></div>';
     document.body.appendChild(m);
   };
   window.CP_salvarProduto = async function(id){
     var nome = $('cp-e-nome').value.trim(); if (!nome) return mostrarAlerta('Informe o nome.', 'aviso');
-    var pl = { nome: nome, categoria: $('cp-e-cat').value || null, unidade_pedido: $('cp-e-un').value, palavras_chave: $('cp-e-kw').value.trim() || null, ativo: $('cp-e-ativo').checked };
-    var r = id ? await sb().from('compras_catalogo').update(pl).eq('id', id) : await sb().from('compras_catalogo').insert([Object.assign({ criado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null }, pl)]);
+    var pl = { nome: nome, categoria: $('cp-e-cat').value || null, unidade_pedido: $('cp-e-un').value, palavras_chave: $('cp-e-kw').value.trim() || null, variacoes: $('cp-e-tam').value.split(',').map(function(x){ return x.trim(); }).filter(Boolean).join(', ') || null, ativo: $('cp-e-ativo').checked };
+    var gravar = function(o){ return id ? sb().from('compras_catalogo').update(o).eq('id', id) : sb().from('compras_catalogo').insert([Object.assign({ criado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null }, o)]); };
+    var r = await gravar(pl);
+    if (r.error && /variacoes/i.test(r.error.message || '')){ var pl2 = Object.assign({}, pl); delete pl2.variacoes; r = await gravar(pl2); if (!r.error) mostrarAlerta('Salvei sem os tamanhos: falta rodar o SQL compras_variacoes no Supabase.', 'aviso'); }
     if (r.error) return mostrarAlerta(/duplicate|unique/i.test(r.error.message) ? 'Já existe um produto com esse nome.' : 'Erro: ' + r.error.message, 'erro');
     $('cp-modal2').remove(); mostrarAlerta('Produto salvo.', 'sucesso'); carregarCatalogo();
   };
 
   // ---------- Lista inicial a partir do almoxarifado (só sugere; nada é criado até marcar e confirmar) ----------
-  var STOPW = { DE:1, DA:1, DO:1, DAS:1, DOS:1, COM:1, PARA:1, SEM:1, TIPO:1, CX:1, PCT:1, UN:1, UND:1, KG:1, ML:1, LT:1, PC:1, PCS:1, FD:1, RL:1 };
-  function palavrasSig(prod){ return norm(prod).split(' ').filter(function(w){ return w.length >= 3 && !STOPW[w] && !/[0-9]/.test(w); }); }
+  // Regras do agrupamento (pedido do Italo, 16/11/2026):
+  //  - O número de embalagem no fim ("C/1000", "C/5000") é só QUANTIDADE: não separa produtos (papel toalha C/1000 e C/5000 viram um só).
+  //    Tudo depois desse marcador (marca/fornecedor) é ignorado.
+  //  - Cor/tipo separam produtos (luva amarela x luva verde = itens diferentes).
+  //  - Tamanho (P, M, G, GG, "TAM G", número de calçado) NÃO separa: vira a lista de "Tamanhos" do produto.
+  var STOPW = { DE:1, DA:1, DO:1, DAS:1, DOS:1, COM:1, PARA:1, SEM:1, TIPO:1, CX:1, PCT:1, UN:1, UND:1, PC:1, PCS:1, FD:1, RL:1, PAR:1, PARES:1 };
+  var TAMS = { PP:1, P:1, M:1, G:1, GG:1, XG:1, EG:1, EXG:1, XGG:1, XXG:1 };
+  var ORDEM_TAM = ['PP','P','M','G','GG','XG','EG','EXG','XGG','XXG'];
+  function analisarNome(prod){
+    var cru = String(prod || '').toUpperCase();
+    var mq = cru.match(/\bC\s*\/\s*\d+|\bCOM\s+\d+\b|\bCX\s*\/?\s*\d+|\b\d+\s*(UN|UND|UNID|UNIDADES|FOLHAS|PCS|PECAS|PEÇAS|PARES)\b|\b\d+\s*X\s*\d+/);
+    if (mq) cru = cru.slice(0, mq.index);
+    var t = norm(cru).split(' ').filter(Boolean), tam = '', out = [];
+    var calcado = /\b(BOTA|BOTINA|SAPATO|TENIS|CALCADO|SAPATILHA|SANDALIA|CHINELO)\b/.test(t.join(' '));
+    for (var k = 0; k < t.length; k++){
+      var w = t[k];
+      if ((w === 'TAM' || w === 'TAMANHO' || w === 'NUM' || w === 'N') && t[k+1]){ tam = t[k+1]; k++; continue; }
+      if (TAMS[w]){ tam = w; continue; }
+      if (calcado && /^(3[3-9]|4[0-9])$/.test(w)){ tam = w; continue; }
+      out.push(w);
+    }
+    var toks = out.filter(function(w){ return w.length >= 3 && !STOPW[w] && !/^\d+$/.test(w); });
+    return { toks: toks, tam: tam };
+  }
+  function ordemTam(a, b){
+    var ia = ORDEM_TAM.indexOf(a), ib = ORDEM_TAM.indexOf(b);
+    if (ia >= 0 && ib >= 0) return ia - ib; if (ia >= 0) return -1; if (ib >= 0) return 1;
+    var na = parseFloat(a), nb = parseFloat(b); if (!isNaN(na) && !isNaN(nb)) return na - nb; return String(a).localeCompare(String(b));
+  }
   window.CP_gerarLista = async function(){
     var m = document.createElement('div'); m.id = 'cp-modal2';
     m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
-    m.innerHTML = '<div style="background:var(--cor-principal);color:var(--cor-texto-principal);border:1px solid var(--cor-borda);border-radius:14px;max-width:1000px;width:100%;max-height:92vh;display:flex;flex-direction:column;"><div id="cp-g-corpo" style="padding:30px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Lendo os produtos do almoxarifado...</div></div>';
+    m.innerHTML = '<div style="background:var(--cor-principal);color:var(--cor-texto-principal);border:1px solid var(--cor-borda);border-radius:14px;max-width:1100px;width:100%;max-height:92vh;display:flex;flex-direction:column;"><div id="cp-g-corpo" style="padding:30px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Lendo os produtos do almoxarifado...</div></div>';
     document.body.appendChild(m);
     var itens = [], from = 0;
     for (var g = 0; g < 20; g++){
@@ -23261,29 +23297,30 @@ window.precarregarListasFinanceiro = async function () {
     }
     var grupos = {};
     itens.forEach(function(i){
-      var w = palavrasSig(i.produto); if (!w.length) return;
-      var key = w[0].slice(0, 4) + (w[1] ? ' ' + w[1].slice(0, 3) : '');
-      var gr = grupos[key] = grupos[key] || { produtos: {}, pares: {}, cats: {}, meds: {}, w1: w[0], w2: w[1] || '' };
+      var a = analisarNome(i.produto); if (!a.toks.length) return;
+      var key = a.toks.map(function(w){ return w.slice(0, 3); }).join(' ');
+      var gr = grupos[key] = grupos[key] || { produtos: {}, nomes: {}, cats: {}, meds: {}, tams: {}, curto: a.toks.slice() };
       gr.produtos[norm(i.produto)] = 1;
-      var par = w[0] + (w[1] ? ' ' + w[1] : ''); gr.pares[par] = (gr.pares[par] || 0) + 1;
+      var nm = a.toks.join(' '); gr.nomes[nm] = (gr.nomes[nm] || 0) + 1;
       if (i.categoria) gr.cats[i.categoria] = (gr.cats[i.categoria] || 0) + 1;
       if (i.medida) gr.meds[i.medida] = (gr.meds[i.medida] || 0) + 1;
-      if (w[0].length < gr.w1.length) gr.w1 = w[0];
-      if (w[1] && (!gr.w2 || w[1].length < gr.w2.length)) gr.w2 = w[1];
+      if (a.tam) gr.tams[a.tam] = 1;
+      a.toks.forEach(function(w, k){ if (w.length < gr.curto[k].length) gr.curto[k] = w; });
     });
     function top(o){ var k = Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }); return k[0] || ''; }
-    function titulo(s){ s = s.toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); }
+    function titulo(x){ x = x.toLowerCase(); return x.charAt(0).toUpperCase() + x.slice(1); }
     var existentes = {}; CP.catalogo.forEach(function(c){ existentes[norm(c.nome)] = 1; });
     var lista = Object.keys(grupos).map(function(k){
-      var gr = grupos[k], par = top(gr.pares), med = top(gr.meds);
-      return { nome: titulo(par), kw: (gr.w1 + (gr.w2 ? ' ' + gr.w2 : '')), cat: top(gr.cats), un: medidas().indexOf(med) >= 0 ? med : 'Unidade(s)', n: Object.keys(gr.produtos).length };
+      var gr = grupos[k], med = top(gr.meds);
+      return { nome: titulo(top(gr.nomes)), kw: gr.curto.join(' '), cat: top(gr.cats), un: medidas().indexOf(med) >= 0 ? med : 'Unidade(s)', tams: Object.keys(gr.tams).sort(ordemTam).join(', '), n: Object.keys(gr.produtos).length };
     }).filter(function(x){ return !existentes[norm(x.nome)]; }).sort(function(a, b){ return b.n - a.n; }).slice(0, 300);
     CP._gerada = lista;
     var cats = (typeof obterCategoriasAlmoxarifado === 'function') ? obterCategoriasAlmoxarifado() : [];
-    var h = '<div style="padding:16px 20px;border-bottom:1px solid var(--cor-borda);"><div style="font-size:1.1rem;font-weight:800;">Lista inicial sugerida</div><div style="font-size:.82rem;color:var(--cor-texto-secundario);margin-top:4px;">Agrupei os '+itens.length+' itens do almoxarifado por nome parecido. Confira, renomeie e desmarque o que não quiser. Só o que estiver marcado é criado.</div></div>'
-      + '<div style="padding:12px 20px;overflow:auto;flex:1;"><table style="width:100%;border-collapse:collapse;min-width:820px;"><thead><tr><th style="'+TH+'"><input type="checkbox" checked onchange="document.querySelectorAll(\'.cp-g-chk\').forEach(function(c){c.checked=this.checked}.bind(this))"></th><th style="'+TH+'">Nome simples</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Produtos no almox.</th></tr></thead><tbody>';
+    var h = '<div style="padding:16px 20px;border-bottom:1px solid var(--cor-borda);"><div style="font-size:1.1rem;font-weight:800;">Lista inicial sugerida</div><div style="font-size:.82rem;color:var(--cor-texto-secundario);margin-top:4px;">Agrupei os '+itens.length+' itens do almoxarifado: nomes iguais com só a embalagem diferente (C/1000, C/5000) viram um produto; <b>cor e tipo ficam separados</b> (luva amarela e luva verde); <b>tamanhos</b> vão para a coluna "Tamanhos". Confira, renomeie e desmarque o que não quiser. Só o que estiver marcado é criado.</div></div>'
+      + '<div style="padding:12px 20px;overflow:auto;flex:1;"><table style="width:100%;border-collapse:collapse;min-width:960px;"><thead><tr><th style="'+TH+'"><input type="checkbox" checked onchange="document.querySelectorAll(\'.cp-g-chk\').forEach(function(c){c.checked=this.checked}.bind(this))"></th><th style="'+TH+'">Nome simples</th><th style="'+TH+'">Tamanhos</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Produtos no almox.</th></tr></thead><tbody>';
     lista.forEach(function(x, i){
-      h += '<tr><td style="'+TD+'"><input type="checkbox" class="cp-g-chk" data-i="'+i+'" checked></td><td style="'+TD+'"><input class="modern-input" id="cp-g-n-'+i+'" value="'+esc(x.nome)+'" style="width:100%;"></td><td style="'+TD+'"><input class="modern-input" id="cp-g-k-'+i+'" value="'+esc(x.kw)+'" style="width:100%;"></td>'
+      h += '<tr><td style="'+TD+'"><input type="checkbox" class="cp-g-chk" data-i="'+i+'" checked></td><td style="'+TD+'"><input class="modern-input" id="cp-g-n-'+i+'" value="'+esc(x.nome)+'" style="width:100%;"></td>'
+        + '<td style="'+TD+'"><input class="modern-input" id="cp-g-t-'+i+'" value="'+esc(x.tams)+'" placeholder="ex.: P, M, G" style="width:120px;"></td><td style="'+TD+'"><input class="modern-input" id="cp-g-k-'+i+'" value="'+esc(x.kw)+'" style="width:100%;"></td>'
         + '<td style="'+TD+'"><select class="modern-input" id="cp-g-c-'+i+'"><option value="">—</option>'+cats.map(function(c){ return '<option value="'+esc(c.nome)+'"'+(x.cat === c.nome ? ' selected' : '')+'>'+esc(c.nome)+'</option>'; }).join('')+'</select></td>'
         + '<td style="'+TD+'"><select class="modern-input" id="cp-g-u-'+i+'">'+medidas().map(function(u){ return '<option'+(x.un === u ? ' selected' : '')+'>'+esc(u)+'</option>'; }).join('')+'</select></td><td style="'+TD+'text-align:center;">'+x.n+'</td></tr>';
     });
@@ -23295,11 +23332,17 @@ window.precarregarListasFinanceiro = async function () {
     var quem = (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null, rows = [], vistos = {};
     document.querySelectorAll('.cp-g-chk').forEach(function(c){
       if (!c.checked) return; var i = c.getAttribute('data-i'), nome = $('cp-g-n-'+i).value.trim(); if (!nome || vistos[norm(nome)]) return; vistos[norm(nome)] = 1;
-      rows.push({ nome: nome, palavras_chave: $('cp-g-k-'+i).value.trim() || null, categoria: $('cp-g-c-'+i).value || null, unidade_pedido: $('cp-g-u-'+i).value, ativo: true, criado_por: quem });
+      rows.push({ nome: nome, palavras_chave: $('cp-g-k-'+i).value.trim() || null, categoria: $('cp-g-c-'+i).value || null, unidade_pedido: $('cp-g-u-'+i).value, variacoes: $('cp-g-t-'+i).value.split(',').map(function(x){ return x.trim(); }).filter(Boolean).join(', ') || null, ativo: true, criado_por: quem });
     });
     if (!rows.length) return mostrarAlerta('Marque pelo menos um produto.', 'aviso');
     var ok = 0, pulados = 0;
-    for (var k = 0; k < rows.length; k++){ var r = await sb().from('compras_catalogo').insert([rows[k]]); if (r.error){ if (semTabela(r.error)) return avisoSql($('cp-conteudo')); pulados++; } else ok++; }
+    var semCol = false;
+    for (var k = 0; k < rows.length; k++){
+      var r = await sb().from('compras_catalogo').insert([rows[k]]);
+      if (r.error && /variacoes/i.test(r.error.message || '')){ semCol = true; var lin = Object.assign({}, rows[k]); delete lin.variacoes; r = await sb().from('compras_catalogo').insert([lin]); }
+      if (r.error){ if (semTabela(r.error)) return avisoSql($('cp-conteudo')); pulados++; } else ok++;
+    }
+    if (semCol) mostrarAlerta('Criei sem os tamanhos: falta rodar o SQL compras_variacoes no Supabase.', 'aviso');
     mostrarAlerta(ok + ' produto(s) criado(s)' + (pulados ? ' · ' + pulados + ' já existia(m) e foi(ram) pulado(s)' : '') + '.', ok ? 'sucesso' : 'aviso');
     $('cp-modal2').remove(); carregarCatalogo();
   };
