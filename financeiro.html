@@ -1013,6 +1013,10 @@
             <i class="fa-solid fa-boxes-stacked"></i>
             <span>Almoxarifado</span>
         </div>
+            <div class="sidebar-item" data-target="tela-compras">
+            <i class="fa-solid fa-cart-shopping"></i>
+            <span>Compras</span>
+        </div>
             <div class="sidebar-item" data-target="tela-conciliacao-bancaria">
             <i class="fa-solid fa-building-columns"></i>
             <span>Conciliação Bancária</span>
@@ -2570,6 +2574,8 @@
             <!-- ============================================================ -->
             <!-- NOVA TELA: LOG DE AUDITORIA                                  -->
             <!-- ============================================================ -->
+            <section id="tela-compras" class="view-section hidden"><div id="cp-raiz"></div></section>
+
             <!-- ============ CONCILIAÇÃO BANCÁRIA (OFX) ============ -->
             <section id="tela-conciliacao-bancaria" class="view-section hidden">
                 <div style="margin-bottom: 18px;">
@@ -4678,6 +4684,7 @@ let jurosDaParcela = lanc.juros || 0;
             'tela-ferias-fin': 'ferias',
             'tela-notas-receber': 'notas-a-receber',
             'tela-almoxarifado': 'almoxarifado',
+            'tela-compras': 'compras',
             'tela-notas-fiscais': 'notas-fiscais',
             'tela-dre': 'dre',
             'tela-auditoria': 'auditoria',
@@ -4753,6 +4760,7 @@ let jurosDaParcela = lanc.juros || 0;
                     if (btn.dataset.target === 'tela-dre')       { carregarDRE(); }
                     if (btn.dataset.target === 'tela-auditoria') { carregarAuditoria(); }
                     if (btn.dataset.target === 'tela-conciliacao-bancaria' && window.carregarConciliacaoBancaria) { carregarConciliacaoBancaria(); }
+                    if (btn.dataset.target === 'tela-compras' && window.carregarCompras) { carregarCompras(); }
                     // NOVO: telas de Cartões Corporativos e Configurar Usuários (ETAPA 1)
                     if (btn.dataset.target === 'tela-cartoes-corporativos') { renderizarCartoesCorporativos(); }
                     // NOVO: tela de Licitações (ETAPA 2)
@@ -22944,6 +22952,385 @@ window.precarregarListasFinanceiro = async function () {
 })();
 </script>
 <!-- ============ FIM MODULO CONCILIACAO BANCARIA ============ -->
+<!-- ============ MODULO COMPRAS (pedidos das unidades) ============ -->
+<script>
+// 16/11/2026 — Pedidos de compra dos gestores. O gestor escolhe produtos do catálogo simples (sem preço); aqui o Financeiro
+// escolhe produto/fornecedor/valor (sugestões vêm do histórico do Almoxarifado da unidade, mas pode digitar à mão),
+// vê o teto mensal da unidade (só o Financeiro enxerga) e aprova ou recusa. Precisa do SQL sql_extra/compras_pedidos.sql.
+// Só LÊ o almoxarifado; grava apenas nas tabelas compras_*.
+(function(){
+  var CP = { pedidos: [], catalogo: [], aba: 'pedidos', filtro: 'enviado', cur: null };
+  function $(id){ return document.getElementById(id); }
+  function sb(){ return window.supabaseClient || supabaseClient; }
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function money(v){ return Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
+  function dbr(iso){ if(!iso) return ''; var p = String(iso).substring(0,10).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
+  function norm(t){ return String(t||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Z0-9]+/g,' ').trim(); }
+  function iniMes(off){ var d = new Date(); d = new Date(d.getFullYear(), d.getMonth() + (off||0), 1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-01'; }
+  var TH = 'padding:11px 10px;text-align:left;font-size:.74rem;text-transform:uppercase;letter-spacing:.04em;background:var(--cor-header-tabela);color:var(--cor-texto-secundario);white-space:nowrap;';
+  var TD = 'padding:10px;border-bottom:1px solid var(--cor-borda);font-size:.84rem;vertical-align:middle;color:var(--cor-texto-principal);';
+  var WRAP = 'overflow-x:auto;border:1px solid var(--cor-borda);border-radius:12px;background:var(--cor-fundo-tabela);';
+  function badge(txt, cor){ return '<span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:800;background:'+cor+'22;color:'+cor+';border:1px solid '+cor+'55;white-space:nowrap;">'+txt+'</span>'; }
+  var ST = { enviado:['Aguardando análise','#4fc3f7'], aprovado:['Aprovado','#2ecc71'], comprado:['Comprado','#27ae60'], recusado:['Recusado','#e74c3c'], cancelado:['Cancelado','#9e9e9e'] };
+  function semTabela(e){ return /compras_/i.test((e && e.message) || '') && /(exist|schema cache|relation|PGRST205|42P01)/i.test(((e && e.message) || '') + ((e && e.code) || '')); }
+  function avisoSql(box){ box.innerHTML = '<p style="padding:24px;text-align:center;color:var(--cor-texto-secundario);"><i class="fa-solid fa-triangle-exclamation" style="color:#e67e22;"></i> Falta rodar o SQL <b>compras_pedidos.sql</b> no Supabase para ativar esta tela.</p>'; }
+  function medidas(){ return (typeof MEDIDAS_ALMOX !== 'undefined' && MEDIDAS_ALMOX.length) ? MEDIDAS_ALMOX : ['Unidade(s)','Pacote(s)','Caixa(s)','Litro(s)','Rolo(s)','Fardo(s)']; }
+  function ccLista(){ return (typeof todosCentrosCustoGlobais !== 'undefined' && todosCentrosCustoGlobais) ? todosCentrosCustoGlobais : []; }
+  function ccNome(id){ var c = ccLista().find(function(x){ return String(x.id) === String(id); }); return c ? c.nome_unidade : ''; }
+  function ccDaUnidade(nome){
+    var n = norm(nome), l = ccLista();
+    return l.find(function(c){ return norm(c.nome_unidade) === n; }) || l.find(function(c){ var m = norm(c.nome_unidade); return m && n && (m.indexOf(n) >= 0 || n.indexOf(m) >= 0); }) || null;
+  }
+
+  // ---------- Teto / gasto ----------
+  async function tetoVigente(ccId){
+    var r = await sb().from('compras_teto').select('valor, vigente_desde').eq('centro_custo_id', String(ccId)).lte('vigente_desde', iniMes(0)).order('vigente_desde', { ascending: false }).limit(1);
+    return (!r.error && r.data && r.data.length) ? Number(r.data[0].valor) : null;
+  }
+  async function gastoMes(ccId, excluirId){
+    var r = await sb().from('compras_pedidos').select('id, compras_pedido_valores(valor_total)').eq('centro_custo_id', String(ccId)).in('status', ['aprovado','comprado'])
+      .gte('decidido_em', iniMes(0)+'T00:00:00-03:00').lt('decidido_em', iniMes(1)+'T00:00:00-03:00');
+    if (r.error) return 0;
+    return (r.data || []).filter(function(p){ return p.id !== excluirId; }).reduce(function(s, p){ return s + (p.compras_pedido_valores || []).reduce(function(a, v){ return a + Number(v.valor_total || 0); }, 0); }, 0);
+  }
+  function barraTeto(teto, gasto, extra){
+    if (teto == null) return '<span style="color:var(--cor-texto-secundario);">Sem teto cadastrado para esta unidade (aba "Tetos mensais").</span>';
+    var total = gasto + extra, pct = teto > 0 ? Math.round(total / teto * 100) : 100, cor = total > teto ? '#e74c3c' : (pct >= 80 ? '#e67e22' : '#2ecc71');
+    return '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:.84rem;"><span>Teto do mês: <b>'+money(teto)+'</b></span><span>Já aprovado no mês: <b>'+money(gasto)+'</b></span><span>Este pedido: <b>'+money(extra)+'</b></span><span style="color:'+cor+';font-weight:800;">Total '+money(total)+' ('+pct+'%)'+(total > teto ? ' — ESTOURA O TETO em '+money(total - teto) : '')+'</span></div>'
+      + '<div style="height:10px;background:rgba(255,255,255,.08);border-radius:8px;overflow:hidden;margin-top:6px;"><div style="width:'+Math.min(pct,100)+'%;height:100%;background:'+cor+';"></div></div>';
+  }
+
+  // ---------- Tela / abas ----------
+  window.carregarCompras = async function(){
+    var raiz = $('cp-raiz'); if (!raiz) return;
+    if (!ccLista().length && typeof carregarCentrosCusto === 'function') { try { await carregarCentrosCusto(true); } catch(e){} }
+    var abas = [['pedidos','Pedidos'],['catalogo','Catálogo de produtos'],['tetos','Tetos mensais']];
+    raiz.innerHTML = '<div style="margin-bottom:16px;"><h2 style="margin:0;color:var(--cor-texto-principal);"><i class="fa-solid fa-cart-shopping" style="color:var(--cor-acento);"></i> Compras</h2>'
+      + '<p style="color:var(--cor-texto-secundario);font-size:.85rem;margin-top:5px;">Pedidos de compra feitos pelos gestores das unidades. O gestor não vê preço, fornecedor nem teto: só você.</p></div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">' + abas.map(function(a){ var at = CP.aba === a[0]; return '<button class="btn-export" style="'+(at ? 'background:var(--cor-acento);color:#000;font-weight:800;' : '')+'" onclick="CP_aba(\''+a[0]+'\')">'+a[1]+'</button>'; }).join('') + '</div>'
+      + '<div id="cp-conteudo"></div>';
+    if (CP.aba === 'pedidos') carregarPedidos(); else if (CP.aba === 'catalogo') carregarCatalogo(); else carregarTetos();
+  };
+  window.CP_aba = function(a){ CP.aba = a; window.carregarCompras(); };
+
+  // ---------- Aba Pedidos ----------
+  async function carregarPedidos(){
+    var box = $('cp-conteudo'); box.innerHTML = '<p style="padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando pedidos...</p>';
+    var r = await sb().from('compras_pedidos').select('*, compras_pedido_itens(id, produto_nome, unidade_pedido, quantidade, catalogo_id), compras_pedido_valores(item_id, valor_total)').order('criado_em', { ascending: false }).limit(300);
+    if (r.error){ if (semTabela(r.error)) return avisoSql(box); box.innerHTML = '<p style="padding:20px;color:var(--cor-perigo);">Erro: '+esc(r.error.message)+'</p>'; return; }
+    CP.pedidos = r.data || []; renderPedidos();
+  }
+  function renderPedidos(){
+    var box = $('cp-conteudo'); if (!box) return;
+    var cont = {}; CP.pedidos.forEach(function(p){ cont[p.status] = (cont[p.status] || 0) + 1; });
+    var filtros = [['enviado','Aguardando'],['aprovado','Aprovados'],['comprado','Comprados'],['recusado','Recusados'],['cancelado','Cancelados'],['todos','Todos']];
+    var lista = CP.pedidos.filter(function(p){ return CP.filtro === 'todos' || p.status === CP.filtro; });
+    var h = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">' + filtros.map(function(f){
+      var n = f[0] === 'todos' ? CP.pedidos.length : (cont[f[0]] || 0), at = CP.filtro === f[0], cor = f[0] === 'enviado' ? '#4fc3f7' : '#7f8c8d';
+      return '<button onclick="CP_filtro(\''+f[0]+'\')" style="cursor:pointer;padding:7px 14px;border-radius:30px;font-weight:700;font-size:.82rem;border:1px solid '+(at ? cor : 'var(--cor-borda)')+';background:'+(at ? cor+'33' : 'transparent')+';color:var(--cor-texto-principal);">'+f[1]+' <span style="background:'+cor+';color:#fff;border-radius:20px;padding:1px 8px;font-size:.72rem;">'+n+'</span></button>'; }).join('') + '</div>';
+    if (!lista.length){ box.innerHTML = h + '<p style="padding:24px;text-align:center;color:var(--cor-texto-secundario);">Nenhum pedido nesta situação.</p>'; return; }
+    h += '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:900px;"><thead><tr><th style="'+TH+'">Data</th><th style="'+TH+'">Unidade</th><th style="'+TH+'">Gestor</th><th style="'+TH+'">Itens</th><th style="'+TH+'">Total previsto</th><th style="'+TH+'">Situação</th><th style="'+TH+'"></th></tr></thead><tbody>';
+    lista.forEach(function(p){
+      var itens = p.compras_pedido_itens || [], tot = (p.compras_pedido_valores || []).reduce(function(s, v){ return s + Number(v.valor_total || 0); }, 0), st = ST[p.status] || ST.enviado;
+      h += '<tr><td style="'+TD+'white-space:nowrap;">'+dbr(p.criado_em)+'</td><td style="'+TD+'"><b>'+esc(p.unidade)+'</b></td><td style="'+TD+'">'+esc(p.gestor_nome || '')+'</td>'
+        + '<td style="'+TD+'max-width:320px;">'+itens.map(function(i){ return esc(i.produto_nome)+' <span style="color:var(--cor-texto-secundario);">× '+Number(i.quantidade)+'</span>'; }).join('<br>')+'</td>'
+        + '<td style="'+TD+'white-space:nowrap;">'+(tot ? money(tot) : '-')+'</td><td style="'+TD+'">'+badge(st[0], st[1])+'</td>'
+        + '<td style="'+TD+'white-space:nowrap;"><button class="btn-export" onclick="CP_abrir(\''+p.id+'\')">'+(p.status === 'enviado' ? 'Analisar' : 'Ver')+'</button></td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+  }
+  window.CP_filtro = function(f){ CP.filtro = f; renderPedidos(); };
+
+  // ---------- Sugestões do almoxarifado ----------
+  async function buscarOpcoes(cat, ccId, outras){
+    if (!cat) return [];
+    var kws = norm(cat.palavras_chave || cat.nome).split(' ').filter(function(w){ return w.length >= 3; });
+    if (!kws.length) return [];
+    var q = sb().from('almoxarifado_itens').select('produto, medida, valor_unitario, almoxarifado_notas!inner(id, fornecedor, data_compra, centro_custo_id)').ilike('produto', '%'+kws.join('%')+'%').limit(800);
+    if (ccId) q = outras ? q.neq('almoxarifado_notas.centro_custo_id', ccId) : q.eq('almoxarifado_notas.centro_custo_id', ccId);
+    var r = await q; if (r.error) return [];
+    var mapa = {};
+    (r.data || []).forEach(function(i){
+      var n = i.almoxarifado_notas || {}, k = norm(i.produto)+'|'+norm(n.fornecedor);
+      if (!mapa[k] || String(n.data_compra || '') > String(mapa[k].data || '')) mapa[k] = { produto: String(i.produto || '').trim(), fornecedor: String(n.fornecedor || '').trim(), medida: i.medida || '', valor: Number(i.valor_unitario) || 0, data: n.data_compra || '', cc: n.centro_custo_id };
+    });
+    return Object.keys(mapa).map(function(k){ return mapa[k]; }).sort(function(a, b){ return String(b.data).localeCompare(String(a.data)); }).slice(0, outras ? 8 : 12);
+  }
+
+  // ---------- Modal de análise ----------
+  function fechar(){ var m = $('cp-modal'); if (m) m.remove(); CP.cur = null; }
+  window.CP_fechar = fechar;
+  window.CP_abrir = async function(id){
+    var ped = CP.pedidos.find(function(p){ return p.id === id; }); if (!ped) return;
+    var m = document.createElement('div'); m.id = 'cp-modal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    m.innerHTML = '<div style="background:var(--cor-principal);color:var(--cor-texto-principal);border:1px solid var(--cor-borda);border-radius:14px;max-width:1000px;width:100%;max-height:92vh;display:flex;flex-direction:column;"><div id="cp-modal-corpo" style="padding:30px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</div></div>';
+    document.body.appendChild(m);
+    var edita = ped.status === 'enviado';
+    var cc = ped.centro_custo_id ? { id: ped.centro_custo_id } : ccDaUnidade(ped.unidade);
+    CP.cur = { ped: ped, ccId: cc ? String(cc.id) : '', itens: [], teto: null, gasto: 0, edita: edita };
+    var itens = (ped.compras_pedido_itens || []).slice();
+    var rv = await sb().from('compras_pedido_valores').select('*').eq('pedido_id', ped.id);
+    var valores = {}; (rv.data || []).forEach(function(v){ valores[v.item_id] = v; });
+    var cats = {}; (CP.catalogo.length ? CP.catalogo : ((await sb().from('compras_catalogo').select('*')).data || [])).forEach(function(c){ cats[c.id] = c; });
+    CP.cur.itens = itens.map(function(i){ return { id: i.id, nome: i.produto_nome, un: i.unidade_pedido || '', qtd: Number(i.quantidade) || 0, cat: cats[i.catalogo_id] || null, ops: [], outras: [], val: valores[i.id] || null }; });
+    await recarregarOpcoes();
+  };
+  async function recarregarOpcoes(){
+    var c = CP.cur; if (!c) return;
+    var vinc = {};
+    if (c.ccId){
+      var ids = c.itens.map(function(i){ return i.cat && i.cat.id; }).filter(Boolean);
+      if (ids.length){ var rv = await sb().from('compras_vinculos').select('catalogo_id, produto_almox, fornecedor, usado_em').eq('centro_custo_id', String(c.ccId)).in('catalogo_id', ids); (rv.data || []).forEach(function(v){ (vinc[v.catalogo_id] = vinc[v.catalogo_id] || []).push(v); }); }
+    }
+    await Promise.all(c.itens.map(async function(it){
+      it.ops = c.ccId ? await buscarOpcoes(it.cat, c.ccId, false) : [];
+      it.outras = it.ops.length ? [] : await buscarOpcoes(it.cat, c.ccId, true);
+      var vs = (vinc[it.cat && it.cat.id] || []).map(function(v){ return norm(v.produto_almox)+'|'+norm(v.fornecedor); });
+      it.ops.forEach(function(o){ o.aprendido = vs.indexOf(norm(o.produto)+'|'+norm(o.fornecedor)) >= 0; });
+      it.ops.sort(function(a, b){ return (b.aprendido ? 1 : 0) - (a.aprendido ? 1 : 0); });
+    }));
+    if (c.ccId){ c.teto = await tetoVigente(c.ccId); c.gasto = await gastoMes(c.ccId, c.ped.id); } else { c.teto = null; c.gasto = 0; }
+    desenharModal();
+    if (c.edita) c.itens.forEach(function(it, i){ var ap = it.ops.find(function(o){ return o.aprendido; }); if (ap) CP_usar(i, 'u', it.ops.indexOf(ap)); });
+    atualizarTotais();
+  }
+  function desenharModal(){
+    var c = CP.cur, p = c.ped, corpo = $('cp-modal-corpo'); if (!corpo) return;
+    var st = ST[p.status] || ST.enviado;
+    var h = '<div style="padding:16px 20px;border-bottom:1px solid var(--cor-borda);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;">'
+      + '<div><div style="font-size:1.1rem;font-weight:800;"><i class="fa-solid fa-cart-shopping" style="color:var(--cor-acento);"></i> Pedido de '+esc(p.unidade)+'</div>'
+      + '<div style="margin-top:4px;font-size:.84rem;color:var(--cor-texto-secundario);">Gestor: '+esc(p.gestor_nome || '')+' · '+dbr(p.criado_em)+(p.observacao ? ' · Obs.: '+esc(p.observacao) : '')+'</div></div>'+badge(st[0], st[1])+'</div>';
+    h += '<div style="padding:12px 20px;border-bottom:1px solid var(--cor-borda);display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><label style="font-weight:700;font-size:.84rem;">Centro de custo da unidade:</label>'
+      + (c.edita ? '<select id="cp-cc" class="modern-input" style="max-width:340px;" onchange="CP_trocarCC(this.value)"><option value="">Escolha...</option>'+ccLista().slice().sort(function(a,b){ return String(a.nome_unidade).localeCompare(String(b.nome_unidade),'pt-BR'); }).map(function(x){ return '<option value="'+esc(x.id)+'"'+(String(x.id) === String(c.ccId) ? ' selected' : '')+'>'+esc(x.nome_unidade)+'</option>'; }).join('')+'</select>' : '<b>'+esc(ccNome(c.ccId) || '-')+'</b>')
+      + '</div><div id="cp-teto" style="padding:12px 20px;border-bottom:1px solid var(--cor-borda);"></div>';
+    h += '<div style="padding:14px 20px;overflow:auto;flex:1;">';
+    c.itens.forEach(function(it, i){
+      var v = it.val;
+      h += '<div style="border:1px solid var(--cor-borda);border-radius:10px;padding:12px 14px;margin-bottom:12px;">'
+        + '<div style="font-weight:800;margin-bottom:8px;">'+esc(it.nome)+' <span style="font-weight:600;color:var(--cor-texto-secundario);">× '+it.qtd+' '+esc(it.un)+'</span></div>';
+      if (c.edita){
+        if (it.ops.length) h += '<div style="font-size:.76rem;color:var(--cor-texto-secundario);margin-bottom:4px;">Já comprado por esta unidade (clique para usar):</div>' + it.ops.map(function(o, k){ return opHtml(i, 'u', k, o); }).join('');
+        else if (it.outras.length) h += '<div style="font-size:.76rem;color:#e67e22;margin-bottom:4px;">Esta unidade nunca comprou este item. Comprado em OUTRAS unidades (clique para usar):</div>' + it.outras.map(function(o, k){ return opHtml(i, 'o', k, o); }).join('');
+        else h += '<div style="font-size:.78rem;color:var(--cor-texto-secundario);margin-bottom:6px;">Nada parecido no almoxarifado. Digite o produto, o fornecedor e o valor abaixo.</div>';
+        h += '<div style="display:grid;grid-template-columns:2fr 1.4fr 1fr 1fr;gap:8px;margin-top:8px;align-items:end;">'
+          + '<div><label style="font-size:.72rem;">Produto a comprar</label><input id="cp-prod-'+i+'" class="modern-input" oninput="CP_manual('+i+')" style="width:100%;"></div>'
+          + '<div><label style="font-size:.72rem;">Fornecedor</label><input id="cp-forn-'+i+'" class="modern-input" oninput="CP_manual('+i+')" style="width:100%;"></div>'
+          + '<div><label style="font-size:.72rem;">Valor unitário (por '+esc(it.un || 'unidade')+')</label><input id="cp-val-'+i+'" type="number" step="0.01" min="0" class="modern-input" oninput="CP_totais()" style="width:100%;"></div>'
+          + '<div style="font-weight:800;text-align:right;" id="cp-tot-'+i+'">-</div></div>';
+      } else {
+        h += v ? '<div style="font-size:.86rem;">'+esc(v.produto_escolhido || '')+' · '+esc(v.fornecedor || '-')+' · '+money(v.valor_unitario)+' cada → <b>'+money(v.valor_total)+'</b></div>' : '<div style="font-size:.82rem;color:var(--cor-texto-secundario);">Sem valor registrado.</div>';
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+    if (c.edita) h += '<div style="padding:10px 20px;border-top:1px solid var(--cor-borda);"><label style="font-size:.76rem;">Motivo (só se for recusar)</label><input id="cp-motivo" class="modern-input" placeholder="Ex.: acima do teto deste mês, item já em estoque..." style="width:100%;"></div>';
+    else if (p.status === 'recusado' && p.motivo_recusa) h += '<div style="padding:10px 20px;border-top:1px solid var(--cor-borda);color:#ef9a9a;font-size:.86rem;"><b>Motivo da recusa:</b> '+esc(p.motivo_recusa)+'</div>';
+    h += '<div style="padding:12px 20px;border-top:1px solid var(--cor-borda);display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;"><button class="btn-export" onclick="CP_fechar()">Fechar</button>'
+      + (c.edita ? '<button class="btn-export" style="background:#c0392b;color:#fff;" onclick="CP_recusar()">Recusar</button><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_aprovar()"><i class="fa-solid fa-check"></i> Aprovar pedido</button>' : '')
+      + (p.status === 'aprovado' ? '<button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_comprado()"><i class="fa-solid fa-bag-shopping"></i> Marcar como comprado</button>' : '') + '</div>';
+    corpo.style.padding = '0'; corpo.style.textAlign = 'left'; corpo.style.display = 'flex'; corpo.style.flexDirection = 'column'; corpo.style.maxHeight = '92vh'; corpo.innerHTML = h;
+  }
+  function opHtml(i, tipo, k, o){
+    return '<div onclick="CP_usar('+i+',\''+tipo+'\','+k+')" style="cursor:pointer;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:6px 10px;margin-bottom:4px;border:1px solid var(--cor-borda);border-radius:8px;font-size:.82rem;">'
+      + '<span>'+(o.aprendido ? '<span title="Escolha anterior" style="color:#f1c40f;">★ </span>' : '')+'<b>'+esc(o.produto)+'</b> · '+esc(o.fornecedor || 'sem fornecedor')+(tipo === 'o' ? ' · <i>'+esc(ccNome(o.cc) || 'outra unidade')+'</i>' : '')+'</span>'
+      + '<span><b>'+money(o.valor)+'</b> / '+esc(o.medida || '')+' · '+dbr(o.data)+'</span></div>';
+  }
+  window.CP_usar = function(i, tipo, k){
+    var it = CP.cur.itens[i], o = (tipo === 'u' ? it.ops : it.outras)[k]; if (!o) return;
+    $('cp-prod-'+i).value = o.produto; $('cp-forn-'+i).value = o.fornecedor; $('cp-val-'+i).value = o.valor ? o.valor.toFixed(2) : '';
+    it.origem = tipo === 'u' ? 'almoxarifado' : 'outra_unidade'; it.opMedida = o.medida || ''; it.opProduto = o.produto; it.opForn = o.fornecedor;
+    atualizarTotais();
+  };
+  window.CP_manual = function(i){
+    var it = CP.cur.itens[i];
+    if (it.origem && ($('cp-prod-'+i).value.trim() !== it.opProduto || $('cp-forn-'+i).value.trim() !== it.opForn)) it.origem = 'manual';
+    if (!it.origem) it.origem = 'manual';
+  };
+  window.CP_totais = function(){ atualizarTotais(); };
+  function lerLinhas(){
+    return CP.cur.itens.map(function(it, i){
+      var val = parseFloat($('cp-val-'+i).value) || 0;
+      return { it: it, produto: $('cp-prod-'+i).value.trim(), forn: $('cp-forn-'+i).value.trim(), val: val, total: Math.round(it.qtd * val * 100) / 100 };
+    });
+  }
+  function atualizarTotais(){
+    var c = CP.cur; if (!c || !c.edita) { var t0 = $('cp-teto'); if (t0 && c) { var tot0 = (c.ped.compras_pedido_valores || []).reduce(function(s, v){ return s + Number(v.valor_total || 0); }, 0); t0.innerHTML = c.ccId ? barraTeto(c.teto, c.gasto, 0) + '<div style="margin-top:6px;font-size:.84rem;">Total do pedido: <b>'+money(tot0)+'</b></div>' : ''; } return; }
+    var linhas = lerLinhas(), total = 0;
+    linhas.forEach(function(l, i){ total += l.total; var e = $('cp-tot-'+i); if (e) e.textContent = l.val ? money(l.total) : '-'; });
+    var t = $('cp-teto'); if (t) t.innerHTML = (c.ccId ? barraTeto(c.teto, c.gasto, total) : '<span style="color:#e67e22;">Escolha o centro de custo para ver o teto.</span>') + '<div style="margin-top:6px;font-size:.84rem;">Total previsto do pedido: <b>'+money(total)+'</b></div>';
+  }
+  window.CP_trocarCC = async function(v){ CP.cur.ccId = v; await recarregarOpcoes(); };
+
+  async function salvarStatus(campos){
+    var c = CP.cur, r = await sb().from('compras_pedidos').update(Object.assign({ atualizado_em: new Date().toISOString() }, campos)).eq('id', c.ped.id);
+    if (r.error) throw r.error;
+  }
+  window.CP_aprovar = async function(){
+    var c = CP.cur; if (!c) return;
+    if (!c.ccId) return mostrarAlerta('Escolha o centro de custo da unidade.', 'aviso');
+    var linhas = lerLinhas();
+    for (var i = 0; i < linhas.length; i++){
+      if (!linhas[i].produto) return mostrarAlerta('Informe o produto de "'+linhas[i].it.nome+'".', 'aviso');
+      if (!(linhas[i].val > 0)) return mostrarAlerta('Informe o valor unitário de "'+linhas[i].it.nome+'".', 'aviso');
+    }
+    var total = linhas.reduce(function(s, l){ return s + l.total; }, 0);
+    if (c.teto != null && c.gasto + total > c.teto && !confirm('Este pedido faz a unidade passar do teto do mês em '+money(c.gasto + total - c.teto)+'.\n\nAprovar mesmo assim?')) return;
+    try {
+      var quem = (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null;
+      var rows = linhas.map(function(l){
+        return { item_id: l.it.id, pedido_id: c.ped.id, produto_escolhido: l.produto, fornecedor: l.forn || null, medida: l.it.opMedida || l.it.un || null, valor_unitario: l.val, valor_total: l.total, origem: l.it.origem || 'manual', escolhido_por: quem, escolhido_em: new Date().toISOString() };
+      });
+      var r1 = await sb().from('compras_pedido_valores').upsert(rows, { onConflict: 'item_id' }); if (r1.error) throw r1.error;
+      var vincs = linhas.filter(function(l){ return l.it.origem === 'almoxarifado' && l.it.cat; }).map(function(l){ return { catalogo_id: l.it.cat.id, centro_custo_id: String(c.ccId), produto_almox: l.it.opProduto || l.produto, fornecedor: l.it.opForn || '', usado_em: new Date().toISOString() }; });
+      if (vincs.length) await sb().from('compras_vinculos').upsert(vincs, { onConflict: 'catalogo_id,centro_custo_id,produto_almox,fornecedor' });
+      await salvarStatus({ status: 'aprovado', centro_custo_id: String(c.ccId), decidido_por: quem, decidido_em: new Date().toISOString(), motivo_recusa: null });
+      mostrarAlerta('Pedido aprovado.', 'sucesso'); fechar(); carregarPedidos();
+    } catch(e){ mostrarAlerta('Não consegui aprovar: ' + (e.message || e), 'erro'); }
+  };
+  window.CP_recusar = async function(){
+    var c = CP.cur; if (!c) return;
+    var motivo = ($('cp-motivo').value || '').trim();
+    if (!motivo) return mostrarAlerta('Escreva o motivo da recusa.', 'aviso');
+    try {
+      var quem = (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null;
+      await salvarStatus({ status: 'recusado', motivo_recusa: motivo, decidido_por: quem, decidido_em: new Date().toISOString(), centro_custo_id: c.ccId ? String(c.ccId) : null });
+      mostrarAlerta('Pedido recusado.', 'sucesso'); fechar(); carregarPedidos();
+    } catch(e){ mostrarAlerta('Não consegui recusar: ' + (e.message || e), 'erro'); }
+  };
+  window.CP_comprado = async function(){
+    if (!CP.cur) return;
+    try { await salvarStatus({ status: 'comprado' }); mostrarAlerta('Pedido marcado como comprado.', 'sucesso'); fechar(); carregarPedidos(); }
+    catch(e){ mostrarAlerta('Erro: ' + (e.message || e), 'erro'); }
+  };
+
+  // ---------- Aba Catálogo ----------
+  async function carregarCatalogo(){
+    var box = $('cp-conteudo'); box.innerHTML = '<p style="padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</p>';
+    var r = await sb().from('compras_catalogo').select('*').order('nome');
+    if (r.error){ if (semTabela(r.error)) return avisoSql(box); box.innerHTML = '<p style="padding:20px;color:var(--cor-perigo);">Erro: '+esc(r.error.message)+'</p>'; return; }
+    CP.catalogo = r.data || [];
+    var h = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;"><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_editarProduto(null)"><i class="fa-solid fa-plus"></i> Novo produto</button>'
+      + '<button class="btn-export" onclick="CP_gerarLista()"><i class="fa-solid fa-wand-magic-sparkles"></i> Gerar lista inicial a partir do almoxarifado</button>'
+      + '<span style="font-size:.8rem;color:var(--cor-texto-secundario);">Este é o nome simples que o gestor escolhe. As palavras-chave servem para achar os produtos parecidos no almoxarifado.</span></div>';
+    if (!CP.catalogo.length){ box.innerHTML = h + '<p style="padding:24px;text-align:center;color:var(--cor-texto-secundario);">Nenhum produto cadastrado ainda. Use "Gerar lista inicial" para começar.</p>'; return; }
+    h += '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:760px;"><thead><tr><th style="'+TH+'">Produto (nome do gestor)</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Situação</th><th style="'+TH+'"></th></tr></thead><tbody>';
+    CP.catalogo.forEach(function(c){
+      h += '<tr><td style="'+TD+'"><b>'+esc(c.nome)+'</b></td><td style="'+TD+'">'+esc(c.categoria || '-')+'</td><td style="'+TD+'">'+esc(c.unidade_pedido || '')+'</td><td style="'+TD+'">'+esc(c.palavras_chave || '')+'</td><td style="'+TD+'">'+(c.ativo ? badge('Ativo','#2ecc71') : badge('Inativo','#7f8c8d'))+'</td>'
+        + '<td style="'+TD+'white-space:nowrap;"><button class="btn-export" onclick="CP_editarProduto(\''+c.id+'\')">Editar</button></td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+  }
+  window.CP_editarProduto = function(id){
+    var c = id ? CP.catalogo.find(function(x){ return x.id === id; }) : { nome: '', categoria: '', unidade_pedido: 'Unidade(s)', palavras_chave: '', ativo: true };
+    if (!c) return;
+    var m = document.createElement('div'); m.id = 'cp-modal2';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
+    var cats = (typeof obterCategoriasAlmoxarifado === 'function') ? obterCategoriasAlmoxarifado() : [];
+    m.innerHTML = '<div style="background:var(--cor-principal);color:var(--cor-texto-principal);border:1px solid var(--cor-borda);border-radius:14px;max-width:520px;width:100%;padding:20px;">'
+      + '<div style="font-size:1.1rem;font-weight:800;margin-bottom:12px;">'+(id ? 'Editar produto' : 'Novo produto')+'</div>'
+      + '<label style="font-size:.78rem;">Nome simples (o que o gestor vê)</label><input id="cp-e-nome" class="modern-input" style="width:100%;margin-bottom:10px;" value="'+esc(c.nome)+'" placeholder="Ex.: Papel toalha">'
+      + '<label style="font-size:.78rem;">Categoria</label><select id="cp-e-cat" class="modern-input" style="width:100%;margin-bottom:10px;"><option value="">— sem categoria —</option>'+cats.map(function(x){ return '<option value="'+esc(x.nome)+'"'+(c.categoria === x.nome ? ' selected' : '')+'>'+esc(x.nome)+'</option>'; }).join('')+'</select>'
+      + '<label style="font-size:.78rem;">Como o gestor pede (unidade de pedido)</label><select id="cp-e-un" class="modern-input" style="width:100%;margin-bottom:10px;">'+medidas().map(function(x){ return '<option'+(c.unidade_pedido === x ? ' selected' : '')+'>'+esc(x)+'</option>'; }).join('')+'</select>'
+      + '<label style="font-size:.78rem;">Palavras-chave para achar no almoxarifado (separe por espaço; ex.: PAPEL TOA)</label><input id="cp-e-kw" class="modern-input" style="width:100%;margin-bottom:10px;" value="'+esc(c.palavras_chave || '')+'">'
+      + '<label style="display:flex;gap:8px;align-items:center;font-size:.84rem;margin-bottom:14px;"><input type="checkbox" id="cp-e-ativo"'+(c.ativo ? ' checked' : '')+'> Ativo (aparece para os gestores)</label>'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn-export" onclick="document.getElementById(\'cp-modal2\').remove()">Cancelar</button><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_salvarProduto('+(id ? '\''+id+'\'' : 'null')+')">Salvar</button></div></div>';
+    document.body.appendChild(m);
+  };
+  window.CP_salvarProduto = async function(id){
+    var nome = $('cp-e-nome').value.trim(); if (!nome) return mostrarAlerta('Informe o nome.', 'aviso');
+    var pl = { nome: nome, categoria: $('cp-e-cat').value || null, unidade_pedido: $('cp-e-un').value, palavras_chave: $('cp-e-kw').value.trim() || null, ativo: $('cp-e-ativo').checked };
+    var r = id ? await sb().from('compras_catalogo').update(pl).eq('id', id) : await sb().from('compras_catalogo').insert([Object.assign({ criado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null }, pl)]);
+    if (r.error) return mostrarAlerta(/duplicate|unique/i.test(r.error.message) ? 'Já existe um produto com esse nome.' : 'Erro: ' + r.error.message, 'erro');
+    $('cp-modal2').remove(); mostrarAlerta('Produto salvo.', 'sucesso'); carregarCatalogo();
+  };
+
+  // ---------- Lista inicial a partir do almoxarifado (só sugere; nada é criado até marcar e confirmar) ----------
+  var STOPW = { DE:1, DA:1, DO:1, DAS:1, DOS:1, COM:1, PARA:1, SEM:1, TIPO:1, CX:1, PCT:1, UN:1, UND:1, KG:1, ML:1, LT:1, PC:1, PCS:1, FD:1, RL:1 };
+  function palavrasSig(prod){ return norm(prod).split(' ').filter(function(w){ return w.length >= 3 && !STOPW[w] && !/[0-9]/.test(w); }); }
+  window.CP_gerarLista = async function(){
+    var m = document.createElement('div'); m.id = 'cp-modal2';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
+    m.innerHTML = '<div style="background:var(--cor-principal);color:var(--cor-texto-principal);border:1px solid var(--cor-borda);border-radius:14px;max-width:1000px;width:100%;max-height:92vh;display:flex;flex-direction:column;"><div id="cp-g-corpo" style="padding:30px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> Lendo os produtos do almoxarifado...</div></div>';
+    document.body.appendChild(m);
+    var itens = [], from = 0;
+    for (var g = 0; g < 20; g++){
+      var r = await sb().from('almoxarifado_itens').select('produto, categoria, medida').range(from, from + 999);
+      if (r.error){ $('cp-g-corpo').innerHTML = '<p style="color:var(--cor-perigo);">Erro: '+esc(r.error.message)+'</p>'; return; }
+      itens = itens.concat(r.data || []); if (!r.data || r.data.length < 1000) break; from += 1000;
+    }
+    var grupos = {};
+    itens.forEach(function(i){
+      var w = palavrasSig(i.produto); if (!w.length) return;
+      var key = w[0].slice(0, 4) + (w[1] ? ' ' + w[1].slice(0, 3) : '');
+      var gr = grupos[key] = grupos[key] || { produtos: {}, pares: {}, cats: {}, meds: {}, w1: w[0], w2: w[1] || '' };
+      gr.produtos[norm(i.produto)] = 1;
+      var par = w[0] + (w[1] ? ' ' + w[1] : ''); gr.pares[par] = (gr.pares[par] || 0) + 1;
+      if (i.categoria) gr.cats[i.categoria] = (gr.cats[i.categoria] || 0) + 1;
+      if (i.medida) gr.meds[i.medida] = (gr.meds[i.medida] || 0) + 1;
+      if (w[0].length < gr.w1.length) gr.w1 = w[0];
+      if (w[1] && (!gr.w2 || w[1].length < gr.w2.length)) gr.w2 = w[1];
+    });
+    function top(o){ var k = Object.keys(o).sort(function(a, b){ return o[b] - o[a]; }); return k[0] || ''; }
+    function titulo(s){ s = s.toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); }
+    var existentes = {}; CP.catalogo.forEach(function(c){ existentes[norm(c.nome)] = 1; });
+    var lista = Object.keys(grupos).map(function(k){
+      var gr = grupos[k], par = top(gr.pares), med = top(gr.meds);
+      return { nome: titulo(par), kw: (gr.w1 + (gr.w2 ? ' ' + gr.w2 : '')), cat: top(gr.cats), un: medidas().indexOf(med) >= 0 ? med : 'Unidade(s)', n: Object.keys(gr.produtos).length };
+    }).filter(function(x){ return !existentes[norm(x.nome)]; }).sort(function(a, b){ return b.n - a.n; }).slice(0, 300);
+    CP._gerada = lista;
+    var cats = (typeof obterCategoriasAlmoxarifado === 'function') ? obterCategoriasAlmoxarifado() : [];
+    var h = '<div style="padding:16px 20px;border-bottom:1px solid var(--cor-borda);"><div style="font-size:1.1rem;font-weight:800;">Lista inicial sugerida</div><div style="font-size:.82rem;color:var(--cor-texto-secundario);margin-top:4px;">Agrupei os '+itens.length+' itens do almoxarifado por nome parecido. Confira, renomeie e desmarque o que não quiser. Só o que estiver marcado é criado.</div></div>'
+      + '<div style="padding:12px 20px;overflow:auto;flex:1;"><table style="width:100%;border-collapse:collapse;min-width:820px;"><thead><tr><th style="'+TH+'"><input type="checkbox" checked onchange="document.querySelectorAll(\'.cp-g-chk\').forEach(function(c){c.checked=this.checked}.bind(this))"></th><th style="'+TH+'">Nome simples</th><th style="'+TH+'">Palavras-chave</th><th style="'+TH+'">Categoria</th><th style="'+TH+'">Se pede em</th><th style="'+TH+'">Produtos no almox.</th></tr></thead><tbody>';
+    lista.forEach(function(x, i){
+      h += '<tr><td style="'+TD+'"><input type="checkbox" class="cp-g-chk" data-i="'+i+'" checked></td><td style="'+TD+'"><input class="modern-input" id="cp-g-n-'+i+'" value="'+esc(x.nome)+'" style="width:100%;"></td><td style="'+TD+'"><input class="modern-input" id="cp-g-k-'+i+'" value="'+esc(x.kw)+'" style="width:100%;"></td>'
+        + '<td style="'+TD+'"><select class="modern-input" id="cp-g-c-'+i+'"><option value="">—</option>'+cats.map(function(c){ return '<option value="'+esc(c.nome)+'"'+(x.cat === c.nome ? ' selected' : '')+'>'+esc(c.nome)+'</option>'; }).join('')+'</select></td>'
+        + '<td style="'+TD+'"><select class="modern-input" id="cp-g-u-'+i+'">'+medidas().map(function(u){ return '<option'+(x.un === u ? ' selected' : '')+'>'+esc(u)+'</option>'; }).join('')+'</select></td><td style="'+TD+'text-align:center;">'+x.n+'</td></tr>';
+    });
+    h += '</tbody></table>'+(lista.length ? '' : '<p style="text-align:center;color:var(--cor-texto-secundario);padding:20px;">Nada novo para sugerir.</p>')+'</div>'
+      + '<div style="padding:12px 20px;border-top:1px solid var(--cor-borda);display:flex;gap:8px;justify-content:flex-end;"><button class="btn-export" onclick="document.getElementById(\'cp-modal2\').remove()">Cancelar</button><button class="btn-export" style="background:#27ae60;color:#fff;" onclick="CP_criarLista()">Criar os marcados</button></div>';
+    var corpo = $('cp-g-corpo'); corpo.style.cssText = 'padding:0;display:flex;flex-direction:column;max-height:92vh;'; corpo.innerHTML = h;
+  };
+  window.CP_criarLista = async function(){
+    var quem = (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null, rows = [], vistos = {};
+    document.querySelectorAll('.cp-g-chk').forEach(function(c){
+      if (!c.checked) return; var i = c.getAttribute('data-i'), nome = $('cp-g-n-'+i).value.trim(); if (!nome || vistos[norm(nome)]) return; vistos[norm(nome)] = 1;
+      rows.push({ nome: nome, palavras_chave: $('cp-g-k-'+i).value.trim() || null, categoria: $('cp-g-c-'+i).value || null, unidade_pedido: $('cp-g-u-'+i).value, ativo: true, criado_por: quem });
+    });
+    if (!rows.length) return mostrarAlerta('Marque pelo menos um produto.', 'aviso');
+    var ok = 0, pulados = 0;
+    for (var k = 0; k < rows.length; k++){ var r = await sb().from('compras_catalogo').insert([rows[k]]); if (r.error){ if (semTabela(r.error)) return avisoSql($('cp-conteudo')); pulados++; } else ok++; }
+    mostrarAlerta(ok + ' produto(s) criado(s)' + (pulados ? ' · ' + pulados + ' já existia(m) e foi(ram) pulado(s)' : '') + '.', ok ? 'sucesso' : 'aviso');
+    $('cp-modal2').remove(); carregarCatalogo();
+  };
+
+  // ---------- Aba Tetos ----------
+  async function carregarTetos(){
+    var box = $('cp-conteudo'); box.innerHTML = '<p style="padding:20px;"><i class="fa-solid fa-spinner fa-spin"></i> Carregando...</p>';
+    var rt = await sb().from('compras_teto').select('*').lte('vigente_desde', iniMes(0)).order('vigente_desde', { ascending: false });
+    if (rt.error){ if (semTabela(rt.error)) return avisoSql(box); box.innerHTML = '<p style="padding:20px;color:var(--cor-perigo);">Erro: '+esc(rt.error.message)+'</p>'; return; }
+    var teto = {}; (rt.data || []).forEach(function(t){ if (!(t.centro_custo_id in teto)) teto[t.centro_custo_id] = Number(t.valor); });
+    var rp = await sb().from('compras_pedidos').select('centro_custo_id, compras_pedido_valores(valor_total)').in('status', ['aprovado','comprado']).gte('decidido_em', iniMes(0)+'T00:00:00-03:00').lt('decidido_em', iniMes(1)+'T00:00:00-03:00');
+    var gasto = {}; (rp.data || []).forEach(function(p){ var s = (p.compras_pedido_valores || []).reduce(function(a, v){ return a + Number(v.valor_total || 0); }, 0); gasto[p.centro_custo_id] = (gasto[p.centro_custo_id] || 0) + s; });
+    var h = '<p style="font-size:.84rem;color:var(--cor-texto-secundario);margin:0 0 12px;">Valor que cada unidade pode gastar por mês. Você cadastra <b>uma vez</b>: ele vale deste mês em diante, todo mês, até você mudar. O gestor não vê este valor. O "gasto" conta os pedidos <b>aprovados</b> no mês.</p>'
+      + '<div style="'+WRAP+'"><table style="width:100%;border-collapse:collapse;min-width:760px;"><thead><tr><th style="'+TH+'">Unidade (centro de custo)</th><th style="'+TH+'">Teto mensal</th><th style="'+TH+'">Aprovado neste mês</th><th style="'+TH+'">Uso</th><th style="'+TH+'">Novo valor</th></tr></thead><tbody>';
+    ccLista().slice().sort(function(a, b){ return String(a.nome_unidade).localeCompare(String(b.nome_unidade), 'pt-BR'); }).forEach(function(c){
+      var id = String(c.id), t = teto[id], g = gasto[id] || 0, pct = t ? Math.round(g / t * 100) : null, cor = t == null ? '#7f8c8d' : (g > t ? '#e74c3c' : (pct >= 80 ? '#e67e22' : '#2ecc71'));
+      h += '<tr><td style="'+TD+'"><b>'+esc(c.nome_unidade)+'</b></td><td style="'+TD+'">'+(t != null ? money(t) : '<span style="color:var(--cor-texto-secundario);">não definido</span>')+'</td><td style="'+TD+'">'+money(g)+'</td>'
+        + '<td style="'+TD+'min-width:130px;">'+(t != null ? '<div style="height:8px;background:rgba(255,255,255,.08);border-radius:6px;overflow:hidden;"><div style="width:'+Math.min(pct,100)+'%;height:100%;background:'+cor+';"></div></div><div style="font-size:.72rem;color:'+cor+';font-weight:700;">'+pct+'%</div>' : '-')+'</td>'
+        + '<td style="'+TD+'white-space:nowrap;"><input id="cp-t-'+esc(id)+'" type="number" step="0.01" min="0" class="modern-input" style="width:130px;" placeholder="R$"> <button class="btn-export" onclick="CP_salvarTeto(\''+esc(id)+'\')">Salvar</button></td></tr>';
+    });
+    box.innerHTML = h + '</tbody></table></div>';
+  }
+  window.CP_salvarTeto = async function(id){
+    var v = parseFloat($('cp-t-'+id).value); if (isNaN(v) || v < 0) return mostrarAlerta('Informe o valor do teto.', 'aviso');
+    var r = await sb().from('compras_teto').upsert([{ centro_custo_id: String(id), vigente_desde: iniMes(0), valor: v, criado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null }], { onConflict: 'centro_custo_id,vigente_desde' });
+    if (r.error) return mostrarAlerta('Erro: ' + r.error.message, 'erro');
+    mostrarAlerta('Teto salvo (vale deste mês em diante).', 'sucesso'); carregarTetos();
+  };
+})();
+</script>
+<!-- ============ FIM MODULO COMPRAS ============ -->
 
 </body>
 </html>
