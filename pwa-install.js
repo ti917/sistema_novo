@@ -68,7 +68,7 @@
       caixa = document.createElement('div'); caixa.id = 'pwa-aviso'; caixa.setAttribute('role', 'dialog'); caixa.setAttribute('aria-label', 'Instalar aplicativo');
       caixa.innerHTML =
         '<button class="pa-x" type="button" aria-label="Fechar" title="Fechar">✕</button>'
-      + '<div class="pa-topo"><img class="pa-ic" src="/pwa/' + sis + '-192.png" alt=""><div><p class="pa-s">Aplicativo disponível</p><p class="pa-t">Instale o ' + NOMES[sis] + '</p></div></div>'
+      + '<div class="pa-topo"><img class="pa-ic" src="/pwa/' + sis + '-192.png?v=2" alt=""><div><p class="pa-s">Aplicativo disponível</p><p class="pa-t">Instale o ' + NOMES[sis] + '</p></div></div>'
       + '<p class="pa-p">' + corpo + '</p>'
       + '<div class="pa-b">' + (ehIOS ? '<button class="pa-ok" type="button">Entendi</button>' : '<button class="pa-ok" type="button">⬇ Instalar agora</button><button class="pa-no" type="button">Agora não</button>') + '</div>';
       document.body.appendChild(caixa);
