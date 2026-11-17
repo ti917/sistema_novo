@@ -27022,12 +27022,12 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
         // ===== Consulta de CPF na Receita (Direct Data) - so Admin, so ao clicar =====
         // Aditivo: grava apenas dados_admissao.consulta_cpf; nada mais e alterado.
         window.htmlConsultaCpfAdmissao = function(c, idColab, empresa) {
-            if (!c && window.empresaUsaConsultaCpf && !window.empresaUsaConsultaCpf(empresa)) return '';
             const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+            const btnGratis = `<button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="window.abrirConsultaReceitaCpf('${idColab}')"><i class="fa-solid fa-arrow-up-right-from-square"></i> Abrir consulta na Receita (grátis)</button>
+                    <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Abre o site da Receita e copia o CPF. É só colar, informar a data de nascimento, marcar "Sou humano" e consultar. O comprovante é gratuito.</small>`;
             if (!c) {
                 return `<span class="fadm-rot"><i class="fa-solid fa-shield-halved"></i> Situação do CPF na Receita</span>
-                    <span class="fadm-val"><button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="window.consultarCpfAdmissao('${idColab}', this)"><i class="fa-solid fa-magnifying-glass"></i> Consultar CPF na Receita</button>
-                    <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Faz 1 consulta paga (cerca de R$ 0,54, com o comprovante). O resultado fica salvo na ficha.</small></span>`;
+                    <span class="fadm-val">${btnGratis}</span>`;
             }
             const sit = String(c.situacao || '-');
             const regular = /regular/i.test(sit) && !c.possui_obito;
@@ -27037,11 +27037,51 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const obito = c.possui_obito ? `<div style="color:#ff5252; font-size:0.8rem; margin-top:4px;"><b>Consta óbito${c.ano_obito ? ' (' + esc(c.ano_obito) + ')' : ''}</b></div>` : '';
             const linkComp = c.url_comprovante_copia || c.url_comprovante;
             const comp = linkComp ? `<br><a href="${esc(linkComp)}" target="_blank" style="color:var(--cor-acento); font-size:0.85rem; font-weight:bold;"><i class="fa-solid fa-file-pdf"></i> Abrir comprovante${c.url_comprovante_copia ? ' (cópia salva)' : ''}</a>` : '';
-            const recons = `<br><a href="javascript:void(0)" onclick="window.reconsultarCpfAdmissao('${idColab}', this)" style="color:var(--cor-texto-secundario); font-size:0.75rem;">Reconsultar (nova cobrança)</a>`;
+            const recons = `<br><a href="javascript:void(0)" onclick="window.abrirConsultaReceitaCpf('${idColab}')" style="color:var(--cor-texto-secundario); font-size:0.75rem;">Consultar de novo na Receita (grátis)</a>`;
             return `<span class="fadm-rot"><i class="fa-solid fa-shield-halved"></i> Situação do CPF na Receita</span>
                 <span class="fadm-val"><b style="color:${cor};"><i class="fa-solid ${regular ? 'fa-circle-check' : 'fa-circle-exclamation'}"></i> ${esc(sit)}</b>
                 ${aviso}${obito}
                 <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Consultado em ${esc(dt)}${c.consultado_por ? ' por ' + esc(c.consultado_por) : ''}</small>${comp}${recons}</span>`;
+        };
+
+        // Consulta GRATUITA: abre a página pública da Receita e copia o CPF (a Receita não aceita preencher por link
+        // e exige o "Sou humano"; quem faz é o RH). A consulta paga (Direct Data) não é mais chamada daqui.
+        window.abrirConsultaReceitaCpf = async function(idColab) {
+            const URL_RECEITA = 'https://servicos.receita.fazenda.gov.br/servicos/cpf/consultasituacao/consultapublica.asp';
+            try {
+                if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
+                let adm = null;
+                [(typeof listaAdmissoesPendentes !== 'undefined' ? listaAdmissoesPendentes : []), (typeof todasAdmissoesAprovadas !== 'undefined' ? todasAdmissoesAprovadas : [])].forEach(arr => {
+                    const it = (arr || []).find(x => x.id === idColab);
+                    if (it && !adm) adm = it.dados_admissao || null;
+                });
+                // Abre a aba ANTES de qualquer espera (senão o navegador bloqueia o pop-up)
+                let aba = window.open(URL_RECEITA, '_blank');
+                if (!adm) {
+                    const { data: pf } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+                    adm = (pf && pf.dados_admissao) || {};
+                }
+                const cpf = String(adm.cpf || '').replace(/\D/g, '');
+                const nasc = adm.nascimento ? (typeof formatarDataBR === 'function' ? formatarDataBR(adm.nascimento) : adm.nascimento) : '';
+                if (!cpf) { mostrarAlerta('Falta o CPF na ficha.', 'aviso'); return; }
+                if (typeof validarCPF === 'function' && !validarCPF(cpf)) { mostrarAlerta('O CPF da ficha parece inválido. Confira antes de consultar.', 'aviso'); }
+                const cpfFmt = (typeof mascaraCPF === 'function') ? mascaraCPF(cpf) : cpf;
+                let copiou = false;
+                try { await navigator.clipboard.writeText(cpf); copiou = true; } catch (e) {
+                    try { const t = document.createElement('textarea'); t.value = cpf; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); copiou = document.execCommand('copy'); t.remove(); } catch (e2) {}
+                }
+                const bloqueou = !aba;
+                const ok = await mostrarConfirmacao(
+                    `CPF: <b>${cpfFmt}</b> ${copiou ? '(já copiado — é só colar com Ctrl+V)' : '(copie manualmente)'}<br>` +
+                    `Data de nascimento: <b>${nasc || 'não informada na ficha'}</b><br><br>` +
+                    `Na Receita: cole o CPF, digite a data, marque <b>"Sou humano"</b> e clique em <b>Consultar</b>. Depois salve o comprovante em PDF (Imprimir → Salvar como PDF) e anexe na ficha.` +
+                    (bloqueou ? `<br><br>O navegador bloqueou a nova aba: clique em <b>Confirmar</b> para abrir a Receita.` : ''),
+                    'Consulta do CPF na Receita');
+                if (ok && bloqueou) window.open(URL_RECEITA, '_blank');
+            } catch (e) {
+                console.error('abrirConsultaReceitaCpf:', e);
+                mostrarAlerta('Não consegui preparar a consulta. Abra o site da Receita manualmente.', 'aviso');
+            }
         };
 
         window.reconsultarCpfAdmissao = function(idColab, el) {
