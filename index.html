@@ -25772,6 +25772,7 @@ window.renderizarPaginacaoAdmissoes = function() {
                         <div style="background: rgba(0,0,0,0.1); padding: 15px; border-radius: 8px; border: 1px solid var(--cor-borda);">
                             <small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase; font-weight: bold; letter-spacing: 1px;">Documentos Oficiais</small><br>
                             <span style="font-size: 0.95rem; color: var(--cor-texto-principal); display: block; margin-top: 8px;"><i class="fa-solid fa-id-card" style="color: #ff9800; width: 20px;"></i> CPF: <b>${adm.cpf ? mascaraCPF(adm.cpf) : '-'}</b></span>
+                            ${(typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.perfil === 'Admin') ? `<div id="box-consulta-cpf" style="margin-top: 8px; font-size: 0.85rem;">${window.htmlConsultaCpfAdmissao(adm.consulta_cpf, colab.id)}</div>` : ''}
                             <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 4px;"><i class="fa-solid fa-address-book" style="color: #ff9800; width: 20px;"></i> RG: ${adm.rg?.possui === 'Sim' ? adm.rg.numero + (adm.rg.data_expedicao ? ' (Exp: ' + formatarDataBR(adm.rg.data_expedicao) + ')' : '') : 'Não possui'}</span>
                             <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 4px;"><i class="fa-solid fa-hashtag" style="color: #ff9800; width: 20px;"></i> PIS: ${adm.pis || '-'}</span>
                             <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 4px;"><i class="fa-solid fa-check-to-slot" style="color: #ff9800; width: 20px;"></i> Título: ${tituloEleitoralHtml}</span>
@@ -26769,6 +26770,74 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
     atualizarContador();
 };
         
+        // ===== Consulta de CPF na Receita (Direct Data) - so Admin, so ao clicar =====
+        // Aditivo: grava apenas dados_admissao.consulta_cpf; nada mais e alterado.
+        window.htmlConsultaCpfAdmissao = function(c, idColab) {
+            const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+            if (!c) {
+                return `<span class="fadm-rot"><i class="fa-solid fa-shield-halved"></i> Situação do CPF na Receita</span>
+                    <span class="fadm-val"><button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="window.consultarCpfAdmissao('${idColab}', this)"><i class="fa-solid fa-magnifying-glass"></i> Consultar CPF na Receita</button>
+                    <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Faz 1 consulta paga (R$ 0,36). O resultado fica salvo na ficha.</small></span>`;
+            }
+            const sit = String(c.situacao || '-');
+            const regular = /regular/i.test(sit) && !c.possui_obito;
+            const cor = regular ? '#28a745' : '#ff5252';
+            const dt = c.consultado_em ? new Date(c.consultado_em).toLocaleString('pt-BR') : '';
+            const aviso = c.nome_diferente ? `<div style="color:#ffb300; font-size:0.8rem; margin-top:4px;"><i class="fa-solid fa-triangle-exclamation"></i> Nome na Receita diferente do cadastro: <b>${esc(c.nome)}</b></div>` : '';
+            const obito = c.possui_obito ? `<div style="color:#ff5252; font-size:0.8rem; margin-top:4px;"><b>Consta óbito${c.ano_obito ? ' (' + esc(c.ano_obito) + ')' : ''}</b></div>` : '';
+            const comp = c.url_comprovante ? ` · <a href="${esc(c.url_comprovante)}" target="_blank" style="color:var(--cor-acento);">Comprovante</a>` : '';
+            return `<span class="fadm-rot"><i class="fa-solid fa-shield-halved"></i> Situação do CPF na Receita</span>
+                <span class="fadm-val"><b style="color:${cor};"><i class="fa-solid ${regular ? 'fa-circle-check' : 'fa-circle-exclamation'}"></i> ${esc(sit)}</b>
+                ${aviso}${obito}
+                <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Consultado em ${esc(dt)}${c.consultado_por ? ' por ' + esc(c.consultado_por) : ''}${comp}</small></span>`;
+        };
+
+        window.consultarCpfAdmissao = async function(idColab, btn) {
+            try {
+                if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
+                const { data: perfilAtual, error: ePerfil } = await supabaseClient.from('perfis').select('nome, dados_admissao').eq('id', idColab).single();
+                if (ePerfil || !perfilAtual) { mostrarAlerta('Não foi possível ler a ficha. Tente novamente.', 'aviso'); return; }
+                const colab = { id: idColab, nome: perfilAtual.nome };
+                const adm = perfilAtual.dados_admissao || {};
+                const cpf = String(adm.cpf || '').replace(/\D/g, '');
+                if (!cpf || !adm.nascimento) { mostrarAlerta('Falta o CPF ou a data de nascimento na ficha.', 'aviso'); return; }
+                if (typeof validarCPF === 'function' && !validarCPF(cpf)) { mostrarAlerta('O CPF da ficha é inválido. Corrija antes de consultar.', 'aviso'); return; }
+
+                if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Consultando...'; }
+                const { data, error } = await supabaseClient.functions.invoke('consultar-cpf', { body: { cpf: cpf, data_nascimento: adm.nascimento } });
+                const box = document.getElementById('box-consulta-cpf');
+                if (error || !data || !data.ok) {
+                    mostrarAlerta((data && data.erro) || 'Não foi possível consultar agora. Siga com a análise normalmente.', 'aviso');
+                    if (box) box.innerHTML = window.htmlConsultaCpfAdmissao(null, idColab);
+                    return;
+                }
+                const norm = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+                const resultado = {
+                    situacao: data.situacao, nome: data.nome, possui_obito: !!data.possui_obito, ano_obito: data.ano_obito || null,
+                    codigo_comprovante: data.codigo_comprovante || null, url_comprovante: data.url_comprovante || null,
+                    data_consulta: data.data_consulta || null,
+                    nome_diferente: !!(data.nome && colab && norm(data.nome) !== norm(colab.nome)),
+                    consultado_por: usuarioAtual.nome || null, consultado_em: new Date().toISOString()
+                };
+                // Grava mesclando (le o atual e so acrescenta consulta_cpf)
+                const { data: perfil, error: eLeitura } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+                if (eLeitura) throw eLeitura;
+                const obj = Object.assign({}, (perfil && perfil.dados_admissao) || {}, { consulta_cpf: resultado });
+                const { error: eGrava } = await supabaseClient.from('perfis').update({ dados_admissao: obj }).eq('id', idColab);
+                if (eGrava) throw eGrava;
+                [(typeof listaAdmissoesPendentes !== 'undefined' ? listaAdmissoesPendentes : []), (typeof todasAdmissoesAprovadas !== 'undefined' ? todasAdmissoesAprovadas : [])].forEach(arr => {
+                    const it = (arr || []).find(c => c.id === idColab);
+                    if (it) it.dados_admissao = obj;
+                });
+                if (box) box.innerHTML = window.htmlConsultaCpfAdmissao(resultado, idColab);
+            } catch (e) {
+                console.error('consultarCpfAdmissao:', e);
+                mostrarAlerta('Erro ao consultar/salvar o CPF. A análise da admissão não foi afetada.', 'aviso');
+                const box = document.getElementById('box-consulta-cpf');
+                if (box && btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> Consultar CPF na Receita'; }
+            }
+        };
+
         window.verFichaAdmissao = function(idStr) {
     const colab = listaAdmissoesPendentes.find(c => c.id === idStr);
     const adm = colab.dados_admissao || {};
@@ -27004,6 +27073,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     ${secao('fa-id-card', 'Documentos', '#ffc107', `
                         <div class="fadm-campos">
                             ${campo('CPF', adm.cpf)}
+                            ${(typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.perfil === 'Admin') ? `<div class="fadm-item fadm-largo" id="box-consulta-cpf">${window.htmlConsultaCpfAdmissao(adm.consulta_cpf, colab.id)}</div>` : ''}
                             ${campo('PIS', adm.pis)}
                             ${campo('RG', rgTxt)}
                             ${campo('Título de eleitor', tituloTxt)}
