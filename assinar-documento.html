@@ -219,6 +219,14 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
         // tem acesso direto ao próprio IP público. BLINDADO: timeout de 3s e qualquer erro
         // (sem internet, serviço fora do ar, bloqueado por firewall) devolve null e quem
         // chamar essa função segue o fluxo normal, sem travar nem exibir erro pro colaborador.
+        // 17/11/2026 - TRILHA DE AUDITORIA: hash SHA-256 + registro da assinatura.
+        // Tudo isolado: se falhar, a assinatura continua valendo normalmente (so nao gera o registro extra).
+        async function hashSha256(bytes) {
+            const buf = await crypto.subtle.digest('SHA-256', bytes);
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        const TEXTO_CONSENTIMENTO = 'Ao desenhar a assinatura e confirmar, o signatario declara ter lido o documento e concorda com seu conteudo, reconhecendo esta assinatura eletronica como aceite.';
+
         async function capturarIpPublico() {
             try {
                 const resposta = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
@@ -477,6 +485,31 @@ const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_
                 }).eq('id', dadosDoc.id);
 
                 if (dbError) throw new Error("Erro ao validar assinatura no banco: " + dbError.message);
+
+                // 17/11/2026: registro de auditoria da assinatura (NAO bloqueia nada se falhar)
+                try {
+                    const [hashOrig, hashFinal] = await Promise.all([
+                        hashSha256(pdfBytesOriginal),
+                        hashSha256(pdfBytesAssinado)
+                    ]);
+                    await supabaseClient.from('assinatura_registros').insert([{
+                        tipo_documento: 'documentos_mensais',
+                        documento_id: String(dadosDoc.id),
+                        colaborador_id: dadosDoc.colaborador_id ? String(dadosDoc.colaborador_id) : null,
+                        nome: dadosDoc.nome || null,
+                        cpf: dadosDoc.cpf || null,
+                        empresa: dadosDoc.empresa || null,
+                        unidade: dadosDoc.unidade || null,
+                        assinado_em: agora.toISOString(),
+                        ip: ipCapturado || null,
+                        dispositivo: (navigator.userAgent || '').slice(0, 400),
+                        hash_original_sha256: hashOrig,
+                        hash_assinado_sha256: hashFinal,
+                        url_original: dadosDoc.documento_pdf || null,
+                        url_assinado: pUrl.publicUrl,
+                        consentimento: TEXTO_CONSENTIMENTO
+                    }]);
+                } catch (eReg) { console.warn('Registro de auditoria da assinatura nao gravado (assinatura segue valida):', eReg); }
 
                 // 8. (O WhatsApp de confirmação agora sai DEPOIS da tela de sucesso, em segundo
                 //    plano e com novas tentativas — veja o passo 10 e enviarConfirmacaoComRetentativas.
