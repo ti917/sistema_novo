@@ -13730,6 +13730,8 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                 </div>
             </div>
 
+            <div id="box-be-regra-va" class="hidden" style="border: 1px dashed rgba(255,193,7,0.45); border-radius: 8px; padding: 12px; margin-bottom: 14px;"></div>
+
             <div style="display: flex; gap: 10px; align-items: flex-end;">
                 <div class="form-group" style="flex: 2;">
                     <label>Nome do Benefício</label>
@@ -65313,6 +65315,7 @@ window.calcularVAAgora = async function() {
         let anoAnt = anoAtual;
         if (mesAnt === 0) { mesAnt = 12; anoAnt -= 1; }
         const mesAnteriorStr = `${anoAnt}-${String(mesAnt).padStart(2, '0')}`;
+        window.mesAvaliadoVA = { ano: anoAnt, mes: mesAnt }; // usado pela regra de falta/atestado dos Benefícios Extras do VA
 
         let queryPerfis = supabaseClient.from('perfis').select('id, nome, empresa, unidade, status, dados_admissao, dados_rescisao').eq('perfil', 'Colaborador');
         if (typeof empresaSelecionadaFiltro !== 'undefined' && empresaSelecionadaFiltro !== 'Todas') queryPerfis = queryPerfis.eq('empresa', empresaSelecionadaFiltro);
@@ -65615,7 +65618,7 @@ window.calcularVAAgora = async function() {
                 window.vaCalculadoPorUnidade[nomeDaUnidade] = [];
             }
             
-            window.statusVAPorId[colab.id] = { retido: /^Retido/.test(statusExcel), status: statusExcel };
+            window.statusVAPorId[colab.id] = { retido: /^Retido/.test(statusExcel), status: statusExcel, faltas: qtdFaltas, retidoPorFalta: /Faltas em/.test(statusExcel) };
             window.vaCalculadoPorUnidade[nomeDaUnidade].push({
                 nome: colab.nome,
                 cpf: cpfColab,
@@ -121467,6 +121470,11 @@ window.abrirModalBeneficiosExtras = async function(tipo) {
     document.getElementById('be-colaborador-lista').innerHTML = '<span style="color: var(--cor-texto-secundario); font-size: 0.85rem;">Selecione a unidade primeiro...</span>';
     document.getElementById('be-valor').value = '';
     document.getElementById('novo-nome-beneficio-extra').value = '';
+    const boxRegraVA = document.getElementById('box-be-regra-va');
+    if (boxRegraVA) {
+        boxRegraVA.classList.toggle('hidden', tipo !== 'va');
+        boxRegraVA.innerHTML = tipo === 'va' ? window._beHtmlRegraVA('be') : '';
+    }
 
     modal.classList.remove('hidden');
 
@@ -121756,6 +121764,7 @@ window.renderizarListaAtribuicoesBeneficiosExtras = function() {
                     <input type="date" value="${a.data_inicio || ''}" onchange="definirDataInicioAtribuicao('${a.id}', this.value)" style="padding: 2px 6px; font-size: 0.75rem; width: auto;">
                 </span>
             </div>
+            ${window.beneficiosExtrasTipoAtual === 'va' ? `<button type="button" onclick="abrirEdicaoRegraVA('${a.id}')" title="${window._beResumoRegraVA(a.regra_va)}" style="background: none; border: 1px solid #ffc107; color: #ffc107; cursor: pointer; border-radius: 6px; padding: 4px 8px; font-size: 0.72rem; margin-right: 8px; white-space: nowrap;"><i class="fa-solid fa-scale-balanced"></i> Regra${(a.regra_va && a.regra_va.modo && a.regra_va.modo !== 'nenhuma') ? ' ✓' : ''}</button>` : ''}
             <button type="button" onclick="removerAtribuicaoBeneficio('${a.id}')" style="background: none; border: none; color: #dc3545; cursor: pointer;">
                 <i class="fa-solid fa-trash"></i>
             </button>
@@ -121806,6 +121815,8 @@ window.adicionarAtribuicaoBeneficio = async function() {
 
     // Só manda a data quando preenchida (vazio = comportamento de sempre)
     if (dataInicioBE) registros.forEach(r => { r.data_inicio = dataInicioBE; });
+    // Regra de falta/atestado (só VA): só envia quando configurada — sem ela o cadastro segue idêntico ao de sempre
+    if (tipo === 'va') { const regNova = window._beLerRegraVA('be'); if (regNova) registros.forEach(r => { r.regra_va = regNova; }); }
 
     const { error } = await supabaseClient
         .from('config_beneficios_extras_atribuicoes')
@@ -121813,10 +121824,12 @@ window.adicionarAtribuicaoBeneficio = async function() {
 
     if (error) {
         console.error(error);
+        if (/regra_va/.test(error.message || '')) return mostrarAlerta('Falta criar a coluna da regra no banco (rodar o SQL beneficio_extra_regra_va.sql no Supabase). Nada foi salvo.', 'erro');
         return mostrarAlerta('Erro ao adicionar benefício: ' + error.message, 'erro');
     }
 
     document.getElementById('be-valor').value = '';
+    if (tipo === 'va' && document.getElementById('box-be-regra-va')) document.getElementById('box-be-regra-va').innerHTML = window._beHtmlRegraVA('be');
     if (document.getElementById('be-data-inicio')) document.getElementById('be-data-inicio').value = '';
     document.querySelectorAll('.chk-be-colaborador:checked').forEach(chk => chk.checked = false);
     mostrarAlerta('Benefício adicionado!', 'sucesso');
@@ -121847,6 +121860,187 @@ window.removerAtribuicaoBeneficio = async function(id) {
         return mostrarAlerta('Erro ao remover: ' + error.message, 'erro');
     }
     await carregarAtribuicoesBeneficiosExtras();
+};
+
+// =========================================================================
+// 🧮 REGRA DE FALTA/ATESTADO DO BENEFÍCIO EXTRA DO VALE ALIMENTAÇÃO (opcional, por benefício)
+// regra_va (jsonb, coluna nova em config_beneficios_extras_atribuicoes):
+//   null / {modo:'nenhuma'}  → como sempre (segue a retenção do VA)
+//   {modo:'personalizada', zera_falta, desc_1, desc_2} → 1 dia de atestado tira desc_1 (R$), 2 dias tira desc_2, 3+ perde; falta zera se zera_falta
+//   {modo:'cesta2'} → mesmo desconto em R$ que a Cesta 2 da unidade aplica (+ proporcional de férias/afastamento)
+// O desconto é SEMPRE o mesmo valor em reais, qualquer que seja o valor do benefício.
+// =========================================================================
+window._beResumoRegraVA = function(r) {
+    if (!r || !r.modo || r.modo === 'nenhuma') return 'Sem regra própria (segue a retenção do VA)';
+    if (r.modo === 'cesta2') return 'Segue a Cesta 2 (automático)';
+    const f = (v) => 'R$ ' + (Number(v) || 0).toFixed(2).replace('.', ',');
+    return 'Falta ' + (r.zera_falta === false ? 'não zera' : 'zera') + ' • 1 atestado -' + f(r.desc_1) + ' • 2 atestados -' + f(r.desc_2) + ' • 3+ perde';
+};
+
+window._beHtmlRegraVA = function(p, r) {
+    r = r || { modo: 'nenhuma' };
+    const op = (v, t) => `<option value="${v}" ${r.modo === v ? 'selected' : ''}>${t}</option>`;
+    const d1 = (r.desc_1 !== undefined && r.desc_1 !== null) ? r.desc_1 : 75;
+    const d2 = (r.desc_2 !== undefined && r.desc_2 !== null) ? r.desc_2 : 100;
+    return `
+        <label style="color: #ffc107; font-weight: bold; font-size: 0.85rem;"><i class="fa-solid fa-scale-balanced"></i> Regra de falta / atestado deste benefício (só Vale Alimentação)</label>
+        <select id="${p}-regra-modo" onchange="window._beMostrarCamposRegra('${p}')" style="margin-top: 6px;">
+            ${op('nenhuma', 'Sem regra própria — segue a retenção do VA (como sempre)')}
+            ${op('personalizada', 'Personalizada — desconta valor fixo por atestado')}
+            ${op('cesta2', 'Segue a Cesta 2 — cálculo automático da unidade')}
+        </select>
+        <div id="${p}-regra-pers" class="${r.modo === 'personalizada' ? '' : 'hidden'}" style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;">
+            <div class="form-group" style="flex: 2; min-width: 170px; margin-bottom: 0;">
+                <label>Falta injustificada zera?</label>
+                <select id="${p}-regra-zera">
+                    <option value="sim" ${r.zera_falta === false ? '' : 'selected'}>Sim, zera o benefício</option>
+                    <option value="nao" ${r.zera_falta === false ? 'selected' : ''}>Não zera</option>
+                </select>
+            </div>
+            <div class="form-group" style="flex: 1; min-width: 110px; margin-bottom: 0;">
+                <label>1 atestado tira (R$)</label>
+                <input type="number" id="${p}-regra-d1" step="0.01" min="0" value="${d1}">
+            </div>
+            <div class="form-group" style="flex: 1; min-width: 110px; margin-bottom: 0;">
+                <label>2 atestados tira (R$)</label>
+                <input type="number" id="${p}-regra-d2" step="0.01" min="0" value="${d2}">
+            </div>
+            <small style="flex-basis: 100%; color: var(--cor-texto-secundario); font-size: 0.75rem;">3 ou mais atestados (dias corridos no mês anterior): perde o direito. O desconto é sempre esse valor em reais, não importa o valor do benefício.</small>
+        </div>
+        <small id="${p}-regra-cesta" class="${r.modo === 'cesta2' ? '' : 'hidden'}" style="display: block; margin-top: 8px; color: var(--cor-texto-secundario); font-size: 0.75rem;">Usa a regra da Cesta 2 cadastrada para a unidade: falta injustificada zera; 1, 2 ou 3+ dias de atestado tiram o mesmo valor em reais que a Cesta 2 tira; férias/afastamento pagam proporcional aos dias trabalhados. O resultado aparece na coluna Situação.</small>`;
+};
+
+window._beMostrarCamposRegra = function(p) {
+    const m = (document.getElementById(p + '-regra-modo') || {}).value;
+    const a = document.getElementById(p + '-regra-pers'); if (a) a.classList.toggle('hidden', m !== 'personalizada');
+    const b = document.getElementById(p + '-regra-cesta'); if (b) b.classList.toggle('hidden', m !== 'cesta2');
+};
+
+window._beLerRegraVA = function(p) {
+    const m = (document.getElementById(p + '-regra-modo') || {}).value;
+    if (m === 'cesta2') return { modo: 'cesta2' };
+    if (m === 'personalizada') {
+        return {
+            modo: 'personalizada',
+            zera_falta: ((document.getElementById(p + '-regra-zera') || {}).value) !== 'nao',
+            desc_1: Math.max(0, parseFloat((document.getElementById(p + '-regra-d1') || {}).value) || 0),
+            desc_2: Math.max(0, parseFloat((document.getElementById(p + '-regra-d2') || {}).value) || 0)
+        };
+    }
+    return null;
+};
+
+// Dias de atestado/férias/afastamento do MÊS AVALIADO do VA (mês anterior ao pagamento) — mesma contagem da Cesta 2.
+window._beDadosRegraVA = async function() {
+    const mv = window.mesAvaliadoVA;
+    if (!mv) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    const ultimo = new Date(mv.ano, mv.mes, 0).getDate();
+    const ini = `${mv.ano}-${pad(mv.mes)}-01`, fim = `${mv.ano}-${pad(mv.mes)}-${pad(ultimo)}`;
+    const [rA, rF] = await Promise.all([
+        supabaseClient.from('ausencias').select('colaborador_id, sigla, data_inicio, data_fim').eq('status', 'Aprovado').lte('data_inicio', fim).gte('data_fim', ini),
+        supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', fim).gte('data_fim_ferias', ini)
+    ]);
+    if (rA.error) throw rA.error;
+    if (rF.error) throw rF.error;
+    const iniObj = new Date(mv.ano, mv.mes - 1, 1), fimObj = new Date(mv.ano, mv.mes - 1, ultimo);
+    const corridos = (di, df) => {
+        const a = new Date(di + 'T00:00:00'), b = new Date((df || di) + 'T00:00:00');
+        const x = a > iniObj ? a : iniObj, y = b < fimObj ? b : fimObj;
+        if (x > y) return 0;
+        return Math.floor((y.getTime() - x.getTime()) / 86400000) + 1;
+    };
+    const porId = {};
+    const get = (id) => porId[id] || (porId[id] = { curto: 0, longo: 0, licenca: 0, ferias: 0 });
+    const COD = ['ATM', 'AC', 'ATC', 'AF', 'LDM', 'LDP', 'DECL'];
+    (rA.data || []).forEach(a => {
+        if (!a.data_inicio || !COD.includes(a.sigla)) return;
+        const dias = corridos(a.data_inicio, a.data_fim);
+        if (dias <= 0) return;
+        const total = Math.floor((new Date((a.data_fim || a.data_inicio) + 'T00:00:00').getTime() - new Date(a.data_inicio + 'T00:00:00').getTime()) / 86400000) + 1;
+        const o = get(a.colaborador_id);
+        if (a.sigla === 'LDM' || a.sigla === 'LDP') o.licenca += dias;
+        else if (a.sigla === 'AF' || total > 15) o.longo += dias;
+        else o.curto += dias;
+    });
+    (rF.data || []).forEach(f => {
+        if (!f.data_inicio_ferias) return;
+        const dias = corridos(f.data_inicio_ferias, f.data_fim_ferias);
+        if (dias > 0) get(f.colaborador_id).ferias += dias;
+    });
+    return { diasNoMes: ultimo, porId };
+};
+
+// Aplica a regra a UM benefício. ctx: { faltas, retido, retidoPorFalta, d:{curto,longo,licenca,ferias}, diasNoMes, cestaRule }
+window._beAplicarRegraVA = function(regra, valorBase, ctx) {
+    const f = (v) => 'R$ ' + v.toFixed(2).replace('.', ',');
+    const d = ctx.d || { curto: 0, longo: 0, licenca: 0, ferias: 0 };
+    const dias = d.curto || 0;
+    if (ctx.retido && !ctx.retidoPorFalta) return { valor: 0, nota: 'retido no VA — extra zerado' };
+    if (ctx.faltas > 0 && (regra.modo === 'cesta2' || regra.zera_falta !== false)) return { valor: 0, nota: `${ctx.faltas} falta(s) — extra zerado` };
+    let valor = valorBase;
+    const partes = [];
+    if (ctx.faltas > 0) partes.push(`${ctx.faltas} falta(s) sem zerar`);
+    if (regra.modo === 'personalizada') {
+        const d1 = Number(regra.desc_1) || 0, d2 = Number(regra.desc_2) || 0;
+        if (dias === 1) { valor -= d1; partes.push(`1 dia de atestado: -${f(d1)}`); }
+        else if (dias === 2) { valor -= d2; partes.push(`2 dias de atestado: -${f(d2)}`); }
+        else if (dias >= 3) { valor = 0; partes.push(`${dias} dias de atestado: perdeu o direito`); }
+    } else {
+        const r = ctx.cestaRule;
+        if (!r) {
+            partes.push('unidade sem regra da Cesta 2 — sem desconto');
+        } else {
+            const base = Number(r.valor_base) || 0;
+            const tier = dias === 0 ? base : (dias === 1 ? Number(r.valor_1_atestado) : (dias === 2 ? Number(r.valor_2_atestados) : Number(r.valor_3_atestados))) || 0;
+            if (dias > 0) {
+                if (dias >= 3 && !(tier > 0)) { valor = 0; partes.push(`${dias} dias de atestado: perdeu o direito (Cesta 2)`); }
+                else { const desc = Math.max(0, base - tier); valor -= desc; partes.push(`${dias} dia(s) de atestado: -${f(desc)} (igual à Cesta 2)`); }
+            }
+            const naoTrab = (d.curto || 0) + (d.longo || 0) + (d.licenca || 0) + (d.ferias || 0);
+            const prop = (d.ferias || 0) > 0 || (d.longo || 0) > 0 || (d.licenca || 0) > 0;
+            if (valor > 0 && prop) {
+                if (naoTrab >= ctx.diasNoMes) { valor = 0; partes.push('afastado/férias o mês inteiro: sem direito'); }
+                else { const trab = Math.max(0, ctx.diasNoMes - naoTrab); valor = (valor / ctx.diasNoMes) * trab; partes.push(`proporcional: ${trab}/${ctx.diasNoMes} dias`); }
+            }
+        }
+    }
+    return { valor: Math.max(0, valor), nota: partes.join('; ') };
+};
+
+// Edição da regra de um benefício JÁ cadastrado
+window.abrirEdicaoRegraVA = function(id) {
+    const a = (window.atribuicoesBeneficiosExtras || []).find(x => x.id === id);
+    if (!a) return;
+    const antigo = document.getElementById('modal-regra-va-be'); if (antigo) antigo.remove();
+    const alvo = a.colaborador_id ? `${a.colaborador_nome} (${a.unidade})` : `Todos — ${a.unidade}`;
+    const d = document.createElement('div');
+    d.id = 'modal-regra-va-be';
+    d.className = 'modal-arquivo-overlay';
+    d.style.zIndex = '10030';
+    d.innerHTML = `<div class="glass-card" style="width: 100%; max-width: 560px; border: 1px solid #ffc107; position: relative;">
+        <button onclick="document.getElementById('modal-regra-va-be').remove()" style="position: absolute; top: 15px; right: 15px; background: none; border: none; color: #fff; cursor: pointer; font-size: 1.2rem;"><i class="fa-solid fa-xmark"></i></button>
+        <h3 style="color: #ffc107; margin-bottom: 6px;"><i class="fa-solid fa-scale-balanced"></i> Regra do benefício</h3>
+        <p style="color: var(--cor-texto-secundario); font-size: 0.85rem; margin-bottom: 14px;"><b>${alvo}</b> — ${a.nome_beneficio}: R$ ${Number(a.valor).toFixed(2).replace('.', ',')}</p>
+        <div>${window._beHtmlRegraVA('ed', a.regra_va)}</div>
+        <button type="button" class="btn-success" style="width: 100%; margin-top: 16px; background-color: #ffc107; color: #000; border: none;" onclick="salvarEdicaoRegraVA('${id}')"><i class="fa-solid fa-floppy-disk"></i> Salvar regra</button>
+    </div>`;
+    document.body.appendChild(d);
+};
+
+window.salvarEdicaoRegraVA = async function(id) {
+    const reg = window._beLerRegraVA('ed');
+    const { error } = await supabaseClient.from('config_beneficios_extras_atribuicoes').update({ regra_va: reg }).eq('id', id);
+    if (error) {
+        console.error(error);
+        if (/regra_va/.test(error.message || '')) return mostrarAlerta('Falta criar a coluna da regra no banco (rodar o SQL beneficio_extra_regra_va.sql no Supabase).', 'erro');
+        return mostrarAlerta('Erro ao salvar a regra: ' + error.message, 'erro');
+    }
+    const a = (window.atribuicoesBeneficiosExtras || []).find(x => x.id === id);
+    if (a) a.regra_va = reg;
+    const m = document.getElementById('modal-regra-va-be'); if (m) m.remove();
+    renderizarListaAtribuicoesBeneficiosExtras();
+    mostrarAlerta('Regra salva! Clique em Calcular no Vale Alimentação para ver o resultado.', 'sucesso');
 };
 
 // --- Geração dos Benefícios Extras (agora entra na mesma planilha de VR/VA e no Resumo Geral) ---
@@ -121894,6 +122088,17 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
             .eq('tipo', tipo);
         if (errAtrib) throw errAtrib;
 
+        // Regra de falta/atestado do extra do VA (opcional): só busca dados quando algum benefício tem regra
+        let dadosRegraVA = null, regrasCestaBE = [];
+        if (tipo === 'va' && (atribuicoes || []).some(a => a.regra_va && a.regra_va.modo && a.regra_va.modo !== 'nenhuma')) {
+            try { dadosRegraVA = await window._beDadosRegraVA(); } catch (eRg) { console.warn('Regra do extra do VA: não consegui buscar atestados/férias:', eRg); }
+            if ((atribuicoes || []).some(a => a.regra_va && a.regra_va.modo === 'cesta2')) {
+                try {
+                    const { data: rc } = await supabaseClient.from('config_cesta2').select('*');
+                    regrasCestaBE = rc || [];
+                } catch (eRc) { console.warn('Regra do extra do VA: não consegui ler a Cesta 2:', eRc); }
+            }
+        }
         const atribGerais = (atribuicoes || []).filter(a => !a.colaborador_id);
         const atribPorColaborador = (atribuicoes || []).filter(a => a.colaborador_id);
 
@@ -121959,6 +122164,7 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
             // pra poder separar por aba/coluna no Excel sem perder o rateio de cada um.
             const notasDataBE = [];
             let algumComData = false;
+            let algumComRegra = false;
             const brData = (iso) => String(iso).split('-').reverse().join('/');
             const beneficiosComRateio = beneficiosDoColab.map(b => {
                 const valorBase = Number(b.valor) || 0;
@@ -122022,11 +122228,31 @@ window.calcularBeneficiosExtras = async function(tipo, silencioso = false) {
                         }
                     } catch (eBE) { console.warn('Data de início do benefício extra ignorada (erro):', eBE); }
                 }
+                // 👇 Regra de falta/atestado (só VA, só quando configurada no benefício)
+                if (tipo === 'va' && b.regra_va && b.regra_va.modo && b.regra_va.modo !== 'nenhuma') {
+                    const stR = window.statusVAPorId ? window.statusVAPorId[c.id] : null;
+                    if (!dadosRegraVA) {
+                        notasDataBE.push(`${b.nome_beneficio}: regra não aplicada (rode o Calcular do VA primeiro)`);
+                    } else if (!stR || stR.faltas === undefined) {
+                        notasDataBE.push(`${b.nome_beneficio}: regra não aplicada (pessoa fora do cálculo do VA)`);
+                    } else {
+                        algumComRegra = true;
+                        const baseRegra = (retidoNoVA && stR.retidoPorFalta) ? valorBase : valorRateado;
+                        const regraCesta = regrasCestaBE.find(r => (r.unidade || '').trim().toUpperCase() === String(b.unidade || '').trim().toUpperCase() && !(r.recebe_cesta === false || String(r.recebe_cesta).trim().toLowerCase() === 'false')) || null;
+                        const rr = window._beAplicarRegraVA(b.regra_va, baseRegra, {
+                            faltas: stR.faltas, retido: stR.retido, retidoPorFalta: stR.retidoPorFalta,
+                            d: dadosRegraVA.porId[c.id], diasNoMes: dadosRegraVA.diasNoMes, cestaRule: regraCesta
+                        });
+                        valorRateado = rr.valor;
+                        if (rr.nota) notasDataBE.push(`${b.nome_beneficio}: ${rr.nota}`);
+                    }
+                }
                 return { nome: b.nome_beneficio, valor: valorBase, valorRateado, retroExtra: retroExtraB };
             });
             const retroExtraMax = beneficiosComRateio.reduce((m, x) => Math.max(m, x.retroExtra || 0), 0);
             // Só recalcula o total quando algum benefício tem data de início — sem data, o total segue exatamente como antes.
-            if (algumComData) valorTotal = beneficiosComRateio.reduce((acc, x) => acc + (x.valorRateado || 0), 0);
+            if (algumComData || algumComRegra) valorTotal = beneficiosComRateio.reduce((acc, x) => acc + (x.valorRateado || 0), 0);
+            if (tipo === 'va' && algumComRegra && retidoNoVA && valorTotal > 0) situacaoVA = String(situacaoVA).replace(' — extra zerado', ' — extra pago pela regra');
 
             // Motivos (igual à explicação que o VR já mostra): proporcional, retroativo, férias, faltas
             const motivos = [];
