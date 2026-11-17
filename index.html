@@ -27038,7 +27038,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                 const titulo = ok ? 'REGULAR — CPF, nome e nascimento conferem' : (l.situacao ? 'Situação: ' + esc(l.situacao) : 'Situação não identificada');
                 return `<div style="color:${cor}; font-size:0.82rem; margin-top:4px; font-weight:bold;"><i class="fa-solid ${ok ? 'fa-circle-check' : 'fa-triangle-exclamation'}"></i> ${titulo}</div>` +
                     (prob.length ? `<div style="color:${cor}; font-size:0.78rem;">Atenção: ${prob.join('; ')}.</div>` : '') +
-                    `<small style="display:block; color:var(--cor-texto-secundario); font-size:0.7rem;">Leitura automática do PDF (apoio). Não prova autenticidade — confira o arquivo${l.codigo_controle ? ' e o código de controle ' + esc(l.codigo_controle) : ''}.</small>`;
+                    `<small style="display:block; color:var(--cor-texto-secundario); font-size:0.7rem;">Leitura automática ${l.via_ocr ? 'por OCR (pode errar letras)' : 'do PDF'} (apoio). Não prova autenticidade — confira o arquivo${l.codigo_controle ? ' e o código de controle ' + esc(l.codigo_controle) : ''}.</small>`;
             })(comprovante && comprovante.leitura);
             const compHtml = (comprovante && comprovante.url)
                 ? `<div style="margin-top:8px; font-size:0.85rem;"><a href="${esc(comprovante.url)}" target="_blank" rel="noopener" style="color:var(--cor-acento); font-weight:bold;"><i class="fa-solid fa-file-pdf"></i> Abrir comprovante anexado</a>
@@ -27104,44 +27104,81 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
         // 🔎 Lê o comprovante (PDF com texto) e confere com a ficha. É só uma LEITURA AUTOMÁTICA de apoio: nunca bloqueia
         // e não prova autenticidade (isso só o código de controle no site da Receita). Foto/escaneado = "não lido".
         window.lerComprovanteCpf = async function(arquivo, ficha) {
-            const semAc = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+            const semAc = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+            const carregarScript = (src, teste) => new Promise((ok, erro) => {
+                if (teste()) return ok();
+                const sc = document.createElement('script'); sc.src = src; sc.onload = () => ok(); sc.onerror = () => erro(new Error('script ' + src)); document.head.appendChild(sc);
+            });
             try {
-                if (!/pdf/i.test(arquivo.type || '') && !/\.pdf$/i.test(arquivo.name || '')) return { lido: false, motivo: 'Não é PDF (foto/imagem não é lida automaticamente).' };
+                const ehPdf = /pdf/i.test(arquivo.type || '') || /\.pdf$/i.test(arquivo.name || '');
+                const ehImg = /^image\//i.test(arquivo.type || '');
+                if (!ehPdf && !ehImg) return { lido: false, motivo: 'Formato não suportado para leitura.' };
                 let lib = window.pdfjsLib;
-                for (let i = 0; i < 40 && !lib; i++) { await new Promise(r => setTimeout(r, 100)); lib = window.pdfjsLib; }
-                if (!lib) return { lido: false, motivo: 'Leitor de PDF indisponível.' };
-                try { if (!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js'; } catch (e) {}
-                const buf = await arquivo.arrayBuffer();
-                const pdf = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
-                let texto = '';
-                for (let n = 1; n <= Math.min(pdf.numPages, 3); n++) {
-                    const pg = await pdf.getPage(n);
-                    const tc = await pg.getTextContent();
-                    texto += ' ' + tc.items.map(it => it.str).join(' ');
+                for (let i = 0; i < 40 && !lib && ehPdf; i++) { await new Promise(r => setTimeout(r, 100)); lib = window.pdfjsLib; }
+                let texto = '', viaOcr = false, pdf = null;
+                if (ehPdf) {
+                    if (!lib) return { lido: false, motivo: 'Leitor de PDF indisponível.' };
+                    try { if (!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js'; } catch (e) {}
+                    pdf = await lib.getDocument({ data: new Uint8Array(await arquivo.arrayBuffer()) }).promise;
+                    for (let n = 1; n <= Math.min(pdf.numPages, 3); n++) {
+                        const pg = await pdf.getPage(n);
+                        const tc = await pg.getTextContent();
+                        texto += ' ' + tc.items.map(it => it.str).join(' ');
+                    }
+                }
+                // Sem texto (PDF "imagem" ou foto): OCR no próprio navegador (nada é enviado para fora)
+                if (semAc(texto).length < 40) {
+                    let canvas = document.createElement('canvas');
+                    if (ehPdf) {
+                        const pg = await pdf.getPage(1);
+                        const vp = pg.getViewport({ scale: 2 });
+                        canvas.width = vp.width; canvas.height = vp.height;
+                        await pg.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+                    } else {
+                        const bmp = await createImageBitmap(arquivo);
+                        const k = Math.min(1, 2200 / Math.max(bmp.width, bmp.height)) || 1;
+                        canvas.width = Math.round(bmp.width * k); canvas.height = Math.round(bmp.height * k);
+                        const cx = canvas.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, canvas.width, canvas.height); cx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                    }
+                    try {
+                        await carregarScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js', () => !!window.Tesseract);
+                        const r = await window.Tesseract.recognize(canvas, 'por');
+                        texto = (r && r.data && r.data.text) || '';
+                        viaOcr = true;
+                    } catch (eOcr) {
+                        console.warn('OCR:', eOcr);
+                        return { lido: false, motivo: 'O arquivo não tem texto e a leitura por OCR não funcionou agora.' };
+                    }
                 }
                 const T = semAc(texto);
-                if (T.length < 40) return { lido: false, motivo: 'O PDF não tem texto legível (parece imagem escaneada).' };
+                if (T.length < 40) return { lido: false, motivo: 'Não consegui ler o conteúdo do arquivo.' };
                 if (!/SITUACAO CADASTRAL/.test(T) || !/CPF/.test(T)) return { lido: false, motivo: 'Não parece um Comprovante de Situação Cadastral no CPF.' };
-                const mSit = T.match(/SITUACAO CADASTRAL\s*:?\s*(REGULAR|SUSPENSA|CANCELADA(?: POR [A-Z ]+?)?|PENDENTE DE REGULARIZACAO|NULA|TITULAR FALECIDO)/);
-                const mCpf = T.match(/(\d{3}\.\d{3}\.\d{3}-\d{2})/);
-                const mNasc = T.match(/DATA DE NASCIMENTO\s*:?\s*(\d{2}\/\d{2}\/\d{4})/);
-                const mNome = T.match(/NOME\s*:?\s*([A-Z ]+?)\s+(?:DATA DE NASCIMENTO|SITUACAO CADASTRAL|DATA DA INSCRICAO)/);
-                const mCod = T.match(/CODIGO DE CONTROLE DO COMPROVANTE\s*:?\s*([A-Z0-9]{8,})/);
+                const mSit = T.match(/SITUACAO CADASTRAL\s*[:.]?\s*(REGULAR|SUSPENSA|CANCELADA(?: POR [A-Z ]+?)?|PENDENTE DE REGULARIZACAO|NULA|TITULAR FALECIDO)/);
+                const mCpf = T.match(/(\d{3}\s?\.\s?\d{3}\s?\.\s?\d{3}\s?-\s?\d{2})/);
+                const mNasc = T.match(/DATA DE NASCIMENTO\s*[:.]?\s*(\d{2}\s?\/\s?\d{2}\s?\/\s?\d{4})/);
+                const mNome = T.match(/NOME\s*[:.]?\s*([A-Z ]+?)\s+(?:DATA DE NASCIMENTO|SITUACAO CADASTRAL|DATA DA INSCRICAO)/);
+                const mCod = T.match(/CODIGO DE CONTROLE DO COMPROVANTE\s*[:.]?\s*([A-Z0-9]{8,})/);
                 const cpfFicha = String(ficha.cpf || '').replace(/\D/g, '');
                 const nascFicha = ficha.nascimento ? (typeof formatarDataBR === 'function' ? formatarDataBR(ficha.nascimento) : String(ficha.nascimento)) : '';
+                const nomeFicha = semAc(ficha.nome || '');
+                // OCR pode errar uma letra: no OCR basta cada palavra do nome da ficha aparecer no texto lido
+                const nomeOk = (mNome && nomeFicha)
+                    ? (viaOcr ? nomeFicha.split(' ').filter(w => w.length > 2).every(w => T.includes(w)) : semAc(mNome[1]) === nomeFicha)
+                    : null;
                 return {
                     lido: true,
+                    via_ocr: viaOcr,
                     situacao: mSit ? mSit[1].trim() : null,
                     regular: !!(mSit && mSit[1].trim() === 'REGULAR'),
                     cpf_confere: mCpf ? mCpf[1].replace(/\D/g, '') === cpfFicha : null,
-                    nome_confere: mNome && ficha.nome ? semAc(mNome[1]) === semAc(ficha.nome) : null,
+                    nome_confere: nomeOk,
                     nome_no_comprovante: mNome ? mNome[1].trim() : null,
-                    nasc_confere: mNasc && nascFicha ? mNasc[1] === nascFicha : null,
+                    nasc_confere: mNasc && nascFicha ? mNasc[1].replace(/\s/g, '') === nascFicha : null,
                     codigo_controle: mCod ? mCod[1] : null
                 };
             } catch (e) {
                 console.warn('lerComprovanteCpf:', e);
-                return { lido: false, motivo: 'Não consegui ler o PDF.' };
+                return { lido: false, motivo: 'Não consegui ler o arquivo.' };
             }
         };
 
@@ -27161,6 +27198,7 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     const base = `${formatarNomePasta(pf.empresa)}/${formatarNomePasta(pf.unidade)}/${formatarNomePasta(pf.nome)}/Admissoes`;
                     const urls = await window.subirDocumentos(base, [arq]);
                     if (!urls || !urls[0]) throw new Error('O envio não retornou o endereço do arquivo.');
+                    mostrarAlerta('Lendo o comprovante...', 'info');
                     const leitura = await window.lerComprovanteCpf(arq, { cpf: (pf.dados_admissao || {}).cpf, nascimento: (pf.dados_admissao || {}).nascimento, nome: pf.nome });
                     const comp = { url: urls[0], nome_arquivo: arq.name, anexado_por: usuarioAtual.nome || null, anexado_em: new Date().toISOString(), leitura: leitura };
                     const obj = Object.assign({}, pf.dados_admissao || {}, { comprovante_cpf: comp });
