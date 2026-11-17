@@ -128,7 +128,7 @@
       +     '<i class="fa-solid ' + (tipo === 'imagem' ? 'fa-file-image' : 'fa-file-pdf') + '" style="color:' + cor + ';"></i>'
       +     '<strong style="flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.9rem;">' + esc(nome || 'Documento') + '</strong>'
       +     '<a data-sem-visualizador="1" href="' + esc(url) + '" target="_blank" rel="noopener" style="padding:7px 12px;font-size:.78rem;text-decoration:none;color:var(--cor-acento,#ffc107);border:1px solid var(--cor-acento,#ffc107);border-radius:8px;background:rgba(255,193,7,.08);font-weight:700;"><i class="fa-solid fa-up-right-from-square"></i> Abrir em nova aba</a>'
-      +     '<a data-sem-visualizador="1" href="' + esc(url) + '" download="' + esc(nome || 'documento') + '" style="padding:7px 12px;font-size:.78rem;text-decoration:none;color:#e8eef7;border:1px solid rgba(255,255,255,.25);border-radius:8px;font-weight:700;"><i class="fa-solid fa-download"></i> Baixar</a>'
+      +     '<a data-sem-visualizador="1" data-baixar="1" href="' + esc(url) + '" download="' + esc(nome || 'documento') + '" style="padding:7px 12px;font-size:.78rem;text-decoration:none;color:#e8eef7;border:1px solid rgba(255,255,255,.25);border-radius:8px;font-weight:700;"><i class="fa-solid fa-download"></i> Baixar</a>'
       +     '<button type="button" data-fechar="1" title="Fechar (Esc)" style="background:none;border:0;color:#9fb0c8;cursor:pointer;font-size:1.4rem;line-height:1;"><i class="fa-solid fa-xmark"></i></button>'
       +   '</div>'
       +   '<div id="visualizador-doc-corpo" style="flex:1;min-height:0;position:relative;background:#111;">'
@@ -140,7 +140,21 @@
     m.setAttribute('data-overflow', document.documentElement.style.overflow || '');
     document.documentElement.style.overflow = 'hidden';
     if (blobTemp) m.setAttribute('data-blob-url', url);
-    m.addEventListener('click', function (ev) { if (ev.target === m || (ev.target.closest && ev.target.closest('[data-fechar]'))) fechar(); });
+    m.addEventListener('click', function (ev) {
+      if (ev.target === m || (ev.target.closest && ev.target.closest('[data-fechar]'))) { fechar(); return; }
+      // "Baixar": o atributo download e ignorado pelo navegador quando o arquivo vem de OUTRO site (Supabase) e so abria
+      // outra janela. Aqui baixa os bytes e salva direto. Se falhar, segue o comportamento antigo do link.
+      var bx = ev.target.closest && ev.target.closest('[data-baixar]');
+      if (!bx) return;
+      ev.preventDefault();
+      var nomeArq = bx.getAttribute('download') || 'documento';
+      fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); }).then(function (b) {
+        var bu = URL.createObjectURL(new Blob([b], { type: b.type || (tipo === 'imagem' ? 'image/jpeg' : 'application/pdf') }));
+        var al = document.createElement('a'); al.href = bu; al.download = nomeArq; al.setAttribute('data-sem-visualizador', '1');
+        document.body.appendChild(al); al.click(); al.remove();
+        setTimeout(function () { try { URL.revokeObjectURL(bu); } catch (e) {} }, 60000);
+      }).catch(function () { window.open(url, '_blank'); });
+    });
     document.addEventListener('keydown', onEsc, true);
     var corpo = document.getElementById('visualizador-doc-corpo');
     function mostrarImg(src) { if (!document.body.contains(corpo)) return; corpo.innerHTML = '<div style="position:absolute;inset:0;overflow:auto;display:flex;align-items:flex-start;justify-content:center;"><img src="' + esc(src) + '" alt="' + esc(nome) + '" style="max-width:100%;height:auto;display:block;"></div>'; }
