@@ -79638,15 +79638,65 @@ window.renderListaSuperAdmins = async function() {
     if (error) { tb.innerHTML = '<tr><td colspan="3" style="color: var(--cor-perigo);">Não foi possível carregar a lista.</td></tr>'; return; }
     const raiz = window.souSuperAdminRaiz();
     const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-    tb.innerHTML = (data || []).filter(u => u.status !== 'Excluído').map(u => {
+    const norm = (t) => String(t || '').trim().toUpperCase().replace(/^SOUL$/, 'SOUL GESTÃO');
+    // Minha abrangencia: 'Todas' (ou Raiz) ve todos; senao so as empresas do meu cadastro
+    const minhaEmp = String((usuarioAtual && usuarioAtual.empresa) || '').trim();
+    const vejoTudo = raiz || !minhaEmp || minhaEmp === 'Todas';
+    const minhasEmps = minhaEmp.split(',').map(norm).filter(x => x);
+    // Opcoes de empresa: Todas + SOUL GESTÃO + VILLAC + cadastradas
+    const opts = new Set(['SOUL GESTÃO', 'VILLAC']);
+    try {
+        const { data: emps } = await supabaseClient.from('perfis').select('nome, perfil').eq('perfil', 'Empresa');
+        (emps || []).forEach(e => { if (e.nome) opts.add(norm(e.nome)); });
+    } catch (e) {}
+    const listaOpts = vejoTudo ? ['Todas', ...opts] : [...opts].filter(o => minhasEmps.includes(o));
+    const linhas = (data || []).filter(u => u.status !== 'Excluído').filter(u => {
+        if (vejoTudo) return true;
+        const ue = String(u.empresa || '').trim();
+        if (!ue || ue === 'Todas') return false;
+        return ue.split(',').map(norm).some(x => minhasEmps.includes(x));
+    });
+    tb.innerHTML = linhas.map(u => {
         const ehRaiz = (u.id === window.ID_SUPER_ADMIN);
         const ehExtra = window.superAdminsExtras.has(u.id);
+        const nomeJs = String(u.nome).replace(/'/g, "\\'");
         let celula;
         if (ehRaiz) celula = '<span class="badge" style="background: rgba(255,193,7,0.15); color: #ffc107; border: 1px solid #ffc107;"><i class="fa-solid fa-crown"></i> Raiz</span>';
-        else if (raiz) celula = `<button type="button" class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; border-color:${ehExtra ? '#28a745' : '#888'}; color:${ehExtra ? '#28a745' : '#888'};" onclick="window.alternarSuperAdminExtra('${u.id}', '${String(u.nome).replace(/'/g, "\\'")}')">${ehExtra ? '<i class="fa-solid fa-toggle-on"></i> Sim' : '<i class="fa-solid fa-toggle-off"></i> Não'}</button>`;
+        else if (raiz) celula = `<button type="button" class="btn-secondary" style="padding:4px 8px; font-size:0.75rem; border-color:${ehExtra ? '#28a745' : '#888'}; color:${ehExtra ? '#28a745' : '#888'};" onclick="window.alternarSuperAdminExtra('${u.id}', '${nomeJs}')">${ehExtra ? '<i class="fa-solid fa-toggle-on"></i> Sim' : '<i class="fa-solid fa-toggle-off"></i> Não'}</button>`;
         else celula = ehExtra ? '<span style="color:#28a745; font-weight:bold;">Sim</span>' : '<span style="color: var(--cor-texto-secundario);">Não</span>';
-        return `<tr><td style="text-align:left;"><b>${esc(u.nome)}</b></td><td>${esc(u.empresa || '-')}</td><td>${celula}</td></tr>`;
+        // Empresa: editavel (Raiz ou Super Admin) exceto a conta Raiz
+        let celEmp;
+        const atual = String(u.empresa || 'Todas').trim() || 'Todas';
+        if (ehRaiz || !window.souSuperAdmin()) celEmp = esc(atual);
+        else {
+            const todas = listaOpts.slice();
+            const atualOk = todas.some(o => norm(o) === norm(atual)) ? todas.find(o => norm(o) === norm(atual)) : null;
+            if (!atualOk) todas.push(atual);
+            celEmp = `<select style="padding:4px 8px; font-size:0.8rem;" onchange="window.trocarEmpresaAdmin('${u.id}', '${nomeJs}', this.value, '${esc(atual).replace(/'/g, "\\'")}', this)">${todas.map(o => `<option value="${esc(o)}" ${(norm(o) === norm(atual)) ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+        }
+        return `<tr><td style="text-align:left;"><b>${esc(u.nome)}</b></td><td>${celEmp}</td><td>${celula}</td></tr>`;
     }).join('') || '<tr><td colspan="3">Nenhum Admin encontrado.</td></tr>';
+};
+
+// Troca a empresa de um Admin (Super Admin). Nao mexe em mais nada do cadastro.
+window.trocarEmpresaAdmin = async function(idAlvo, nome, novaEmp, antiga, selectEl) {
+    const voltar = () => { if (selectEl) selectEl.value = antiga; };
+    if (!window.souSuperAdmin() || !idAlvo || idAlvo === window.ID_SUPER_ADMIN) { voltar(); return; }
+    const minhaEmp = String((usuarioAtual && usuarioAtual.empresa) || '').trim();
+    const vejoTudo = window.souSuperAdminRaiz() || !minhaEmp || minhaEmp === 'Todas';
+    if (!vejoTudo && String(novaEmp).trim() === 'Todas') { voltar(); mostrarAlerta('Você só pode escolher a sua empresa.', 'erro'); return; }
+    const ok = await mostrarConfirmacao(`Mudar a empresa de <b>${nome}</b> de <b>${antiga}</b> para <b>${novaEmp}</b>?`, 'Mudar Empresa');
+    if (!ok) { voltar(); return; }
+    try {
+        const { error } = await supabaseClient.from('perfis').update({ empresa: novaEmp }).eq('id', idAlvo).eq('perfil', 'Admin');
+        if (error) throw error;
+        mostrarAlerta(`Empresa de ${nome} agora é ${novaEmp}.`, 'sucesso');
+        window.renderListaSuperAdmins();
+    } catch (err) {
+        console.error('trocarEmpresaAdmin:', err);
+        voltar();
+        mostrarAlerta('Não consegui salvar: ' + err.message, 'erro');
+    }
 };
 
 // Da/tira o cargo de Super Admin (SO o Administrador Raiz)
