@@ -27026,9 +27026,23 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const btnGratis = `<button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="window.abrirConsultaReceitaCpf('${idColab}')"><i class="fa-solid fa-arrow-up-right-from-square"></i> Abrir consulta na Receita (grátis)</button>
                     <small style="display:block; margin-top:4px; color:var(--cor-texto-secundario);">Abre o site da Receita e copia o CPF. É só colar, informar a data de nascimento, marcar "Sou humano" e consultar. O comprovante é gratuito.</small>`;
             // 📎 Comprovante da Receita anexado pelo RH (PDF ou imagem)
+            const leituraHtml = (function(l) {
+                if (!l) return '';
+                if (!l.lido) return `<div style="color:var(--cor-texto-secundario); font-size:0.78rem; margin-top:4px;"><i class="fa-solid fa-circle-info"></i> Leitura automática: ${esc(l.motivo || 'não lido')} — confira o arquivo.</div>`;
+                const prob = [];
+                if (l.cpf_confere === false) prob.push('CPF do comprovante é diferente da ficha');
+                if (l.nasc_confere === false) prob.push('data de nascimento diferente da ficha');
+                if (l.nome_confere === false) prob.push('nome diferente da ficha' + (l.nome_no_comprovante ? ' (' + esc(l.nome_no_comprovante) + ')' : ''));
+                const ok = l.regular && !prob.length;
+                const cor = ok ? '#28a745' : (l.regular ? '#ff9800' : '#ff5252');
+                const titulo = ok ? 'REGULAR — CPF, nome e nascimento conferem' : (l.situacao ? 'Situação: ' + esc(l.situacao) : 'Situação não identificada');
+                return `<div style="color:${cor}; font-size:0.82rem; margin-top:4px; font-weight:bold;"><i class="fa-solid ${ok ? 'fa-circle-check' : 'fa-triangle-exclamation'}"></i> ${titulo}</div>` +
+                    (prob.length ? `<div style="color:${cor}; font-size:0.78rem;">Atenção: ${prob.join('; ')}.</div>` : '') +
+                    `<small style="display:block; color:var(--cor-texto-secundario); font-size:0.7rem;">Leitura automática do PDF (apoio). Não prova autenticidade — confira o arquivo${l.codigo_controle ? ' e o código de controle ' + esc(l.codigo_controle) : ''}.</small>`;
+            })(comprovante && comprovante.leitura);
             const compHtml = (comprovante && comprovante.url)
                 ? `<div style="margin-top:8px; font-size:0.85rem;"><a href="${esc(comprovante.url)}" target="_blank" rel="noopener" style="color:var(--cor-acento); font-weight:bold;"><i class="fa-solid fa-file-pdf"></i> Abrir comprovante anexado</a>
-                    <small style="display:block; color:var(--cor-texto-secundario);">${esc(comprovante.nome_arquivo || '')}${comprovante.anexado_por ? ' — por ' + esc(comprovante.anexado_por) : ''}${comprovante.anexado_em ? ' em ' + esc(new Date(comprovante.anexado_em).toLocaleString('pt-BR')) : ''}</small>
+                    ${leituraHtml}<small style="display:block; color:var(--cor-texto-secundario);">${esc(comprovante.nome_arquivo || '')}${comprovante.anexado_por ? ' — por ' + esc(comprovante.anexado_por) : ''}${comprovante.anexado_em ? ' em ' + esc(new Date(comprovante.anexado_em).toLocaleString('pt-BR')) : ''}</small>
                     <a href="javascript:void(0)" onclick="window.anexarComprovanteCpf('${idColab}')" style="color:var(--cor-texto-secundario); font-size:0.75rem;">Trocar comprovante</a></div>`
                 : `<div style="margin-top:8px;"><button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.8rem;" onclick="window.anexarComprovanteCpf('${idColab}')"><i class="fa-solid fa-paperclip"></i> Anexar comprovante</button></div>`;
             if (!c) {
@@ -27087,6 +27101,50 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             }
         };
 
+        // 🔎 Lê o comprovante (PDF com texto) e confere com a ficha. É só uma LEITURA AUTOMÁTICA de apoio: nunca bloqueia
+        // e não prova autenticidade (isso só o código de controle no site da Receita). Foto/escaneado = "não lido".
+        window.lerComprovanteCpf = async function(arquivo, ficha) {
+            const semAc = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+            try {
+                if (!/pdf/i.test(arquivo.type || '') && !/\.pdf$/i.test(arquivo.name || '')) return { lido: false, motivo: 'Não é PDF (foto/imagem não é lida automaticamente).' };
+                let lib = window.pdfjsLib;
+                for (let i = 0; i < 40 && !lib; i++) { await new Promise(r => setTimeout(r, 100)); lib = window.pdfjsLib; }
+                if (!lib) return { lido: false, motivo: 'Leitor de PDF indisponível.' };
+                try { if (!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js'; } catch (e) {}
+                const buf = await arquivo.arrayBuffer();
+                const pdf = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+                let texto = '';
+                for (let n = 1; n <= Math.min(pdf.numPages, 3); n++) {
+                    const pg = await pdf.getPage(n);
+                    const tc = await pg.getTextContent();
+                    texto += ' ' + tc.items.map(it => it.str).join(' ');
+                }
+                const T = semAc(texto);
+                if (T.length < 40) return { lido: false, motivo: 'O PDF não tem texto legível (parece imagem escaneada).' };
+                if (!/SITUACAO CADASTRAL/.test(T) || !/CPF/.test(T)) return { lido: false, motivo: 'Não parece um Comprovante de Situação Cadastral no CPF.' };
+                const mSit = T.match(/SITUACAO CADASTRAL\s*:?\s*(REGULAR|SUSPENSA|CANCELADA(?: POR [A-Z ]+?)?|PENDENTE DE REGULARIZACAO|NULA|TITULAR FALECIDO)/);
+                const mCpf = T.match(/(\d{3}\.\d{3}\.\d{3}-\d{2})/);
+                const mNasc = T.match(/DATA DE NASCIMENTO\s*:?\s*(\d{2}\/\d{2}\/\d{4})/);
+                const mNome = T.match(/NOME\s*:?\s*([A-Z ]+?)\s+(?:DATA DE NASCIMENTO|SITUACAO CADASTRAL|DATA DA INSCRICAO)/);
+                const mCod = T.match(/CODIGO DE CONTROLE DO COMPROVANTE\s*:?\s*([A-Z0-9]{8,})/);
+                const cpfFicha = String(ficha.cpf || '').replace(/\D/g, '');
+                const nascFicha = ficha.nascimento ? (typeof formatarDataBR === 'function' ? formatarDataBR(ficha.nascimento) : String(ficha.nascimento)) : '';
+                return {
+                    lido: true,
+                    situacao: mSit ? mSit[1].trim() : null,
+                    regular: !!(mSit && mSit[1].trim() === 'REGULAR'),
+                    cpf_confere: mCpf ? mCpf[1].replace(/\D/g, '') === cpfFicha : null,
+                    nome_confere: mNome && ficha.nome ? semAc(mNome[1]) === semAc(ficha.nome) : null,
+                    nome_no_comprovante: mNome ? mNome[1].trim() : null,
+                    nasc_confere: mNasc && nascFicha ? mNasc[1] === nascFicha : null,
+                    codigo_controle: mCod ? mCod[1] : null
+                };
+            } catch (e) {
+                console.warn('lerComprovanteCpf:', e);
+                return { lido: false, motivo: 'Não consegui ler o PDF.' };
+            }
+        };
+
         // 📎 Anexa o comprovante da Receita na ficha (guarda em dados_admissao.comprovante_cpf, MESCLANDO — não apaga nada)
         window.anexarComprovanteCpf = function(idColab) {
             if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
@@ -27103,7 +27161,8 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
                     const base = `${formatarNomePasta(pf.empresa)}/${formatarNomePasta(pf.unidade)}/${formatarNomePasta(pf.nome)}/Admissoes`;
                     const urls = await window.subirDocumentos(base, [arq]);
                     if (!urls || !urls[0]) throw new Error('O envio não retornou o endereço do arquivo.');
-                    const comp = { url: urls[0], nome_arquivo: arq.name, anexado_por: usuarioAtual.nome || null, anexado_em: new Date().toISOString() };
+                    const leitura = await window.lerComprovanteCpf(arq, { cpf: (pf.dados_admissao || {}).cpf, nascimento: (pf.dados_admissao || {}).nascimento, nome: pf.nome });
+                    const comp = { url: urls[0], nome_arquivo: arq.name, anexado_por: usuarioAtual.nome || null, anexado_em: new Date().toISOString(), leitura: leitura };
                     const obj = Object.assign({}, pf.dados_admissao || {}, { comprovante_cpf: comp });
                     const { error: eGr } = await supabaseClient.from('perfis').update({ dados_admissao: obj }).eq('id', idColab);
                     if (eGr) throw eGr;
