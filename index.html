@@ -33659,6 +33659,7 @@ window.confirmarTrancarEscala = async function(usarCadastrada) {
             .eq('mes_ano', mesAno).eq('unidade', unidade);
             
         if (errUpdate) throw errUpdate;
+        window.registrarAssinaturaAuditoria({ tipo: 'escala_mensal', documentoId: `${mesAno}|${unidade}`, unidade: unidade, metodo: usarCadastrada === true ? 'assinatura cadastrada' : 'assinatura desenhada', bytesAssinado: base64Signature });
 
         await mostrarAlerta("Escala trancada e assinada com sucesso!", "sucesso");
         
@@ -61420,6 +61421,70 @@ window._baixarImagemComoBytes = async function(url) {
 
 // 👇 O botão final: "achata" a assinatura/carimbo dentro do arquivo, na posição/tamanho
 // escolhidos, e devolve o arquivo pronto pra baixar (PDF continua PDF, foto continua foto).
+// ===== TRILHA DE AUDITORIA DE ASSINATURAS (17/11/2026) =====
+// Grava 1 linha em assinatura_registros (tabela so de insercao). NUNCA bloqueia nem atrasa a
+// assinatura: roda em segundo plano e qualquer erro so vai pro console.
+window._hashSha256 = async function(dado) {
+    let bytes;
+    if (dado == null) return null;
+    if (typeof dado === 'string') bytes = new TextEncoder().encode(dado);
+    else if (dado instanceof Blob) bytes = new Uint8Array(await dado.arrayBuffer());
+    else if (dado instanceof ArrayBuffer) bytes = new Uint8Array(dado);
+    else bytes = dado; // Uint8Array
+    const buf = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+window._ipPublicoAuditoria = async function() {
+    if (window.__ipAuditoriaCache !== undefined) return window.__ipAuditoriaCache;
+    try {
+        const r = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
+        const d = await r.json();
+        window.__ipAuditoriaCache = d.ip || null;
+    } catch (e) { window.__ipAuditoriaCache = null; }
+    return window.__ipAuditoriaCache;
+};
+window.registrarAssinaturaAuditoria = function(o) {
+    (async () => {
+        try {
+            if (!o || !usuarioAtual) return;
+            // Quem assina: o colaborador indicado, ou (gestor/admin) o colaborador VINCULADO a ele.
+            let idColab = o.colaboradorId || (o.naoUsarVinculo ? null : (usuarioAtual?.permissoes?.colaborador_vinculado_id || null));
+            let ficha = null;
+            if (idColab) {
+                const { data } = await supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao').eq('id', idColab).maybeSingle();
+                ficha = data || null;
+            } else if (!o.colaboradorId && !o.naoUsarVinculo && usuarioAtual.nome) {
+                const { data } = await supabaseClient.from('perfis').select('id, nome, empresa, unidade, dados_admissao')
+                    .eq('perfil', 'Colaborador').ilike('nome', usuarioAtual.nome).neq('id', usuarioAtual.id).limit(1).maybeSingle();
+                ficha = data || null;
+            }
+            const adm = (ficha && ficha.dados_admissao) || {};
+            const [hashOrig, hashFinal, ip] = await Promise.all([
+                window._hashSha256(o.bytesOriginal), window._hashSha256(o.bytesAssinado), window._ipPublicoAuditoria()
+            ]);
+            const registradoPor = `registrado por ${usuarioAtual.nome} (${usuarioAtual.perfil})`;
+            await supabaseClient.from('assinatura_registros').insert([{
+                tipo_documento: o.tipo,
+                documento_id: String(o.documentoId || ''),
+                colaborador_id: (ficha && ficha.id) ? String(ficha.id) : (o.colaboradorId ? String(o.colaboradorId) : String(usuarioAtual.id)),
+                nome: (ficha && ficha.nome) || o.nome || usuarioAtual.nome || null,
+                cpf: adm.cpf || null,
+                empresa: (ficha && ficha.empresa) || o.empresa || usuarioAtual.empresa || null,
+                unidade: (ficha && ficha.unidade) || o.unidade || null,
+                assinado_em: new Date().toISOString(),
+                ip: ip,
+                dispositivo: (navigator.userAgent || '').slice(0, 400),
+                hash_original_sha256: hashOrig,
+                hash_assinado_sha256: hashFinal,
+                url_original: o.urlOriginal || null,
+                url_assinado: o.urlAssinado || null,
+                consentimento: 'Assinatura eletronica realizada de forma autenticada no sistema, com usuario logado, reconhecida como aceite do documento.',
+                metodo: `${o.metodo || 'eletronica'} - ${registradoPor}`
+            }]);
+        } catch (e) { console.warn('Registro de auditoria da assinatura nao gravado (a assinatura segue valida):', e); }
+    })();
+};
+
 window.gerarDocumentoAssinado = async function() {
     const st = window.__assinarDoc;
     if (!st.tipoArquivo) return mostrarAlerta("Anexe um documento primeiro!", "aviso");
@@ -61478,6 +61543,7 @@ window.gerarDocumentoAssinado = async function() {
 
             const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
             window._baixarBlobComoArquivo(blob, window._sugerirNomeArquivoAssinado('png'));
+            window.registrarAssinaturaAuditoria({ tipo: 'assinar_documento_sistema', documentoId: window._sugerirNomeArquivoAssinado('png'), metodo: 'assinatura/carimbo cadastrados', bytesAssinado: blob });
         } else {
             // PDF: usa pdf-lib pra embutir as imagens de verdade dentro do arquivo (não é
             // print/screenshot — o PDF final continua com texto pesquisável, só ganha a
@@ -61564,6 +61630,7 @@ window.gerarDocumentoAssinado = async function() {
             const bytesFinais = await pdfDoc.save();
             const blob = new Blob([bytesFinais], { type: 'application/pdf' });
             window._baixarBlobComoArquivo(blob, window._sugerirNomeArquivoAssinado('pdf'));
+            window.registrarAssinaturaAuditoria({ tipo: 'assinar_documento_sistema', documentoId: window._sugerirNomeArquivoAssinado('pdf'), metodo: 'assinatura/carimbo cadastrados', bytesOriginal: st.pdfBytesOriginais, bytesAssinado: bytesFinais });
         }
 
         document.getElementById('area-resultado-assinar').innerHTML = `
@@ -88952,6 +89019,14 @@ window.salvarAssinaturaEtapa1 = async function(idAval, nome, unidade, empresa) {
         }).eq('id', idAval);
 
         if (errUpdate) throw new Error("Erro no Banco de Dados: " + errUpdate.message);
+
+        // 17/11/2026: trilha de auditoria (quem assina aqui e o COLABORADOR avaliado)
+        (async () => {
+            try {
+                const { data: av } = await supabaseClient.from('avaliacoes_desempenho').select('colaborador_id').eq('id', idAval).maybeSingle();
+                window.registrarAssinaturaAuditoria({ tipo: 'avaliacao_desempenho', documentoId: idAval, naoUsarVinculo: true, colaboradorId: (av && av.colaborador_id) || null, nome: nome, empresa: empresa, unidade: unidade, metodo: 'assinatura desenhada na tela', bytesAssinado: blob, urlAssinado: urlAssinatura });
+            } catch (eAud) { console.warn('auditoria avaliacao:', eAud); }
+        })();
 
         // 5. Conclui e fecha a tela
         document.getElementById('modal-assinar-tela-des').remove();
