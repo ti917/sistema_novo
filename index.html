@@ -24271,6 +24271,67 @@ async function escutarTempoReal() {
 
 // 📜 HISTÓRICO SALARIAL — guarda em dados_admissao.historico_salarial o que o colaborador tinha ANTES de cada mudança.
 // Só registra se o valor realmente mudou. Nunca apaga entradas antigas.
+// ➕ Modal para o Admin cadastrar/editar os adicionais de UM colaborador (acúmulo de função, gratificação...).
+// Lê o colaborador fresco do banco, mexe SÓ na chave dados_admissao.adicionais e grava de volta o resto intacto. Nunca apaga outros dados.
+window.abrirModalAdicionaisColab = async function(idColab) {
+    try {
+        if (!(usuarioAtual && usuarioAtual.perfil === 'Admin')) return mostrarAlerta('Só o Admin pode cadastrar adicionais.', 'aviso');
+        const { data: c, error } = await supabaseClient.from('perfis').select('id, nome, dados_admissao').eq('id', idColab).single();
+        if (error || !c) throw (error || new Error('Colaborador não encontrado.'));
+        const lista = Array.isArray(c.dados_admissao && c.dados_admissao.adicionais) ? c.dados_admissao.adicionais : [];
+        const escA = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        const linha = (a) => `<div class="adic-linha" style="display: grid; grid-template-columns: 1.6fr 1fr 0.9fr auto auto; gap: 8px; align-items: center; margin-bottom: 8px;">
+            <input type="text" class="adic-nome" placeholder="Ex: Acúmulo de função" value="${escA(a.nome)}">
+            <select class="adic-tipo"><option value="valor" ${a.tipo !== 'percentual' ? 'selected' : ''}>R$ fixo</option><option value="percentual" ${a.tipo === 'percentual' ? 'selected' : ''}>% do salário</option></select>
+            <input type="text" class="adic-valor" inputmode="decimal" placeholder="0,00" value="${escA(a.valor == null ? '' : String(a.valor).replace('.', ','))}">
+            <label title="Entra na base de rescisão, férias e 13º" style="font-size: 0.75rem; display: flex; align-items: center; gap: 4px; white-space: nowrap;"><input type="checkbox" class="adic-integra" ${a.integra !== false ? 'checked' : ''}> integra</label>
+            <button type="button" title="Remover linha" onclick="this.closest('.adic-linha').remove()" style="background: none; border: none; color: var(--cor-perigo); cursor: pointer; font-size: 1rem;"><i class="fa-solid fa-trash"></i></button>
+        </div>`;
+        document.getElementById('modal-adicionais-colab')?.remove();
+        const el = document.createElement('div');
+        el.id = 'modal-adicionais-colab';
+        el.className = 'modal-arquivo-overlay';
+        el.style.cssText = 'z-index: 100010; display: flex; justify-content: center; align-items: center; padding: 20px;';
+        el.innerHTML = `<div style="width: 100%; max-width: 640px; background: var(--cor-fundo-card, #0b2239); border: 1px solid var(--cor-borda); border-radius: 14px; padding: 24px; max-height: 90vh; overflow-y: auto;">
+            <h3 style="margin: 0 0 6px;"><i class="fa-solid fa-circle-plus" style="color: #4fc3f7;"></i> Outros Adicionais</h3>
+            <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin: 0 0 16px;"><b>${escA(c.nome)}</b> — acúmulo de função, gratificação e outros valores que a pessoa recebe além do salário. Marque <b>integra</b> quando o valor entra na base de rescisão, férias e 13º.</p>
+            <div id="adic-lista">${lista.map(linha).join('')}</div>
+            <button type="button" id="adic-add" class="btn-secondary" style="margin: 4px 0 18px;"><i class="fa-solid fa-plus"></i> Adicionar linha</button>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button type="button" class="btn-secondary" onclick="document.getElementById('modal-adicionais-colab').remove()">Cancelar</button>
+                <button type="button" id="adic-salvar" class="btn-success"><i class="fa-solid fa-floppy-disk"></i> Salvar</button>
+            </div></div>`;
+        document.body.appendChild(el);
+        document.getElementById('adic-add').onclick = () => document.getElementById('adic-lista').insertAdjacentHTML('beforeend', linha({ integra: true }));
+        if (!lista.length) document.getElementById('adic-add').click();
+        document.getElementById('adic-salvar').onclick = async function() {
+            const novos = [];
+            for (const ln of document.querySelectorAll('#adic-lista .adic-linha')) {
+                const nome = ln.querySelector('.adic-nome').value.trim();
+                const bruto = ln.querySelector('.adic-valor').value.trim();
+                if (!nome && !bruto) continue; // linha vazia: ignora
+                const v = parseFloat(bruto.replace(/\./g, '').replace(',', '.'));
+                if (!nome || isNaN(v) || v <= 0) return mostrarAlerta('Preencha nome e um valor maior que zero em cada linha (ou remova a linha).', 'aviso');
+                const tipo = ln.querySelector('.adic-tipo').value === 'percentual' ? 'percentual' : 'valor';
+                if (tipo === 'percentual' && v > 100) return mostrarAlerta('Percentual não pode passar de 100%.', 'aviso');
+                novos.push({ nome, tipo, valor: v, integra: ln.querySelector('.adic-integra').checked });
+            }
+            this.disabled = true;
+            try {
+                // relê na hora de salvar para não sobrescrever nada que mudou enquanto o modal estava aberto
+                const { data: fresco, error: e2 } = await supabaseClient.from('perfis').select('dados_admissao').eq('id', idColab).single();
+                if (e2 || !fresco) throw (e2 || new Error('Não consegui reler o colaborador.'));
+                const adm2 = { ...(fresco.dados_admissao || {}) };
+                if (novos.length) adm2.adicionais = novos; else delete adm2.adicionais;
+                const { error: e3 } = await supabaseClient.from('perfis').update({ dados_admissao: adm2 }).eq('id', idColab);
+                if (e3) throw e3;
+                el.remove();
+                mostrarAlerta('Adicionais salvos. Reabra a ficha para ver atualizado; a simulação de rescisão já usa.', 'sucesso');
+            } catch (err) { this.disabled = false; mostrarAlerta('Não consegui salvar: ' + (err.message || err), 'erro'); }
+        };
+    } catch (e) { mostrarAlerta('Não consegui abrir os adicionais: ' + (e.message || e), 'erro'); }
+};
+
 window._registrarHistoricoSalarial = function(adm, novo) {
     try {
         if (!adm || !novo) return false;
@@ -26186,6 +26247,19 @@ window.renderizarPaginacaoAdmissoes = function() {
                         </div>`;
                             return cartao('Insalubridade', 'fa-flask-vial', nIns > 0, rawIns != null && rawIns !== '', nIns > 0 ? 'Recebe ' + nIns + '%' : 'Não recebe', [grau, insViaTab ? 'pela Tabela Salarial' : ''].filter(Boolean).join(' · '), '#ff9800', insViaTab)
                                  + cartao('Periculosidade', 'fa-bolt', nPer > 0, rawPer != null && rawPer !== '', nPer > 0 ? 'Recebe ' + nPer + '%' : 'Não recebe', ['Sobre o salário base', perViaTab ? 'pela Tabela Salarial' : ''].filter(Boolean).join(' · '), '#ef5350', perViaTab);
+                        })()}
+                        ${(() => {
+                            // ➕ Adicionais do colaborador (acúmulo de função, gratificação...) — só aparece se houver, ou o botão para o Admin cadastrar
+                            const eAdmin = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.perfil === 'Admin');
+                            const ad = window._adicionaisColab(adm, adm.salario);
+                            if (!ad.itens.length && !eAdmin) return '';
+                            const f = (n) => Number(n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+                            const linhas = ad.itens.map(a => '<span style="font-size: 0.82rem; color: var(--cor-texto-principal); display: block; margin-top: 3px;">' + String(a.nome).replace(/&/g, '&amp;').replace(/</g, '&lt;') + ': <b>' + f(a.calculado) + '</b>' + (a.tipo === 'percentual' ? ' <span style="color: var(--cor-texto-secundario);">(' + a.valor + '% do salário)</span>' : '') + (a.integra ? '' : ' <span style="color: var(--cor-texto-secundario);">· não integra</span>') + '</span>').join('');
+                            return '<div class="ficha-adicional" style="background: rgba(0,0,0,0.1); padding: 15px; border-radius: 8px; border-left: 3px solid ' + (ad.itens.length ? '#4fc3f7' : '#8a94a6') + '; border-top: 1px solid var(--cor-borda); border-right: 1px solid var(--cor-borda); border-bottom: 1px solid var(--cor-borda);">'
+                                + '<small style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase; font-weight: bold; letter-spacing: 1px;">Outros Adicionais</small><br>'
+                                + (ad.itens.length ? linhas : '<span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 4px;">Nenhum cadastrado</span>')
+                                + (eAdmin ? '<button type="button" onclick="window.abrirModalAdicionaisColab(\'' + colab.id + '\')" style="margin-top: 8px; background: none; border: 1px dashed var(--cor-borda); color: #4fc3f7; border-radius: 6px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer;"><i class="fa-solid fa-pen"></i> ' + (ad.itens.length ? 'Editar' : 'Cadastrar') + '</button>' : '')
+                                + '</div>';
                         })()}
                     </div>
                 </div>
@@ -78693,6 +78767,28 @@ document.getElementById('form-troca-admin')?.addEventListener('submit', async (e
 // o governo reajustar (Decreto de 1º/jan/2026: R$ 1.621,00).
 window.SALARIO_MINIMO_SIMULADOR_RESCISAO = 1621.00;
 
+// ➕ ADICIONAIS DO COLABORADOR (18/11/2026) — gratificação, acúmulo de função etc. Guardado em perfis.dados_admissao.adicionais
+// como [{nome, tipo:'valor'|'percentual', valor, integra:true|false}]. É só ACRÉSCIMO: colaborador sem a lista dá o mesmo resultado de antes.
+// "percentual" = % do salário-base. "integra" = entra na base de rescisão/férias/13º.
+window._adicionaisColab = function(adm, salarioBase) {
+    const out = { itens: [], totalIntegra: 0, totalGeral: 0 };
+    try {
+        const lista = Array.isArray(adm && adm.adicionais) ? adm.adicionais : [];
+        lista.forEach(a => {
+            if (!a) return;
+            const v = parseFloat(String(a.valor == null ? '' : a.valor).replace(',', '.')) || 0;
+            if (v <= 0) return;
+            const pct = a.tipo === 'percentual';
+            const calc = pct ? (v / 100) * (Number(salarioBase) || 0) : v;
+            const integra = a.integra !== false;
+            out.itens.push({ nome: String(a.nome || 'Adicional'), tipo: pct ? 'percentual' : 'valor', valor: v, calculado: calc, integra });
+            out.totalGeral += calc;
+            if (integra) out.totalIntegra += calc;
+        });
+    } catch (e) { console.warn('Adicionais do colaborador:', e); }
+    return out;
+};
+
 window.prepararSimuladorRescisao = async function() {
     // 🔐 Confere na hora (lê o banco de novo) — assim, se o Super Admin tirar a permissão
     // enquanto a pessoa já está logada, ela perde o acesso sem precisar sair e entrar.
@@ -78928,7 +79024,9 @@ window.calcularSimulacaoRescisao = async function() {
         const percPericulosidade = temPericulosidade ? (parseFloat(periculosidadeTxt.replace('%', '').replace(',', '.')) || 0) : 0;
         const valorPericulosidade = (percPericulosidade / 100) * salarioBase; // % do salário-base do colaborador
 
-        const remuneracaoBase = salarioBase + valorInsalubridade + valorPericulosidade;
+        const adicionaisSim = window._adicionaisColab(adm, salarioBase);
+        const valorAdicionais = adicionaisSim.totalIntegra; // só os que "integram" a base (0 se o colaborador não tem nenhum)
+        const remuneracaoBase = salarioBase + valorInsalubridade + valorPericulosidade + valorAdicionais;
 
         const ehSemJustaCausa = (tipo === 'Pedido da Empresa' || tipo === 'Rescisão Indireta');
         const ehAntecipacaoExperiencia = (tipo === 'Pedido da Empresa (Antecipação Experiência)');
@@ -79144,7 +79242,7 @@ window.calcularSimulacaoRescisao = async function() {
         // montarem tudo sem precisar recalcular.
         window._ultimaSimulacaoRescisao = {
             colab, tipo, unidadeSelecionada, dataResc, dataProjetada, dataAdm, salarioBase, percInsalub, valorInsalubridade,
-            percPericulosidade, valorPericulosidade, remuneracaoBase, diasAviso, anosCompletosAviso,
+            percPericulosidade, valorPericulosidade, valorAdicionais, adicionaisSim, remuneracaoBase, diasAviso, anosCompletosAviso,
             avisoCumprido, avisoTrabalhado, avisoIndenizadoValor, saldoFeriasVencidas, diasFeriasProporcionais, mesesCicloFerias,
             diasBaseFerias, totalFaltasFerias, valorFeriasVencidas, valorFeriasProporcionais,
             meses13, valor13Proporcional, diasCorridosNoMes, totalFaltasMes, diasTrabalhadosNoMes, tipoJornadaSim, jornadaMistaNoMes, valorSaldoSalario,
@@ -79233,7 +79331,7 @@ window.verDetalhesSimulacaoRescisao = function() {
             <h3 style="color: var(--cor-perigo); margin-bottom: 15px; border-bottom: 1px solid var(--cor-borda); padding-bottom: 10px;"><i class="fa-solid fa-magnifying-glass-chart"></i> Como chegamos nesse valor — ${s.colab.nome}</h3>
 
             <div style="background: rgba(79,195,247,0.08); padding: 12px; border-radius: 6px; margin-bottom: 15px; font-size: 0.82rem; color: var(--cor-texto-secundario); line-height: 1.5;">
-                <b style="color: #4fc3f7;">Base usada em quase tudo:</b> Remuneração Base = Salário (${formatarMoeda(s.salarioBase)}) + Insalubridade (${formatarMoeda(s.valorInsalubridade)}, ${s.percInsalub}% do salário-mínimo de ${formatarMoeda(window.SALARIO_MINIMO_SIMULADOR_RESCISAO)}) + Periculosidade (${formatarMoeda(s.valorPericulosidade)}, ${s.percPericulosidade}% do salário-base) = <b style="color:#fff;">${formatarMoeda(s.remuneracaoBase)}</b>
+                <b style="color: #4fc3f7;">Base usada em quase tudo:</b> Remuneração Base = Salário (${formatarMoeda(s.salarioBase)}) + Insalubridade (${formatarMoeda(s.valorInsalubridade)}, ${s.percInsalub}% do salário-mínimo de ${formatarMoeda(window.SALARIO_MINIMO_SIMULADOR_RESCISAO)}) + Periculosidade (${formatarMoeda(s.valorPericulosidade)}, ${s.percPericulosidade}% do salário-base)${(s.adicionaisSim && s.adicionaisSim.itens.some(a => a.integra)) ? s.adicionaisSim.itens.filter(a => a.integra).map(a => ' + ' + a.nome + ' (' + formatarMoeda(a.calculado) + (a.tipo === 'percentual' ? ', ' + a.valor + '% do salário-base' : '') + ')').join('') : ''} = <b style="color:#fff;">${formatarMoeda(s.remuneracaoBase)}</b>
             </div>
 
             ${linhaDetalhe(
@@ -79446,7 +79544,7 @@ window.baixarExcelSimulacoesRescisao = async function() {
                 if (typeof valor === 'number') r.getCell(3).numFmt = '"R$ "#,##0.00';
             };
 
-            addLinhaDet('Remuneração Base', `Salário ${formatarMoeda(item.salarioBase)} + Insalubridade ${formatarMoeda(item.valorInsalubridade)} (${item.percInsalub}% do salário-mínimo) + Periculosidade ${formatarMoeda(item.valorPericulosidade)} (${item.percPericulosidade}% do salário-base)`, item.remuneracaoBase);
+            addLinhaDet('Remuneração Base', `Salário ${formatarMoeda(item.salarioBase)} + Insalubridade ${formatarMoeda(item.valorInsalubridade)} (${item.percInsalub}% do salário-mínimo) + Periculosidade ${formatarMoeda(item.valorPericulosidade)} (${item.percPericulosidade}% do salário-base)${Number(item.valorAdicionais) > 0 ? ' + Adicionais ' + formatarMoeda(item.valorAdicionais) : ''}`, item.remuneracaoBase);
             addLinhaDet('Saldo de Salário', (item.jornadaMistaNoMes
                 ? `Jornada mudou no meio do mês — conta dia a dia respeitando o tipo vigente em cada data. `
                 : (item.tipoJornadaSim === '12x36' ? `Escala 12x36 — conta dia a dia: folga só paga se o plantão da véspera não teve falta. ` : ''))
