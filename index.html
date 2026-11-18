@@ -30061,6 +30061,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
 
         if (escalaSalva && escalaSalva.fechada) {
             escalaMesAtualGerada = typeof escalaSalva.dados_escala === 'string' ? JSON.parse(escalaSalva.dados_escala) : escalaSalva.dados_escala;
+            escalaMesAtualGerada = window._escalaSoDoGestor(escalaMesAtualGerada, unidade); // gestor com cargos marcados: só as linhas dos cargos dele
             window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada);
 
             assinaturaEscalaAtual = escalaSalva.assinatura;
@@ -30296,10 +30297,24 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             const ocorrenciasMescladas = [...(resAusencias.data || []), ...(resFts.data || [])];
             
             escalaMesAtualGerada = algoritmoGeradorDeEscala(colaboradores, mesAno, ocorrenciasMescladas, unidade, resPonto.data || [], resFerias.data || [], resPlantao.data || [], resTrocas.data || []);
+            escalaMesAtualGerada = window._escalaSoDoGestor(escalaMesAtualGerada, unidade);
             window.updatedFiltroCargosPorUnidade = window.atualizarFiltroCargosPorUnidade ? window.atualizarFiltroCargosPorUnidade(escalaMesAtualGerada) : null;
 
             if (escalaSalva) {
-                await supabaseClient.from('escalas_mensais').update({ dados_escala: escalaMesAtualGerada }).eq('id', escalaSalva.id);
+                // 🛡️ Gestor com cargos marcados só enxerga (e regenera) as linhas dos cargos dele. A escala salva é UMA SÓ por unidade/mês e vale pra
+                // todos (RH e outros gestores), então aqui MESCLA: mantém as linhas dos outros cargos que já estavam salvas e troca só as dele.
+                let dadosParaSalvar = escalaMesAtualGerada;
+                try {
+                    if (window._gestorTemCargosNaUnidade(unidade)) {
+                        const existente = typeof escalaSalva.dados_escala === 'string' ? JSON.parse(escalaSalva.dados_escala) : escalaSalva.dados_escala;
+                        if (Array.isArray(existente)) {
+                            const minhas = new Set(escalaMesAtualGerada.map(l => String(l.id_colaborador)));
+                            const dosOutros = existente.filter(l => !minhas.has(String(l.id_colaborador)) && !window._linhaEscalaDoGestor(l, unidade));
+                            dadosParaSalvar = dosOutros.concat(escalaMesAtualGerada);
+                        }
+                    }
+                } catch (eMescla) { console.warn('Mescla da escala do gestor falhou; gravação de escala cancelada para não apagar outros cargos:', eMescla); dadosParaSalvar = null; }
+                if (dadosParaSalvar) await supabaseClient.from('escalas_mensais').update({ dados_escala: dadosParaSalvar }).eq('id', escalaSalva.id);
             } else {
                 await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
             }
@@ -105466,6 +105481,29 @@ window.gestorCuidaDoColab = function(c, gestor) {
         const cargo = window._normCargoGestor(c.dados_admissao && c.dados_admissao.cargo);
         return lista.some(x => window._normCargoGestor(x) === cargo);
     } catch (e) { return true; } // na dúvida, NUNCA esconde nem libera diferente do que era
+};
+
+// 🗓️ (18/11/2026) ESCALA: a escala salva/trancada vem pronta do banco (JSON com TODOS os colaboradores da unidade), então o filtro das consultas
+// não a alcançava e o gestor com cargos marcados via todo mundo. Aqui filtra as LINHAS da escala (por cargo) só na exibição.
+// Só age em Gestor com cargos marcados NAQUELA unidade; Admin e gestor sem marcação recebem a escala igualzinha a antes.
+window._gestorTemCargosNaUnidade = function(unidade) {
+    try {
+        const g = (typeof usuarioAtual !== 'undefined') ? usuarioAtual : null;
+        const l = g && g.perfil === 'Gestor' && g.permissoes && g.permissoes.cargos_por_unidade && g.permissoes.cargos_por_unidade[unidade];
+        return Array.isArray(l) && l.length > 0;
+    } catch (e) { return false; }
+};
+window._linhaEscalaDoGestor = function(linha, unidade) {
+    try {
+        const g = usuarioAtual;
+        const eu = new Set([g.id, g.permissoes && g.permissoes.colaborador_vinculado_id].filter(Boolean).map(String));
+        if (linha && eu.has(String(linha.id_colaborador))) return true; // o próprio gestor (colaborador vinculado) nunca some pra ele
+        return window.gestorCuidaDoColab({ unidade: unidade, dados_admissao: { cargo: linha && linha.cargo } });
+    } catch (e) { return true; } // na dúvida, mostra (como era antes)
+};
+window._escalaSoDoGestor = function(arr, unidade) {
+    if (!Array.isArray(arr) || !window._gestorTemCargosNaUnidade(unidade)) return arr;
+    return arr.filter(l => window._linhaEscalaDoGestor(l, unidade));
 };
 
 // ==========================================================================
