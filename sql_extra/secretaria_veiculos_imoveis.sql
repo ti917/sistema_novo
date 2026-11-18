@@ -113,3 +113,31 @@ create policy secretaria_acesso_total on public.secretaria_imoveis
   for all to authenticated
   using (public.fn_secretaria_tem_acesso())
   with check (public.fn_secretaria_tem_acesso());
+
+-- ---------------------------------------------------------------------
+-- FINANCIAMENTO / PARCELAMENTO em campos separados (para o sistema calcular
+-- saldo, parcelas restantes e a próxima parcela). Aditivo e repetível.
+-- ---------------------------------------------------------------------
+alter table public.secretaria_veiculos
+  add column if not exists fin_banco text,
+  add column if not exists fin_contrato text,
+  add column if not exists fin_valor_financiado numeric(14,2),
+  add column if not exists fin_entrada numeric(14,2),
+  add column if not exists fin_parcelas int,
+  add column if not exists fin_valor_parcela numeric(14,2),
+  add column if not exists fin_primeira_parcela date,
+  add column if not exists fin_parcelas_pagas int not null default 0,
+  add column if not exists fin_taxa_juros numeric(8,4);
+
+alter table public.secretaria_imoveis
+  add column if not exists financiado boolean not null default false,
+  add column if not exists financiamento_obs text,
+  add column if not exists fin_banco text,
+  add column if not exists fin_contrato text,
+  add column if not exists fin_valor_financiado numeric(14,2),
+  add column if not exists fin_entrada numeric(14,2),
+  add column if not exists fin_parcelas int,
+  add column if not exists fin_valor_parcela numeric(14,2),
+  add column if not exists fin_primeira_parcela date,
+  add column if not exists fin_parcelas_pagas int not null default 0,
+  add column if not exists fin_taxa_juros numeric(8,4);
