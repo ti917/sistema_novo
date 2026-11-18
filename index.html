@@ -27475,14 +27475,23 @@ window.reprovarFeriasModal = async function(idFerias, idColab) {
             const arq = (document.getElementById('adm-comprovante-cpf') && document.getElementById('adm-comprovante-cpf').files && document.getElementById('adm-comprovante-cpf').files[0]) || null;
             const antigo = idCorr ? window.comprovanteCpfAntigo : null;
             window.__compCpfParaSalvar = null;
-            const irPara = () => { const bx = document.getElementById('box-adm-comprovante-cpf'); if (bx && bx.scrollIntoView) bx.scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+            // 🧭 leva até o campo E deixa ele vermelho piscando com a etiqueta "FALTA ANEXAR" (sai sozinho quando o arquivo é escolhido)
+            const irPara = () => {
+                const bx = document.getElementById('box-adm-comprovante-cpf');
+                if (typeof window.destacarDocsFaltandoAdmissao === 'function') {
+                    window._irParaDocFaltando = window.destacarDocsFaltandoAdmissao([{ boxId: 'box-adm-comprovante-cpf' }]);
+                    const inp = document.getElementById('adm-comprovante-cpf');
+                    if (inp && !inp.dataset.limpaDestaque) { inp.dataset.limpaDestaque = '1'; inp.addEventListener('change', () => { if (bx) { bx.classList.remove('doc-faltando'); const et = bx.querySelector('.etiqueta-doc-faltando'); if (et) et.remove(); } }); }
+                } else if (bx && bx.scrollIntoView) bx.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            };
             if (!arq) {
                 if (antigo && antigo.url && antigo.cpf_validado === dig(ficha.cpf) && antigo.nasc_validado === ficha.nascimento && antigo.nome_validado === semAc(ficha.nome)) {
                     window.__compCpfParaSalvar = { manter: antigo };
                     return true;
                 }
                 irPara();
-                await mostrarAlerta("Anexe o <b>Comprovante de Situação Cadastral do CPF</b> (campo logo abaixo do CPF). Ele é obrigatório e o sistema confere nome, CPF e data de nascimento com a ficha.", "aviso");
+                await mostrarAlerta("Falta anexar o <b>Comprovante de Situação Cadastral do CPF</b> (o PDF baixado do site da Receita). Ele é obrigatório e o sistema confere nome, CPF e data de nascimento com a ficha.<br><br>👇 Já deixei o campo <b style=\"color:#dc3545;\">em vermelho</b> na tela, é só clicar nele e anexar.", "aviso");
+                if (typeof window._irParaDocFaltando === 'function') window._irParaDocFaltando();
                 return false;
             }
             if (arq.size > 5 * 1024 * 1024) { irPara(); await mostrarAlerta("O comprovante passa de 5 MB.", "aviso"); return false; }
@@ -35617,6 +35626,7 @@ window.atualizarPillDocAdmissao = function(id) {
     else if (obrigatorio) { txt = 'OBRIGATÓRIO'; cor = '#ff6b6b'; bg = 'rgba(220,53,69,0.14)'; }
     else { txt = 'OPCIONAL'; cor = 'var(--cor-texto-secundario)'; bg = 'rgba(255,255,255,0.07)'; }
     pill.textContent = txt; pill.style.color = cor; pill.style.background = bg;
+    if (box && total > 0 && box.classList.contains('doc-faltando')) { box.classList.remove('doc-faltando'); const etF = box.querySelector('.etiqueta-doc-faltando'); if (etF) etF.remove(); }
     if (box && total === 0 && box.style.borderColor && box.style.borderColor.indexOf('40, 167, 69') >= 0) { box.style.borderColor = ''; box.style.background = ''; }
     if (typeof window.atualizarResumoAnexosAdmissao === 'function') window.atualizarResumoAnexosAdmissao();
 };
@@ -36086,19 +36096,64 @@ window.abrirAvisoArquivoNaoPdf = function(nomeArquivo) {
 };
 
 // 👇 Confere se todos os campos de anexo obrigatórios no momento têm arquivo escolhido.
-// Retorna null se está tudo ok, ou a mensagem de erro do primeiro campo faltando.
-window.validarAnexosObrigatoriosAdmissao = function() {
-    for (const cfg of window.CONFIG_ANEXOS_ADMISSAO) {
+// Retorna null se está tudo ok, ou a mensagem de erro (agora listando TODOS os documentos que faltam).
+// 🧭 (18/11/2026) Quando falta documento, além do aviso o sistema LEVA o usuário até o campo de anexo que falta (rola a tela até lá,
+// deixa o campo vermelho piscando com a etiqueta "ANEXE AQUI") — pensado pro gestor que tem mais dificuldade de achar onde anexar.
+window.documentosFaltandoAdmissao = function() {
+    const faltando = [];
+    for (const cfg of (window.CONFIG_ANEXOS_ADMISSAO || [])) {
         if (!cfg.visivel() || !cfg.obrigatorio()) continue;
         const input = document.getElementById(`doc-${cfg.id}`);
         const temArquivoNovo = input && input.files && input.files.length > 0;
         const idCorrecaoAtual = document.getElementById('btn-salvar-usuario')?.getAttribute('data-id-correcao');
         const temArquivoAntigo = idCorrecaoAtual && window.docsAntigosCorrecaoAdmissao && window.docsAntigosCorrecaoAdmissao[cfg.id] && window.docsAntigosCorrecaoAdmissao[cfg.id].length > 0;
-        if (!temArquivoNovo && !temArquivoAntigo) {
-            return `O documento <b>${cfg.label.replace(' (Opcional)', '').replace(/ \(.*?\)$/, '')}</b> é obrigatório de acordo com o que você preencheu na ficha. Anexe o PDF antes de enviar!`;
-        }
+        const temAcumulado = ((window.arquivosAcumuladosAdmissao || {})[cfg.id] || []).length > 0;
+        if (!temArquivoNovo && !temArquivoAntigo && !temAcumulado) faltando.push({ id: cfg.id, nome: String(cfg.label).replace(' (Opcional)', '').replace(/ \(.*?\)$/, '') });
     }
+    return faltando;
+};
+
+window.destacarDocsFaltandoAdmissao = function(faltando) {
+    try {
+        if (!document.getElementById('estilo-doc-faltando')) {
+            const st = document.createElement('style');
+            st.id = 'estilo-doc-faltando';
+            st.textContent = '@keyframes pulsaDocFaltando{0%,100%{box-shadow:0 0 0 0 rgba(220,53,69,.55)}50%{box-shadow:0 0 0 8px rgba(220,53,69,0)}}'
+                + '.doc-faltando{border:2px solid #dc3545 !important;background:rgba(220,53,69,.12) !important;animation:pulsaDocFaltando 1.3s ease-in-out infinite;}'
+                + '.etiqueta-doc-faltando{display:flex;align-items:center;gap:8px;background:#dc3545;color:#fff;font-weight:700;font-size:.85rem;padding:8px 12px;border-radius:8px;margin-bottom:10px;}';
+            document.head.appendChild(st);
+        }
+        document.querySelectorAll('.doc-faltando').forEach(b => { b.classList.remove('doc-faltando'); const e = b.querySelector('.etiqueta-doc-faltando'); if (e) e.remove(); });
+        let primeiro = null;
+        (faltando || []).forEach(f => {
+            const box = document.getElementById(f.boxId || `box-doc-${f.id}`);
+            if (!box) return;
+            box.classList.add('doc-faltando');
+            if (!box.querySelector('.etiqueta-doc-faltando')) {
+                const et = document.createElement('div');
+                et.className = 'etiqueta-doc-faltando';
+                et.innerHTML = '<i class="fa-solid fa-hand-point-down"></i> FALTA ANEXAR ESTE DOCUMENTO — clique em "Escolher arquivo" logo abaixo';
+                box.insertBefore(et, box.firstChild);
+            }
+            if (!primeiro) primeiro = box;
+        });
+        if (primeiro) {
+            const ir = () => { try { primeiro.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { primeiro.scrollIntoView(); } };
+            ir(); setTimeout(ir, 350);
+            return ir;
+        }
+    } catch (e) { console.warn('Destaque de documento faltando:', e); }
     return null;
+};
+
+window.validarAnexosObrigatoriosAdmissao = function() {
+    const faltando = window.documentosFaltandoAdmissao();
+    if (!faltando.length) return null;
+    window._irParaDocFaltando = window.destacarDocsFaltandoAdmissao(faltando);
+    const lista = faltando.map(f => `• <b>${f.nome}</b>`).join('<br>');
+    return faltando.length === 1
+        ? `Falta anexar este documento (obrigatório de acordo com o que você preencheu na ficha):<br><br>${lista}<br><br>👇 Já deixei o campo <b style="color:#dc3545;">em vermelho</b> na tela, é só clicar nele e anexar o PDF ou a foto.`
+        : `Faltam anexar <b>${faltando.length} documentos</b> (obrigatórios de acordo com o que você preencheu na ficha):<br><br>${lista}<br><br>👇 Deixei os campos <b style="color:#dc3545;">em vermelho</b> na tela, é só clicar em cada um e anexar o PDF ou a foto.`;
 };
 
         document.getElementById('form-novo-usuario').addEventListener('submit', async (e) => {
@@ -36235,7 +36290,11 @@ if (temPis === 'Sim' && !document.getElementById('adm-pis').value) {
         if(document.getElementById('adm-recebe-agasalho').checked && !document.getElementById('adm-agasalho').value.trim()) return mostrarAlerta("O tamanho do <b>Agasalho</b> é obrigatório!", "aviso");
 
         const erroAnexosAdmissao = (typeof window.validarAnexosObrigatoriosAdmissao === 'function') ? window.validarAnexosObrigatoriosAdmissao() : null;
-        if (erroAnexosAdmissao) return mostrarAlerta(erroAnexosAdmissao, "aviso");
+        if (erroAnexosAdmissao) {
+            const pAviso = mostrarAlerta(erroAnexosAdmissao, "aviso");
+            try { if (pAviso && typeof pAviso.then === 'function') pAviso.then(() => { if (typeof window._irParaDocFaltando === 'function') window._irParaDocFaltando(); }); } catch (eIr) {}
+            return pAviso;
+        }
 
         if(document.getElementById('adm-precisa-vt').value === 'Sim') {
             window.vtMultiAproveitarPendente('admissao');
