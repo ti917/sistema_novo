@@ -1,4 +1,4 @@
-/* Aviso de "Instalar o app" (RH, Financeiro e Comercial) — v1
+/* Aviso de "Instalar o app" (RH, Financeiro, Comercial e Secretaria) — v1
    - Aparece ao entrar, se o navegador permitir instalar (PC e celular).
    - Fechou: só avisa de novo depois de 14 dias. Instalou: não aparece mais.
    - Não mexe em nenhum dado nem em nenhuma tela do sistema; é só um cartão flutuante. */
@@ -7,9 +7,9 @@
   try {
     if (window.top !== window.self) return;                         // dentro de iframe não mostra
     var path = (location.pathname || '').toLowerCase();
-    var sis = path.indexOf('financeiro') >= 0 ? 'financeiro' : (path.indexOf('comercial') >= 0 ? 'comercial' : 'rh');
-    var NOMES = { rh: 'RH Soul', financeiro: 'Financeiro Soul', comercial: 'Comercial Soul' };
-    var COR = { rh: ['#ff7a1a', '#d6400a'], financeiro: ['#22c586', '#0b805c'], comercial: ['#29b6f6', '#1565c0'] }[sis];
+    var sis = path.indexOf('financeiro') >= 0 ? 'financeiro' : (path.indexOf('comercial') >= 0 ? 'comercial' : (path.indexOf('secretaria') >= 0 ? 'secretaria' : 'rh'));
+    var NOMES = { rh: 'RH Soul', financeiro: 'Financeiro Soul', comercial: 'Comercial Soul', secretaria: 'Secretaria Soul' };
+    var COR = { rh: ['#ff7a1a', '#d6400a'], financeiro: ['#22c586', '#0b805c'], comercial: ['#29b6f6', '#1565c0'], secretaria: ['#a855f7', '#6d28d9'] }[sis];
     var K_FECHOU = 'pwa_fechou_' + sis, K_INSTALOU = 'pwa_instalou_' + sis, DIAS = 14;
 
     function ls(a, k, v){ try { if (a === 'g') return localStorage.getItem(k); if (a === 's') localStorage.setItem(k, v); } catch(e){} return null; }
