@@ -5412,8 +5412,47 @@ document.querySelector('.sidebar-item[data-target="tela-insumos"]')?.addEventLis
             } catch (e) { console.error(e); }
         };
 
+        // 🔒 Fornecedor/categoria em uso em algum Centro de Custo (inclui Secretaria) não pode sair do cadastro
+        window.centrosQueUsam = async function(tipo, nome) {
+            try {
+                if (!nome) return [];
+                const norm = t => String(t || '').trim().toUpperCase();
+                const alvo = norm(nome);
+                const ids = new Set();
+                if (tipo === 'fornecedor') {
+                    const r = await supabaseClient.from('financeiro_lancamentos').select('centro_custo_id').eq('fornecedor_nome', nome).not('centro_custo_id', 'is', null).limit(2000);
+                    (r.data || []).forEach(x => ids.add(x.centro_custo_id));
+                } else {
+                    const r1 = await supabaseClient.from('financeiro_lancamentos').select('centro_custo_id').eq('categoria', nome).not('centro_custo_id', 'is', null).limit(2000);
+                    (r1.data || []).forEach(x => ids.add(x.centro_custo_id));
+                    const r2 = await supabaseClient.from('financeiro_contas_fixas').select('centro_custo_id').eq('categoria', nome).not('centro_custo_id', 'is', null).limit(2000);
+                    (r2.data || []).forEach(x => ids.add(x.centro_custo_id));
+                }
+                const nomes = new Set();
+                for (const tab of ['financeiro_centros_custo', 'secretaria_centros_custo']) {
+                    const rc = await supabaseClient.from(tab).select('id,nome,fornecedores');
+                    if (rc.error) continue;
+                    (rc.data || []).forEach(c => {
+                        let usa = ids.has(c.id);
+                        if (!usa && tipo === 'fornecedor') {
+                            let l = c.fornecedores;
+                            try { if (typeof l === 'string') l = JSON.parse(l); } catch (e) { l = []; }
+                            usa = Array.isArray(l) && l.some(f => norm(typeof f === 'string' ? f : (f && f.nome)) === alvo);
+                        }
+                        if (usa) nomes.add(c.nome);
+                    });
+                }
+                return [...nomes];
+            } catch (e) { console.warn('centrosQueUsam', e); return []; }
+        };
+
         // 2. Lixeira de Fornecedores
         window.excluirFornecedor = async function(id) {
+            try {
+                const { data: fRow } = await supabaseClient.from('financeiro_fornecedores').select('nome').eq('id', id).maybeSingle();
+                const emUso = await window.centrosQueUsam('fornecedor', fRow && fRow.nome);
+                if (emUso.length) return mostrarAlerta(`Este fornecedor está em uso em: <b>${emUso.join(', ')}</b>.<br>Ele não pode ser excluído do cadastro enquanto estiver vinculado ou lançado em algum Centro de Custo.`, "aviso");
+            } catch (e) { console.warn(e); }
             const confirmado = await mostrarConfirmacao("Tem certeza que deseja excluir este fornecedor permanentemente do diretório?", "Excluir Fornecedor");
             if (!confirmado) return;
 
@@ -9287,6 +9326,11 @@ if (formClara) {
         };
 
         window.excluirCategoria = async function(id) {
+            try {
+                const { data: cRow } = await supabaseClient.from('financeiro_categorias').select('nome').eq('id', id).maybeSingle();
+                const emUso = await window.centrosQueUsam('categoria', cRow && cRow.nome);
+                if (emUso.length) return mostrarAlerta(`Esta categoria está em uso em: <b>${emUso.join(', ')}</b>.<br>Ela não pode ser excluída do cadastro enquanto estiver lançada em algum Centro de Custo.`, "aviso");
+            } catch (e) { console.warn(e); }
             const confirmado = await mostrarConfirmacao("Deseja excluir esta categoria? Lançamentos antigos manterão o nome gravado no histórico.", "Excluir Categoria");
             if (!confirmado) return;
             try {
