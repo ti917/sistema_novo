@@ -41037,7 +41037,13 @@ window.abrirAdvertenciaDestacadaGestor = async function() {
                     const orig = ciclo.data_admissao_original;
                     const admCiclo = Object.assign({}, adm0, orig ? { data_inicio: orig, jornada: Object.assign({}, adm0.jornada || {}, { data_inicio: orig }) } : {});
                     const rescCiclo = window.normalizarUltimoDiaResc ? window.normalizarUltimoDiaResc(Object.assign({}, ciclo.rescisao_anterior)) : Object.assign({}, ciclo.rescisao_anterior);
-                    window.ciclosAnterioresResc.push(Object.assign({}, rc, { _cicloIdx: i, dados_rescisao: rescCiclo, dados_admissao: admCiclo }));
+                    window.ciclosAnterioresResc.push(Object.assign({}, rc, {
+                        _cicloIdx: i, dados_rescisao: rescCiclo, dados_admissao: admCiclo,
+                        // empresa/unidade DAQUELE período (ficha atual pode ter mudado na recontratação)
+                        empresa: ciclo.empresa_anterior || rc.empresa, unidade: ciclo.unidade_anterior || rc.unidade,
+                        _novaAdmissao: ciclo.nova_data_admissao || adm0.data_inicio || null,
+                        _novaEmpresa: ciclo.nova_empresa || rc.empresa, _novaUnidade: ciclo.nova_unidade || rc.unidade
+                    }));
                 });
             });
         }
@@ -41802,6 +41808,9 @@ window._htmlCiclosAnterioresResc = function () {
                     </span>
                     <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
                         <i class="fa-solid fa-calendar-days"></i> Período trabalhado: <b style="color: var(--cor-texto-principal);">${(a.dados_admissao && a.dados_admissao.data_inicio) ? a.dados_admissao.data_inicio.split('-').reverse().join('/') : '—'}</b> a <b style="color: var(--cor-texto-principal);">${resc.ultimo_dia || '—'}</b>
+                    </span>
+                    <span style="font-size: 0.85rem; color: #28a745; display: block; margin-top: 5px;">
+                        <i class="fa-solid fa-user-plus"></i> Recontratado(a) em: <b>${a._novaAdmissao ? String(a._novaAdmissao).split('-').reverse().join('/') : '—'}</b> &nbsp;|&nbsp; ${a._novaEmpresa || '-'} / ${a._novaUnidade || '-'}
                     </span>
                     <div style="margin-top: 10px; font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.15); padding: 10px 12px; border-radius: 8px; border-left: 3px solid #4fc3f7; max-width: 640px;">
                         <b style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px;">Motivo / Obs</b><br> ${resc.motivo || 'Não informado.'}
@@ -72244,6 +72253,40 @@ window.filtrarStatusEpiVisual = function() {
     const inicioAntigoIso = adm0.jornada?.data_inicio || adm0.data_inicio || '';
     const fimAntigoIso = window.converterDataBrParaIso ? window.converterDataBrParaIso(resc0.ultimo_dia) : '';
     const brData = iso => iso ? iso.split('-').reverse().join('/') : '—';
+    const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+    // Empresas/unidades ATIVAS para escolher (só leitura). Se falhar, usa só a atual da ficha.
+    let unidadesAtivas = [];
+    try {
+        const ru = await supabaseClient.from('unidades_oficiais').select('nome, empresa').eq('ativo', true).order('nome');
+        if (!ru.error) unidadesAtivas = ru.data || [];
+    } catch (e) {}
+    const empresaAtual = (colab.empresa || '').trim();
+    const unidadeAtual = (colab.unidade || '').trim();
+    let listaEmpresas = [...new Set(unidadesAtivas.map(u => (u.empresa || '').trim()).filter(Boolean))];
+    // Gestor só enxerga as empresas dele; empresa desativada some para quem não é Super Admin
+    try {
+        if (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.perfil === 'Gestor') {
+            const minhas = (usuarioAtual.empresa || '').split(',').map(e => e.trim()).filter(Boolean);
+            if (minhas.length && !minhas.includes('Todas')) listaEmpresas = listaEmpresas.filter(e => minhas.includes(e));
+        }
+        const ehSA = (typeof window.souSuperAdmin === 'function') ? window.souSuperAdmin() : false;
+        if (!ehSA && window.empresasDesativadas && window.empresasDesativadas.size && typeof window.chaveNormalizada === 'function') {
+            listaEmpresas = listaEmpresas.filter(e => !window.empresasDesativadas.has(window.chaveNormalizada(e)) || e === empresaAtual);
+        }
+    } catch (e) {}
+    if (empresaAtual && !listaEmpresas.includes(empresaAtual)) listaEmpresas.unshift(empresaAtual);
+    listaEmpresas.sort((a, b) => a.localeCompare(b));
+    const unidadesDaEmpresa = emp => {
+        const l = [...new Set(unidadesAtivas.filter(u => (u.empresa || '').trim() === emp).map(u => (u.nome || '').trim()).filter(Boolean))];
+        if (emp === empresaAtual && unidadeAtual && !l.includes(unidadeAtual)) l.unshift(unidadeAtual);
+        return l.sort((a, b) => a.localeCompare(b));
+    };
+    const htmlUnidades = emp => {
+        const l = unidadesDaEmpresa(emp);
+        const sel = (emp === empresaAtual) ? unidadeAtual : '';
+        return '<option value="">Selecione a unidade...</option>' + l.map(u => `<option value="${esc(u)}"${u === sel ? ' selected' : ''}>${esc(u)}</option>`).join('');
+    };
 
     document.getElementById('modal-recontratar')?.remove();
     document.body.insertAdjacentHTML('beforeend', `
@@ -72256,7 +72299,15 @@ window.filtrarStatusEpiVisual = function() {
             </div>
             <label style="display:block; font-weight: bold; margin-bottom: 6px;">Nova data de admissão (início do novo período) <span style="color: var(--cor-perigo);">*</span></label>
             <input type="date" id="recontratar-nova-data" class="modern-input" style="width:100%; margin-bottom: 8px;" onclick="try{this.showPicker()}catch(e){}">
-            <small style="display:block; color: var(--cor-texto-secundario); margin-bottom: 16px;">ASO, férias e avaliações passam a contar desta data. Depois confira o <b>cargo</b> e a <b>unidade</b> na ficha.</small>
+            <small style="display:block; color: var(--cor-texto-secundario); margin-bottom: 16px;">ASO, férias e avaliações passam a contar desta data.</small>
+            <label style="display:block; font-weight: bold; margin-bottom: 6px;">Empresa <span style="color: var(--cor-perigo);">*</span></label>
+            <select id="recontratar-empresa" class="modern-input" style="width:100%; margin-bottom: 14px;">
+                <option value="">Selecione a empresa...</option>
+                ${listaEmpresas.map(e => `<option value="${esc(e)}"${e === empresaAtual ? ' selected' : ''}>${esc(e)}</option>`).join('')}
+            </select>
+            <label style="display:block; font-weight: bold; margin-bottom: 6px;">Unidade <span style="color: var(--cor-perigo);">*</span></label>
+            <select id="recontratar-unidade" class="modern-input" style="width:100%; margin-bottom: 8px;">${htmlUnidades(empresaAtual)}</select>
+            <small style="display:block; color: var(--cor-texto-secundario); margin-bottom: 16px;">Já vêm preenchidas com a empresa e a unidade do período anterior. Se ela voltar para outro lugar, troque aqui. Depois confira o <b>cargo</b> na ficha.</small>
             <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                 <button class="btn-secondary" style="flex: 1; min-width: 120px; height: 46px;" onclick="document.getElementById('modal-recontratar').remove()">Cancelar</button>
                 <button class="btn-success" id="btn-confirmar-recontratar" style="flex: 2; min-width: 200px; height: 46px; background-color: #28a745; color: #fff; border: none; font-weight: bold;">
@@ -72266,9 +72317,17 @@ window.filtrarStatusEpiVisual = function() {
         </div>
     </div>`);
 
+    document.getElementById('recontratar-empresa').onchange = function() {
+        document.getElementById('recontratar-unidade').innerHTML = htmlUnidades(this.value);
+    };
+
     document.getElementById('btn-confirmar-recontratar').onclick = async function() {
         const novaData = document.getElementById('recontratar-nova-data').value;
+        const novaEmpresa = (document.getElementById('recontratar-empresa').value || '').trim();
+        const novaUnidade = (document.getElementById('recontratar-unidade').value || '').trim();
         if (!novaData) return mostrarAlerta("Informe a nova data de admissão.", "aviso");
+        if (!novaEmpresa) return mostrarAlerta("Selecione a empresa.", "aviso");
+        if (!novaUnidade) return mostrarAlerta("Selecione a unidade.", "aviso");
         if (fimAntigoIso && novaData <= fimAntigoIso) return mostrarAlerta(`A nova data de admissão precisa ser <b>depois</b> do fim do período anterior (${brData(fimAntigoIso)}).`, "aviso");
         const btn = this; btn.disabled = true;
         try {
@@ -72286,6 +72345,11 @@ window.filtrarStatusEpiVisual = function() {
                 data_admissao_original: inicioAnt,
                 data_fim_periodo: fimAntigoIso || null,
                 data_ultimo_aso_anterior: adm.data_ultimo_aso || null,
+                empresa_anterior: c.empresa || null,
+                unidade_anterior: c.unidade || null,
+                nova_data_admissao: novaData,
+                nova_empresa: novaEmpresa,
+                nova_unidade: novaUnidade,
                 recontratado_em: new Date().toISOString(),
                 recontratado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null,
                 rescisao_anterior: rescVelha
@@ -72300,11 +72364,13 @@ window.filtrarStatusEpiVisual = function() {
                 status: 'Ativo',
                 status_aprovacao: 'Aprovado',
                 dados_rescisao: null,
-                dados_admissao: adm
+                dados_admissao: adm,
+                empresa: novaEmpresa,
+                unidade: novaUnidade
             }).eq('id', idColab);
             if (error) throw error;
 
-            mostrarAlerta(`${nomeColab} foi recontratado(a)! Novo período a partir de <b>${brData(novaData)}</b>. Confira o cargo e a unidade na ficha.`, "sucesso");
+            mostrarAlerta(`${nomeColab} foi recontratado(a)! Novo período a partir de <b>${brData(novaData)}</b> em <b>${esc(novaEmpresa)} / ${esc(novaUnidade)}</b>. Confira o cargo na ficha.`, "sucesso");
             document.getElementById('modal-recontratar')?.remove();
             document.getElementById('modal-resc-concluida')?.remove();
             carregarRescisoesParaAdmin();
