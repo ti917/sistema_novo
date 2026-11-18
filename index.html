@@ -58859,6 +58859,7 @@ window.__aplicarModoScanner = async function(ctx, w, h, baixaResolucao) {
     try { polirPapelBrancoCanvas(ctx, w, h); } catch (e) { console.warn('Falha ao polir o papel, seguindo sem:', e); }
     await respirar();
     try { realcarNitidezCanvas(ctx, w, h, baixaResolucao); } catch (e) { console.warn('Falha ao realçar nitidez, seguindo sem:', e); }
+    try { polirPapelBrancoCanvas(ctx, w, h); } catch (e) { /* polimento é só estético */ }
 };
 
 // =========================================================================
@@ -59730,6 +59731,90 @@ function bordasDaFotoParecemFundo(pequeno) {
 // (canvasCorte) continua intocada — só a busca pelos cantos usa a cópia
 // corrigida; a cor final do documento ainda passa pelo modo scanner completo
 // depois do corte, como sempre.
+// ✂️ (18/11/2026) CORTE PARCIAL: quando o recorte automático não achou as 4 bordas (papel enchendo o quadro, fundo só num lado),
+// em vez de deixar a foto inteira, tira só o lado que TEM fundo. Um lado só é cortado se: (1) existe uma linha reta bem definida
+// (a borda do papel) cobrindo >= 75% da largura, quase reta (<= 6°); (2) do lado de fora dela quase não há conteúdo (sem texto/desenho);
+// (3) o corte come no máximo 22% daquele lado. Qualquer dúvida = não corta aquele lado. Nunca mexe nos dados, só na imagem da foto.
+function aparaFundoNasBordasCanvas(canvas, ctx, w, h) {
+    const sem = { canvas, ctx, w, h, aparou: false };
+    try {
+        const esc = 360 / Math.max(w, h);
+        if (!(esc < 1)) return sem;
+        const sw = Math.max(40, Math.round(w * esc)), sh = Math.max(40, Math.round(h * esc));
+        const mini = document.createElement('canvas'); mini.width = sw; mini.height = sh;
+        const mc = mini.getContext('2d'); mc.imageSmoothingEnabled = true; mc.drawImage(canvas, 0, 0, sw, sh);
+        const px = mc.getImageData(0, 0, sw, sh).data;
+        let g = new Float32Array(sw * sh);
+        for (let i = 0, p = 0; p < g.length; p++, i += 4) g[p] = px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114;
+        // suaviza (média 3x3 duas vezes)
+        const suav = (a, W, H) => { const o = new Float32Array(a.length); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let t = 0, c = 0; for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue; for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; t += a[yy * W + xx]; c++; } } o[y * W + x] = t / c; } return o; };
+        g = suav(suav(g, sw, sh), sw, sh);
+        // gira a matriz pra que o lado analisado fique SEMPRE em cima. lado: 0 topo, 1 base, 2 esquerda, 3 direita
+        const orienta = (lado) => {
+            if (lado === 0) return { a: g, W: sw, H: sh };
+            if (lado === 1) { const o = new Float32Array(g.length); for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) o[(sh - 1 - y) * sw + x] = g[y * sw + x]; return { a: o, W: sw, H: sh }; }
+            const W = sh, H = sw, o = new Float32Array(g.length);
+            for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+                if (lado === 2) o[x * W + y] = g[y * sw + x];                 // esquerda vira topo
+                else o[(sw - 1 - x) * W + y] = g[y * sw + x];                 // direita vira topo
+            }
+            return { a: o, W, H };
+        };
+        const analisaTopo = ({ a, W, H }) => {
+            const banda = Math.floor(H * 0.22), passo = Math.max(1, Math.floor(W / 120));
+            const xs = [], ys = [], fs = [];
+            for (let x = 0; x < W; x += passo) {
+                // pega a transição MAIS EXTERNA (a borda do papel), não a mais forte: a mais forte costuma ser tinta/barra do próprio documento
+                let melhor = 0, yb = 0;
+                for (let y = 3; y < banda; y++) {
+                    const d = Math.abs(a[(y + 3) * W + x] - a[(y - 3) * W + x]);
+                    if (d >= 10) {
+                        melhor = d; yb = y;
+                        for (let y2 = y + 1; y2 < Math.min(banda, y + 5); y2++) { const d2 = Math.abs(a[(y2 + 3) * W + x] - a[(y2 - 3) * W + x]); if (d2 > melhor) { melhor = d2; yb = y2; } }
+                        break;
+                    }
+                }
+                xs.push(x); ys.push(yb); fs.push(melhor);
+            }
+            const idx = fs.map((v, i) => i).filter(i => fs[i] >= 10);
+            if (idx.length < 0.6 * xs.length) return null;
+            // reta por mínimos quadrados nos pontos fortes
+            let sx = 0, sy = 0, sxx = 0, sxy = 0; idx.forEach(i => { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; });
+            const n = idx.length, den = n * sxx - sx * sx; if (!den) return null;
+            const k = (n * sxy - sx * sy) / den, b0 = (sy - k * sx) / n;
+            if (Math.abs(Math.atan(k) * 180 / Math.PI) > 6) return null;
+            const tol = Math.max(3, H * 0.006);
+            let ap = 0; for (let i = 0; i < xs.length; i++) if (Math.abs(ys[i] - (k * xs[i] + b0)) < tol) ap++;
+            if (ap / xs.length < 0.75) return null;
+            const yA = b0, yB = k * (W - 1) + b0, yMax = Math.max(yA, yB), yMin = Math.min(yA, yB);
+            // energia de borda fora (acima da linha) vs dentro (logo abaixo): fora tem que ser quase vazio
+            const energia = (y0, y1) => { let t = 0, c = 0; for (let y = Math.max(1, y0); y < Math.min(H - 1, y1); y++) for (let x = 1; x < W - 1; x++) { t += Math.abs(a[y * W + x + 1] - a[y * W + x - 1]) + Math.abs(a[(y + 1) * W + x] - a[(y - 1) * W + x]); c++; } return c ? t / c : 0; };
+            const yFora = Math.floor(yMin - 4);
+            const fora = yFora > 3 ? energia(1, yFora) : 0;
+            const dentro = energia(Math.ceil(yMax + 6), Math.ceil(yMax + 6) + Math.max(20, Math.floor(H * 0.25)));
+            if (!(dentro > 0) || fora > 0.6 * dentro) return null;
+            return yMax;
+        };
+        const cortes = [0, 0, 0, 0]; // em px da imagem cheia: topo, base, esq, dir
+        for (let lado = 0; lado < 4; lado++) {
+            const yMax = analisaTopo(orienta(lado));
+            if (yMax === null) continue;
+            const dimLado = (lado < 2) ? sh : sw;
+            const corte = Math.max(0, yMax - 2); // 2 px (da miniatura) de folga pro lado do fundo
+            if (corte < 2 || corte > dimLado * 0.22) continue;
+            cortes[lado] = Math.round(corte / esc);
+        }
+        const [cT, cB, cE, cD] = cortes;
+        if (!(cT || cB || cE || cD)) return sem;
+        const nx = cE, ny = cT, nw = w - cE - cD, nh = h - cT - cB;
+        if (nw < w * 0.6 || nh < h * 0.6) return sem;
+        const novo = document.createElement('canvas'); novo.width = nw; novo.height = nh;
+        const nctx = novo.getContext('2d'); nctx.drawImage(canvas, nx, ny, nw, nh, 0, 0, nw, nh);
+        console.info('Corte parcial aplicado (px): topo', cT, 'base', cB, 'esq', cE, 'dir', cD);
+        return { canvas: novo, ctx: nctx, w: nw, h: nh, aparou: true };
+    } catch (e) { console.warn('Corte parcial falhou, seguindo sem:', e); return sem; }
+}
+
 function detectarEcortarDocumento(canvasDeteccao, canvasCorte) {
     const canvasDeteccaoSemSombra = document.createElement('canvas');
     canvasDeteccaoSemSombra.width = canvasDeteccao.width;
@@ -60027,6 +60112,9 @@ window.processarImagemDigitalizada = function(file) {
                     if (!cortado) {
                         const endireitado = endireitarCanvas(canvas, ctx, w, h);
                         canvas = endireitado.canvas; ctx = endireitado.ctx; w = endireitado.w; h = endireitado.h;
+                        // ✂️ sem as 4 bordas achadas: tira ao menos o lado que tem fundo (se houver)
+                        const parcial = aparaFundoNasBordasCanvas(canvas, ctx, w, h);
+                        if (parcial.aparou) { canvas = parcial.canvas; ctx = parcial.ctx; w = parcial.w; h = parcial.h; }
                     }
 
                     // Reduz pro tamanho final ANTES de tratar o tom — assim o ruído de
