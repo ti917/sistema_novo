@@ -21167,6 +21167,7 @@ async function carregarPerfil(id) {
         window.cacheUnidadesGestor = await window.getUnidadesPermitidasGestor();
     }
     await promessaEscopoAtivo;
+    if (usuarioAtual.perfil === 'Gestor') { await window.iniciarFiltroCargosGestor(); } // só age se o RH marcou cargos para este gestor
     // ---------------------------------------------------
     document.getElementById('user-name-display').innerText = data.nome;
     // 👇 Avatar no header: por padrão mostra as iniciais (1ª letra do primeiro nome + 1ª
@@ -104958,6 +104959,77 @@ window.verificarCargosSemGestor = async function() {
     } catch (e) { console.warn('Cargos por gestor:', e); }
 };
 setTimeout(() => window.verificarCargosSemGestor(), 6000);
+
+// ==========================================================================
+// 👁️ ETAPA 2 — o gestor com cargos marcados NÃO enxerga os colaboradores dos outros cargos.
+// SEGURANÇA: só entra em ação para Gestor que tenha cargos marcados (permissoes.cargos_por_unidade).
+// Para todo o resto (Admin, gestor sem marcação, colaborador) NADA é instalado nem muda.
+// Funciona como um filtro no resultado das consultas (lista de colaboradores e tabelas que têm
+// colaborador_id: ausências, férias, escala, avisos...). Consultas de contagem não são filtradas.
+// ==========================================================================
+window._cargosFiltro = { ativo: false, ocultos: new Set(), unidades: [] };
+window._atualizarOcultosCargos = async function() {
+    try {
+        const f = window._cargosFiltro; if (!f.ativo || !f.unidades.length) return;
+        const { data, error } = await supabaseClient.from('perfis').select('id, unidade, cargo:dados_admissao->>cargo').eq('perfil', 'Colaborador').in('unidade', f.unidades);
+        if (error || !data) return; // mantém a lista anterior
+        const eu = new Set([usuarioAtual.id, usuarioAtual.permissoes && usuarioAtual.permissoes.colaborador_vinculado_id].filter(Boolean));
+        const novo = new Set();
+        data.forEach(c => {
+            if (eu.has(c.id)) return; // o próprio gestor (colaborador vinculado) nunca some para ele mesmo
+            if (!window.gestorCuidaDoColab({ unidade: c.unidade, dados_admissao: { cargo: c.cargo } })) novo.add(c.id);
+        });
+        f.ocultos = novo;
+    } catch (e) { console.warn('Filtro de cargos:', e); }
+};
+window._filtrarResultadoCargos = function(builder, res) {
+    const f = window._cargosFiltro;
+    if (!f.ativo || !res || !Array.isArray(res.data) || (builder.method && builder.method !== 'GET')) return res;
+    const tabela = String((builder.url && builder.url.pathname) || '').split('/').pop();
+    const eu = new Set([usuarioAtual.id, usuarioAtual.permissoes && usuarioAtual.permissoes.colaborador_vinculado_id].filter(Boolean));
+    const oculta = (row) => {
+        if (!row) return false;
+        if (tabela === 'perfis') {
+            if (eu.has(row.id)) return false;
+            if (f.ocultos.has(row.id)) return true;
+            if (row.perfil === 'Colaborador' && row.unidade && row.dados_admissao && !window.gestorCuidaDoColab(row)) return true;
+            return false;
+        }
+        return !!row.colaborador_id && !eu.has(row.colaborador_id) && f.ocultos.has(row.colaborador_id);
+    };
+    const filtrado = res.data.filter(r => !oculta(r));
+    if (filtrado.length === res.data.length) return res;
+    return Object.assign({}, res, { data: filtrado });
+};
+window.iniciarFiltroCargosGestor = async function() {
+    try {
+        const u = (typeof usuarioAtual !== 'undefined') ? usuarioAtual : null;
+        if (!u || u.perfil !== 'Gestor') return;
+        const cfg = u.permissoes && u.permissoes.cargos_por_unidade;
+        const unis = (cfg && typeof cfg === 'object') ? Object.keys(cfg).filter(k => Array.isArray(cfg[k]) && cfg[k].length) : [];
+        if (!unis.length) return; // sem cargos marcados: nada muda
+        const f = window._cargosFiltro;
+        f.unidades = String(u.unidade || '').split(',').map(x => x.trim()).filter(Boolean);
+        f.ativo = true;
+        await window._atualizarOcultosCargos();
+        if (!window._cargosFiltroInstalado) {
+            let proto = Object.getPrototypeOf(supabaseClient.from('perfis').select('id'));
+            while (proto && !Object.prototype.hasOwnProperty.call(proto, 'then')) proto = Object.getPrototypeOf(proto);
+            if (proto) {
+                const thenOriginal = proto.then;
+                proto.then = function(onF, onR) {
+                    const self = this;
+                    return thenOriginal.call(self, function(res) {
+                        try { res = window._filtrarResultadoCargos(self, res); } catch (e) {}
+                        return onF ? onF(res) : res;
+                    }, onR);
+                };
+                window._cargosFiltroInstalado = true;
+            }
+        }
+        setInterval(() => window._atualizarOcultosCargos(), 180000);
+    } catch (e) { console.warn('Filtro de cargos do gestor:', e); window._cargosFiltro.ativo = false; }
+};
 
 window.checarTravaContrato = async function(foiCliqueManual = false) {
     // 👇 Chave-mestra de segurança: dá pra desligar TUDO (Admissional + Prorrogação)
