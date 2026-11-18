@@ -41800,6 +41800,9 @@ window._htmlCiclosAnterioresResc = function () {
                     <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
                         Tipo: ${resc.tipo || '-'} | Último dia: <b style="color: var(--cor-texto-principal);">${resc.ultimo_dia || '-'}</b>
                     </span>
+                    <span style="font-size: 0.85rem; color: var(--cor-texto-secundario); display: block; margin-top: 5px;">
+                        <i class="fa-solid fa-calendar-days"></i> Período trabalhado: <b style="color: var(--cor-texto-principal);">${(a.dados_admissao && a.dados_admissao.data_inicio) ? a.dados_admissao.data_inicio.split('-').reverse().join('/') : '—'}</b> a <b style="color: var(--cor-texto-principal);">${resc.ultimo_dia || '—'}</b>
+                    </span>
                     <div style="margin-top: 10px; font-size: 0.85rem; color: var(--cor-texto-principal); background: rgba(0,0,0,0.15); padding: 10px 12px; border-radius: 8px; border-left: 3px solid #4fc3f7; max-width: 640px;">
                         <b style="color: var(--cor-texto-secundario); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px;">Motivo / Obs</b><br> ${resc.motivo || 'Não informado.'}
                     </div>
@@ -72227,40 +72230,89 @@ window.filtrarStatusEpiVisual = function() {
 };
 
         window.prepararRecontratacao = async function(idColab, nomeColab) {
-    const confirmado = await mostrarConfirmacao(`Deseja recontratar <b>${nomeColab}</b>?<br><br>O status voltará para <b>Ativo</b> e a rescisão anterior será movida para o Histórico Permanente.`, "Confirmar Recontratação");
-    if (!confirmado) return;
-
+    // 🔁 RECONTRATAÇÃO: o período antigo (início + fim da rescisão) fica guardado no histórico da ficha
+    // e um período NOVO começa na data de admissão informada aqui (ASO, férias e avaliações contam dela).
+    let colab;
     try {
-        const { data: colab } = await supabaseClient.from('perfis').select('*').eq('id', idColab).single();
-        
-        let adm = colab.dados_admissao || {};
-        let rescVelha = colab.dados_rescisao || {};
+        const r = await supabaseClient.from('perfis').select('*').eq('id', idColab).single();
+        if (r.error) throw r.error;
+        colab = r.data;
+    } catch (e) { return mostrarAlerta("Erro ao abrir a recontratação: " + e.message, "erro"); }
 
-        // 1. Cria ou atualiza um array de "Ciclos Anteriores" para não perder a rescisão velha
-        if (!adm.historico_ciclos) adm.historico_ciclos = [];
-        
-        adm.historico_ciclos.push({
-            data_admissao_original: adm.data_inicio,
-            rescisao_anterior: rescVelha
-        });
+    const adm0 = colab.dados_admissao || {};
+    const resc0 = colab.dados_rescisao ? (window.normalizarUltimoDiaResc ? window.normalizarUltimoDiaResc(Object.assign({}, colab.dados_rescisao)) : colab.dados_rescisao) : {};
+    const inicioAntigoIso = adm0.jornada?.data_inicio || adm0.data_inicio || '';
+    const fimAntigoIso = window.converterDataBrParaIso ? window.converterDataBrParaIso(resc0.ultimo_dia) : '';
+    const brData = iso => iso ? iso.split('-').reverse().join('/') : '—';
 
-        // 2. Limpa os dados de rescisão atuais para o novo ciclo começar
-        const { error } = await supabaseClient.from('perfis').update({
-            status: 'Ativo',
-            status_aprovacao: 'Aprovado',
-            dados_rescisao: null, // Limpa para a próxima
-            dados_admissao: adm    // Salva com o histórico guardado
-        }).eq('id', idColab);
+    document.getElementById('modal-recontratar')?.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="modal-recontratar" style="position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 10001; display: flex; justify-content: center; align-items: center; padding: 20px;">
+        <div class="glass-card" style="width: 100%; max-width: 520px; border: 1px solid #28a745; max-height: 95vh; overflow-y: auto;">
+            <h3 style="color: #28a745; margin-bottom: 14px;"><i class="fa-solid fa-user-plus"></i> Recontratar: ${String(nomeColab).replace(/</g, '&lt;')}</h3>
+            <div style="background: rgba(79,195,247,0.08); border-left: 4px solid #4fc3f7; padding: 12px 14px; border-radius: 8px; font-size: 0.88rem; margin-bottom: 14px;">
+                <b>Período anterior (fica guardado no histórico):</b><br>
+                Início: <b>${brData(inicioAntigoIso)}</b> &nbsp;→&nbsp; Fim (rescisão): <b>${brData(fimAntigoIso)}</b>
+            </div>
+            <label style="display:block; font-weight: bold; margin-bottom: 6px;">Nova data de admissão (início do novo período) <span style="color: var(--cor-perigo);">*</span></label>
+            <input type="date" id="recontratar-nova-data" class="modern-input" style="width:100%; margin-bottom: 8px;" onclick="try{this.showPicker()}catch(e){}">
+            <small style="display:block; color: var(--cor-texto-secundario); margin-bottom: 16px;">ASO, férias e avaliações passam a contar desta data. Depois confira o <b>cargo</b> e a <b>unidade</b> na ficha.</small>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn-secondary" style="flex: 1; min-width: 120px; height: 46px;" onclick="document.getElementById('modal-recontratar').remove()">Cancelar</button>
+                <button class="btn-success" id="btn-confirmar-recontratar" style="flex: 2; min-width: 200px; height: 46px; background-color: #28a745; color: #fff; border: none; font-weight: bold;">
+                    <i class="fa-solid fa-user-plus"></i> Confirmar Recontratação
+                </button>
+            </div>
+        </div>
+    </div>`);
 
-        if (error) throw error;
+    document.getElementById('btn-confirmar-recontratar').onclick = async function() {
+        const novaData = document.getElementById('recontratar-nova-data').value;
+        if (!novaData) return mostrarAlerta("Informe a nova data de admissão.", "aviso");
+        if (fimAntigoIso && novaData <= fimAntigoIso) return mostrarAlerta(`A nova data de admissão precisa ser <b>depois</b> do fim do período anterior (${brData(fimAntigoIso)}).`, "aviso");
+        const btn = this; btn.disabled = true;
+        try {
+            // lê de novo na hora de gravar (evita sobrescrever algo que mudou enquanto a janela estava aberta)
+            const fresco = await supabaseClient.from('perfis').select('*').eq('id', idColab).single();
+            if (fresco.error) throw fresco.error;
+            const c = fresco.data;
+            if (c.status !== 'Desligado') throw new Error('Esta ficha não está mais como Desligado (status atual: ' + c.status + ').');
+            let adm = c.dados_admissao || {};
+            const rescVelha = c.dados_rescisao || {};
+            const inicioAnt = adm.jornada?.data_inicio || adm.data_inicio || null;
 
-        mostrarAlerta(`${nomeColab} foi reativado! Lembre-se de atualizar a nova Data de Início e o Cargo na ficha dele.`, "sucesso");
-        document.getElementById('modal-resc-concluida')?.remove();
-        carregarRescisoesParaAdmin(); // Atualiza a lista
+            if (!Array.isArray(adm.historico_ciclos)) adm.historico_ciclos = [];
+            adm.historico_ciclos.push({
+                data_admissao_original: inicioAnt,
+                data_fim_periodo: fimAntigoIso || null,
+                data_ultimo_aso_anterior: adm.data_ultimo_aso || null,
+                recontratado_em: new Date().toISOString(),
+                recontratado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null,
+                rescisao_anterior: rescVelha
+            });
 
-    } catch (e) {
-        mostrarAlerta("Erro ao recontratar: " + e.message, "erro");
-    }
+            // período NOVO: tudo passa a contar da nova data de admissão
+            adm.data_inicio = novaData;
+            if (adm.jornada && typeof adm.jornada === 'object') adm.jornada = Object.assign({}, adm.jornada, { data_inicio: novaData });
+            delete adm.data_ultimo_aso;   // o ASO do período anterior não vale para o novo (fica guardado no histórico)
+
+            const { error } = await supabaseClient.from('perfis').update({
+                status: 'Ativo',
+                status_aprovacao: 'Aprovado',
+                dados_rescisao: null,
+                dados_admissao: adm
+            }).eq('id', idColab);
+            if (error) throw error;
+
+            mostrarAlerta(`${nomeColab} foi recontratado(a)! Novo período a partir de <b>${brData(novaData)}</b>. Confira o cargo e a unidade na ficha.`, "sucesso");
+            document.getElementById('modal-recontratar')?.remove();
+            document.getElementById('modal-resc-concluida')?.remove();
+            carregarRescisoesParaAdmin();
+        } catch (e) {
+            btn.disabled = false;
+            mostrarAlerta("Erro ao recontratar: " + e.message, "erro");
+        }
+    };
 };
 
         // =====================================
