@@ -5061,6 +5061,10 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
         <i class="fa-solid fa-unlock-keyhole" style="width: 20px;"></i> Liberar Contratos e ASO
     </button>
 
+    <button type="button" id="btn-menu-cargos-gestores" onclick="abrirModalCargosGestores()" style="display: none; background: transparent; border: none; color: #20c997; text-align: left; cursor: pointer; padding: 10px 5px 5px 5px; border-radius: 4px; transition: 0.2s; font-weight: bold; align-items: center;" title="Quando há mais de um gestor na mesma unidade, define quais cargos cada um cuida">
+        <i class="fa-solid fa-users-gear" style="width: 20px;"></i> Cargos por Gestor <span id="badge-cargos-gestores" style="display:none; margin-left:6px; background:#dc3545; color:#fff; border-radius:10px; font-size:0.65rem; padding:1px 6px;">!</span>
+    </button>
+
     <!-- Area exclusiva dos Super Admins (empresas, ferramentas, lista de Super Admins) -->
     <button type="button" id="btn-menu-super-admin" onclick="window.abrirAreaSuperAdmin()" style="display: none; background: transparent; border: none; color: #ffc107; text-align: left; cursor: pointer; padding: 10px 5px 5px 5px; border-radius: 4px; font-weight: bold;">
         <i class="fa-solid fa-crown" style="width: 20px;"></i> Super Admin
@@ -67680,6 +67684,7 @@ window.checarTravaExperiencia = async function(foiCliqueManual = false) {
 
     const colabs = (resColabs.data || []).filter(c => {
         const emRescisao = c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura';
+        if (!window.gestorCuidaDoColab(c)) return false; // gestor com cargos marcados só responde pelos colaboradores desses cargos
         return !emRescisao && !setAfastados.has(c.id) && !window.ehPJIsento(c); // PJ / Sócio não tem avaliação de experiência
     });
 
@@ -88060,6 +88065,7 @@ window.checarPendenciasDesempenho = async function(foiCliqueManual = false, _ten
         let contagemMenorFaltante = 999; // Guarda o menor tempo que falta para o aviso na tarja
 
         colabs.forEach(c => {
+            if (!window.gestorCuidaDoColab(c)) return; // gestor com cargos marcados só responde pelos colaboradores desses cargos
             const adm = c.dados_admissao || {};
             // 👇 Desligamento programado pelo Admin/Gestor Global: NÃO cobra avaliação nem bloqueia o sistema por
             // esse colaborador; ele aparece na lista só com o botão de rescisão. Some daqui quando a rescisão é enviada.
@@ -104799,6 +104805,139 @@ document.addEventListener('click', (ev) => {
     }
 });
 
+// ==========================================================================
+// 👥 CARGOS POR GESTOR (mesma unidade, gestores diferentes cuidando de cargos diferentes)
+// O RH marca, para cada gestor e cada unidade, os cargos que ele cuida. Fica em
+// perfis.permissoes.cargos_por_unidade = { "UNIDADE": ["CARGO 1", "CARGO 2"] }.
+// REGRA DE SEGURANÇA: se o gestor NÃO tiver cargos marcados naquela unidade, nada muda —
+// ele continua cuidando de todos, exatamente como era antes.
+// ==========================================================================
+window._normCargoGestor = function(x) { return String(x || '').trim().toUpperCase(); };
+window.gestorCuidaDoColab = function(c, gestor) {
+    try {
+        const g = gestor || (typeof usuarioAtual !== 'undefined' ? usuarioAtual : null);
+        if (!g || g.perfil !== 'Gestor') return true;
+        const cfg = g.permissoes && g.permissoes.cargos_por_unidade;
+        if (!cfg || typeof cfg !== 'object') return true;
+        const lista = cfg[c.unidade];
+        if (!Array.isArray(lista) || lista.length === 0) return true;
+        const cargo = window._normCargoGestor(c.dados_admissao && c.dados_admissao.cargo);
+        return lista.some(x => window._normCargoGestor(x) === cargo);
+    } catch (e) { return true; } // na dúvida, NUNCA esconde nem libera diferente do que era
+};
+
+// ==========================================================================
+// 👥 TELA DO RH: "Cargos por Gestor" (ver window.gestorCuidaDoColab)
+// ==========================================================================
+window._cargosGestoresDados = null;
+window._carregarDadosCargosGestores = async function() {
+    const [rg, rc] = await Promise.all([
+        supabaseClient.from('perfis').select('id, nome, empresa, unidade, permissoes, status').eq('perfil', 'Gestor'),
+        supabaseClient.from('perfis').select('unidade, cargo:dados_admissao->>cargo, status').eq('perfil', 'Colaborador').in('status', ['Ativo', 'Aguardando ASO'])
+    ]);
+    if (rg.error) throw rg.error;
+    if (rc.error) throw rc.error;
+    const gestores = (rg.data || []).filter(g => g.status !== 'Excluído' && g.status !== 'Desligado' && g.status !== 'Cancelado(a)');
+    const cargosPorUnidade = {}; // unidade -> { CARGO NORMALIZADO: nome }
+    (rc.data || []).forEach(c => {
+        if (!c.unidade || !c.cargo) return;
+        (cargosPorUnidade[c.unidade] = cargosPorUnidade[c.unidade] || {})[window._normCargoGestor(c.cargo)] = String(c.cargo).trim();
+    });
+    window._cargosGestoresDados = { gestores, cargosPorUnidade };
+    return window._cargosGestoresDados;
+};
+// Cargos com colaborador numa unidade onde TODOS os gestores têm cargos marcados, e que nenhum cobre.
+window._cargosSemGestor = function(dados) {
+    const out = [];
+    const unidades = new Set();
+    dados.gestores.forEach(g => String(g.unidade || '').split(',').map(u => u.trim()).filter(Boolean).forEach(u => unidades.add(u)));
+    unidades.forEach(u => {
+        const gestoresU = dados.gestores.filter(g => String(g.unidade || '').split(',').map(x => x.trim()).includes(u));
+        const cfgDe = g => { const l = g.permissoes && g.permissoes.cargos_por_unidade && g.permissoes.cargos_por_unidade[u]; return Array.isArray(l) && l.length ? l.map(window._normCargoGestor) : null; };
+        const alguemMarcou = gestoresU.some(g => cfgDe(g));
+        if (!alguemMarcou) return; // ninguém usa a divisão nessa unidade: tudo como sempre foi
+        if (gestoresU.some(g => !cfgDe(g))) return; // tem gestor sem marcação = cuida de todos
+        const cobertos = new Set(); gestoresU.forEach(g => (cfgDe(g) || []).forEach(c => cobertos.add(c)));
+        Object.entries(dados.cargosPorUnidade[u] || {}).forEach(([norm, nome]) => { if (!cobertos.has(norm)) out.push({ unidade: u, cargo: nome }); });
+    });
+    return out;
+};
+window.verificarCargosSemGestor = async function() {
+    try {
+        if (!usuarioAtual || usuarioAtual.perfil !== 'Admin') return;
+        const btn = document.getElementById('btn-menu-cargos-gestores');
+        if (btn) btn.style.display = 'flex';
+        const dados = await window._carregarDadosCargosGestores();
+        const faltando = window._cargosSemGestor(dados);
+        const bd = document.getElementById('badge-cargos-gestores');
+        if (bd) { bd.style.display = faltando.length ? 'inline-block' : 'none'; bd.textContent = faltando.length; }
+        if (faltando.length && !sessionStorage.getItem('aviso-cargos-sem-gestor')) {
+            sessionStorage.setItem('aviso-cargos-sem-gestor', '1');
+            mostrarAlerta('<b>Atenção RH:</b> existem ' + faltando.length + ' cargo(s) sem nenhum gestor responsável (ex.: <b>' + faltando[0].cargo + '</b> em ' + faltando[0].unidade + '). Os gestores não enxergam esses colaboradores até você marcar em <b>Engrenagem &gt; Cargos por Gestor</b>.', 'aviso');
+        }
+    } catch (e) { console.warn('Cargos por gestor:', e); }
+};
+setTimeout(() => window.verificarCargosSemGestor(), 6000);
+
+window.abrirModalCargosGestores = async function() {
+    document.getElementById('modal-cargos-gestores')?.remove();
+    let dados;
+    try { dados = await window._carregarDadosCargosGestores(); } catch (e) { return mostrarAlerta('Não consegui carregar os gestores: ' + e.message, 'erro'); }
+    const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    const faltando = window._cargosSemGestor(dados);
+    const gestoresOrd = dados.gestores.slice().sort((a, b) => String(a.unidade || '').localeCompare(String(b.unidade || '')) || String(a.nome).localeCompare(String(b.nome)));
+    let cards = '';
+    gestoresOrd.forEach(g => {
+        const unids = String(g.unidade || '').split(',').map(u => u.trim()).filter(Boolean);
+        if (!unids.length) return;
+        const cfg = (g.permissoes && g.permissoes.cargos_por_unidade) || {};
+        let blocos = '';
+        unids.forEach(u => {
+            const cargos = Object.values(dados.cargosPorUnidade[u] || {}).sort((a, b) => a.localeCompare(b));
+            const marcados = (Array.isArray(cfg[u]) ? cfg[u] : []).map(window._normCargoGestor);
+            const outros = dados.gestores.filter(x => x.id !== g.id && String(x.unidade || '').split(',').map(y => y.trim()).includes(u)).length;
+            blocos += '<div style="margin-top:12px;"><div style="font-size:0.8rem; font-weight:bold; color:var(--cor-texto-principal);"><i class="fa-solid fa-building"></i> ' + esc(u) + (outros ? ' <span style="color:var(--cor-texto-secundario); font-weight:normal;">— ' + outros + ' outro(s) gestor(es) nesta unidade</span>' : '') + '</div>'
+                + '<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">'
+                + (cargos.length ? cargos.map(c => '<label style="display:inline-flex; align-items:center; gap:6px; padding:5px 10px; border:1px solid var(--cor-borda); border-radius:20px; font-size:0.78rem; cursor:pointer; color:var(--cor-texto-principal);"><input type="checkbox" data-g="' + esc(g.id) + '" data-u="' + esc(u) + '" value="' + esc(c) + '" ' + (marcados.includes(window._normCargoGestor(c)) ? 'checked' : '') + ' style="width:auto; margin:0;"> ' + esc(c) + '</label>').join('') : '<span style="font-size:0.78rem; color:var(--cor-texto-secundario);">Nenhum colaborador ativo nesta unidade.</span>')
+                + '</div></div>';
+        });
+        cards += '<div style="border:1px solid var(--cor-borda); border-radius:12px; padding:14px 16px; margin-bottom:12px; background:rgba(127,127,127,0.05);">'
+            + '<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;"><strong style="color:var(--cor-texto-principal);"><i class="fa-solid fa-user-tie" style="color:#20c997;"></i> ' + esc(g.nome) + '</strong>'
+            + '<button type="button" class="btn-success" style="padding:7px 16px; font-size:0.8rem; border-radius:8px;" onclick="salvarCargosGestor(\'' + esc(g.id) + '\', this)"><i class="fa-solid fa-floppy-disk"></i> Salvar</button></div>' + blocos + '</div>';
+    });
+    const aviso = faltando.length ? '<div style="background:rgba(220,53,69,0.1); border:1px solid var(--cor-perigo); border-radius:10px; padding:12px 14px; margin-bottom:14px; font-size:0.85rem; color:var(--cor-texto-principal);"><b style="color:var(--cor-perigo);"><i class="fa-solid fa-triangle-exclamation"></i> Cargos sem gestor responsável:</b><br>' + faltando.map(f => esc(f.cargo) + ' <span style="color:var(--cor-texto-secundario);">(' + esc(f.unidade) + ')</span>').join('<br>') + '<br><span style="color:var(--cor-texto-secundario);">Marque esses cargos em algum gestor da unidade, senão nenhum gestor enxerga esses colaboradores.</span></div>' : '';
+    document.body.insertAdjacentHTML('beforeend', '<div id="modal-cargos-gestores" class="modal-arquivo-overlay" style="z-index:100030; display:flex; justify-content:center; align-items:center; padding:20px;"><div class="glass-card" style="width:100%; max-width:760px; max-height:90vh; overflow-y:auto; position:relative; border:1px solid #20c997;">'
+        + '<button onclick="document.getElementById(\'modal-cargos-gestores\').remove()" style="position:absolute; top:14px; right:16px; background:none; border:none; color:var(--cor-texto-principal); cursor:pointer; font-size:1.2rem;"><i class="fa-solid fa-xmark"></i></button>'
+        + '<h3 style="color:#20c997; margin-bottom:6px;"><i class="fa-solid fa-users-gear"></i> Cargos por Gestor</h3>'
+        + '<p style="font-size:0.85rem; color:var(--cor-texto-secundario); margin-bottom:14px; line-height:1.4;">Quando há mais de um gestor na mesma unidade, marque os cargos que cada um cuida. O bloqueio (contrato, ASO, avaliações) passa a olhar só esses cargos. <b>Gestor sem nenhum cargo marcado continua cuidando de todos</b>, como hoje.</p>'
+        + aviso + (cards || '<p style="color:var(--cor-texto-secundario);">Nenhum gestor encontrado.</p>') + '</div></div>');
+};
+
+window.salvarCargosGestor = async function(idGestor, btn) {
+    try {
+        if (btn) btn.disabled = true;
+        const cfg = {};
+        document.querySelectorAll('#modal-cargos-gestores input[type=checkbox][data-g="' + idGestor + '"]').forEach(i => {
+            if (!cfg[i.dataset.u]) cfg[i.dataset.u] = [];
+            if (i.checked) cfg[i.dataset.u].push(i.value);
+        });
+        Object.keys(cfg).forEach(u => { if (!cfg[u].length) delete cfg[u]; });
+        // lê o perfil de novo para não sobrescrever outras permissões do gestor
+        const { data: atual, error: e1 } = await supabaseClient.from('perfis').select('permissoes').eq('id', idGestor).single();
+        if (e1) throw e1;
+        const perm = Object.assign({}, atual.permissoes || {});
+        if (Object.keys(cfg).length) perm.cargos_por_unidade = cfg; else delete perm.cargos_por_unidade;
+        const { error: e2 } = await supabaseClient.from('perfis').update({ permissoes: perm }).eq('id', idGestor);
+        if (e2) throw e2;
+        mostrarAlerta('Cargos do gestor salvos!', 'sucesso');
+        await window.verificarCargosSemGestor();
+        window.abrirModalCargosGestores();
+    } catch (e) {
+        mostrarAlerta('Erro ao salvar: ' + e.message, 'erro');
+        if (btn) btn.disabled = false;
+    }
+};
+
 window.checarTravaContrato = async function(foiCliqueManual = false) {
     // 👇 Chave-mestra de segurança: dá pra desligar TUDO (Admissional + Prorrogação)
     // direto no código, sem depender do passe-livre. O dia-a-dia (ligar/desligar
@@ -104837,7 +104976,7 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     // assinatura há dias. Agora busca todo mundo da unidade e a exclusão de quem já saiu
     // de fato da empresa (Cancelado/Excluído/Desligado) é feita no filter abaixo.
     const [resColabs, resAusencias, resFerias] = await Promise.all([
-        supabaseClient.from('perfis').select('id, nome, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').in('unidade', unids),
+        supabaseClient.from('perfis').select('id, nome, unidade, dados_admissao, status, status_aprovacao').eq('perfil', 'Colaborador').in('unidade', unids),
         supabaseClient.from('ausencias').select('colaborador_id, data_inicio, data_fim').eq('status', 'Aprovado').neq('sigla', 'FA').lte('data_inicio', hojeIso).gte('data_fim', dataCarenciaIso),
         supabaseClient.from('solicitacoes_ferias').select('colaborador_id, data_inicio_ferias, data_fim_ferias').eq('status', 'Aprovado').lte('data_inicio_ferias', hojeIso).gte('data_fim_ferias', dataCarenciaIso)
     ]);
@@ -104867,6 +105006,7 @@ window.checarTravaContrato = async function(foiCliqueManual = false) {
     const listaAlertaCtr = []; // quem está causando o aviso roxo (nome + dias) — mostrado no banner
 
     (resColabs.data || []).forEach(c => {
+        if (!window.gestorCuidaDoColab(c)) return; // gestor com cargos marcados só responde pelos colaboradores desses cargos
         // 🩹 CORREÇÃO: antes só considerava quem estava com status EXATAMENTE 'Ativo' —
         // alguém "Aguardando ASO" (ou qualquer outro status intermediário de quem ainda
         // está na empresa) nunca era cobrado de Contrato de Trabalho, mesmo pendente há
@@ -105296,6 +105436,7 @@ window.checarTravaAsoAdmissional = async function(foiCliqueManual = false) {
     const pendentesBloqueio = []; // { nome, unidade, tipo: 'Admissional'|'Periódico', dias }
 
     (resColabs.data || []).forEach(c => {
+        if (!window.gestorCuidaDoColab(c)) return; // gestor com cargos marcados só responde pelos colaboradores desses cargos
         if (!['Ativo', 'Aguardando ASO'].includes(c.status)) return;
         if (c.status_aprovacao === 'Rescisão Pendente' || c.status_aprovacao === 'Aguardando Assinatura') return;
         if (window.asoColabAindaNaoAprovado(c)) return; // admissão ainda não aprovada não é cobrada
