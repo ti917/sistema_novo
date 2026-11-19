@@ -33216,15 +33216,25 @@ window.carregarMapaPontoEscala = async function(dadosArray, mesAno) {
                 if (tem) dias[x.colaborador_id][String(x.data).slice(0, 10)] = true;
             });
         }
-        window._escalaPontoMapa = { cfg: cfg, dias: dias };
+        // dia que já tem ausência (falta, atestado, licença; aprovada ou pendente) NÃO leva relógio — já está justificado
+        const just = {};
+        for (let i = 0; i < comPonto.length; i += 25) {
+            const r = await supabaseClient.from('ausencias').select('colaborador_id, sigla, data_inicio, data_fim').in('colaborador_id', comPonto.slice(i, i + 25)).in('status', ['Pendente', 'Aprovado']).lte('data_inicio', fim).gte('data_fim', ini);
+            (r.data || []).forEach(function(x) {
+                if (x.sigla === 'DECL') return; // declaração de horas não justifica o dia todo
+                just[x.colaborador_id] = just[x.colaborador_id] || [];
+                just[x.colaborador_id].push([String(x.data_inicio).slice(0, 10), String(x.data_fim).slice(0, 10)]);
+            });
+        }
+        window._escalaPontoMapa = { cfg: cfg, dias: dias, just: just };
     } catch (e) {
         console.warn('Mapa de ponto da escala:', e);
         window._escalaPontoMapa = { cfg: {}, dias: {} };
     }
 };
-window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2) {
+window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2, temOcorrenciaPonto) {
     try {
-        if (horario2 || (sigla !== 'D' && sigla !== 'N')) return false;
+        if (horario2 || temOcorrenciaPonto || (sigla !== 'D' && sigla !== 'N')) return false;
         const m = window._escalaPontoMapa;
         const inicio = m && m.cfg && m.cfg[idColab];
         if (!inicio || iso < inicio) return false;
@@ -33232,6 +33242,7 @@ window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2) {
         const limite = new Date(hoje + 'T12:00:00'); limite.setDate(limite.getDate() - (sigla === 'N' ? 2 : 1));
         const lim = limite.getFullYear() + '-' + String(limite.getMonth() + 1).padStart(2, '0') + '-' + String(limite.getDate()).padStart(2, '0');
         if (iso > lim) return false; // dia ainda não encerrado (D: até ontem; N: até anteontem)
+        if ((m.just && m.just[idColab] || []).some(function(r) { return iso >= r[0] && iso <= r[1]; })) return false;
         return !(m.dias[idColab] && m.dias[idColab][iso]);
     } catch (e) { return false; }
 };
@@ -33386,7 +33397,7 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
             const obsSegura = encodeURIComponent(obsFinal).replace(/'/g, "%27");
             const horaSegura = (diaData.horario || '').replace(/'/g, "\\'");
 
-            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}"${window._escalaDiaSemPonto(colab.id_colaborador, dataIsoParaModal, diaData.sigla, diaData.horario2) ? ' data-sem-ponto="1" title="Sem ponto batido neste dia — clique para ver"' : ''}>${diaData.sigla}</span>`);
+            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}"${window._escalaDiaSemPonto(colab.id_colaborador, dataIsoParaModal, diaData.sigla, diaData.horario2, diaData.statusOcoPonto) ? ' data-sem-ponto="1" title="Sem ponto batido neste dia — clique para ver"' : ''}>${diaData.sigla}</span>`);
             let horaClique = diaData.horario || '';
             if (diaData.horario2) {
                 // Jornada quebrada: duas pílulas na mesma célula (ex: D e N). Clicar em cada uma
@@ -99559,7 +99570,7 @@ window.ocoAbrirForm = function(sigla) {
         </div>
         <div style="display:flex;gap:10px;margin-top:14px;">
             <button type="button" class="btn-secondary" style="flex:1;" onclick="ocoMostrarMenu()"><i class="fa-solid fa-arrow-left"></i> Voltar</button>
-            <button type="button" id="oco-salvar" class="btn-success" style="flex:1;font-weight:bold;" onclick="ocoSalvar('${t.sigla}')"><i class="fa-solid fa-paper-plane"></i> Lançar e Enviar para Aprovação</button>
+            <button type="button" id="oco-salvar" class="btn-success" style="flex:1;font-weight:bold;" onclick="ocoSalvar('${t.sigla}')"><i class="fa-solid fa-paper-plane"></i> ${usuarioAtual.perfil === 'Admin' ? 'Lançar Ausência' : 'Lançar e Enviar para Aprovação'}</button>
         </div>`;
 };
 
@@ -99729,7 +99740,7 @@ window.ocoSalvar = async function(sigla) {
     }
 
     btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Enviando...';
-    const liberar = () => { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Lançar e Enviar para Aprovação'; };
+    const liberar = () => { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> ' + (usuarioAtual.perfil === 'Admin' ? 'Lançar Ausência' : 'Lançar e Enviar para Aprovação'); };
     try {
         const conflito = await window.checarConflitoGlobal(idColab, dataI, dataF, sigla === 'DECL');
         if (conflito) { liberar(); return mostrarAlerta(`<b>Ação Bloqueada!</b><br><br><b>${nome}</b> já possui <b>${conflito}</b> na escala nesse período.<br><br>Para prosseguir, exclua a ocorrência anterior.`, 'erro', '⛔ Conflito de Agendas'); }
@@ -99762,11 +99773,13 @@ window.ocoSalvar = async function(sigla) {
             const urls = await subirDocumentos(base, arq.files);
             urlAnexo = urls[0];
         }
-        const { data: nova, error } = await supabaseClient.from('ausencias').insert([{
+        // RH (Admin) lança direto, já aprovado — o gestor continua mandando para aprovação em Solicitações
+        const lancaDireto = usuarioAtual.perfil === 'Admin';
+        const { data: nova, error } = await supabaseClient.from('ausencias').insert([Object.assign({
             colaborador_id: idColab, nome, unidade: p?.unidade, sigla, motivo,
             data_inicio: dataI, data_fim: dataF, cid, observacao: obsFinal, documento: urlAnexo,
-            status: 'Pendente', criado_por: usuarioAtual.nome
-        }]).select('id').single();
+            status: lancaDireto ? 'Aprovado' : 'Pendente', criado_por: usuarioAtual.nome
+        }, lancaDireto ? { aprovado_por: usuarioAtual.nome } : {})]).select('id').single();
         if (error) throw error;
         if (cobObj) await window.inserirCoberturasDaAusencia(nova.id, [cobObj]);
         await supabaseClient.from('notificacoes').insert([{ colaborador_id: idColab, nome, unidade: p?.unidade, lida: false, tipo: 'Ausência_Admin', referencia_id: nova.id }]);
@@ -99784,8 +99797,11 @@ window.ocoSalvar = async function(sigla) {
                 if (typeof carregarJustificativasZap === 'function') carregarJustificativasZap(true);
             } catch (e) { console.warn('Não arquivou a justificativa vinculada:', e); }
         }
-        mostrarAlerta('Lançamento enviado para aprovação em Solicitações!', 'sucesso');
+        if (lancaDireto && typeof window.dispararEmailAusenciaAprovada === 'function') { try { await window.dispararEmailAusenciaAprovada(nova.id); } catch (eMail) { console.warn('E-mail da ausência:', eMail); } }
+        mostrarAlerta(lancaDireto ? 'Ausência lançada e aprovada!' : 'Lançamento enviado para aprovação em Solicitações!', 'sucesso');
         window.ocoFechar();
+        // se o lançamento veio do Controle de Ponto, atualiza o calendário
+        try { if (window.pontoCalendarioEstado && window.pontoCalendarioEstado.colaboradorId && typeof window.carregarCalendarioPontoWhatsapp === 'function' && document.getElementById('sub-aba-ponto-batimentos')) window.carregarCalendarioPontoWhatsapp(); } catch (eCal) {}
         document.getElementById('modal-sistema-overlay')?.classList.add('hidden');
         if (typeof atualizarContador === 'function') atualizarContador();
         if (!document.getElementById('tela-escala').classList.contains('hidden') && typeof processarEscala === 'function') processarEscala();
@@ -118821,17 +118837,33 @@ window.salvarAjusteDia = async function(idCartao) {
 // EXCEÇÃO E ABONO — registro separado no dia (não altera nenhuma batida).
 // Guardado em correcoes._abonos (jsonb), com motivo, autor, data e anexo.
 // =========================================================================
+// Ponto -> abre o MESMO lançamento de ocorrência da Escala/Ausências (FA, ATM...), pro dia do cartão
+window.abrirOcorrenciaDoPonto = async function(idCartao, sigla) {
+    const b = window.pontoCartoesPorId[idCartao]; if (!b) return;
+    ['modal-abono-dia', 'modal-detalhes-ponto-whatsapp', 'modal-ajuste-dia'].forEach(function(id) { const m = document.getElementById(id); if (m) m.remove(); });
+    await window.ocoAbrir(b.colaborador_id, b.nome_colaborador || '', b.data);
+    if (sigla) window.ocoAbrirForm(sigla);
+};
+
 window.abrirAbonoPontoDia = function(idCartao) {
     const b = window.pontoCartoesPorId[idCartao]; if (!b) return;
     const antigo = document.getElementById('modal-abono-dia'); if (antigo) antigo.remove();
     const dataFmt = new Date(b.data + 'T12:00:00').toLocaleDateString('pt-BR');
     const campo = 'width:100%; box-sizing:border-box; background:rgba(255,255,255,0.06); color:#fff; border:1px solid var(--cor-borda); border-radius:10px; color-scheme:dark; font-family:inherit; outline:none; height:42px; padding:0 12px; font-size:0.9rem;';
     const rot = function(t) { return '<label style="display:block; font-size:0.78rem; color:var(--cor-texto-secundario); margin:12px 0 5px;">' + t + '</label>'; };
-    const motivos = ['AJUSTE', 'ATESTADO MÉDICO', 'DECLARAÇÃO DE HORAS', 'FALTA JUSTIFICADA', 'COMPENSAÇÃO DE HORAS', 'OUTROS'];
+    const motivos = ['AJUSTE', 'DECLARAÇÃO DE HORAS', 'FALTA JUSTIFICADA', 'COMPENSAÇÃO DE HORAS', 'OUTROS'];
     const html = '<div id="modal-abono-dia" style="position:fixed; inset:0; background:rgba(0,10,20,0.8); z-index:106900; display:flex; align-items:flex-start; justify-content:center; padding:24px 16px; overflow:auto;">'
         + '<div class="glass-card" style="width:100%; max-width:640px; padding:24px; border:1px solid rgba(255,193,7,0.45);">'
         + '<h3 style="margin:0 0 2px; color:#fff;"><i class="fa-solid fa-file-circle-check" style="color:#ffc107;"></i> Exceção e abono</h3>'
         + '<p style="margin:0 0 6px; font-size:0.78rem; color:var(--cor-texto-secundario);">' + esc2(b.nome_colaborador || '') + ' · ' + dataFmt + ' — o abono é um registro à parte: as batidas não são alteradas.</p>'
+        + '<div style="margin:10px 0 4px; border:1px solid rgba(220,53,69,0.45); background:rgba(220,53,69,0.07); border-radius:12px; padding:12px 14px;">'
+        + '<div style="font-weight:700; font-size:0.84rem; color:#ff6b6b;"><i class="fa-solid fa-user-xmark"></i> Falta ou atestado neste dia?</div>'
+        + '<div style="font-size:0.76rem; color:var(--cor-texto-secundario); margin:4px 0 10px;">Lance como <b>ausência</b>: vira a sigla na Escala e entra em Ausências, igual ao lançamento normal (a Clara IA lê o atestado). O abono abaixo é só para ajuste, declaração e compensação.</div>'
+        + '<div style="display:flex; gap:8px; flex-wrap:wrap;">'
+        + '<button type="button" class="btn-secondary" style="height:36px; padding:0 14px; border-color:#dc3545; color:#ff6b6b;" onclick="window.abrirOcorrenciaDoPonto(\'' + idCartao + '\', \'FA\')"><i class="fa-solid fa-user-xmark"></i> Falta injustificada (FA)</button>'
+        + '<button type="button" class="btn-secondary" style="height:36px; padding:0 14px; border-color:#ff9800; color:#ff9800;" onclick="window.abrirOcorrenciaDoPonto(\'' + idCartao + '\', \'ATM\')"><i class="fa-solid fa-notes-medical"></i> Atestado médico (ATM)</button>'
+        + '<button type="button" class="btn-secondary" style="height:36px; padding:0 14px;" onclick="window.abrirOcorrenciaDoPonto(\'' + idCartao + '\', \'\')"><i class="fa-solid fa-list"></i> Outras ausências e licenças</button>'
+        + '</div></div>'
         + '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">'
         + '<div>' + rot('Período abonado') + '<select id="ab-periodo" style="' + campo + '" onchange="document.getElementById(\'ab-horas\').style.display = this.value === \'periodo\' ? \'grid\' : \'none\'"><option value="dia">Dia todo</option><option value="periodo">Informar período</option></select></div>'
         + '<div>' + rot('Motivo *') + '<select id="ab-motivo" style="' + campo + '" onchange="document.getElementById(\'ab-atestado\').style.display = this.value === \'ATESTADO MÉDICO\' ? \'block\' : \'none\'"><option value="">Selecione...</option>' + motivos.map(function(m) { return '<option value="' + m + '">' + m + '</option>'; }).join('') + '</select></div>'
@@ -118864,10 +118896,7 @@ window.abrirAbonoPontoDia = function(idCartao) {
                 + (au.documento ? ' · <a href="' + esc2(au.documento) + '" target="_blank" rel="noopener" style="color:#4fc3f7;">ver documento</a> (já fica anexado, não precisa enviar de novo)' : '')
                 + '</div>';
             const h3 = document.querySelector('#modal-abono-dia h3'); if (h3 && h3.nextElementSibling) h3.nextElementSibling.insertAdjacentHTML('afterend', ban);
-            if (medico) {
-                const sel = document.getElementById('ab-motivo'); sel.value = 'ATESTADO MÉDICO'; sel.onchange();
-                if (au.cid) document.getElementById('ab-cid').value = au.cid;
-            }
+            // (o atestado/falta já lançado em Ausências justifica o dia sozinho: não precisa de abono)
         } catch (_) {}
     })();
     function esc2(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
