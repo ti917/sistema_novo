@@ -3083,6 +3083,14 @@ html:not([data-theme="light"]) .tabela-escala.tabela-escala tbody tr.linha-desta
     background-color: rgba(255, 193, 7, 0.22) !important;
 }
 
+/* Relógio no lugar do D/N quando não há ponto batido (a letra continua no texto da célula, então o PDF oficial não muda) */
+.tabela-escala td span[class^="celula-"][data-sem-ponto="1"] { font-size: 0 !important; }
+.tabela-escala td span[class^="celula-"][data-sem-ponto="1"]::before {
+    content: "\f017"; font-family: "Font Awesome 6 Free", "Font Awesome 5 Free"; font-weight: 900; font-size: 0.72rem; color: #ff5252;
+}
+.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto="1"] { font-size: 0.65rem !important; }
+.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto="1"]::before { content: none !important; }
+
        /* ==========================================
    DESTAQUE DA LINHA DA ESCALA (CLIQUE NO NOME)
    ========================================== */
@@ -30224,6 +30232,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
             assinaturaEscalaAtual = escalaSalva.assinatura;
             window.nomeAssinaturaEscala = escalaSalva.assinado_por || 'Responsável não identificado';
             
+            await window.carregarMapaPontoEscala(escalaMesAtualGerada, mesAno);
             renderizarTabelaHTML(escalaMesAtualGerada, mesAno, true);
             grupoBotoes.classList.remove('hidden'); 
 
@@ -30476,6 +30485,7 @@ window.concluirRescisaoCartaPunho = async function(idColab) {
                 await supabaseClient.from('escalas_mensais').insert([{ mes_ano: mesAno, unidade: unidade, dados_escala: escalaMesAtualGerada, fechada: false }]);
             }
 
+            await window.carregarMapaPontoEscala(escalaMesAtualGerada, mesAno);
             renderizarTabelaHTML(escalaMesAtualGerada, mesAno, false);
             btnSalvar.innerHTML = '<i class="fa-solid fa-lock"></i> Trancar Escala Definitivamente';
             btnSalvar.disabled = false;
@@ -33177,6 +33187,55 @@ window.destacarLinhaEscala = function(celulaNome) {
 // =========================================================================
 // RENDERIZADOR DA TABELA HTML NA TELA (MÁGICA DOS ÍCONES COM FLEXBOX)
 // =========================================================================
+// 🕒 RELÓGIO NA ESCALA: pra quem já usa o ponto, o dia de trabalho (D/N) em que NÃO houve nenhuma batida
+// mostra um relógio no lugar da letra — só a partir da "data que começou a bater ponto" de cada pessoa,
+// só em dia que já passou (o noturno só depois que o turno virou o dia) e nunca em folga/férias/atestado.
+// Quem não usa o ponto continua exatamente igual. Se algo falhar aqui, a escala segue normal (sem relógio).
+window._escalaPontoMapa = { cfg: {}, dias: {} };
+window.carregarMapaPontoEscala = async function(dadosArray, mesAno) {
+    window._escalaPontoMapa = { cfg: {}, dias: {} };
+    try {
+        const ids = (dadosArray || []).map(function(c) { return c.id_colaborador; }).filter(Boolean);
+        if (!ids.length) return;
+        const ini = mesAno + '-01';
+        const p = mesAno.split('-');
+        const fim = mesAno + '-' + String(new Date(parseInt(p[0]), parseInt(p[1]), 0).getDate()).padStart(2, '0');
+        const cfg = {};
+        for (let i = 0; i < ids.length; i += 100) {
+            const r = await supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, habilitado, data_inicio_ponto').in('colaborador_id', ids.slice(i, i + 100));
+            (r.data || []).forEach(function(x) { if (x.habilitado === true && x.data_inicio_ponto) cfg[x.colaborador_id] = String(x.data_inicio_ponto).slice(0, 10); });
+        }
+        const comPonto = Object.keys(cfg);
+        const dias = {};
+        for (let i = 0; i < comPonto.length; i += 25) {
+            const r = await supabaseClient.from('pontos_diarios_whatsapp').select('colaborador_id, data, entrada_hora, ida_refeicao_hora, volta_refeicao_hora, saida_hora, batidas_extras, correcoes').in('colaborador_id', comPonto.slice(i, i + 25)).gte('data', ini).lte('data', fim);
+            (r.data || []).forEach(function(x) {
+                const tem = !!(x.entrada_hora || x.ida_refeicao_hora || x.volta_refeicao_hora || x.saida_hora
+                    || (Array.isArray(x.batidas_extras) && x.batidas_extras.length) || (x.correcoes && Object.keys(x.correcoes).length));
+                dias[x.colaborador_id] = dias[x.colaborador_id] || {};
+                if (tem) dias[x.colaborador_id][String(x.data).slice(0, 10)] = true;
+            });
+        }
+        window._escalaPontoMapa = { cfg: cfg, dias: dias };
+    } catch (e) {
+        console.warn('Mapa de ponto da escala:', e);
+        window._escalaPontoMapa = { cfg: {}, dias: {} };
+    }
+};
+window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2) {
+    try {
+        if (horario2 || (sigla !== 'D' && sigla !== 'N')) return false;
+        const m = window._escalaPontoMapa;
+        const inicio = m && m.cfg && m.cfg[idColab];
+        if (!inicio || iso < inicio) return false;
+        const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+        const limite = new Date(hoje + 'T12:00:00'); limite.setDate(limite.getDate() - (sigla === 'N' ? 2 : 1));
+        const lim = limite.getFullYear() + '-' + String(limite.getMonth() + 1).padStart(2, '0') + '-' + String(limite.getDate()).padStart(2, '0');
+        if (iso > lim) return false; // dia ainda não encerrado (D: até ontem; N: até anteontem)
+        return !(m.dias[idColab] && m.dias[idColab][iso]);
+    } catch (e) { return false; }
+};
+
 window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
     const containerTabela = document.getElementById('container-tabela-escala');
     const partes = mesAnoStr.split('-');
@@ -33327,7 +33386,7 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
             const obsSegura = encodeURIComponent(obsFinal).replace(/'/g, "%27");
             const horaSegura = (diaData.horario || '').replace(/'/g, "\\'");
 
-            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}">${diaData.sigla}</span>`);
+            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}"${window._escalaDiaSemPonto(colab.id_colaborador, dataIsoParaModal, diaData.sigla, diaData.horario2) ? ' data-sem-ponto="1" title="Sem ponto batido neste dia — clique para ver"' : ''}>${diaData.sigla}</span>`);
             let horaClique = diaData.horario || '';
             if (diaData.horario2) {
                 // Jornada quebrada: duas pílulas na mesma célula (ex: D e N). Clicar em cada uma
@@ -33773,6 +33832,7 @@ window.exportarEscalaPDFVetorial = async function(ctx) {
 window.exportarPDF = function() {
     const tabelaDOM = document.querySelector('.tabela-escala');
     if (!tabelaDOM) return mostrarAlerta("Nenhuma escala gerada para exportar!", "aviso");
+    tabelaDOM.classList.add('esc-pdf-sem-relogio'); setTimeout(function() { tabelaDOM.classList.remove('esc-pdf-sem-relogio'); }, 25000); // o PDF oficial sempre mostra D/N, nunca o relógio
     
     const mesAno = document.getElementById('filtro-mes-escala').value;
     const unidade = document.getElementById('filtro-unidade-escala').value;
