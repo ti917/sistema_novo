@@ -3084,18 +3084,23 @@ html:not([data-theme="light"]) .tabela-escala.tabela-escala tbody tr.linha-desta
 }
 
 /* Relógio no lugar do D/N quando não há ponto batido (a letra continua no texto da célula, então o PDF oficial não muda) */
-.tabela-escala td span[class^="celula-"][data-sem-ponto="1"] { font-size: 0 !important; }
-.tabela-escala td span[class^="celula-"][data-sem-ponto="1"]::before {
+.tabela-escala td span[class^="celula-"][data-sem-ponto] { font-size: 0 !important; }
+.tabela-escala td span[class^="celula-"][data-sem-ponto]::before {
     content: "\f017"; font-family: "Font Awesome 6 Free", "Font Awesome 5 Free"; font-weight: 400; font-size: 0.78rem; color: #9fb3c8;
 }
+/* Ponto incompleto: mesma pílula com uma barrinha embaixo, preenchida na proporção das batidas feitas */
+.tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto] { position: relative; overflow: hidden; }
+.tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto="p"]::after {
+    content: ""; position: absolute; left: 0; bottom: 0; height: 3px; width: var(--p, 50%); background: #ffb300; border-radius: 0 2px 2px 0;
+}
 /* Pílula neutra (cinza-azulado, borda tracejada): sinaliza "sem ponto" sem parecer alarme */
-.tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto="1"] {
+.tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto] {
     background: rgba(144,164,174,0.10) !important; border: 1px dashed rgba(159,179,200,0.65) !important; box-shadow: none !important;
 }
-html[data-theme="light"] .tabela-escala td span[class^="celula-"][data-sem-ponto="1"]::before { color: #546e7a; }
-html[data-theme="light"] .tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto="1"] { background: rgba(84,110,122,0.08) !important; border-color: rgba(84,110,122,0.6) !important; }
-.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto="1"] { font-size: 0.65rem !important; }
-.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto="1"]::before { content: none !important; }
+html[data-theme="light"] .tabela-escala td span[class^="celula-"][data-sem-ponto]::before { color: #546e7a; }
+html[data-theme="light"] .tabela-escala:not(.esc-pdf-sem-relogio) td span[class^="celula-"][data-sem-ponto] { background: rgba(84,110,122,0.08) !important; border-color: rgba(84,110,122,0.6) !important; }
+.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto] { font-size: 0.65rem !important; }
+.tabela-escala.esc-pdf-sem-relogio td span[class^="celula-"][data-sem-ponto]::before { content: none !important; }
 
        /* ==========================================
    DESTAQUE DA LINHA DA ESCALA (CLIQUE NO NOME)
@@ -33213,13 +33218,33 @@ window.carregarMapaPontoEscala = async function(dadosArray, mesAno) {
         }
         const comPonto = Object.keys(cfg);
         const dias = {};
+        // batidas esperadas por pessoa: 4 (entrada, ida, volta, saída) se a jornada tem refeição; senão 2
+        const esperadas = {};
+        for (let i = 0; i < comPonto.length; i += 25) {
+            try {
+                const rc = await supabaseClient.from('colaboradores').select('id, dados_admissao').in('id', comPonto.slice(i, i + 25));
+                (rc.data || []).forEach(function(c) {
+                    const j = c.dados_admissao && c.dados_admissao.jornada;
+                    esperadas[c.id] = (j && j.refeicao && j.refeicao.inicio && j.refeicao.fim) ? 4 : 2;
+                });
+            } catch (eJ) {}
+        }
         for (let i = 0; i < comPonto.length; i += 25) {
             const r = await supabaseClient.from('pontos_diarios_whatsapp').select('colaborador_id, data, entrada_hora, ida_refeicao_hora, volta_refeicao_hora, saida_hora, batidas_extras, correcoes').in('colaborador_id', comPonto.slice(i, i + 25)).gte('data', ini).lte('data', fim);
             (r.data || []).forEach(function(x) {
-                const tem = !!(x.entrada_hora || x.ida_refeicao_hora || x.volta_refeicao_hora || x.saida_hora
-                    || (Array.isArray(x.batidas_extras) && x.batidas_extras.length) || (x.correcoes && Object.keys(x.correcoes).length));
+                const esp = esperadas[x.colaborador_id] || 4;
+                const ab = x.correcoes && x.correcoes._abonos;
+                const temAbono = !!(ab && (Array.isArray(ab) ? ab.length : Object.keys(ab).length));
+                let n = 0;
+                ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'].forEach(function(k) {
+                    let v = x[k + '_hora'];
+                    try { if (typeof window.pontoHoraEfetiva === 'function') v = window.pontoHoraEfetiva(x, k); } catch (eH) {}
+                    if (v) n++;
+                });
+                if (esp === 2 && n > 2) n = 2;
+                if (temAbono) n = esp; // dia abonado pelo RH (ajuste/declaração/compensação) não leva relógio
                 dias[x.colaborador_id] = dias[x.colaborador_id] || {};
-                if (tem) dias[x.colaborador_id][String(x.data).slice(0, 10)] = true;
+                dias[x.colaborador_id][String(x.data).slice(0, 10)] = { n: n, esp: esp };
             });
         }
         // dia que já tem ausência (falta, atestado, licença; aprovada ou pendente) NÃO leva relógio — já está justificado
@@ -33240,7 +33265,8 @@ window.carregarMapaPontoEscala = async function(dadosArray, mesAno) {
 };
 window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2, temOcorrenciaPonto) {
     try {
-        if (horario2 || temOcorrenciaPonto || (sigla !== 'D' && sigla !== 'N')) return false;
+        // (ocorrência de ponto/justificativa do colaborador NÃO tira o relógio: só falta, atestado ou abono do RH justificam o dia)
+        if (horario2 || (sigla !== 'D' && sigla !== 'N')) return false;
         const m = window._escalaPontoMapa;
         const inicio = m && m.cfg && m.cfg[idColab];
         if (!inicio || iso < inicio) return false;
@@ -33249,7 +33275,10 @@ window._escalaDiaSemPonto = function(idColab, iso, sigla, horario2, temOcorrenci
         const lim = limite.getFullYear() + '-' + String(limite.getMonth() + 1).padStart(2, '0') + '-' + String(limite.getDate()).padStart(2, '0');
         if (iso > lim) return false; // dia ainda não encerrado (D: até ontem; N: até anteontem)
         if ((m.just && m.just[idColab] || []).some(function(r) { return iso >= r[0] && iso <= r[1]; })) return false;
-        return !(m.dias[idColab] && m.dias[idColab][iso]);
+        const d = m.dias[idColab] && m.dias[idColab][iso];
+        if (!d || d.n === 0) return { n: 0, esp: (d && d.esp) || 4 };
+        if (d.n >= d.esp) return false;
+        return d; // ponto incompleto: n de esp batidas
     } catch (e) { return false; }
 };
 
@@ -33403,7 +33432,7 @@ window.renderizarTabelaHTML = function(dadosArray, mesAnoStr, isFechada) {
             const obsSegura = encodeURIComponent(obsFinal).replace(/'/g, "%27");
             const horaSegura = (diaData.horario || '').replace(/'/g, "\\'");
 
-            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : `<span class="${diaData.cssClass}"${window._escalaDiaSemPonto(colab.id_colaborador, dataIsoParaModal, diaData.sigla, diaData.horario2, diaData.statusOcoPonto) ? ' data-sem-ponto="1" title="Sem ponto batido neste dia — clique para ver"' : ''}>${diaData.sigla}</span>`);
+            let visualPilula = diaData.sigla === '-' ? '-' : (diaData.sigla === '' ? '' : (function() { const _sp = window._escalaDiaSemPonto(colab.id_colaborador, dataIsoParaModal, diaData.sigla, diaData.horario2, diaData.statusOcoPonto); const _at = !_sp ? '' : (_sp.n === 0 ? ' data-sem-ponto="1" title="Sem ponto batido neste dia — clique para ver"' : ' data-sem-ponto="p" style="--p:' + Math.round(_sp.n / _sp.esp * 100) + '%" title="Ponto incompleto: ' + _sp.n + ' de ' + _sp.esp + ' batidas — clique para ver"'); return `<span class="${diaData.cssClass}"${_at}>${diaData.sigla}</span>`; })());
             let horaClique = diaData.horario || '';
             if (diaData.horario2) {
                 // Jornada quebrada: duas pílulas na mesma célula (ex: D e N). Clicar em cada uma
