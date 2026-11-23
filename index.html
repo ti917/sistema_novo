@@ -121084,6 +121084,65 @@ window.abrirDetalhesEscalaPontoDia = function(dataStr) {
 // seguinte ao fim de cada fechamento do Banco de Horas (banco_horas_fechamentos) da unidade.
 // Abono "dia todo" ou ausência justificada não gera débito. Só leitura: não grava nada.
 // =========================================================================
+// =========================================================================
+// TOLERÂNCIA DO PONTO (config_tolerancia_ponto) — mesma ideia do Ponto Mais:
+//  • "Por registro": cada batida (entrada, ida e volta da refeição, saída) que difere do horário PREVISTO em
+//    até N minutos conta como no horário. Passou de N: conta o tempo real inteiro.
+//  • "Acumulada": soma os desvios do dia; se o total fica dentro de N, nada é cobrado nem creditado.
+//  • "Aplicar pro intervalo" decide se ida/volta da refeição entram nessa conta.
+// Devolve os minutos a SOMAR no tempo trabalhado do dia (positivo ou negativo). Sem configuração = 0.
+// =========================================================================
+window.pontoTolCache = { em: 0, linhas: [] };
+window.pontoCarregarTolerancias = async function() {
+    try {
+        if (Date.now() - window.pontoTolCache.em < 60000) return;
+        const r = await supabaseClient.from('config_tolerancia_ponto').select('*');
+        window.pontoTolCache = { em: Date.now(), linhas: (r && r.data) || [] };
+    } catch (e) { console.warn('Tolerância do ponto indisponível:', e); }
+};
+window.pontoToleranciaDaUnidade = function(unidade) {
+    const linhas = window.pontoTolCache.linhas || [];
+    const norm = function(t) { return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase(); };
+    const un = norm(unidade), primeira = norm(String(unidade || '').split(',')[0]);
+    const achou = linhas.find(function(l) { return norm(l.unidade) === un; })
+        || linhas.find(function(l) { return norm(l.unidade) === primeira; })
+        || linhas.find(function(l) { return norm(l.unidade) === 'TODAS'; });
+    if (!achou || !(achou.tolerancia_minutos > 0)) return null;
+    return { min: achou.tolerancia_minutos, tipo: achou.tipo_tolerancia || 'por_registro', aplicarIntervalo: achou.aplicar_intervalo !== false };
+};
+window.pontoCorrecaoTolerancia = function(cfg, horarioTxt, refeicao, ent1, sai1, ent2, sai2) {
+    try {
+        if (!cfg || !ent1 || !sai2) return 0;
+        const m = String(horarioTxt || '').match(/(\d{2}):(\d{2})\s*às\s*(\d{2}):(\d{2})/);
+        if (!m) return 0;
+        const S1 = +m[1] * 60 + +m[2], S2 = +m[3] * 60 + +m[4];
+        const mDia = function(iso) {
+            const t = new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Sao_Paulo' }).split(':').map(Number);
+            return (t[0] % 24) * 60 + t[1];
+        };
+        const dif = function(a, b) { return (((a - b + 720) % 1440) + 1440) % 1440 - 720; };
+        const minEntre = function(a, b) { return Math.max(0, (new Date(b) - new Date(a)) / 60000); };
+        const regs = []; // { dev, efeito } — efeito = quanto esse desvio mexe no tempo trabalhado
+        const eD = dif(mDia(ent1), S1); regs.push({ dev: eD, efeito: -eD });
+        const sD = dif(mDia(sai2), S2); regs.push({ dev: sD, efeito: sD });
+        if (cfg.aplicarIntervalo && sai1 && ent2) {
+            if (refeicao && refeicao.inicio && refeicao.fim) {
+                const a = refeicao.inicio.split(':').map(Number), b = refeicao.fim.split(':').map(Number);
+                const iD = dif(mDia(sai1), a[0] * 60 + a[1]); regs.push({ dev: iD, efeito: iD });
+                const vD = dif(mDia(ent2), b[0] * 60 + b[1]); regs.push({ dev: vD, efeito: -vD });
+            } else {
+                const bD = minEntre(sai1, ent2) - 60; regs.push({ dev: bD, efeito: -bD });
+            }
+        }
+        const N = cfg.min;
+        if (cfg.tipo === 'acumulada') {
+            const soma = regs.reduce(function(t, r) { return t + Math.abs(r.dev); }, 0);
+            return soma <= N ? -regs.reduce(function(t, r) { return t + r.efeito; }, 0) : 0;
+        }
+        return -regs.reduce(function(t, r) { return t + (Math.abs(r.dev) <= N ? r.efeito : 0); }, 0);
+    } catch (e) { return 0; }
+};
+
 window.fmtSaldoPonto = function(min) {
     min = Math.round(min || 0);
     const a = Math.abs(min);
@@ -121102,6 +121161,8 @@ window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
             supabaseClient.from('config_ponto_whatsapp').select('data_inicio_ponto, habilitado').eq('colaborador_id', colabId).maybeSingle(),
             supabaseClient.from('banco_horas_fechamentos').select('numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado').order('periodo_fim')
         ]);
+        await window.pontoCarregarTolerancias();
+        const tolCfg = window.pontoToleranciaDaUnidade(unidade);
         const jornadaRaiz = (perfil && perfil.dados_admissao && perfil.dados_admissao.jornada) || null;
         if (!jornadaRaiz) return res;
         const dataInicioPonto = rCfg && rCfg.data ? rCfg.data.data_inicio_ponto : null;
@@ -121141,17 +121202,17 @@ window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
             let credito = 0, debito = 0, contar = ds <= hojeStr;
             if (contar) {
                 const jor = window.obterJornadaVigenteNaData(jornadaRaiz, ds) || {};
-                let target = 0, folga = false;
+                let target = 0, folga = false, horarioDiaTxt = null;
                 if (jor.tipo === '12x36') {
                     if (jor.data_inicio) {
                         const diff = Math.round((new Date(ds + 'T00:00:00') - new Date(jor.data_inicio + 'T00:00:00')) / 86400000);
                         const primeiroTrab = (jor.status_inicio || 'Trabalho') === 'Trabalho';
                         const trabalha = (diff % 2 === 0) ? primeiroTrab : !primeiroTrab;
-                        if (trabalha && jor.horario) target = parseHorario(jor.horario); else folga = true;
+                        if (trabalha && jor.horario) { target = parseHorario(jor.horario); horarioDiaTxt = jor.horario; } else folga = true;
                     }
                 } else if (jor.escala && jor.escala[nomesDia[cursor.getDay()]]) {
                     const c = jor.escala[nomesDia[cursor.getDay()]];
-                    if (c.status === 'Folga') folga = true; else target = parseHorario(c.horario);
+                    if (c.status === 'Folga') folga = true; else { target = parseHorario(c.horario); horarioDiaTxt = c.horario; }
                 }
                 if (!folga && target > 0) {
                     let ref = 60;
@@ -121168,6 +121229,7 @@ window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
                 if (ent1 && sai2) trab = Math.max(0, minEntre(ent1, sai2) - minEntre(sai1, ent2));
                 else if (ent1 && sai1 && !ent2 && !sai2) trab = minEntre(ent1, sai1);
                 if (p) trab += window.pontoMinutosExtras(p);
+                if (p && tolCfg && !folga) trab = Math.max(0, trab + window.pontoCorrecaoTolerancia(tolCfg, horarioDiaTxt, jor.refeicao, ent1, sai1, ent2, sai2));
                 const aus = auss.find(function(a) { return ds >= a.data_inicio && ds <= (a.data_fim || a.data_inicio); });
                 let justificado = !!aus && String(aus.sigla || '').toUpperCase() !== 'FA';
                 // abonos lançados no dia
@@ -122769,6 +122831,7 @@ window.gerarRelatorioAdmin = async function() {
                 supabaseClient.from('config_banco_horas').select('unidade, dias_validade, data_inicio_ciclo, usa_banco')
             ]);
 
+            await window.pontoCarregarTolerancias();
             const pontosPorChave = {};
             (rPontos.data || []).forEach(p => { pontosPorChave[p.colaborador_id + '_' + p.data] = p; });
             const ausenciasPorColab = {};
@@ -122884,7 +122947,7 @@ window.gerarRelatorioAdmin = async function() {
                         }
                     }
 
-                    let targetMin = 0, ehFolgaEscala = false;
+                    let targetMin = 0, ehFolgaEscala = false, horarioDiaTxt = null;
                     if (jaDesligado) ehFolgaEscala = true;
                     else
                     if (jor.tipo === '12x36') {
@@ -122892,13 +122955,13 @@ window.gerarRelatorioAdmin = async function() {
                             const diffDias = Math.round((diaObj - new Date(jor.data_inicio + 'T00:00:00')) / 86400000);
                             const primeiroEhTrabalho = (jor.status_inicio || 'Trabalho') === 'Trabalho';
                             const trabalha = (diffDias % 2 === 0) ? primeiroEhTrabalho : !primeiroEhTrabalho;
-                            if (trabalha && jor.horario) targetMin = parseHorario(jor.horario);
+                            if (trabalha && jor.horario) { targetMin = parseHorario(jor.horario); horarioDiaTxt = jor.horario; }
                             else ehFolgaEscala = true;
                         }
                     } else if (jor.escala && jor.escala[diaSemanaNome]) {
                         const cfgDia = jor.escala[diaSemanaNome];
                         if (cfgDia.status === 'Folga') ehFolgaEscala = true;
-                        else targetMin = parseHorario(cfgDia.horario);
+                        else { targetMin = parseHorario(cfgDia.horario); horarioDiaTxt = cfgDia.horario; }
                     }
 
                     // O horário da jornada (ex: "08:00 às 18:00") é o período de presença inteiro,
@@ -122949,6 +123012,7 @@ window.gerarRelatorioAdmin = async function() {
                     if (ent1 && sai2) { minTrabalhados = Math.max(0, minutosEntre(ent1, sai2) - minIntervalo); }
                     else if (ent1 && sai1 && !ent2 && !sai2) { minTrabalhados = minutosEntre(ent1, sai1); }
                     if (p) minTrabalhados += window.pontoMinutosExtras(p);
+                    if (p && !ehFolgaEscala) minTrabalhados = Math.max(0, minTrabalhados + window.pontoCorrecaoTolerancia(window.pontoToleranciaDaUnidade(colab.unidade), horarioDiaTxt, jor.refeicao, ent1, sai1, ent2, sai2));
 
                     const minNoturno = somaMinutosNoturnos(ent1, sai1) + somaMinutosNoturnos(ent2, sai2);
 
