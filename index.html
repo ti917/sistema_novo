@@ -10669,6 +10669,7 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
             <button class="btn-secondary" onclick="abrirAjuda('gestao_unidades')" style="padding: 6px 12px; font-size: 0.8rem; border-radius: 20px; border-color: rgba(255,193,7,0.5); color: #ffc107; transition: 0.2s;" onmouseover="this.style.color='#000'; this.style.backgroundColor='#ffc107'" onmouseout="this.style.color='#ffc107'; this.style.backgroundColor='transparent'">
                 <i class="fa-solid fa-circle-question"></i> Como funciona?
             </button>
+            <button class="btn-secondary" style="padding: 8px 15px; border-radius: 8px; font-weight: bold; border-color: rgba(139,92,246,0.6); color: #a78bfa;" onclick="abrirFeriadosUnidade()"><i class="fa-solid fa-champagne-glasses"></i> Feriados</button>
             <button class="btn-success" style="background-color: #ffc107; color: #000; border: none; font-weight: bold; padding: 8px 15px; border-radius: 8px;" onclick="document.getElementById('modal-nova-unidade').classList.remove('hidden')">
                 <i class="fa-solid fa-plus"></i> Nova Unidade
             </button>
@@ -30779,6 +30780,8 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
     let novaEscala = [];
 
     colaboradores.forEach(colab => {
+        // nacionais + estaduais/municipais/da unidade deste colaborador
+        const feriadosDoColab = Object.assign({}, feriadosNacionais, window.feriadosUnidadeDoAno(colab.unidade, ano));
         const adm = colab.dados_admissao || {}; 
         const jor = adm.jornada || {};
         
@@ -30932,7 +30935,7 @@ function algoritmoGeradorDeEscala(colaboradores, mesAno, listaAusencias, unidade
             let temHPlus = false; let temHMinus = false; let obsHPlus = ''; let siglaTag = '';
             let temDecl = false; let obsDecl = ''; let nomeFeriadoParaModal = '';
 
-            const nomeFeriadoDoDia = feriadosNacionais[dataIsoStr]; 
+            const nomeFeriadoDoDia = feriadosDoColab[dataIsoStr]; 
             let statusOcorrenciaPonto = null; let docRhPonto = null; let docColabPonto = null; let justificativaPonto = null;
 
             let ocoPlantaoAtual = null;
@@ -81728,6 +81731,110 @@ document.getElementById('form-adv-admin')?.addEventListener('submit', async (e) 
         // ==========================================
 // CALCULADORA DE FERIADOS NACIONAIS
 // ==========================================
+
+// ===== FERIADOS POR ESTADO / CIDADE / UNIDADE =====
+window._feriadosUnidadeLista = [];
+window._unidadesEnderecoMapa = {};
+window._feriadosUnidadeCarregadoEm = 0;
+window._semAcentoFer = function(t) { return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim(); };
+window.cidadeUfDoEndereco = function(end) {
+    // endereço no padrão "..., Americana/SP - CEP: ..." -> { cidade:'AMERICANA', uf:'SP' }
+    const m = String(end || '').match(/([A-Za-zÀ-ÿ'. ]+?)\s*\/\s*([A-Za-z]{2})\b(?!.*\/\s*[A-Za-z]{2}\b)/);
+    if (!m) return { cidade: '', uf: '' };
+    return { cidade: window._semAcentoFer(m[1].split(',').pop()), uf: m[2].toUpperCase() };
+};
+window.carregarFeriadosUnidade = async function() {
+    try {
+        const [rf, ru] = await Promise.all([
+            supabaseClient.from('feriados_unidade').select('*'),
+            supabaseClient.from('unidades_oficiais').select('nome, endereco')
+        ]);
+        if (!rf.error) window._feriadosUnidadeLista = rf.data || [];
+        const mapa = {};
+        (ru.data || []).forEach(function(u) { mapa[u.nome] = window.cidadeUfDoEndereco(u.endereco); });
+        window._unidadesEnderecoMapa = mapa;
+        window._feriadosUnidadeCarregadoEm = Date.now();
+    } catch (e) { console.warn('Feriados por unidade indisponíveis:', e); }
+};
+// Feriados (estaduais/municipais/da unidade) que valem para uma unidade num ano -> { 'AAAA-MM-DD': nome }
+window.feriadosUnidadeDoAno = function(unidade, ano) {
+    if (Date.now() - window._feriadosUnidadeCarregadoEm > 120000) { window._feriadosUnidadeCarregadoEm = Date.now(); window.carregarFeriadosUnidade(); }
+    const out = {};
+    const end = window._unidadesEnderecoMapa[unidade] || { cidade: '', uf: '' };
+    (window._feriadosUnidadeLista || []).forEach(function(f) {
+        let vale = false;
+        if (f.escopo === 'estadual') vale = !!end.uf && String(f.uf || '').toUpperCase() === end.uf;
+        else if (f.escopo === 'municipal') vale = !!end.uf && String(f.uf || '').toUpperCase() === end.uf && window._semAcentoFer(f.cidade) === end.cidade;
+        else if (f.escopo === 'unidade') vale = f.unidade === unidade;
+        if (!vale) return;
+        const d = String(f.data || '').slice(0, 10); if (d.length < 10) return;
+        if (f.recorrente) out[ano + d.slice(4)] = f.nome;
+        else if (d.slice(0, 4) === String(ano)) out[d] = f.nome;
+    });
+    return out;
+};
+// Nacional + local, juntos
+window.feriadosDaUnidadeNoAno = function(unidade, ano) {
+    return Object.assign({}, window.obterFeriadosNacionais(ano), window.feriadosUnidadeDoAno(unidade, ano));
+};
+window.abrirFeriadosUnidade = async function() {
+    await window.carregarFeriadosUnidade();
+    let m = document.getElementById('modal-feriados-unidade');
+    if (!m) { m = document.createElement('div'); m.id = 'modal-feriados-unidade'; m.className = 'modal-overlay'; document.body.appendChild(m); }
+    const ufs = [...new Set(Object.values(window._unidadesEnderecoMapa).map(x => x.uf).filter(Boolean))].sort();
+    const unids = Object.keys(window._unidadesEnderecoMapa).sort();
+    const linhas = (window._feriadosUnidadeLista || []).slice().sort((a, b) => String(a.data).slice(5).localeCompare(String(b.data).slice(5))).map(function(f) {
+        const d = String(f.data).slice(0, 10).split('-');
+        const alvo = f.escopo === 'estadual' ? ('Estado ' + f.uf) : f.escopo === 'municipal' ? (f.cidade + '/' + f.uf) : f.unidade;
+        return `<tr><td>${d[2]}/${d[1]}${f.recorrente ? ' <small style="opacity:.6">(todo ano)</small>' : '/' + d[0]}</td><td>${f.nome}</td><td>${alvo}</td><td><button class="btn-danger" style="padding:3px 9px;" onclick="excluirFeriadoUnidade('${f.id}')"><i class="fa-solid fa-trash"></i></button></td></tr>`;
+    }).join('') || '<tr><td colspan="4" style="text-align:center; opacity:.7; padding:15px;">Nenhum feriado local cadastrado ainda.</td></tr>';
+    m.innerHTML = `<div class="modal-content" style="max-width:760px; width:94%; max-height:90vh; overflow:auto;">
+        <h3 style="color:#a78bfa; margin-top:0;"><i class="fa-solid fa-champagne-glasses"></i> Feriados por Estado / Cidade / Unidade</h3>
+        <p style="font-size:.85rem; opacity:.8;">Os feriados nacionais já são automáticos. Aqui você cadastra os <b>estaduais</b>, <b>municipais</b> ou de <b>uma unidade</b>. Cidade e UF vêm do endereço de cada unidade. Nesses dias a Escala mostra FRD e o Controle de Ponto não desconta o dia (exceto 12x36, que segue a escala).</p>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:10px;">
+            <div><label>Data</label><input type="date" id="fer-un-data" style="width:100%;"></div>
+            <div><label>Nome do feriado</label><input type="text" id="fer-un-nome" placeholder="Ex: Aniversário de Americana" style="width:100%;"></div>
+            <div><label>Vale para</label><select id="fer-un-escopo" onchange="window._ferUnEscopoMudou()" style="width:100%;"><option value="municipal">Uma cidade</option><option value="estadual">Um estado inteiro</option><option value="unidade">Uma unidade específica</option></select></div>
+            <div id="fer-un-box-uf"><label>UF</label><select id="fer-un-uf" style="width:100%;">${ufs.map(u => `<option>${u}</option>`).join('')}</select></div>
+            <div id="fer-un-box-cidade"><label>Cidade</label><input type="text" id="fer-un-cidade" placeholder="Ex: Americana" style="width:100%;"></div>
+            <div id="fer-un-box-unidade" class="hidden"><label>Unidade</label><select id="fer-un-unidade" style="width:100%;">${unids.map(u => `<option>${u}</option>`).join('')}</select></div>
+        </div>
+        <label style="display:flex; gap:8px; align-items:center; margin-bottom:12px;"><input type="checkbox" id="fer-un-rec" checked> Repete todos os anos (marque para feriados fixos)</label>
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-bottom:15px;"><button class="btn-success" onclick="salvarFeriadoUnidade()"><i class="fa-solid fa-plus"></i> Adicionar feriado</button></div>
+        <table style="width:100%; font-size:.85rem;"><thead><tr><th style="text-align:left">Data</th><th style="text-align:left">Feriado</th><th style="text-align:left">Vale para</th><th></th></tr></thead><tbody>${linhas}</tbody></table>
+        <div style="text-align:right; margin-top:15px;"><button class="btn-secondary" onclick="document.getElementById('modal-feriados-unidade').classList.add('hidden')">Fechar</button></div>
+    </div>`;
+    m.classList.remove('hidden');
+    window._ferUnEscopoMudou();
+};
+window._ferUnEscopoMudou = function() {
+    const e = document.getElementById('fer-un-escopo').value;
+    document.getElementById('fer-un-box-uf').classList.toggle('hidden', e === 'unidade');
+    document.getElementById('fer-un-box-cidade').classList.toggle('hidden', e !== 'municipal');
+    document.getElementById('fer-un-box-unidade').classList.toggle('hidden', e !== 'unidade');
+};
+window.salvarFeriadoUnidade = async function() {
+    const escopo = document.getElementById('fer-un-escopo').value;
+    const data = document.getElementById('fer-un-data').value;
+    const nome = document.getElementById('fer-un-nome').value.trim();
+    if (!data || !nome) { mostrarAlerta('Informe a data e o nome do feriado.', 'aviso'); return; }
+    const reg = { data: data, nome: nome, escopo: escopo, recorrente: document.getElementById('fer-un-rec').checked, criado_por: (usuarioAtual && usuarioAtual.nome) || null };
+    if (escopo !== 'unidade') reg.uf = document.getElementById('fer-un-uf').value;
+    if (escopo === 'municipal') { reg.cidade = document.getElementById('fer-un-cidade').value.trim(); if (!reg.cidade) { mostrarAlerta('Informe a cidade.', 'aviso'); return; } }
+    if (escopo === 'unidade') reg.unidade = document.getElementById('fer-un-unidade').value;
+    const { error } = await supabaseClient.from('feriados_unidade').insert([reg]);
+    if (error) { mostrarAlerta('Não consegui salvar. Rode primeiro o SQL feriados_unidade.sql no Supabase. (' + error.message + ')', 'erro'); return; }
+    mostrarAlerta('Feriado cadastrado.', 'sucesso');
+    window.abrirFeriadosUnidade();
+};
+window.excluirFeriadoUnidade = async function(id) {
+    if (!confirm('Remover este feriado? Os dias voltam a ser cobrados normalmente.')) return;
+    const { error } = await supabaseClient.from('feriados_unidade').delete().eq('id', id);
+    if (error) { mostrarAlerta('Erro ao remover: ' + error.message, 'erro'); return; }
+    window.abrirFeriadosUnidade();
+};
+setTimeout(function() { try { window.carregarFeriadosUnidade(); } catch (e) {} }, 4000);
+
 window.obterFeriadosNacionais = function(ano) {
     const f = {};
     const add = (m, d, nome) => f[`${ano}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`] = nome;
@@ -123151,6 +123258,11 @@ window.gerarRelatorioAdmin = async function() {
                         else { targetMin = parseHorario(cfgDia.horario); horarioDiaTxt = cfgDia.horario; }
                     }
 
+                    // Feriado (nacional, estadual, municipal ou da unidade): quem não é 12x36 não tem meta
+                    // nesse dia — não gera falta nem débito no saldo.
+                    const nomeFeriadoDiaPonto = (!jaDesligado && jor.tipo !== '12x36') ? (window.feriadosDaUnidadeNoAno(colab.unidade, diaObj.getFullYear())[dataIso] || null) : null;
+                    if (nomeFeriadoDiaPonto && !ehFolgaEscala && targetMin > 0) { targetMin = 0; ehFolgaEscala = true; }
+
                     // O horário da jornada (ex: "08:00 às 18:00") é o período de presença inteiro,
                     // já incluindo o intervalo de refeição — então a jornada NORMAL de trabalho tem
                     // que descontar esse intervalo (o configurado pra esse colaborador, ou 1h padrão
@@ -123225,7 +123337,7 @@ window.gerarRelatorioAdmin = async function() {
                             }
                         }
                     } else if (ehFolgaEscala && !motivo) {
-                        motivo = 'Folga';
+                        motivo = nomeFeriadoDiaPonto ? ('Feriado: ' + nomeFeriadoDiaPonto) : 'Folga';
                     }
 
                     // 👇 1º par de batidas EXTRAS: colunas Ext. Entrada / Ext. Saída (a ordem define: 1ª = entrada, 2ª = saída)
@@ -123249,7 +123361,7 @@ window.gerarRelatorioAdmin = async function() {
                     }
 
                     const normais = Math.min(minTrabalhados, targetMin);
-                    const ehFimDeSemanaOuFeriado = (diaObj.getDay() === 0) || (ausDia && (ausDia.sigla || '').toUpperCase() === 'FRD');
+                    const ehFimDeSemanaOuFeriado = (diaObj.getDay() === 0) || !!nomeFeriadoDiaPonto || (ausDia && (ausDia.sigla || '').toUpperCase() === 'FRD');
                     const he50 = (credito > 0 && !ehFimDeSemanaOuFeriado) ? credito : 0;
                     const he100 = (credito > 0 && ehFimDeSemanaOuFeriado) ? credito : 0;
 
