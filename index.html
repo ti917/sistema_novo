@@ -81773,6 +81773,23 @@ window.cidadeUfDoEndereco = function(end) {
     const nome = ult[1].trim();
     return { cidade: window._semAcentoFer(nome), cidadeNome: nome, uf: ult[2] };
 };
+// Empresas que o usuário pode ver nessa tela (null = todas)
+window._empresasVisiveisFeriados = function() {
+    try {
+        const sel = localStorage.getItem('rh-empresa-salva') || 'Todas';
+        if (sel && sel !== 'Todas') return [sel];
+        if (typeof window.souSuperAdmin === 'function' && !window.souSuperAdmin() && usuarioAtual && usuarioAtual.empresa) {
+            const l = String(usuarioAtual.empresa).split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+            if (l.length) return l;
+        }
+    } catch (e) {}
+    return null;
+};
+window._empresaPermitidaFeriado = function(emp, lista) {
+    if (!lista) return true;
+    const k = (typeof window.chaveNormalizada === 'function') ? window.chaveNormalizada : function(x) { return String(x || '').toUpperCase().trim(); };
+    return lista.some(function(e) { return k(e) === k(emp); });
+};
 window.carregarFeriadosUnidade = async function() {
     try {
         const [rf, ru] = await Promise.all([
@@ -81784,7 +81801,8 @@ window.carregarFeriadosUnidade = async function() {
         (ru.data || []).forEach(function(u) {
             // ignora unidade de empresa inteira desativada
             if (window.empresasDesativadas && typeof window.chaveNormalizada === 'function' && window.empresasDesativadas.has(window.chaveNormalizada(u.empresa))) return;
-            mapa[u.nome] = window.cidadeUfDoEndereco(u.endereco);
+            if (!window._empresaPermitidaFeriado(u.empresa, window._empresasVisiveisFeriados())) return;
+            mapa[u.nome] = Object.assign({ empresa: u.empresa }, window.cidadeUfDoEndereco(u.endereco));
         });
         window._unidadesEnderecoMapa = mapa;
         window._feriadosUnidadeCarregadoEm = Date.now();
@@ -81801,6 +81819,7 @@ window.feriadosUnidadeDoAno = function(unidade, ano) {
         else if (f.escopo === 'municipal') vale = !!end.uf && String(f.uf || '').toUpperCase() === end.uf && window._semAcentoFer(f.cidade) === end.cidade;
         else if (f.escopo === 'unidade') vale = f.unidade === unidade;
         if (!vale) return;
+        if (f.empresa && end.empresa && window._semAcentoFer(f.empresa) !== window._semAcentoFer(end.empresa)) return;
         const d = String(f.data || '').slice(0, 10); if (d.length < 10) return;
         if (f.recorrente) out[ano + d.slice(4)] = f.nome;
         else if (d.slice(0, 4) === String(ano)) out[d] = f.nome;
@@ -81823,7 +81842,8 @@ window.abrirFeriadosUnidade = async function() {
     m.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,8,20,0.95); z-index:100000; display:flex; justify-content:center; align-items:center; padding:20px;';
     const ufs = [...new Set(Object.values(window._unidadesEnderecoMapa).map(x => x.uf).filter(Boolean))].sort();
     const unids = Object.keys(window._unidadesEnderecoMapa).sort();
-    const linhas = (window._feriadosUnidadeLista || []).slice().sort((a, b) => String(a.data).slice(5).localeCompare(String(b.data).slice(5))).map(function(f) {
+    const _empVis = window._empresasVisiveisFeriados();
+    const linhas = (window._feriadosUnidadeLista || []).filter(function(f) { return !f.empresa || window._empresaPermitidaFeriado(f.empresa, _empVis); }).slice().sort((a, b) => String(a.data).slice(5).localeCompare(String(b.data).slice(5))).map(function(f) {
         const d = String(f.data).slice(0, 10).split('-');
         const alvo = f.escopo === 'estadual' ? ('Estado ' + f.uf) : f.escopo === 'municipal' ? (f.cidade + '/' + f.uf) : f.unidade;
         return `<tr><td>${d[2]}/${d[1]}${f.recorrente ? ' <small style="opacity:.6">(todo ano)</small>' : '/' + d[0]}</td><td>${f.nome}</td><td>${alvo}</td><td style="text-align:right;"><button type="button" class="btn-secondary" title="Remover" style="border-color:var(--cor-perigo); color:var(--cor-perigo); padding:5px 10px;" onclick="excluirFeriadoUnidade('${f.id}')"><i class="fa-solid fa-trash"></i></button></td></tr>`;
@@ -81892,7 +81912,11 @@ window.salvarFeriadoUnidade = async function() {
     if (escopo !== 'unidade') reg.uf = document.getElementById('fer-un-uf').value;
     if (escopo === 'municipal') { reg.cidade = document.getElementById('fer-un-cidade').value.trim(); if (!reg.cidade) { mostrarAlerta('Escolha a cidade.', 'aviso'); return; } }
     if (escopo === 'unidade') reg.unidade = document.getElementById('fer-un-unidade').value;
-    const { error } = await supabaseClient.from('feriados_unidade').insert([reg]);
+    const _ev = window._empresasVisiveisFeriados();
+    if (escopo === 'unidade') { const um = window._unidadesEnderecoMapa[reg.unidade]; if (um && um.empresa) reg.empresa = um.empresa; }
+    else if (_ev && _ev.length === 1) reg.empresa = _ev[0];
+    let { error } = await supabaseClient.from('feriados_unidade').insert([reg]);
+    if (error && reg.empresa && /empresa/i.test(error.message || '')) { delete reg.empresa; ({ error } = await supabaseClient.from('feriados_unidade').insert([reg])); }
     if (error) { mostrarAlerta('Não consegui salvar. Rode primeiro o SQL feriados_unidade.sql no Supabase. (' + error.message + ')', 'erro'); return; }
     mostrarAlerta('Feriado cadastrado.', 'sucesso');
     window.abrirFeriadosUnidade();
