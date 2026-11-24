@@ -68273,6 +68273,19 @@ window.carregarTabelaINSS = async function(tbodyId, buscaId) {
         return;
     }
 
+    // Quem já foi desligado (para o selo e o botão Arquivar)
+    window._inssDesligados = {};
+    try {
+        const idsColab = [...new Set((data || []).map(x => x.colaborador_id).filter(Boolean))];
+        if (idsColab.length) {
+            const { data: perfisDes } = await supabaseClient.from('perfis').select('id, status, dados_rescisao').in('id', idsColab).eq('status', 'Desligado');
+            (perfisDes || []).forEach(function(pf) {
+                const ud = pf.dados_rescisao && pf.dados_rescisao.ultimo_dia ? String(pf.dados_rescisao.ultimo_dia) : '';
+                window._inssDesligados[pf.id] = ud || true;
+            });
+        }
+    } catch (e) { console.warn('INSS: status de desligados indisponível', e); }
+
     // 👇 NOVO (v67 cont. 8): agrupa os atestados por CADEIA (mesmo colaborador + mesmo CID,
     // com reset se o hiato entre um atestado e o próximo passar de 60 dias — mesma regra já
     // usada no mapaInssCID da Escala) — atestados que são continuação do mesmo caso deixam de
@@ -68326,6 +68339,11 @@ window.carregarTabelaINSS = async function(tbodyId, buscaId) {
                     dataFecha15Str: dataFecha15 ? isoStr(dataFecha15) : null,
                     dataCruzou16Str: dataCruzou16 ? isoStr(dataCruzou16) : null,
                     numeroAtestadosNaCadeia: subcadeia.length,
+                    idsCadeia: subcadeia.map(at => at.id),
+                    arquivado_em: representante.inss_arquivado_em || null,
+                    arquivado_por: representante.inss_arquivado_por || null,
+                    desligado: !!window._inssDesligados[representante.colaborador_id],
+                    ultimoDiaDeslig: (typeof window._inssDesligados[representante.colaborador_id] === 'string') ? window._inssDesligados[representante.colaborador_id] : '',
                     // 👇 NOVO: guarda o anexo de CADA atestado da cadeia (não só o mais recente),
                     // pra poder mostrar "Ver Atestado" de todos quando é um caso agrupado.
                     documentosCadeia: subcadeia.map(at => ({ data_inicio: at.data_inicio, data_fim: at.data_fim, documento: at.documento })),
@@ -68355,6 +68373,20 @@ window.carregarTabelaINSS = async function(tbodyId, buscaId) {
 // ==========================================
 // MONITORAMENTO INSS (COM BOTÃO DE ANEXO)
 // ==========================================
+window.inssTrocarAba = function(aba) {
+    window._inssAba = aba;
+    window.filtrarINSS(window._inssUltTb, window._inssUltBusca);
+};
+window.arquivarCasoINSS = async function(idCaso, arquivar) {
+    const caso = todosAfastamentosINSS.find(c => String(c.id) === String(idCaso));
+    if (!caso) return;
+    if (!confirm(arquivar ? 'Arquivar este afastamento? Ele sai da lista em andamento e fica guardado em "Arquivados" (nada é apagado).' : 'Voltar este afastamento para a lista em andamento?')) return;
+    const upd = arquivar ? { inss_arquivado_em: new Date().toISOString(), inss_arquivado_por: (usuarioAtual && usuarioAtual.nome) || null } : { inss_arquivado_em: null, inss_arquivado_por: null };
+    const { error } = await supabaseClient.from('ausencias').update(upd).in('id', caso.idsCadeia);
+    if (error) { mostrarAlerta('Não consegui salvar. Rode primeiro o SQL inss_arquivar.sql no Supabase. (' + error.message + ')', 'erro'); return; }
+    mostrarAlerta(arquivar ? 'Afastamento arquivado.' : 'Afastamento voltou para a lista em andamento.', 'sucesso');
+    window.carregarTabelaINSS(window._inssUltTb, window._inssUltBusca);
+};
 window.filtrarINSS = function(tbodyId, buscaId) {
     // 👇 NOVO (v67 cont. 11): mesmos parâmetros opcionais de carregarTabelaINSS, mesma regra —
     // sem argumentos, comportamento 100% igual ao de antes (ids originais).
@@ -68366,10 +68398,22 @@ window.filtrarINSS = function(tbodyId, buscaId) {
     if (!tbody) return;
     tbody.innerHTML = "";
     
-    const filtrados = todosAfastamentosINSS.filter(a => a.nome.toLowerCase().includes(termo));
+    window._inssUltTb = tbodyId; window._inssUltBusca = buscaId;
+    const abaInss = window._inssAba || 'andamento';
+    const qtdArq = todosAfastamentosINSS.filter(x => x.arquivado_em).length;
+    const qtdAnd = todosAfastamentosINSS.length - qtdArq;
+    const tabelaEl = tbody.closest('table');
+    if (tabelaEl && tabelaEl.parentElement) {
+        let barra = tabelaEl.parentElement.querySelector('.inss-subabas[data-tb="' + tbodyId + '"]');
+        if (!barra) { barra = document.createElement('div'); barra.className = 'inss-subabas'; barra.dataset.tb = tbodyId; barra.style.cssText = 'display:flex; gap:8px; margin:0 0 12px; flex-wrap:wrap;'; tabelaEl.parentElement.insertBefore(barra, tabelaEl); }
+        const estilo = (ativa) => 'padding:7px 14px; border-radius:20px; cursor:pointer; font-weight:700; font-size:.8rem; border:1px solid ' + (ativa ? '#ff9800' : 'rgba(255,255,255,0.2)') + '; background:' + (ativa ? 'rgba(255,152,0,0.18)' : 'transparent') + '; color:' + (ativa ? '#ff9800' : 'var(--cor-texto-secundario)') + ';';
+        barra.innerHTML = `<button type="button" style="${estilo(abaInss === 'andamento')}" onclick="window.inssTrocarAba('andamento')"><i class="fa-solid fa-briefcase-medical"></i> Em andamento (${qtdAnd})</button><button type="button" style="${estilo(abaInss === 'arquivados')}" onclick="window.inssTrocarAba('arquivados')"><i class="fa-solid fa-box-archive"></i> Arquivados (${qtdArq})</button>`;
+    }
+
+    const filtrados = todosAfastamentosINSS.filter(a => a.nome.toLowerCase().includes(termo) && (abaInss === 'arquivados' ? !!a.arquivado_em : !a.arquivado_em));
 
     if (filtrados.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">Nenhum colaborador com atestado maior que 15 dias encontrado.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--cor-texto-secundario); padding: 20px;">' + (abaInss === 'arquivados' ? 'Nenhum caso arquivado.' : 'Nenhum colaborador com atestado maior que 15 dias encontrado.') + '</td></tr>';
         return;
     }
 
@@ -68404,7 +68448,7 @@ window.filtrarINSS = function(tbodyId, buscaId) {
                 <br><a href="javascript:void(0)" onclick="window.abrirModalRetornoTrabalho('${a.id}')" style="font-size: 0.7rem; color: var(--cor-texto-secundario); text-decoration: underline; margin-top: 4px; display: inline-block;"><i class="fa-solid fa-pen"></i> Editar</a>`;
         } else {
             const hojeStr = new Date().toISOString().split('T')[0];
-            const emAberto = hojeStr > a.data_fim;
+            const emAberto = hojeStr > a.data_fim && !a.desligado;
             let avisoAberto = '';
             if (emAberto) {
                 const dHoje = new Date(hojeStr + 'T00:00:00');
@@ -68418,8 +68462,11 @@ window.filtrarINSS = function(tbodyId, buscaId) {
         tbody.innerHTML += `<tr style="background: rgba(0,0,0,0.1); border-bottom: 1px solid var(--cor-borda);">
             <td style="text-align: left; padding: 12px; vertical-align: top;">
                 <strong style="color: #ff9800; font-size: 1.05rem;">${a.nome}</strong><br>
+                ${a.desligado ? `<span class="badge" style="background: rgba(244,67,54,0.12); color: #f44336; border: 1px solid #f44336; padding: 3px 8px; font-size: 0.7rem; margin-top: 6px; display: inline-block;"><i class="fa-solid fa-user-slash"></i> Desligado${a.ultimoDiaDeslig ? ' · último dia ' + a.ultimoDiaDeslig : ''}</span><br>` : ''}
                 ${linkAnexo}
                 ${seloCadeia}
+                ${a.arquivado_em ? `<br><span style="font-size:.7rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-box-archive"></i> Arquivado em ${formatarDataBR(String(a.arquivado_em).slice(0,10))}${a.arquivado_por ? ' por ' + a.arquivado_por : ''}</span>` : ''}
+                ${(usuarioAtual && usuarioAtual.perfil === 'Admin' && (a.desligado || a.arquivado_em)) ? `<br><button type="button" class="btn-secondary" style="margin-top:8px; padding:5px 12px; font-size:.75rem; border-radius:6px; ${a.arquivado_em ? '' : 'border-color:#ff9800; color:#ff9800;'}" onclick="window.arquivarCasoINSS('${a.id}', ${a.arquivado_em ? 'false' : 'true'})"><i class="fa-solid ${a.arquivado_em ? 'fa-box-open' : 'fa-box-archive'}"></i> ${a.arquivado_em ? 'Desarquivar' : 'Arquivar'}</button>` : ''}
             </td>
             <td style="color: var(--cor-texto-principal); vertical-align: middle;">${a.unidade}</td>
             <td style="vertical-align: middle;">
