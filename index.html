@@ -122140,6 +122140,11 @@ window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
                     const c = jor.escala[nomesDia[cursor.getDay()]];
                     if (c.status === 'Folga') folga = true; else { target = parseHorario(c.horario); horarioDiaTxt = c.horario; }
                 }
+                // Feriado (nacional, estadual, municipal ou da unidade): quem não é 12x36 não tem meta nesse dia
+                if (jor.tipo !== '12x36' && !folga && target > 0) {
+                    const _fer = (window.feriadosDaUnidadeNoAno(unidade, parseInt(ds.slice(0, 4), 10)) || {})[ds];
+                    if (_fer) { target = 0; folga = true; }
+                }
                 if (!folga && target > 0) {
                     let ref = 60;
                     if (jor.refeicao && jor.refeicao.inicio && jor.refeicao.fim) {
@@ -122167,7 +122172,9 @@ window.calcularSaldoPontoMes = async function(colabId, ano, mes) {
                 const hojePendente = ds === hojeStr && !sai2 && !(ent1 && sai1 && !ent2);
                 // 🔎 Ponto ímpar/incompleto (dia passado com batida faltando): não debita nem credita o dia inteiro —
                 // fica pendente até o RH ajustar/justificar. Quando completa, o cálculo normal volta sozinho.
-                const impar = !!p && ds < hojeStr && [ent1, sai1, ent2, sai2].some(Boolean) && (!(ent1 && sai2) || (!!sai1) !== (!!ent2));
+                const _tsCal = [ent1, sai1, ent2, sai2].filter(Boolean).map(function(h) { return new Date(h).getTime(); });
+                const ordemInv = _tsCal.some(function(v, i) { return i > 0 && v < _tsCal[i - 1]; });
+                const impar = !!p && ds < hojeStr && [ent1, sai1, ent2, sai2].some(Boolean) && ((!(ent1 && sai2) || (!!sai1) !== (!!ent2)) || ordemInv);
                 if (!folga && target > 0 && !hojePendente && !impar) {
                     if (trab > target) credito = trab - target;
                     else if (trab < target && !justificado) debito = p ? (target - trab) : target;
@@ -123759,14 +123766,18 @@ window.gerarRelatorioAdmin = async function() {
             const dFimObj = new Date(dataFim + 'T00:00:00');
             while (dCursor <= dFimObj) { diasPeriodo.push(new Date(dCursor)); dCursor.setDate(dCursor.getDate() + 1); }
 
-            const [rPontos, rAus, rConfigPonto, rConfigBH] = await Promise.all([
+            const [rPontos, rAus, rConfigPonto, rConfigBH, rFechBH] = await Promise.all([
                 supabaseClient.from('pontos_diarios_whatsapp').select('*').gte('data', dataIni).lte('data', dataFim),
                 supabaseClient.from('ausencias').select('*').eq('status', 'Aprovado').lte('data_inicio', dataFim).gte('data_fim', dataIni),
                 supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, habilitado, data_inicio_ponto'),
-                supabaseClient.from('config_banco_horas').select('unidade, dias_validade, data_inicio_ciclo, usa_banco')
+                supabaseClient.from('config_banco_horas').select('unidade, dias_validade, data_inicio_ciclo, usa_banco'),
+                // Fechamentos REAIS do Banco de Horas (Zerar Banco de Horas do Período): o saldo só reinicia depois de um fechamento de verdade
+                supabaseClient.from('banco_horas_fechamentos').select('numero, periodo_ini, periodo_fim, unidades, status').neq('status', 'Cancelado')
             ]);
 
             await window.pontoCarregarTolerancias();
+            const fechamentosBHEsp = rFechBH.data || [];
+            const hojeIsoEsp = window.dataSPPontoWhatsapp(new Date().toISOString());
             const pontosPorChave = {};
             (rPontos.data || []).forEach(p => { pontosPorChave[p.colaborador_id + '_' + p.data] = p; });
             const ausenciasPorColab = {};
@@ -123849,17 +123860,13 @@ window.gerarRelatorioAdmin = async function() {
                     if (dataInicioPontoColab && dataIso < dataInicioPontoColab) return; // ainda não tinha começado a bater ponto
                     if (diaObj > hojeSemHoraObj) return; // dia futuro, ainda nem chegou — não faz sentido mostrar
 
-                    // Saldo respeitando o ciclo de fechamento real do Banco de Horas — reinicia toda
-                    // vez que o dia entra num ciclo novo (Data de Início do 1º Ciclo + Duração do
-                    // Ciclo de Fechamento), em vez de só somar solto desde o começo do período pedido.
-                    if (configBHUnidade && configBHUnidade.data_inicio_ciclo && configBHUnidade.dias_validade) {
-                        const inicioCicloDoDia = window.obterInicioCicloAtual(configBHUnidade.data_inicio_ciclo, configBHUnidade.dias_validade, diaObj);
-                        const chaveCiclo = inicioCicloDoDia ? inicioCicloDoDia.toISOString().split('T')[0] : null;
-                        if (inicioCicloAnterior !== null && chaveCiclo !== inicioCicloAnterior) {
-                            saldoAcumulado = 0; // virou de ciclo — reinicia o saldo mostrado
-                        }
-                        inicioCicloAnterior = chaveCiclo;
-                    }
+                    // Saldo reinicia só no dia seguinte ao fim de um FECHAMENTO REAL do Banco de Horas da unidade
+                    // (mesma regra do calendário do Controle de Ponto e do Extrato) — não por ciclo calculado.
+                    if (fechamentosBHEsp.some(function(f) {
+                        if (!(f.unidades || []).includes(colab.unidade)) return false;
+                        const nx = new Date(f.periodo_fim + 'T12:00:00'); nx.setDate(nx.getDate() + 1);
+                        return nx.toISOString().slice(0, 10) === dataIso;
+                    })) saldoAcumulado = 0;
 
                     const diaSemanaNome = diasSemana[diaObj.getDay()];
                     // 👇 Pega o horário que estava VALENDO nesse dia específico, não o atual —
@@ -123924,6 +123931,9 @@ window.gerarRelatorioAdmin = async function() {
                     const sai1 = p ? window.pontoHoraEfetiva(p, 'ida_refeicao') : null;
                     const ent2 = p ? window.pontoHoraEfetiva(p, 'volta_refeicao') : null;
                     const sai2 = p ? window.pontoHoraEfetiva(p, 'saida') : null;
+                    // Batidas fora de ordem (ex.: entrada depois da saída) = dado inconsistente, aguarda ajuste do RH
+                    const _tsBat = [ent1, sai1, ent2, sai2].filter(Boolean).map(function(h) { return new Date(h).getTime(); });
+                    const ordemInvalida = _tsBat.some(function(v, i) { return i > 0 && v < _tsBat[i - 1]; });
 
                     // 👇 Pra auditoria: marca quais desses 4 horários foram corrigidos pelo RH
                     // (existe uma correção justificada em `correcoes` pra aquele campo) — usado pra
@@ -123996,9 +124006,15 @@ window.gerarRelatorioAdmin = async function() {
 
                     // 🔎 Ponto ímpar/incompleto em dia passado: não debita nem credita o dia — aguarda ajuste/justificativa do RH.
                     if (p && !jaDesligado && !ehFolgaEscala && targetMin > 0 && !ausenciaJustificada && dataIso < window.dataSPPontoWhatsapp(new Date().toISOString())
-                        && [ent1, sai1, ent2, sai2].some(Boolean) && (!(ent1 && sai2) || (!!sai1) !== (!!ent2))) {
+                        && [ent1, sai1, ent2, sai2].some(Boolean) && ((!(ent1 && sai2) || (!!sai1) !== (!!ent2)) || ordemInvalida)) {
                         credito = 0; debito = 0;
-                        motivo = (motivo && motivo !== '-' ? motivo + ' · ' : '') + 'Ponto incompleto (falta batida) — aguardando ajuste do RH';
+                        motivo = (motivo && motivo !== '-' ? motivo + ' · ' : '') + (ordemInvalida ? 'Batidas fora de ordem — aguardando ajuste do RH' : 'Ponto incompleto (falta batida) — aguardando ajuste do RH');
+                    }
+
+                    // Hoje ainda não acabou: sem a saída batida não debita nem credita (só fecha o dia depois)
+                    if (dataIso === hojeIsoEsp && !jaDesligado && !ehFolgaEscala && targetMin > 0 && !sai2 && !(ent1 && sai1 && !ent2)) {
+                        credito = 0; debito = 0;
+                        motivo = 'Dia em andamento';
                     }
 
                     const normais = Math.min(minTrabalhados, targetMin);
