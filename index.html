@@ -48373,7 +48373,7 @@ window.carregarPainelSaldosGestor = async function() {
             }
 
             htmlAcumulado += `
-                <div class="admissao-card card-saldo-gestor" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <div class="admissao-card card-saldo-gestor" data-colab-id="${colab.id}" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
                     <div>
                         <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${colab.nome}</strong><br>
                         <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-briefcase"></i> ${cargo}</span>
@@ -48398,6 +48398,7 @@ window.carregarPainelSaldosGestor = async function() {
         });
 
         container.innerHTML = htmlAcumulado;
+        try { window.pontoMarcarExcedentesPendentes(idsColabs, container); } catch (_e) {} // aviso informativo, não altera saldo
 
     } catch (e) {
         console.error("ERRO NO PAINEL DO GESTOR:", e);
@@ -96327,6 +96328,147 @@ window.todosSaldosBHAdmin = [];
     }
 };
 
+// =========================================================================
+// ⏳ HORAS A MAIS NO PONTO SEM FT — só informativo (NÃO altera nenhum saldo)
+// Pra quem tem o Método de Ponto ativo: mostra os dias (a partir da "Data que começou a bater
+// ponto no sistema") em que a batida passou da jornada e ainda não existe FT/Hora Extra
+// aprovada cobrindo aquele dia. Gestor/RH lança a FT e o aviso some sozinho.
+// Mesma regra de crédito do Espelho de Ponto. Nada é gravado nem apagado.
+// =========================================================================
+window.pontoExcedentesPendentes = async function(idsColabs) {
+    const resultado = {};
+    try {
+        if (!idsColabs || !idsColabs.length) return resultado;
+        const sp = function(d) { return window.dataSPPontoWhatsapp(d.toISOString()); };
+        const hojeIso = sp(new Date());
+        const limite = new Date(); limite.setDate(limite.getDate() - 90);
+        const limiteIso = sp(limite);
+
+        const { data: cfgs } = await supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, habilitado, data_inicio_ponto').in('colaborador_id', idsColabs);
+        const cfgPorColab = {};
+        (cfgs || []).forEach(function(c) { if (c.habilitado) cfgPorColab[c.colaborador_id] = c; });
+        const ids = Object.keys(cfgPorColab);
+        if (!ids.length) return resultado;
+
+        const [rPerf, rPontos, rFts, rAus] = await Promise.all([
+            supabaseClient.from('perfis').select('id, unidade, dados_admissao, status, dados_rescisao').in('id', ids),
+            supabaseClient.from('pontos_diarios_whatsapp').select('*').in('colaborador_id', ids).gte('data', limiteIso).lt('data', hojeIso),
+            supabaseClient.from('horas_extras_ft').select('colaborador_id, sigla, data_inicio, data_fim, observacao').eq('status', 'Aprovado').in('colaborador_id', ids),
+            supabaseClient.from('ausencias').select('colaborador_id, sigla, data_inicio, data_fim').eq('status', 'Aprovado').in('colaborador_id', ids).gte('data_fim', limiteIso)
+        ]);
+        if (window.pontoCarregarTolerancias) await window.pontoCarregarTolerancias();
+
+        const parseHorario = function(txt) { const m = (txt || '').match(/(\d{2}):(\d{2})\s*às\s*(\d{2}):(\d{2})/); if (!m) return 0; return ((+m[3] * 60 + +m[4]) - (+m[1] * 60 + +m[2]) + 1440) % 1440; };
+        const minutosEntre = function(h1, h2) { if (!h1 || !h2) return 0; const d = (new Date(h2) - new Date(h1)) / 60000; return d > 0 ? d : 0; };
+        const diasSemana = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        const perfis = {}; (rPerf.data || []).forEach(function(p) { perfis[p.id] = p; });
+
+        const ftsPorColab = {};
+        (rFts.data || []).forEach(function(f) { if (['H+', 'HE', 'FT'].includes(f.sigla)) (ftsPorColab[f.colaborador_id] = ftsPorColab[f.colaborador_id] || []).push(f); });
+        const ausPorColab = {};
+        (rAus.data || []).forEach(function(a) { (ausPorColab[a.colaborador_id] = ausPorColab[a.colaborador_id] || []).push(a); });
+
+        (rPontos.data || []).forEach(function(p) {
+            try {
+                const cfg = cfgPorColab[p.colaborador_id], colab = perfis[p.colaborador_id];
+                if (!cfg || !colab) return;
+                const dataIso = p.data;
+                if (cfg.data_inicio_ponto && dataIso < cfg.data_inicio_ponto) return;
+                if (colab.status === 'Desligado') return;
+                const diaObj = new Date(dataIso + 'T00:00:00');
+                const jor = window.obterJornadaVigenteNaData((colab.dados_admissao || {}).jornada || {}, dataIso) || {};
+
+                let targetMin = 0, horarioDiaTxt = null, ehFolga = false;
+                if (jor.tipo === '12x36') {
+                    if (jor.data_inicio) {
+                        const diff = Math.round((diaObj - new Date(jor.data_inicio + 'T00:00:00')) / 86400000);
+                        const primeiroEhTrabalho = (jor.status_inicio || 'Trabalho') === 'Trabalho';
+                        const trabalha = (diff % 2 === 0) ? primeiroEhTrabalho : !primeiroEhTrabalho;
+                        if (trabalha && jor.horario) { targetMin = parseHorario(jor.horario); horarioDiaTxt = jor.horario; } else ehFolga = true;
+                    }
+                } else if (jor.escala && jor.escala[diasSemana[diaObj.getDay()]]) {
+                    const cd = jor.escala[diasSemana[diaObj.getDay()]];
+                    if (cd.status === 'Folga') ehFolga = true; else { targetMin = parseHorario(cd.horario); horarioDiaTxt = cd.horario; }
+                }
+                if (jor.tipo !== '12x36') {
+                    const fer = (window.feriadosDaUnidadeNoAno(colab.unidade, diaObj.getFullYear()) || {})[dataIso];
+                    if (fer && !ehFolga && targetMin > 0) { targetMin = 0; ehFolga = true; }
+                }
+                if (ehFolga || targetMin <= 0) return;
+                let refeicaoMin = 60;
+                if (jor.refeicao && jor.refeicao.inicio && jor.refeicao.fim) {
+                    const [hi, mi] = jor.refeicao.inicio.split(':').map(Number), [hf, mf] = jor.refeicao.fim.split(':').map(Number);
+                    refeicaoMin = ((hf * 60 + mf) - (hi * 60 + mi) + 1440) % 1440;
+                }
+                targetMin = Math.max(0, targetMin - refeicaoMin);
+
+                const ent1 = window.pontoHoraEfetiva(p, 'entrada'), sai1 = window.pontoHoraEfetiva(p, 'ida_refeicao');
+                const ent2 = window.pontoHoraEfetiva(p, 'volta_refeicao'), sai2 = window.pontoHoraEfetiva(p, 'saida');
+                if ([ent1, sai1, ent2, sai2].some(Boolean) && (!(ent1 && sai2) || (!!sai1) !== (!!ent2))) return; // incompleto: aguarda RH
+                let trab = 0;
+                if (ent1 && sai2) trab = Math.max(0, minutosEntre(ent1, sai2) - minutosEntre(sai1, ent2));
+                else if (ent1 && sai1 && !ent2 && !sai2) trab = minutosEntre(ent1, sai1);
+                trab += window.pontoMinutosExtras(p);
+                trab = Math.max(0, trab + window.pontoCorrecaoTolerancia(window.pontoToleranciaDaUnidade(colab.unidade), horarioDiaTxt, jor.refeicao, ent1, sai1, ent2, sai2));
+                const excesso = Math.round(trab - targetMin);
+                if (excesso < 1) return;
+
+                // Ausência aprovada no dia (atestado, férias etc.) não entra: o dia já tem tratamento próprio
+                if ((ausPorColab[p.colaborador_id] || []).some(function(a) { return dataIso >= a.data_inicio && dataIso <= (a.data_fim || a.data_inicio); })) return;
+
+                // Já tem FT/Hora Extra aprovada cobrindo o dia (pelo período ou citando a data) = justificado
+                const [yy, mm, dd] = dataIso.split('-'); const dataBR = dd + '/' + mm + '/' + yy;
+                const justificado = (ftsPorColab[p.colaborador_id] || []).some(function(f) {
+                    return (f.data_inicio && dataIso >= f.data_inicio && dataIso <= (f.data_fim || f.data_inicio)) || String(f.observacao || '').includes(dataBR);
+                });
+                if (justificado) return;
+
+                const r = resultado[p.colaborador_id] = resultado[p.colaborador_id] || { total: 0, dias: [] };
+                r.total += excesso; r.dias.push({ data: dataIso, dataBR: dataBR, minutos: excesso });
+            } catch (_e) {}
+        });
+        Object.keys(resultado).forEach(function(k) { resultado[k].dias.sort(function(a, b) { return a.data < b.data ? 1 : -1; }); });
+    } catch (e) { console.warn('pontoExcedentesPendentes:', e); }
+    return resultado;
+};
+
+window.pontoMarcarExcedentesPendentes = async function(idsColabs, container) {
+    const res = await window.pontoExcedentesPendentes(idsColabs);
+    window._excPendentesPonto = res;
+    const fmt = function(m) { return Math.floor(m / 60) + 'h ' + String(Math.round(m % 60)).padStart(2, '0') + 'm'; };
+    Object.keys(res).forEach(function(id) {
+        const card = container.querySelector('[data-colab-id="' + id + '"]');
+        if (!card || card.querySelector('.aviso-exc-ponto')) return;
+        const alvo = card.firstElementChild;
+        if (!alvo) return;
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'aviso-exc-ponto';
+        b.style.cssText = 'margin-top:8px; background:rgba(255,152,0,0.15); color:#ff9800; border:1px solid rgba(255,152,0,0.5); border-radius:14px; padding:3px 10px; font-size:0.75rem; font-weight:bold; cursor:pointer; width:auto;';
+        b.innerHTML = '<i class="fa-solid fa-hourglass-half"></i> ' + fmt(res[id].total) + ' a mais no ponto sem FT';
+        b.title = 'Horas batidas além da jornada que ainda não têm Hora Extra/FT aprovada. Não entram no saldo até serem justificadas.';
+        b.onclick = function() { window.abrirExcedentesPontoColab(id); };
+        alvo.appendChild(b);
+    });
+};
+
+window.abrirExcedentesPontoColab = function(id) {
+    const r = (window._excPendentesPonto || {})[id];
+    if (!r) return;
+    const nome = ((document.querySelector('[data-colab-id="' + id + '"] strong') || {}).textContent || '').trim();
+    const fmt = function(m) { return Math.floor(m / 60) + 'h ' + String(Math.round(m % 60)).padStart(2, '0') + 'm'; };
+    const linhas = r.dias.map(function(d) { return '<tr><td style="padding:6px 8px;">' + d.dataBR + '</td><td style="padding:6px 8px; text-align:right; color:#ff9800; font-weight:bold;">+' + fmt(d.minutos) + '</td></tr>'; }).join('');
+    const ov = document.createElement('div');
+    ov.className = 'modal-arquivo-overlay'; ov.style.cssText = 'z-index:100010; display:flex; justify-content:center; align-items:center; padding:20px;';
+    ov.innerHTML = '<div style="background:var(--cor-fundo-card); border:1px solid var(--cor-borda); border-radius:12px; padding:22px; max-width:420px; width:100%; max-height:80vh; overflow:auto;">'
+        + '<h3 style="margin:0 0 6px;"><i class="fa-solid fa-hourglass-half" style="color:#ff9800;"></i> Horas a mais no ponto</h3>'
+        + '<p style="margin:0 0 12px; color:var(--cor-texto-secundario); font-size:0.85rem;">' + nome + ' — dias em que bateu além da jornada e ainda não há Hora Extra/FT aprovada. Lance a FT do dia para justificar; enquanto isso, não entra no saldo.</p>'
+        + '<table style="width:100%; border-collapse:collapse; font-size:0.9rem;"><tbody>' + linhas + '</tbody></table>'
+        + '<p style="margin:12px 0 0; font-weight:bold;">Total: ' + fmt(r.total) + '</p>'
+        + '<button type="button" class="btn-primary" style="width:100%; justify-content:center; margin-top:14px;" onclick="this.closest(\'.modal-arquivo-overlay\').remove()">Fechar</button></div>';
+    ov.addEventListener('click', function(e) { if (e.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+};
+
      // =========================================================================
 // 📊 PAINEL DE SALDOS DO ADMIN - LENDO AUSÊNCIAS E FTS
 // =========================================================================
@@ -96470,7 +96612,7 @@ window.carregarPainelSaldosAdmin = async function() {
             }
 
             htmlAcumulado += `
-                <div class="admissao-card card-saldo-admin" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
+                <div class="admissao-card card-saldo-admin" data-colab-id="${colab.id}" data-nome-busca="${window.removerAcentos(colab.nome)}" style="border-left: 4px solid ${corSaldo}; padding: 15px; display: flex; justify-content: space-between; align-items: center;">
                     <div>
                         <strong style="color: #fff; font-size: 1.1rem;"><i class="fa-solid fa-user"></i> ${colab.nome}</strong><br>
                         <span style="font-size: 0.85rem; color: var(--cor-texto-secundario);"><i class="fa-solid fa-briefcase"></i> ${cargo}</span>
@@ -96495,6 +96637,7 @@ window.carregarPainelSaldosAdmin = async function() {
         });
 
         container.innerHTML = htmlAcumulado;
+        try { window.pontoMarcarExcedentesPendentes(idsColabs, container); } catch (_e) {} // aviso informativo, não altera saldo
 
     } catch (e) {
         console.error("ERRO NO PAINEL DO ADMIN:", e);
