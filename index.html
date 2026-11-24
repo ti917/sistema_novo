@@ -26292,6 +26292,14 @@ if (!window._ddAcoesUsrLigado) {
     window.addEventListener('resize', () => window.fecharMenusAcoesUsuario());
 }
 
+// 📋 Motivo da recusa mostrado ao gestor em "Meus Envios e Status" (ausência, férias, troca de turno).
+window._htmlMotivoRecusaEnvio = function(r) {
+    if (!r || r.status !== 'Reprovado') return '';
+    const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const quem = r.recusado_por ? ' (' + esc(r.recusado_por) + ')' : '';
+    return `<br><span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> <b>Motivo da recusa${quem}:</b> ${r.motivo_recusa ? esc(r.motivo_recusa) : 'o RH não informou o motivo.'}</span>`;
+};
+
        window.verDetalhesFichaAprovada = async function(idStr) {
     // 👇 CORREÇÃO: antes só procurava em todasAdmissoesAprovadas — se o botão "Ver Ficha"
     // fosse clicado numa tela que nunca carregou esse array (ex: Controle de Desligamentos,
@@ -32977,9 +32985,10 @@ window.enviarProcessoFeriasAssinadoGestor = async function(idFerias) {
 };
 
 window.reprovarFerias = async function(id) {
-    const confirmado = await mostrarConfirmacao("Deseja RECUSAR estas férias?", "Recusar");
-    if (!confirmado) return;
-    await supabaseClient.from('solicitacoes_ferias').update({ status: 'Reprovado', aprovado_por: usuarioAtual.nome }).eq('id', id);
+    const motivo = await pedirMotivoDevolucao('esta solicitação de férias');
+    if (!motivo) return;
+    const { error: erroRec } = await supabaseClient.from('solicitacoes_ferias').update({ status: 'Reprovado', aprovado_por: usuarioAtual.nome, motivo_recusa: motivo, recusado_por: usuarioAtual.nome }).eq('id', id);
+    if (erroRec) return mostrarAlerta("Erro ao recusar: " + erroRec.message + "<br><br>Se for \"column ... does not exist\", rode o SQL <b>motivo_recusa_solicitacoes.sql</b> no Supabase.", "erro");
     mostrarAlerta("Férias Recusadas.", "sucesso");
     carregarFeriasAdmin();
 };
@@ -45285,8 +45294,8 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
 }
 
        window.reprovarAusenciaAdmin = async function(id) {
-            const confirmado = await mostrarConfirmacao("Tem certeza que deseja REPROVAR esta solicitação de ausência?", "Reprovar Ausência");
-            if (!confirmado) return;
+            const motivoRecusaAus = await pedirMotivoDevolucao('esta solicitação de ausência');
+            if (!motivoRecusaAus) return;
 
             // 🆕 Se o gestor lançou coberturas (FT) pra essa ausência, mostra pro RH recusar junto.
             const cobVinc = await window.fluxoCoberturasDaAusencia(id, 'Reprovar ausência e coberturas marcadas');
@@ -45295,10 +45304,12 @@ window.editarAusenciaAdmin = async function(idAusenciaParam) {
 
             const { error } = await supabaseClient.from('ausencias').update({ 
                 status: 'Reprovado',
-                aprovado_por: usuarioAtual.nome // <--- GRAVA NO BANCO
+                aprovado_por: usuarioAtual.nome, // <--- GRAVA NO BANCO
+                motivo_recusa: motivoRecusaAus,
+                recusado_por: usuarioAtual.nome
             }).eq('id', id);
 
-            if (error) { await mostrarAlerta("Erro ao reprovar: " + error.message, "erro"); return; }
+            if (error) { await mostrarAlerta("Erro ao reprovar: " + error.message + "<br><br>Se for \"column ... does not exist\", rode o SQL <b>motivo_recusa_solicitacoes.sql</b> no Supabase.", "erro"); return; }
 
             await window.recusarCoberturasSelecionadas(cobVinc.ids);
             await avisarGestor();
@@ -50680,10 +50691,11 @@ window.excluirTrocaHist = async function(id) {
 };
 
 window.reprovarTrocaAdmin = async function(idTroca) {
-    const confirmado = await mostrarConfirmacao("Deseja recusar esta troca?", "Recusar Troca");
-    if (!confirmado) return;
+    const motivo = await pedirMotivoDevolucao('esta troca de turno');
+    if (!motivo) return;
 
-    await supabaseClient.from('trocas_turno').update({ status: 'Reprovado', aprovado_por: usuarioAtual.nome }).eq('id', idTroca);
+    const { error: erroRec } = await supabaseClient.from('trocas_turno').update({ status: 'Reprovado', aprovado_por: usuarioAtual.nome, motivo_recusa: motivo, recusado_por: usuarioAtual.nome }).eq('id', idTroca);
+    if (erroRec) return mostrarAlerta("Erro ao recusar: " + erroRec.message + "<br><br>Se for \"column ... does not exist\", rode o SQL <b>motivo_recusa_solicitacoes.sql</b> no Supabase.", "erro");
     mostrarAlerta("Troca recusada.", "sucesso");
     carregarTrocasAdmin();
 };
@@ -72445,7 +72457,7 @@ window.carregarMeusHistoricos = async function() {
             let descMotivo = a.motivo ? a.motivo.split('(')[0].trim() : '';
             unificado.push({
                 id: a.id, tipo: 'Ausência', nome: a.nome, data: a.created_at, status: a.status,
-                detalhes: `<b>${a.sigla}</b> - ${descMotivo} &nbsp;|&nbsp; De <b>${formataData(a.data_inicio)}</b> até <b>${formataData(a.data_fim)}</b>`,
+                detalhes: `<b>${a.sigla}</b> - ${descMotivo} &nbsp;|&nbsp; De <b>${formataData(a.data_inicio)}</b> até <b>${formataData(a.data_fim)}</b>` + window._htmlMotivoRecusaEnvio(a),
                 icone: 'fa-user-clock', cor: '#ff9800', url: a.documento, raw: a
             });
         });
@@ -72465,7 +72477,7 @@ window.carregarMeusHistoricos = async function() {
             let priNomeSub = t.nome_substituto.split(' ')[0];
             unificado.push({
                 id: t.id, tipo: 'Troca de Turno', nome: `${t.nome_solicitante} e ${t.nome_substituto}`, data: t.created_at, status: t.status,
-                detalhes: `Ida de ${priNomeSol}: <b>${formataData(t.dia_solicitante_ira)}</b> &nbsp;|&nbsp; Ida de ${priNomeSub}: <b>${formataData(t.dia_substituto_ira)}</b>`,
+                detalhes: `Ida de ${priNomeSol}: <b>${formataData(t.dia_solicitante_ira)}</b> &nbsp;|&nbsp; Ida de ${priNomeSub}: <b>${formataData(t.dia_substituto_ira)}</b>` + window._htmlMotivoRecusaEnvio(t),
                 icone: 'fa-people-arrows', cor: '#4dabf7', raw: t
             });
         });
@@ -72506,7 +72518,8 @@ window.carregarMeusHistoricos = async function() {
                 id: f.id, tipo: 'Férias', nome: f.nome, data: f.created_at, status: f.status,
                 detalhes: `Direito: <b>${f.dias_direito} dias</b> &nbsp;|&nbsp; Saída: <b>${formataData(f.data_inicio_ferias)}</b> &nbsp;|&nbsp; Retorno: <b>${formataData(f.data_fim_ferias)}</b>`
                     + (f.aprovacao_diretoria && f.aprovacao_diretoria.status === 'Pendente' ? `<br><span style="color: #e67e22;"><i class="fa-solid fa-landmark"></i> Aguardando aprovação da Diretoria</span>` : '')
-                    + (f.aprovacao_diretoria && f.aprovacao_diretoria.status === 'Reprovado' ? `<br><span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Reprovado pela Diretoria${f.aprovacao_diretoria.por ? ' (' + f.aprovacao_diretoria.por + ')' : ''}: ${f.aprovacao_diretoria.motivo || ''}</span>` : ''),
+                    + (f.aprovacao_diretoria && f.aprovacao_diretoria.status === 'Reprovado' ? `<br><span style="color: var(--cor-perigo);"><i class="fa-solid fa-ban"></i> Reprovado pela Diretoria${f.aprovacao_diretoria.por ? ' (' + f.aprovacao_diretoria.por + ')' : ''}: ${f.aprovacao_diretoria.motivo || ''}</span>` : '')
+                    + (f.aprovacao_diretoria && f.aprovacao_diretoria.status === 'Reprovado' ? '' : window._htmlMotivoRecusaEnvio(f)),
                 icone: 'fa-plane-departure', cor: '#ffd54f', raw: f
             });
         });
