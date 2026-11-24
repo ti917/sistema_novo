@@ -37465,6 +37465,7 @@ if (erroDependente) {
             window.docsAntigosCorrecaoAdmissao = {};
             window.arquivosAcumuladosAdmissao = {};
             window.comprovanteCpfAntigo = null; window.__compCpfParaSalvar = null;
+            try { window.RascunhoAdmissao && window.RascunhoAdmissao.descartar(); } catch (_e) {}
             
             // Depois que salvar, reseta o botão para o normal
             btn.removeAttribute('data-id-correcao');
@@ -58056,6 +58057,183 @@ window.abrirJustificativaDestacada = async function(idReferencia) {
 };
 
 // ==========================================
+// 💾 RASCUNHOS AUTOMÁTICOS (sobrevive a F5 / fechar a aba)
+// Guarda os campos no localStorage e os ANEXOS no IndexedDB do navegador (só deste
+// computador). Nada vai pro servidor. Vence em 7 dias. Só é apagado quando a pessoa
+// envia/descarta — nunca por conta própria.
+// ==========================================
+window.Rascunho = (function () {
+    const VALIDADE_MS = 7 * 24 * 3600 * 1000;
+    const chaveLS = (nome) => { let uid = 'anon'; try { if (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.id) uid = usuarioAtual.id; } catch (e) {} return 'rascunho_' + uid + '_' + nome; };
+    let _db = null;
+    function abrirDB() {
+        if (_db) return Promise.resolve(_db);
+        return new Promise((ok, erro) => {
+            try {
+                const rq = indexedDB.open('soul_rascunhos', 1);
+                rq.onupgradeneeded = () => { rq.result.createObjectStore('arquivos'); };
+                rq.onsuccess = () => { _db = rq.result; ok(_db); };
+                rq.onerror = () => erro(rq.error);
+            } catch (e) { erro(e); }
+        });
+    }
+    async function tx(modo, fn) {
+        const db = await abrirDB();
+        return new Promise((ok, erro) => {
+            const t = db.transaction('arquivos', modo); const st = t.objectStore('arquivos');
+            const r = fn(st); t.oncomplete = () => ok(r && r.result !== undefined ? r.result : undefined); t.onerror = () => erro(t.error);
+        });
+    }
+    return {
+        ler(nome) {
+            try {
+                const v = JSON.parse(localStorage.getItem(chaveLS(nome)) || 'null');
+                if (!v || !v.ts || Date.now() - v.ts > VALIDADE_MS) return null;
+                return v.dados;
+            } catch (e) { return null; }
+        },
+        gravar(nome, dados) { try { localStorage.setItem(chaveLS(nome), JSON.stringify({ ts: Date.now(), dados })); } catch (e) {} },
+        apagar(nome) { try { localStorage.removeItem(chaveLS(nome)); } catch (e) {} },
+        async gravarArq(chave, files) {
+            try {
+                const lista = Array.from(files || []).map(f => ({ nome: f.name, tipo: f.type, blob: f }));
+                await tx('readwrite', st => st.put({ ts: Date.now(), lista }, chaveLS(chave)));
+            } catch (e) { /* sem IndexedDB: segue sem guardar o anexo */ }
+        },
+        async lerArq(chave) {
+            try {
+                const r = await tx('readonly', st => st.get(chaveLS(chave)));
+                if (!r || !r.lista) return [];
+                return r.lista.map(x => new File([x.blob], x.nome, { type: x.tipo }));
+            } catch (e) { return []; }
+        },
+        async apagarArq(chave) { try { await tx('readwrite', st => st.delete(chaveLS(chave))); } catch (e) {} },
+        async apagarArqPrefixo(prefixo) {
+            try {
+                const db = await abrirDB();
+                await new Promise((ok) => {
+                    const t = db.transaction('arquivos', 'readwrite'); const st = t.objectStore('arquivos');
+                    const rq = st.openCursor();
+                    rq.onsuccess = () => { const c = rq.result; if (c) { if (String(c.key).startsWith(chaveLS(prefixo))) c.delete(); c.continue(); } };
+                    t.oncomplete = ok; t.onerror = ok;
+                });
+            } catch (e) {}
+        },
+        colocarArquivosNoInput(input, files) {
+            try { const dt = new DataTransfer(); files.forEach(f => dt.items.add(f)); input.files = dt.files; return true; } catch (e) { return false; }
+        }
+    };
+})();
+
+// ==========================================
+// 💾 RASCUNHO DA ADMISSÃO (Cadastro Geral › Colaborador)
+// Salva sozinho os campos e os anexos enquanto o Gestor/RH preenche. Se atualizar a
+// página ou fechar a aba, aparece um aviso no topo do formulário com "Recuperar" e
+// "Descartar" — nunca preenche por cima sem a pessoa pedir. Só vale para cadastro NOVO
+// de Colaborador (não mexe em edição nem em ficha devolvida para correção).
+// ==========================================
+window.RascunhoAdmissao = (function () {
+    const NOME = 'admissao_nova';
+    let timer = null, restaurando = false, bannerDispensado = false;
+    const form = () => document.getElementById('form-novo-usuario');
+    const modoNovo = () => {
+        const b = document.getElementById('btn-salvar-usuario');
+        return !!b && !b.getAttribute('data-edit-id') && !b.getAttribute('data-id-correcao');
+    };
+    const campos = () => Array.from((form() || document).querySelectorAll('input[id], select[id], textarea[id]'))
+        .filter(el => el.type !== 'file' && el.type !== 'password' && el.id !== 'novo-senha' && el.closest('#form-novo-usuario'));
+    function coletar() {
+        const v = {};
+        campos().forEach(el => { v[el.id] = (el.type === 'checkbox' || el.type === 'radio') ? { c: el.checked } : { v: el.value }; });
+        return v;
+    }
+    function temConteudo() {
+        const g = id => (document.getElementById(id) || {}).value || '';
+        return (g('novo-nome').trim() !== '' || g('adm-cpf').trim() !== '');
+    }
+    async function salvarAgora() {
+        if (restaurando || !form() || !modoNovo()) return;
+        if ((document.getElementById('novo-perfil') || {}).value !== 'Colaborador' || !temConteudo()) return;
+        window.Rascunho.gravar(NOME, { campos: coletar(), nome: (document.getElementById('novo-nome') || {}).value || '', em: Date.now() });
+        const ac = window.arquivosAcumuladosAdmissao || {};
+        const lista = [];
+        Object.keys(ac).forEach(id => (ac[id] || []).forEach(f => { if (f instanceof File || f instanceof Blob) lista.push({ id, f }); }));
+        if (lista.length) {
+            const fakeFiles = lista.map(x => { const nf = new File([x.f], (x.f.name || 'arquivo'), { type: x.f.type }); nf._grupo = x.id; return nf; });
+            await window.Rascunho.gravarArq(NOME + '_arq', fakeFiles.map((nf, i) => Object.assign(nf, {})));
+            window.Rascunho.gravar(NOME + '_arq_mapa', lista.map(x => x.id));
+        } else {
+            await window.Rascunho.apagarArq(NOME + '_arq'); window.Rascunho.apagar(NOME + '_arq_mapa');
+        }
+    }
+    function agendar() { clearTimeout(timer); timer = setTimeout(salvarAgora, 800); }
+    function existe() { const d = window.Rascunho.ler(NOME); return d && d.campos ? d : null; }
+    function descartar() {
+        clearTimeout(timer); window.Rascunho.apagar(NOME); window.Rascunho.apagar(NOME + '_arq_mapa'); window.Rascunho.apagarArq(NOME + '_arq');
+        document.getElementById('banner-rascunho-admissao')?.remove();
+    }
+    function aplicarCampos(valores) {
+        Object.keys(valores).forEach(id => {
+            const el = document.getElementById(id); if (!el) return; const x = valores[id];
+            if ('c' in x) { if (el.checked !== x.c) { el.checked = x.c; el.dispatchEvent(new Event('change', { bubbles: true })); } return; }
+            if (el.value === x.v) return;
+            if (el.tomselect) { try { el.tomselect.setValue(x.v, true); } catch (e) {} }
+            el.value = x.v;
+            el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    }
+    async function recuperar() {
+        const d = existe(); if (!d) return;
+        restaurando = true;
+        try {
+            document.getElementById('banner-rascunho-admissao')?.remove();
+            // várias passadas: alguns campos dependem de outros (empresa → unidade, país → cidade, "tem RG" → RG...)
+            for (let i = 0; i < 4; i++) { aplicarCampos(d.campos); await new Promise(r => setTimeout(r, 450)); }
+            if (typeof window.renderizarAnexosAdmissaoTipados === 'function') window.renderizarAnexosAdmissaoTipados();
+            const mapa = window.Rascunho.ler(NOME + '_arq_mapa') || [];
+            const arqs = await window.Rascunho.lerArq(NOME + '_arq');
+            if (arqs.length && arqs.length === mapa.length) {
+                window.arquivosAcumuladosAdmissao = window.arquivosAcumuladosAdmissao || {};
+                arqs.forEach((f, i) => { const id = mapa[i]; (window.arquivosAcumuladosAdmissao[id] = window.arquivosAcumuladosAdmissao[id] || []).push(f); });
+                Object.keys(window.arquivosAcumuladosAdmissao).forEach(id => {
+                    try { window.sincronizarInputComAcumuladorAdmissao(id); window.renderizarChipsArquivosAdmissao(id); window.atualizarStatusDocAntigo && window.atualizarStatusDocAntigo(id); } catch (e) {}
+                });
+            }
+            if (typeof mostrarAlerta === 'function') mostrarAlerta('Rascunho recuperado. Confira os campos e os anexos antes de salvar.', 'sucesso');
+        } finally { restaurando = false; }
+    }
+    function mostrarBannerSePreciso() {
+        if (bannerDispensado || document.getElementById('banner-rascunho-admissao')) return;
+        const f = form(); if (!f || f.offsetParent === null || !modoNovo()) return;
+        if (temConteudo()) return;
+        const d = existe(); if (!d) return;
+        const quando = new Date(d.em || Date.now()).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        const div = document.createElement('div');
+        div.id = 'banner-rascunho-admissao';
+        div.style.cssText = 'margin-bottom:18px; padding:14px 18px; border-radius:12px; background:rgba(255,193,7,0.10); border:1px solid rgba(255,193,7,0.45); display:flex; gap:12px; align-items:center; flex-wrap:wrap;';
+        div.innerHTML = `<i class="fa-solid fa-floppy-disk" style="color:#ffc107; font-size:1.3rem;"></i>
+            <div style="flex:1; min-width:220px;"><b style="color:#ffc107;">Você tem um cadastro não finalizado</b><br>
+            <span style="font-size:0.85rem; color:var(--cor-texto-secundario);">${(d.nome || 'Sem nome').replace(/</g, '&lt;')} — salvo automaticamente em ${quando}</span></div>
+            <button type="button" class="btn-primary" id="btn-recuperar-rascunho-adm" style="padding:8px 16px;">Recuperar</button>
+            <button type="button" class="btn-secondary" id="btn-descartar-rascunho-adm" style="padding:8px 16px;">Descartar</button>`;
+        f.insertBefore(div, f.firstChild);
+        document.getElementById('btn-recuperar-rascunho-adm').onclick = recuperar;
+        document.getElementById('btn-descartar-rascunho-adm').onclick = () => { bannerDispensado = true; descartar(); };
+    }
+    document.addEventListener('input', ev => { if (ev.target && ev.target.closest && ev.target.closest('#form-novo-usuario')) agendar(); });
+    document.addEventListener('change', ev => { if (ev.target && ev.target.closest && ev.target.closest('#form-novo-usuario')) agendar(); });
+    ['acumularArquivosDocAdmissao', 'removerArquivoDocAdmissao'].forEach(nome => {
+        const orig = window[nome];
+        if (typeof orig === 'function' && !orig._rascunho) {
+            window[nome] = async function () { const r = await orig.apply(this, arguments); agendar(); return r; };
+            window[nome]._rascunho = true;
+        }
+    });
+    setInterval(() => { try { mostrarBannerSePreciso(); } catch (e) {} }, 1500);
+    return { descartar, recuperar, existe };
+})();
+
+// ==========================================
 // MOTOR DE COBRANÇA EM MASSA DE PONTO (ZAP)
 // ==========================================
 window.filaCobrancaPonto = [];
@@ -58088,14 +58266,25 @@ window.adicionarColabFilaPonto = function() {
         nome: nome,
         fone: fone,
         empresa: empresa,
-        unidade: unidade
+        unidade: unidade,
+        dataInicio: dataInicioLimit
     });
 
+    window._montarCardFilaPonto(window.filaCobrancaPonto[window.filaCobrancaPonto.length - 1]);
+
+    document.getElementById('qtd-fila-ponto').innerText = window.filaCobrancaPonto.length;
+    document.getElementById('btn-enviar-zap-ponto-massa').disabled = false;
+    window._salvarRascunhoFilaPonto();
+
+    if (select.tomselect) select.tomselect.clear();
+};
+
+// Monta o card de UM colaborador na fila (usado ao adicionar e ao recuperar o rascunho)
+window._montarCardFilaPonto = function(item) {
+    const filaIdUnico = item.filaId, nome = item.nome, dataInicioLimit = item.dataInicio || '';
+    const hojeLimit = new Date().toISOString().split('T')[0];
     const container = document.getElementById('container-fila-ponto');
-    
-    if (window.filaCobrancaPonto.length === 1) {
-        container.innerHTML = '';
-    }
+    if (container.querySelector('p')) container.innerHTML = '';
 
     const divCard = document.createElement('div');
     divCard.id = `card-fila-${filaIdUnico}`;
@@ -58139,12 +58328,55 @@ window.adicionarColabFilaPonto = function() {
     `;
 
     container.appendChild(divCard);
+};
 
+// 💾 Salva a fila inteira (colaboradores, data, erros marcados). Anexos vão pro IndexedDB.
+window._salvarRascunhoFilaPonto = function() {
+    try {
+        const itens = window.filaCobrancaPonto.map(c => ({
+            ...c,
+            data: (document.getElementById(`data-ponto-${c.filaId}`) || {}).value || '',
+            erros: Array.from(document.querySelectorAll(`.chk-erro-${c.filaId}:checked`)).map(e => e.value)
+        }));
+        if (itens.length === 0) window.Rascunho.apagar('fila_ponto');
+        else window.Rascunho.gravar('fila_ponto', itens);
+    } catch (e) {}
+};
+window._restaurarRascunhoFilaPonto = async function() {
+    const container = document.getElementById('container-fila-ponto');
+    if (!container || window.filaCobrancaPonto.length > 0 || window._filaPontoRestaurada) return;
+    window._filaPontoRestaurada = true;
+    const itens = window.Rascunho.ler('fila_ponto');
+    if (!Array.isArray(itens) || itens.length === 0) return;
+    for (const it of itens) {
+        const { data, erros, ...item } = it;
+        window.filaCobrancaPonto.push(item);
+        window._montarCardFilaPonto(item);
+        const inp = document.getElementById(`data-ponto-${item.filaId}`); if (inp && data) inp.value = data;
+        (erros || []).forEach(v => { const ch = Array.from(document.querySelectorAll(`.chk-erro-${item.filaId}`)).find(x => x.value === v); if (ch) ch.checked = true; });
+        const arqs = await window.Rascunho.lerArq('fila_' + item.filaId);
+        const fi = document.getElementById(`doc-ponto-${item.filaId}`);
+        if (arqs.length && fi) window.Rascunho.colocarArquivosNoInput(fi, arqs);
+    }
     document.getElementById('qtd-fila-ponto').innerText = window.filaCobrancaPonto.length;
     document.getElementById('btn-enviar-zap-ponto-massa').disabled = false;
-    
-    if (select.tomselect) select.tomselect.clear();
+    if (typeof mostrarAlerta === 'function') mostrarAlerta(`Recuperei a fila de cobranças que você tinha começado (<b>${window.filaCobrancaPonto.length}</b> colaborador(es)). Confira os dados antes de disparar.`, 'aviso');
 };
+// Grava sozinho a cada alteração dentro da fila (data, caixinhas e anexo)
+document.addEventListener('change', function(ev) {
+    const alvo = ev.target; if (!alvo || !alvo.closest || !alvo.closest('#container-fila-ponto')) return;
+    if (alvo.type === 'file' && alvo.id && alvo.id.startsWith('doc-ponto-')) {
+        const fid = alvo.id.replace('doc-ponto-', '');
+        if (alvo.files && alvo.files.length) window.Rascunho.gravarArq('fila_' + fid, alvo.files); else window.Rascunho.apagarArq('fila_' + fid);
+    }
+    window._salvarRascunhoFilaPonto();
+});
+// Recupera quando o painel já estiver carregado (espera o usuário logar)
+(function aguardarParaRestaurarFila(tentativas) {
+    if (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.id && document.getElementById('container-fila-ponto')) { window._restaurarRascunhoFilaPonto(); return; }
+    if (tentativas > 120) return;
+    setTimeout(() => aguardarParaRestaurarFila(tentativas + 1), 1000);
+})(0);
 
 window.removerColabFilaPonto = function(filaIdParaRemover) {
     // Remove do Array
@@ -58153,6 +58385,8 @@ window.removerColabFilaPonto = function(filaIdParaRemover) {
     // Remove do HTML apagando SÓ o card da lixeira clicada
     const card = document.getElementById(`card-fila-${filaIdParaRemover}`);
     if(card) card.remove();
+    window.Rascunho.apagarArq('fila_' + filaIdParaRemover);
+    window._salvarRascunhoFilaPonto();
 
     // Atualiza botão e contadores
     document.getElementById('qtd-fila-ponto').innerText = window.filaCobrancaPonto.length;
@@ -58165,6 +58399,7 @@ window.removerColabFilaPonto = function(filaIdParaRemover) {
 
 window.limparTodaFilaPonto = function() {
     window.filaCobrancaPonto = [];
+    window.Rascunho.apagar('fila_ponto'); window.Rascunho.apagarArqPrefixo('fila_');
     document.getElementById('container-fila-ponto').innerHTML = '<p style="text-align: center; color: var(--cor-texto-secundario); padding: 20px; border: 1px dashed var(--cor-borda); border-radius: 8px;">Nenhum colaborador adicionado à fila.</p>';
     document.getElementById('qtd-fila-ponto').innerText = '0';
     document.getElementById('btn-enviar-zap-ponto-massa').disabled = true;
