@@ -95212,8 +95212,45 @@ window.exportarExcelAdmissoesR6EmLote = async function() {
         return mostrarAlerta("Nenhum colaborador encontrado com os filtros atuais da tela.", "aviso");
     }
 
+    // 🎯 R6 é o cadastro de cartão de benefício: só entra quem a regra de benefício da unidade manda receber VR e/ou VA.
+    // Unidade sem VR e sem VA fica de fora; unidade que paga só VR ou só VA continua aparecendo.
+    // Usa as MESMAS regras das telas de VR/VA (config_vr / config_va): flag da unidade, escopo "específicos" e exceção por cargo.
+    let _foraSemBeneficio = 0;
     try {
-        mostrarAlerta(`Lendo dados de ${dadosFiltrados.length} colaborador(es)... Gerando planilha!`, "sucesso");
+        const [rVR, rVA] = await Promise.all([
+            supabaseClient.from('config_vr').select('*'),
+            supabaseClient.from('config_va').select('*')
+        ]);
+        if (rVR.error) throw rVR.error;
+        if (rVA.error) throw rVA.error;
+        const regrasVRr6 = rVR.data || [], regrasVAr6 = rVA.data || [];
+        const normR6 = function(x) { return String(x || '').trim().toUpperCase(); };
+        const recebeBeneficioR6 = function(c, regras, flag, chaveExc) {
+            const unidadesC = String(c.unidade || '').split(',').map(normR6).filter(Boolean);
+            return regras.some(function(r) {
+                if (!unidadesC.includes(normR6(r.unidade))) return false;
+                if (String(r[flag]) === 'false') return false;
+                if (r.escopo_recebimento === 'especificos') {
+                    return Array.isArray(r.colaboradores_recebem) && r.colaboradores_recebem.map(String).includes(String(c.id));
+                }
+                const exc = (typeof window.cargoTemExcecaoBeneficio === 'function') && window.cargoTemExcecaoBeneficio({ id: c.id, unidade: c.unidade, dados_admissao: c.dados_admissao, cargo: (c.dados_admissao || {}).cargo }, chaveExc);
+                return !exc;
+            });
+        };
+        const antesR6 = dadosFiltrados.length;
+        dadosFiltrados = dadosFiltrados.filter(function(c) {
+            return recebeBeneficioR6(c, regrasVRr6, 'recebe_vr', 'sem_vr') || recebeBeneficioR6(c, regrasVAr6, 'recebe_va', 'sem_va');
+        });
+        _foraSemBeneficio = antesR6 - dadosFiltrados.length;
+    } catch (eBen) {
+        return mostrarAlerta("Não consegui ler as regras de VR/VA pra filtrar o R6 (" + (eBen.message || eBen) + "). Nada foi exportado — tente de novo.", "erro");
+    }
+    if (dadosFiltrados.length === 0) {
+        return mostrarAlerta("Nenhum colaborador desses filtros recebe VR nem VA (unidades sem benefício ficam fora do R6).", "aviso");
+    }
+
+    try {
+        mostrarAlerta(`Lendo dados de ${dadosFiltrados.length} colaborador(es)` + (_foraSemBeneficio ? ` (${_foraSemBeneficio} ficaram de fora por não receberem VR nem VA)` : '') + `... Gerando planilha!`, "sucesso");
         
         const workbook = new ExcelJS.Workbook();
         const sheet = workbook.addWorksheet('R6 Admissoes Lote');
