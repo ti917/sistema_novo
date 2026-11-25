@@ -120545,7 +120545,32 @@ window.pontoTemCorrecao = function(b) {
     return ['entrada', 'ida_refeicao', 'volta_refeicao', 'saida'].some(function(c) { return !!window.pontoCorrecaoDoCampo(b, c); });
 };
 
+// 🔒 Trava: não deixa corrigir/mover/desconsiderar/abonar/ajustar ponto de um dia ANTERIOR à data em que o colaborador
+// começou a bater ponto no sistema (Método de Ponto). Só olha a data de início; se não houver data configurada, não trava aqui.
+window.pontoTravaAntesDoInicio = async function(colabId, dataIso) {
+    if (!colabId || !dataIso) return;
+    let ini = null;
+    try {
+        const r = await supabaseClient.from('config_ponto_whatsapp').select('data_inicio_ponto').eq('colaborador_id', colabId).maybeSingle();
+        if (r && !r.error && r.data && r.data.data_inicio_ponto) ini = String(r.data.data_inicio_ponto).slice(0, 10);
+    } catch (e) { return; }
+    const dia = String(dataIso).slice(0, 10);
+    if (ini && dia < ini) {
+        const br = function(d) { return d.split('-').reverse().join('/'); };
+        const err = new Error('BLOQUEADO: o dia ' + br(dia) + ' é anterior à data em que este colaborador começou a bater ponto no sistema (' + br(ini) + ', definida em Método de Ponto). Não é possível lançar, corrigir, mover, desconsiderar nem abonar ponto antes dessa data.');
+        err.bloqueioInicioPonto = true;
+        throw err;
+    }
+};
 window.aplicarPatchPontoDiario = async function(id, patch) {
+    {
+        let reg = (window.pontoCartoesPorId && window.pontoCartoesPorId[id]) || null;
+        if (!reg || !reg.data || !reg.colaborador_id) {
+            const q = await supabaseClient.from('pontos_diarios_whatsapp').select('colaborador_id, data').eq('id', id).maybeSingle();
+            reg = q && q.data ? q.data : null;
+        }
+        if (reg) await window.pontoTravaAntesDoInicio(reg.colaborador_id, reg.data);
+    }
     const { data, error } = await supabaseClient.from('pontos_diarios_whatsapp').update(patch).eq('id', id).select('id');
     if (error) throw error;
     if (!data || data.length === 0) {
@@ -120634,6 +120659,8 @@ window.salvarEdicaoPontoCampo = async function(idCartao, campo) {
     const agora = new Date().toISOString();
 
     try {
+        // 🔒 A data digitada na correção também não pode ser anterior ao início do ponto no sistema
+        await window.pontoTravaAntesDoInicio(b.colaborador_id, window.dataSPPontoWhatsapp(novoIso));
         const correcoes = Object.assign({}, b.correcoes || {});
         correcoes[campo] = { hora: novoIso, justificativa: justificativa, por: autor, em: agora, batida_original: original };
 
