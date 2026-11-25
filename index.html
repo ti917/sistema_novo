@@ -11312,8 +11312,8 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
     <h3 style="color: #28a745; margin: 0;"><i class="fa-solid fa-credit-card"></i> Cartões de Benefício (R6)</h3>
   </div>
   <p style="font-size: 0.85rem; color: var(--cor-texto-secundario); margin-bottom: 15px;">
-    Escolha o mês: aparecem os colaboradores <b>admitidos naquele mês</b> (data de início) que estão <b>ativos</b> e cuja unidade paga <b>VR e/ou VA</b>.
-    Cancelados, desistentes, desligados e unidades sem VR/VA ficam de fora. O Excel sai no modelo R6 para solicitar os cartões.
+    Escolha o mês: aparecem os colaboradores <b>admitidos naquele mês</b> (data de início) que estão <b>ativos</b> e cuja unidade paga <b>VR, VA e/ou Cesta 2</b>.
+    Cancelados, desistentes, desligados e unidades sem VR, VA e Cesta 2 ficam de fora. O Excel sai no modelo R6 para solicitar os cartões.
   </p>
   <div class="controls-escala" style="display: flex; flex-wrap: wrap; gap: 15px; align-items: center; margin-bottom: 15px;">
     <div class="input-wrapper" style="min-width: 220px;">
@@ -95244,13 +95244,16 @@ window.r6MontarLista = async function(mes) {
     }
     const base = todasAdmissoesAprovadas || [];
     const ativosReais = window.filtrarAtivosE_AvisoPrevio(base);
-    const [rVR, rVA] = await Promise.all([
+    if (typeof window.carregarExcecoesCargoBeneficio === 'function') await window.carregarExcecoesCargoBeneficio();
+    const [rVR, rVA, rCE] = await Promise.all([
         supabaseClient.from('config_vr').select('*'),
-        supabaseClient.from('config_va').select('*')
+        supabaseClient.from('config_va').select('*'),
+        supabaseClient.from('config_cesta2').select('*')
     ]);
     if (rVR.error) throw rVR.error;
     if (rVA.error) throw rVA.error;
-    const regrasVRr6 = rVR.data || [], regrasVAr6 = rVA.data || [];
+    if (rCE.error) throw rCE.error;
+    const regrasVRr6 = rVR.data || [], regrasVAr6 = rVA.data || [], regrasCEr6 = rCE.data || [];
     const normR6 = function(x) { return String(x || '').trim().toUpperCase(); };
     const recebeR6 = function(c, regras, flag, chaveExc) {
         const unidadesC = String(c.unidade || '').split(',').map(normR6).filter(Boolean);
@@ -95274,8 +95277,12 @@ window.r6MontarLista = async function(mes) {
         if (mes && !String(inicio).startsWith(mes)) return;
         const vr = recebeR6(c, regrasVRr6, 'recebe_vr', 'sem_vr');
         const va = recebeR6(c, regrasVAr6, 'recebe_va', 'sem_va');
-        if (!vr && !va) return;
-        resultado.push({ colab: c, inicio: inicio, vr: vr, va: va });
+        const unidadesCE = String(c.unidade || '').split(',').map(normR6).filter(Boolean);
+        const regraCE = regrasCEr6.find(function(r) { return unidadesCE.includes(normR6(r.unidade)); });
+        const cesta = !!(regraCE && regraCE.recebe_cesta !== false && String(regraCE.recebe_cesta).trim().toLowerCase() !== 'false')
+            && !(typeof window.cargoTemExcecaoBeneficio === 'function' && window.cargoTemExcecaoBeneficio({ id: c.id, unidade: c.unidade, dados_admissao: c.dados_admissao, cargo: adm.cargo }, 'sem_cesta2'));
+        if (!vr && !va && !cesta) return;
+        resultado.push({ colab: c, inicio: inicio, vr: vr, va: va, cesta: cesta });
     });
     resultado.sort(function(a, b) { return String(a.colab.nome || '').localeCompare(String(b.colab.nome || ''), 'pt-BR'); });
     return resultado;
@@ -95292,10 +95299,10 @@ window.carregarCartoesR6 = async function() {
         const lista = await window.r6MontarLista(mes);
         const esc = function(t) { return String(t == null ? '' : t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
         if (resumo) resumo.textContent = lista.length + ' colaborador(es) para solicitar cartão.';
-        if (!lista.length) { tb.innerHTML = '<tr><td colspan="5" style="padding: 15px; text-align: center; color: var(--cor-texto-secundario);">Nenhum colaborador ativo admitido neste mês em unidade com VR/VA.</td></tr>'; return; }
+        if (!lista.length) { tb.innerHTML = '<tr><td colspan="5" style="padding: 15px; text-align: center; color: var(--cor-texto-secundario);">Nenhum colaborador ativo admitido neste mês em unidade com VR, VA ou Cesta 2.</td></tr>'; return; }
         tb.innerHTML = lista.map(function(x) {
             const adm = x.colab.dados_admissao || {};
-            const ben = (x.vr && x.va) ? 'VR + VA' : (x.vr ? 'Só VR' : 'Só VA');
+            const ben = [x.vr ? 'VR' : '', x.va ? 'VA' : '', x.cesta ? 'Cesta 2' : ''].filter(Boolean).join(' + ');
             return '<tr style="border-top: 1px solid var(--cor-borda);"><td style="padding: 8px;">' + esc(x.colab.nome) + '</td><td style="padding: 8px;">' + esc(adm.cpf ? mascaraCPF(adm.cpf) : '') + '</td><td style="padding: 8px;">' + esc(x.colab.unidade) + '</td><td style="padding: 8px;">' + esc(x.inicio ? formatarDataBR(x.inicio) : '') + '</td><td style="padding: 8px;">' + ben + '</td></tr>';
         }).join('');
     } catch (e) {
@@ -95313,7 +95320,7 @@ window.exportarExcelAdmissoesR6EmLote = async function() {
         return mostrarAlerta("Não consegui montar a lista do R6 (" + (eBen.message || eBen) + "). Nada foi exportado — tente de novo.", "erro");
     }
     if (dadosFiltrados.length === 0) {
-        return mostrarAlerta("Nenhum colaborador ativo admitido neste mês em unidade com VR ou VA.", "aviso");
+        return mostrarAlerta("Nenhum colaborador ativo admitido neste mês em unidade com VR, VA ou Cesta 2.", "aviso");
     }
     const _foraSemBeneficio = 0;
 
