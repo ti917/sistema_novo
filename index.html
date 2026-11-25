@@ -120301,7 +120301,7 @@ window.renderizarLinhasPontosBatidos = function(b) {
                 + '</div>'
             : '';
 
-        const botaoMover = (podeEditar && c.hora && !desc && Object.keys(window.ROTULOS_BATIDA_PONTO).some(function(k) { return k !== c.campo && !b[k + '_hora']; }))
+        const botaoMover = (podeEditar && c.hora && !desc)
             ? '<button type="button" onclick="window.abrirMoverBatidaModal(\'' + b.id + '\', \'' + c.campo + '\')" '
                 + 'style="' + estiloBotao('#b388ff') + '" onmouseenter="this.style.background=\'rgba(179,136,255,0.14)\'" onmouseleave="this.style.background=\'none\'" title="A batida foi gravada na linha errada? Mova pra linha certa (a original não é apagada)">'
                 + '<i class="fa-solid fa-right-left"></i> Mover para…</button>'
@@ -120752,6 +120752,8 @@ window.removerCorrecaoPonto = async function(idCartao, campo) {
         delete correcoes[campo];
         // Correção que veio de uma batida MOVIDA: ao remover, a batida volta a valer na linha onde foi gravada.
         if (correcao.movida_de && correcoes[correcao.movida_de] && correcoes[correcao.movida_de].desconsiderada && correcoes[correcao.movida_de].movida_para === campo) delete correcoes[correcao.movida_de];
+        // Correção que veio de uma TROCA de horários: desfaz os dois lados juntos (senão o mesmo horário contaria 2x).
+        if (correcao.troca && correcao.movida_de && correcoes[correcao.movida_de] && correcoes[correcao.movida_de].troca && correcoes[correcao.movida_de].movida_de === campo) delete correcoes[correcao.movida_de];
         const historico = (b.historico_edicoes || []).slice();
         historico.push({
             tipo: 'correcao_removida',
@@ -120886,7 +120888,13 @@ window.abrirMoverBatidaModal = function(idCartao, origem) {
     const soCorrecao = !horaOrig && corrOrig && corrOrig.hora && !corrOrig.desconsiderada;
     if (!horaOrig && !soCorrecao) { mostrarAlerta('Essa linha não tem horário pra mover.', 'erro'); return; }
     if (window.pontoDesconsiderada(b, origem)) { mostrarAlerta('Essa batida já está desconsiderada. Restaure antes de mover.', 'erro'); return; }
-    const destinos = Object.keys(rot).filter(function(k) { return k !== origem && !b[k + '_hora'] && (!soCorrecao || !window.pontoCorrecaoDoCampo(b, k)); });
+    const origemFixa = !!rot[origem];
+    const destinos = Object.keys(rot).filter(function(k) {
+        if (k === origem) return false;
+        if (!b[k + '_hora']) return !soCorrecao || !window.pontoCorrecaoDoCampo(b, k);
+        // linha ocupada: só dá pra TROCAR de lugar (origem e destino com batida real, nenhuma desconsiderada)
+        return origemFixa && !soCorrecao && !window.pontoDesconsiderada(b, k) && !!window.pontoHoraEfetiva(b, k);
+    });
     if (!destinos.length) { mostrarAlerta('Não há nenhuma linha livre pra receber esse horário.', 'erro'); return; }
     const antigo = document.getElementById('modal-mover-batida'); if (antigo) antigo.remove();
     const hms = horaOrig ? window.horaComSegundosSP(horaOrig) : '';
@@ -120900,7 +120908,7 @@ window.abrirMoverBatidaModal = function(idCartao, origem) {
               + '<p style="margin:0 0 12px; font-size:0.9rem;">Batida do colaborador: <b>' + hms + '</b> (gravada como ' + window.pontoRotuloChave(origem) + ')</p>')
         + '<label style="font-size:0.8rem; color:var(--cor-texto-secundario);">Mover para</label>'
         + '<select id="mvb-destino" style="width:100%; box-sizing:border-box; margin:6px 0 12px; padding:11px 13px; border:1px solid var(--cor-borda); border-radius:10px; background:var(--cor-fundo-input); color:var(--cor-texto-principal); font-family:inherit;">'
-        + destinos.map(function(k) { return '<option value="' + k + '">' + rot[k] + '</option>'; }).join('') + '</select>'
+        + destinos.map(function(k) { return '<option value="' + k + '">' + rot[k] + (b[k + '_hora'] ? ' — trocar de lugar com a batida das ' + window.htmlHoraCurta(window.pontoHoraEfetiva(b, k)) : ' (linha livre)') + '</option>'; }).join('') + '</select>'
         + '<label style="font-size:0.8rem; color:var(--cor-texto-secundario);">Justificativa (obrigatória, mínimo 10 caracteres)</label>'
         + '<textarea id="mvb-just" rows="3" style="width:100%; box-sizing:border-box; margin-top:6px; padding:11px 13px; border:1px solid var(--cor-borda); border-radius:10px; background:var(--cor-fundo-input); color:var(--cor-texto-principal); font-family:inherit; resize:vertical;" placeholder="Ex: colaborador esqueceu de bater a entrada; essa batida foi a ida para o almoço"></textarea>'
         + '<div style="display:flex; gap:10px; margin-top:16px;">'
@@ -120943,7 +120951,31 @@ window.salvarMoverBatida = async function(idCartao, origem) {
         return;
     }
     if (!origISO || window.pontoDesconsiderada(b, origem)) { mostrarAlerta('Essa batida não pode ser movida.', 'erro'); return; }
-    if (b[destino + '_hora']) { mostrarAlerta('A linha escolhida já tem uma batida real do colaborador.', 'erro'); return; }
+    if (b[destino + '_hora']) {
+        // TROCA: as duas linhas têm batida real. Cada uma passa a valer o horário da outra (originais intactos).
+        if (!rot[origem] || window.pontoDesconsiderada(b, destino) || !window.pontoHoraEfetiva(b, destino)) { mostrarAlerta('A linha escolhida já tem uma batida real do colaborador.', 'erro'); return; }
+        const autorT = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Admin';
+        const agoraT = new Date().toISOString();
+        try {
+            const heO = window.pontoHoraEfetiva(b, origem), heD = window.pontoHoraEfetiva(b, destino);
+            const corrT = Object.assign({}, b.correcoes || {});
+            corrT[origem] = { hora: heD, justificativa: just, por: autorT, em: agoraT, batida_original: b[origem + '_hora'] || null, movida_de: destino, troca: true };
+            corrT[destino] = { hora: heO, justificativa: just, por: autorT, em: agoraT, batida_original: b[destino + '_hora'] || null, movida_de: origem, troca: true };
+            const histT = (b.historico_edicoes || []).slice();
+            histT.push({ tipo: 'batida_trocada', campo: origem + '_hora', campo_destino: destino + '_hora', batida_original: b[origem + '_hora'] || null, valor_novo: heD, justificativa: just, editado_por: autorT, editado_em: agoraT });
+            histT.push({ tipo: 'batida_trocada', campo: destino + '_hora', campo_destino: origem + '_hora', batida_original: b[destino + '_hora'] || null, valor_novo: heO, justificativa: just, editado_por: autorT, editado_em: agoraT });
+            const patchT = { correcoes: corrT, historico_edicoes: histT };
+            await window.aplicarPatchPontoDiario(b.id, patchT);
+            Object.assign(b, patchT);
+            window.pontoCartoesPorId[idCartao] = b;
+            const mT = document.getElementById('modal-mover-batida'); if (mT) mT.remove();
+            mostrarAlerta('Horários trocados: ' + rot[origem] + ' ⇄ ' + rot[destino] + ' (as batidas originais continuam registradas).', 'sucesso');
+            window.reabrirDetalhesPontoDiaAtualizado(idCartao);
+        } catch (e) {
+            mostrarAlerta('Erro ao trocar os horários: ' + e.message, 'erro');
+        }
+        return;
+    }
     const autor = (typeof usuarioAtual !== 'undefined' && usuarioAtual && usuarioAtual.nome) || 'Admin';
     const agora = new Date().toISOString();
     try {
