@@ -7102,13 +7102,13 @@ body.sem-perm-resc .resc-perm-alterar { display: none !important; }
                             Tire ou escolha fotos de um documento (pode ser mais de uma folha, não precisa estar em ordem nem juntas) — o sistema clareia o fundo, aumenta o contraste do texto e comprime cada uma automaticamente, depois junta tudo num <b>único PDF</b>, uma foto por página, já leve pra anexar em qualquer lugar do sistema.
                         </p>
 
-                        <input type="file" id="input-fotos-digitalizar" class="hidden" accept="image/*" multiple onchange="window.adicionarFotosDigitalizar(this.files)">
+                        <input type="file" id="input-fotos-digitalizar" class="hidden" accept="image/*,application/pdf,.pdf" multiple onchange="window.adicionarFotosDigitalizar(this.files)">
 
                         <div id="dropzone-digitalizar" onclick="document.getElementById('input-fotos-digitalizar').click()"
                             style="border: 2px dashed rgba(79,195,247,0.4); border-radius: 14px; padding: 30px 20px; text-align: center; cursor: pointer; transition: 0.2s; background: rgba(79,195,247,0.04);">
                             <i class="fa-solid fa-camera" style="font-size: 2rem; color: #4fc3f7; margin-bottom: 10px; display: block;"></i>
-                            <b style="color: #4fc3f7;">Clique para escolher ou tirar as fotos</b>
-                            <div style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 4px;">Pode selecionar várias de uma vez — cada uma vira uma página do PDF</div>
+                            <b style="color: #4fc3f7;">Clique para escolher ou tirar as fotos (ou escolha um PDF)</b>
+                            <div style="font-size: 0.8rem; color: var(--cor-texto-secundario); margin-top: 4px;">Pode selecionar várias de uma vez — cada uma vira uma página do PDF. Se escolher um PDF, cada página dele é clareada e fica mais nítida</div>
                         </div>
 
                         <!-- 👇 Some quando não há nenhuma página com corte automático não confiável -->
@@ -61796,9 +61796,50 @@ window.processarImagemDigitalizada = function(file) {
     });
 };
 
-window.adicionarFotosDigitalizar = function(fileList) {
-    const arquivos = Array.from(fileList || []).filter(f => f.type.startsWith('image/'));
-    if (arquivos.length === 0) return;
+// 📄 PDF no digitalizador: cada página é desenhada (pdf.js) numa imagem de boa resolução e segue o MESMO caminho das fotos
+// (clarear fundo, contraste, nitidez). Só LÊ o PDF escolhido; nada é alterado nele nem enviado a lugar nenhum.
+window.pdfParaImagensDigitalizar = async function(file, maxPaginas) {
+    let lib = window.pdfjsLib;
+    for (let i = 0; i < 50 && !lib; i++) { await new Promise(r => setTimeout(r, 100)); lib = window.pdfjsLib; }
+    if (!lib) throw new Error('O leitor de PDF ainda não carregou. Espere um instante e tente de novo.');
+    try { if (!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js'; } catch (e) { /* segue */ }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const doc = await lib.getDocument({ data: bytes }).promise;
+    const total = Math.min(doc.numPages, maxPaginas || 30);
+    const paginas = [];
+    for (let p = 1; p <= total; p++) {
+        const page = await doc.getPage(p);
+        const v1 = page.getViewport({ scale: 1 });
+        // alvo ~2400px no lado maior (nítido sem pesar); páginas de foto escaneada já vêm grandes, as digitais são ampliadas
+        const escala = Math.min(4, Math.max(1.5, 2400 / Math.max(v1.width, v1.height)));
+        const vp = page.getViewport({ scale: escala });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(vp.width); canvas.height = Math.round(vp.height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
+        canvas.width = 1; canvas.height = 1;
+        paginas.push(new File([blob], file.name.replace(/\.pdf$/i, '') + ' - pág ' + p + '.jpg', { type: 'image/jpeg' }));
+    }
+    return { paginas, totalReal: doc.numPages };
+};
+
+window.adicionarFotosDigitalizar = async function(fileList) {
+    let arquivos = [];
+    for (const f of Array.from(fileList || [])) {
+        if (f.type.startsWith('image/')) { arquivos.push(f); continue; }
+        if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '')) {
+            try {
+                const r = await window.pdfParaImagensDigitalizar(f, 30);
+                arquivos = arquivos.concat(r.paginas);
+                if (r.totalReal > r.paginas.length && typeof mostrarAlerta === 'function') mostrarAlerta('O PDF "' + f.name + '" tem ' + r.totalReal + ' páginas; foram usadas as ' + r.paginas.length + ' primeiras.', 'aviso');
+            } catch (e) {
+                if (typeof mostrarAlerta === 'function') mostrarAlerta('Não consegui abrir o PDF "' + f.name + '": ' + (e.message || e), 'erro');
+            }
+        }
+    }
+    if (arquivos.length === 0) { const inp = document.getElementById('input-fotos-digitalizar'); if (inp) inp.value = ''; return; }
 
     arquivos.forEach(file => {
         const item = {
