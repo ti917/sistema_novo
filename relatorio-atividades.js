@@ -496,7 +496,7 @@
             <span class="sep"></span>
             ${b('undo', 'fa-rotate-left', 'Desfazer')}${b('redo', 'fa-rotate-right', 'Refazer')}
             <span class="sep"></span>
-            <button type="button" title="Acrescenta uma página em branco no fim" onmousedown="event.preventDefault()" onclick="RelAtv.quebra()"><i class="fa-solid fa-file-circle-plus"></i> Nova página</button>
+            <button type="button" title="Acrescentar uma página em branco (no começo ou no fim)" onmousedown="event.preventDefault()" onclick="RelAtv.menuNovaPagina(this)"><i class="fa-solid fa-file-circle-plus"></i> Nova página <i class="fa-solid fa-caret-down" style="font-size:.7em"></i></button>
             <button type="button" title="Excluir a página onde está o cursor" onmousedown="event.preventDefault()" onclick="RelAtv.excluirPagina()"><i class="fa-solid fa-file-circle-minus"></i> Excluir página</button>
             <button type="button" title="Inserir imagem (pode arrastar depois)" onclick="document.getElementById('ra-file').click()" id="ra-btn-img"><i class="fa-solid fa-image"></i> Imagem</button>
             <button type="button" title="Inserir a sua assinatura digital (a mesma de Assinar Documento)" onmousedown="event.preventDefault()" onclick="RelAtv.assinar('assinatura')" id="ra-btn-assin"><i class="fa-solid fa-signature"></i> Assinatura</button>
@@ -679,6 +679,34 @@
         if (n <= 1) { if (m) m.remove(); return; }
         if (!m) { m = document.createElement('div'); m.className = 'ra-pgmin'; m.setAttribute('contenteditable', 'false'); m.style.display = 'none'; ed.appendChild(m); }
         m.setAttribute('data-n', String(n));
+    }
+    // "Nova página": pequeno menu com "No começo" e "No fim"
+    function menuNovaPagina(btn) {
+        if (S.somenteLeitura) return;
+        const antigo = document.getElementById('ra-menu-np'); if (antigo) { antigo.remove(); return; }
+        const r = btn.getBoundingClientRect();
+        const m = document.createElement('div'); m.id = 'ra-menu-np';
+        m.style.cssText = 'position:fixed;z-index:100000;left:' + Math.round(r.left) + 'px;top:' + Math.round(r.bottom + 4) + 'px;background:#fff;color:#1f2937;border:1px solid #c9d1dc;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);padding:4px;min-width:190px;font-size:.85rem;';
+        const item = (txt, ic, fn) => { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = '<i class="fa-solid ' + ic + '" style="width:18px"></i> ' + txt; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:0;padding:8px 10px;border-radius:6px;cursor:pointer;color:#1f2937;font:inherit;'; b.onmouseover = () => { b.style.background = '#eef2f7'; }; b.onmouseout = () => { b.style.background = 'none'; }; b.onclick = () => { m.remove(); fn(); }; m.appendChild(b); };
+        item('Página em branco no começo', 'fa-arrow-up', paginaNoComeco);
+        item('Página em branco no fim', 'fa-arrow-down', quebra);
+        document.body.appendChild(m);
+        setTimeout(() => { const fechar = (e) => { if (!m.contains(e.target)) { m.remove(); document.removeEventListener('mousedown', fechar, true); } }; document.addEventListener('mousedown', fechar, true); }, 0);
+    }
+    // página em branco no começo: coloca uma quebra de página no topo (o mesmo mecanismo que já empurra o texto para a página seguinte)
+    function paginaNoComeco() {
+        const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
+        const br = document.createElement('div'); br.className = 'ra-pgbreak'; br.setAttribute('contenteditable', 'false'); br.textContent = 'página em branco';
+        ed.insertBefore(br, ed.firstChild);
+        // as imagens já posicionadas acompanham o texto: descem uma página
+        (S.atual.imagens || []).forEach((i) => { i.page = (i.page || 0) + 1; });
+        // cursor no primeiro texto (agora na página 2)
+        let alvo = br.nextElementSibling; while (alvo && (alvo.classList.contains('ra-pgbreak') || alvo.classList.contains('ra-pgmin'))) alvo = alvo.nextElementSibling;
+        if (!alvo) { alvo = document.createElement('p'); alvo.innerHTML = '<br>'; ed.appendChild(alvo); }
+        ed.focus({ preventScroll: true });
+        const r = document.createRange(); r.selectNodeContents(alvo); r.collapse(true); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        desenharImagens(); sujo(); paginar();
+        setTimeout(() => { const cena = $('ra-cena'); if (cena) cena.scrollTo({ top: 0, behavior: 'smooth' }); }, 120);
     }
     function quebra() {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
@@ -1620,5 +1648,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, _modalUnidades: null, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, menuNovaPagina, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, _modalUnidades: null, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
