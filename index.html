@@ -120241,6 +120241,7 @@ window.abrirHistoricoAuditoriaColaborador = async function(idColab, nomeColab) {
 window.pontoColabsGlobais = [];
 window.pontoConfigMapa = {};
 window.pontoForaRaioMapa = {}; // { idColaborador: true } = pode bater ponto fora do raio da unidade
+window.pontoClaraCobraMapa = {}; // { idColaborador: true } = a Clara cobra (WhatsApp) o ponto esquecido do dia anterior
 
 window.carregarPontoWhatsappTeste = async function() {
     window.alternarSubAbaControlePonto('batimentos');
@@ -120316,6 +120317,13 @@ window.listarColabsParaPontoWhatsapp = async function() {
             const { data: cfgRaio, error: errRaio } = await supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, permite_fora_raio');
             if (!errRaio) (cfgRaio || []).forEach(function(c) { if (c.permite_fora_raio === true) window.pontoForaRaioMapa[c.colaborador_id] = true; });
         } catch (eRaio) { console.warn('Configuração de fora do raio indisponível:', eRaio); }
+
+        // 💬 Quem a Clara cobra quando esquece de bater ponto (coluna opcional: se ainda não existir, ninguém aparece ligado)
+        window.pontoClaraCobraMapa = {};
+        try {
+            const { data: cfgClara, error: errClara0 } = await supabaseClient.from('config_ponto_whatsapp').select('colaborador_id, lembrete_ponto_clara');
+            if (!errClara0) (cfgClara || []).forEach(function(c) { if (c.lembrete_ponto_clara === true) window.pontoClaraCobraMapa[c.colaborador_id] = true; });
+        } catch (eClara0) { console.warn('Configuração da Clara cobrar ponto indisponível:', eClara0); }
 
         // 📍 Unidades ativas sem latitude/longitude: quem está em "Não permitir" não consegue bater ponto nelas
         window.pontoUnidadesSemCoord = [];
@@ -120470,6 +120478,13 @@ window.abrirModalMetodoPonto = function(idColab) {
         + '<p class="mp-dica" style="margin-bottom:' + (semCoordColab ? '8px' : '0') + ';">"Não permitir" vale para o <b>app</b> e para o <b>WhatsApp (Clara)</b>: a unidade precisa ter localização cadastrada e o raio é o definido em cada unidade. No relatório de Registros de Ponto, quem bate fora aparece como "Fora da unidade".</p>'
         + (semCoordColab ? '<p style="font-size:0.76rem; color:#ffb300; background:rgba(255,179,0,0.08); border:1px solid rgba(255,179,0,0.4); border-radius:8px; padding:8px 10px; margin:0;"><i class="fa-solid fa-triangle-exclamation"></i> A unidade deste colaborador ainda <b>não tem localização cadastrada</b>: em "Não permitir" ele não consegue bater ponto até o RH cadastrar.</p>' : '')
         + '</div><div class="mp-sec">'
+        + '<label class="mp-lbl"><i class="fa-brands fa-whatsapp"></i> Clara cobra ponto esquecido</label>'
+        + '<select id="select-clara-cobra-ponto">'
+        + '<option value="nao"' + (window.pontoClaraCobraMapa[idColab] ? '' : ' selected') + '>Desligado — a Clara não cobra esta pessoa</option>'
+        + '<option value="sim"' + (window.pontoClaraCobraMapa[idColab] ? ' selected' : '') + '>Ligado — a Clara avisa no WhatsApp o que faltou bater</option>'
+        + '</select>'
+        + '<p class="mp-dica">Se ligado, a Clara manda de manhã, no WhatsApp, o que a pessoa esqueceu de bater no <b>dia anterior</b>, com o botão "Justificar agora". É <b>uma vez só</b> por dia e só se a pessoa ainda não justificou. Só vale para quem participa do ponto.</p>'
+        + '</div><div class="mp-sec">'
         + '<label class="mp-lbl"><i class="fa-regular fa-calendar-check"></i> Data que começou a bater ponto no sistema</label>'
         + '<input type="date" id="input-data-inicio-ponto" value="' + dataInicioAtual + '" onclick="try{this.showPicker()}catch(e){}" onkeydown="if(event.key!==\'Tab\'&&event.key!==\'Escape\'){event.preventDefault();try{this.showPicker()}catch(e){}}">'
         + '<p class="mp-dica">Usada pra saber a partir de quando cobrar pendência no calendário — dias antes dessa data não mostram aviso de ponto faltando.</p>'
@@ -120586,6 +120601,18 @@ window.salvarMetodoPonto = async function(idColab) {
                 return mostrarAlerta('O método foi salvo, mas a opção de fora do raio não: ' + errRaioSalvar.message + '<br>Peça pra rodar no Supabase: ALTER TABLE public.config_ponto_whatsapp ADD COLUMN IF NOT EXISTS permite_fora_raio boolean NOT NULL DEFAULT false;', 'erro');
             }
             if (querForaRaio) window.pontoForaRaioMapa[idColab] = true; else delete window.pontoForaRaioMapa[idColab];
+        }
+        // 💬 Clara cobra ponto esquecido: salvo à parte — se a coluna ainda não existir, o resto já foi salvo
+        const selClaraCobra = document.getElementById('select-clara-cobra-ponto');
+        const querClaraCobra = !!(selClaraCobra && selClaraCobra.value === 'sim') && habilitado;
+        if (querClaraCobra !== !!window.pontoClaraCobraMapa[idColab]) {
+            const { error: errClaraSalvar } = await supabaseClient.from('config_ponto_whatsapp').update({ lembrete_ponto_clara: querClaraCobra }).eq('colaborador_id', idColab);
+            if (errClaraSalvar) {
+                window.renderizarListaPontoWhatsapp();
+                const m1 = document.getElementById('modal-metodo-ponto'); if (m1) m1.remove();
+                return mostrarAlerta('O método foi salvo, mas a opção da Clara cobrar ponto não: ' + errClaraSalvar.message + '<br>Peça pra rodar no Supabase o SQL <b>sql_extra/clara_cobrar_ponto.sql</b>.', 'erro');
+            }
+            if (querClaraCobra) window.pontoClaraCobraMapa[idColab] = true; else delete window.pontoClaraCobraMapa[idColab];
         }
         await window.pontoRegistrarHistoricoConfig(idColab, _antesHist, { metodo: metodo || null, data_inicio: dataInicioPonto, fora_raio: querForaRaio }, 'Configurar Ponto por Pessoa');
         window.renderizarListaPontoWhatsapp();
