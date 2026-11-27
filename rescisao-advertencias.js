@@ -121,54 +121,129 @@
         return false;
     }
 
+    // ------------------------------------------------------------------ visual
+    function css() {
+        if (document.getElementById('rescadv-css')) return;
+        const st = document.createElement('style'); st.id = 'rescadv-css';
+        st.textContent = `
+        .rescadv { --ra-cor: #8b5cf6; border: 1px solid rgba(139,92,246,.45); border-radius: 16px; padding: 18px 20px; background: linear-gradient(180deg, rgba(139,92,246,.10), rgba(139,92,246,.03)); box-shadow: 0 6px 22px rgba(0,0,0,.12); }
+        .rescadv-topo { display:flex; align-items:center; gap:14px; margin-bottom:14px; flex-wrap:wrap; }
+        .rescadv-ico { width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:1.2rem; color:#fff; background: linear-gradient(135deg,#8b5cf6,#6d28d9); box-shadow:0 4px 12px rgba(109,40,217,.35); flex-shrink:0; }
+        .rescadv-tit { flex:1; min-width:200px; }
+        .rescadv-tit > b { display:block; font-size:1.02rem; color: var(--cor-texto-principal); }
+        .rescadv-tit span { font-size:.78rem; color: var(--cor-texto-secundario); }
+        .rescadv-pill { font-size:.74rem; font-weight:800; padding:6px 12px; border-radius:999px; border:1px solid; white-space:nowrap; }
+        .rescadv-pill.ok { color:#16a34a; background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.5); }
+        .rescadv-pill.alerta { color:#dc2626; background:rgba(239,68,68,.10); border-color:rgba(239,68,68,.5); }
+        .rescadv-pill.neutro { color: var(--cor-texto-secundario); background:rgba(127,127,127,.10); border-color:rgba(127,127,127,.35); }
+        .rescadv-perg { font-size:.9rem; font-weight:700; margin:4px 0 10px; color: var(--cor-texto-principal); }
+        .rescadv-seg { display:grid; grid-template-columns:1fr 1fr; gap:10px; max-width:420px; }
+        .rescadv-seg label { position:relative; cursor:pointer; margin:0; }
+        .rescadv-seg input { position:absolute; opacity:0; inset:0; cursor:pointer; }
+        .rescadv-seg span { display:flex; align-items:center; justify-content:center; gap:8px; padding:12px 14px; border-radius:12px; font-weight:800; font-size:.92rem; border:2px solid var(--cor-borda); background: rgba(127,127,127,.07); color: var(--cor-texto-secundario); transition:.15s; }
+        .rescadv-seg label:hover span { border-color: rgba(139,92,246,.6); }
+        .rescadv-seg input:checked + span.sim { border-color:#16a34a; background:rgba(34,197,94,.14); color:#16a34a; }
+        .rescadv-seg input:checked + span.nao { border-color:#dc2626; background:rgba(239,68,68,.12); color:#dc2626; }
+        .rescadv-sub { margin:16px 0 8px; font-size:.78rem; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color: var(--cor-texto-secundario); }
+        .rescadv-cartas { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; }
+        .rescadv-carta { position:relative; border-radius:12px; padding:12px 14px 12px 52px; border:1px solid rgba(139,92,246,.4); background: rgba(139,92,246,.08); min-height:86px; display:flex; flex-direction:column; gap:4px; }
+        .rescadv-carta .n { position:absolute; left:12px; top:12px; width:30px; height:30px; border-radius:50%; background:#8b5cf6; color:#fff; font-weight:900; display:flex; align-items:center; justify-content:center; font-size:.85rem; }
+        .rescadv-carta .t { font-weight:800; font-size:.86rem; color: var(--cor-texto-principal); line-height:1.25; }
+        .rescadv-carta .d { font-size:.72rem; color: var(--cor-texto-secundario); }
+        .rescadv-carta .m { font-size:.78rem; color: var(--cor-texto-principal); opacity:.85; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+        .rescadv-carta a { align-self:flex-start; margin-top:2px; font-size:.76rem; font-weight:800; color:#3b82f6; text-decoration:none; }
+        .rescadv-carta a:hover { text-decoration:underline; }
+        .rescadv-carta.vazia { border:2px dashed rgba(220,38,38,.45); background: rgba(220,38,38,.04); padding-left:14px; align-items:center; justify-content:center; text-align:center; color:#dc2626; font-weight:700; font-size:.8rem; }
+        .rescadv-msg { margin-top:12px; padding:11px 14px; border-radius:12px; font-size:.84rem; display:flex; gap:10px; align-items:flex-start; line-height:1.4; border:1px solid; }
+        .rescadv-msg.ok { color:#16a34a; background:rgba(34,197,94,.10); border-color:rgba(34,197,94,.45); }
+        .rescadv-msg.erro { color:#dc2626; background:rgba(239,68,68,.08); border-color:rgba(239,68,68,.45); }
+        .rescadv-msg.aviso { color:#d97706; background:rgba(245,158,11,.10); border-color:rgba(245,158,11,.45); }
+        .rescadv-msg i { margin-top:2px; }
+        .rescadv-msg small { display:block; opacity:.85; margin-top:2px; }
+        .rescadv-urg { margin-top:16px; display:flex; align-items:center; gap:14px; padding:14px 16px; border-radius:14px; border:1px solid var(--cor-borda); background: rgba(127,127,127,.06); cursor:pointer; transition:.15s; }
+        .rescadv-urg.on { border-color:#dc2626; background:rgba(239,68,68,.09); }
+        .rescadv-urg.trava { cursor:not-allowed; }
+        .rescadv-urg .ic { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:rgba(127,127,127,.15); color: var(--cor-texto-secundario); flex-shrink:0; }
+        .rescadv-urg.on .ic { background:#dc2626; color:#fff; }
+        .rescadv-urg .tx { flex:1; min-width:0; }
+        .rescadv-urg .tx b { display:block; font-size:.92rem; color: var(--cor-texto-principal); }
+        .rescadv-urg .tx span { font-size:.76rem; color: var(--cor-texto-secundario); }
+        .rescadv-sw { position:relative; width:48px; height:26px; flex-shrink:0; }
+        .rescadv-sw input { position:absolute; opacity:0; inset:0; margin:0; cursor:inherit; z-index:2; }
+        .rescadv-sw i { position:absolute; inset:0; border-radius:999px; background:rgba(127,127,127,.4); transition:.15s; }
+        .rescadv-sw i::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#fff; transition:.15s; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+        .rescadv-sw input:checked + i { background:#dc2626; }
+        .rescadv-sw input:checked + i::after { left:25px; }
+        .rescadv-mot { margin-top:16px; }
+        .rescadv-mot label { display:flex; justify-content:space-between; align-items:center; font-size:.82rem; font-weight:800; margin-bottom:6px; color: var(--cor-texto-principal); }
+        .rescadv-mot label em { font-style:normal; font-weight:700; font-size:.7rem; color:#dc2626; }
+        .rescadv-mot textarea { width:100%; box-sizing:border-box; min-height:78px; padding:12px 14px; border-radius:12px; border:1px solid var(--cor-borda); background: rgba(127,127,127,.08); color: var(--cor-texto-principal); font-family:inherit; font-size:.9rem; resize:vertical; }
+        .rescadv-mot textarea:focus { outline:2px solid rgba(139,92,246,.6); outline-offset:1px; }
+        .rescadv-cont { text-align:right; font-size:.7rem; color: var(--cor-texto-secundario); margin-top:3px; }
+        `;
+        document.head.appendChild(st);
+    }
+
+    function cartaHtml(c, i) {
+        return `<div class="rescadv-carta"><span class="n">${i + 1}</span>
+            <div class="t">${esc(c.tipo || 'Advertência')}</div><div class="d"><i class="fa-regular fa-calendar"></i> ${fmtData(c.data)}</div>
+            <div class="m" title="${esc(c.motivo || '')}">${esc(c.motivo || 'Sem motivo registrado')}</div>
+            ${c.documento ? `<a href="${esc(c.documento)}" target="_blank" rel="noopener"><i class="fa-solid fa-file-pdf"></i> Ver carta assinada</a>` : ''}</div>`;
+    }
+
     function desenhar(prefix) {
+        css();
         const box = $('rescadv-' + prefix), st = estado[prefix];
         if (!box || !st) return;
         const exige = precisaUrgencia(st);
         if (exige) st.urgente = true;
 
-        const radio = (valor, rotulo) => `<label style="display:inline-flex; align-items:center; gap:6px; margin-right:18px; cursor:pointer; font-weight:600;">
-            <input type="radio" name="rescadv-orient-${prefix}" value="${valor}" ${st.orientado === valor ? 'checked' : ''} onchange="window.RESC_ADV._orientou('${prefix}','${valor}')"> ${rotulo}</label>`;
+        // selo do canto: andamento das cartas
+        let pill = '<span class="rescadv-pill neutro">Responda abaixo</span>';
+        if (st.falhou) pill = '<span class="rescadv-pill neutro">Não verificado</span>';
+        else if (st.total >= MIN_CARTAS) pill = `<span class="rescadv-pill ok"><i class="fa-solid fa-circle-check"></i> ${MIN_CARTAS} de ${MIN_CARTAS} cartas</span>`;
+        else pill = `<span class="rescadv-pill alerta"><i class="fa-solid fa-circle-exclamation"></i> ${st.total} de ${MIN_CARTAS} cartas</span>`;
 
-        let lista = '';
+        let corpo = '';
         if (st.orientado === 'sim') {
             if (st.falhou) {
-                lista = `<div style="margin-top:10px; padding:10px 12px; border-radius:8px; background: rgba(255,152,0,0.1); border:1px solid #ff9800; font-size:0.82rem;"><i class="fa-solid fa-triangle-exclamation" style="color:#ff9800;"></i> Não consegui conferir as advertências deste colaborador agora. O pedido segue, mas vai para a <b>aprovação da Diretoria</b> marcado como "não verificado".</div>`;
-            } else if (st.ultimas.length) {
-                lista = `<div style="margin-top:10px; font-size:0.82rem; color: var(--cor-texto-secundario);">${st.ultimas.length === 1 ? 'A última carta assinada será' : 'As ' + st.ultimas.length + ' últimas cartas assinadas serão'} <b>anexada(s) ao pedido</b> automaticamente:</div>` +
-                    st.ultimas.map((c, i) => `<div style="margin-top:6px; padding:8px 10px; border-radius:8px; background: rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.35); font-size:0.82rem; display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap;">
-                        <div style="flex:1; min-width:200px;"><b style="color:#c4b5fd;">${i + 1}. ${esc(c.tipo)}</b> — ${fmtData(c.data)}<br><span style="color: var(--cor-texto-secundario);">${esc(c.motivo || 'Sem motivo registrado')}</span></div>
-                        ${c.documento ? `<a href="${esc(c.documento)}" target="_blank" rel="noopener" style="color:#4fc3f7; font-weight:bold; text-decoration:none; white-space:nowrap;"><i class="fa-solid fa-file-pdf"></i> Ver carta</a>` : ''}</div>`).join('');
+                corpo = `<div class="rescadv-msg aviso"><i class="fa-solid fa-triangle-exclamation"></i><div>Não consegui conferir as advertências deste colaborador agora.<small>O pedido segue, mas vai para a aprovação da Diretoria marcado como "não verificado".</small></div></div>`;
             } else {
-                lista = `<div style="margin-top:10px; font-size:0.82rem; color: var(--cor-texto-secundario);">Nenhuma carta de advertência assinada encontrada para este colaborador.</div>`;
-            }
-            if (!st.falhou) {
-                lista += st.total >= MIN_CARTAS
-                    ? `<div style="margin-top:10px; padding:9px 12px; border-radius:8px; background: rgba(40,167,69,0.1); border:1px solid #28a745; font-size:0.82rem; color:#28a745;"><i class="fa-solid fa-circle-check"></i> Este colaborador tem ${st.total} carta(s) assinada(s). Pode seguir como desligamento normal.</div>`
-                    : `<div style="margin-top:10px; padding:9px 12px; border-radius:8px; background: rgba(220,53,69,0.1); border:1px solid #dc3545; font-size:0.82rem; color:#dc3545;"><i class="fa-solid fa-circle-exclamation"></i> Este colaborador tem só <b>${st.total}</b> carta(s) assinada(s). São necessárias <b>${MIN_CARTAS}</b>. Sem elas, só é aceito como <b>desligamento urgente</b>.</div>`;
-                if (st.naoContam > 0) lista += `<div style="margin-top:6px; font-size:0.74rem; color: var(--cor-texto-secundario);">(${st.naoContam} outra(s) medida(s) — verbal, em andamento ou sem carta assinada — não entram na contagem.)</div>`;
+                const slots = [];
+                for (let i = 0; i < MIN_CARTAS; i++) slots.push(st.ultimas[i] ? cartaHtml(st.ultimas[i], i) : `<div class="rescadv-carta vazia"><span><i class="fa-regular fa-file-circle-xmark"></i><br>Carta ${i + 1} não encontrada</span></div>`);
+                corpo = `<div class="rescadv-sub">${st.ultimas.length ? 'Cartas anexadas automaticamente ao pedido' : 'Cartas encontradas'}</div><div class="rescadv-cartas">${slots.join('')}</div>`;
+                corpo += st.total >= MIN_CARTAS
+                    ? `<div class="rescadv-msg ok"><i class="fa-solid fa-circle-check"></i><div><b>Tudo certo.</b> O colaborador tem ${st.total} carta(s) assinada(s). Pode seguir como desligamento normal.</div></div>`
+                    : `<div class="rescadv-msg erro"><i class="fa-solid fa-circle-exclamation"></i><div><b>Faltam ${MIN_CARTAS - st.total} carta(s).</b> São necessárias ${MIN_CARTAS} cartas assinadas. Sem elas, só é aceito como <b>desligamento urgente</b>.</div></div>`;
+                if (st.naoContam > 0) corpo += `<div style="margin-top:6px; font-size:.72rem; color: var(--cor-texto-secundario);">${st.naoContam} outra(s) medida(s) (verbal, em andamento ou sem carta assinada) não entram na contagem.</div>`;
             }
         } else if (st.orientado === 'nao') {
-            lista = `<div style="margin-top:10px; padding:9px 12px; border-radius:8px; background: rgba(220,53,69,0.1); border:1px solid #dc3545; font-size:0.82rem; color:#dc3545;"><i class="fa-solid fa-circle-exclamation"></i> Sem orientação por carta de advertência, o desligamento só é aceito como <b>urgente</b>.</div>`;
+            corpo = `<div class="rescadv-msg erro"><i class="fa-solid fa-circle-exclamation"></i><div><b>Sem orientação por carta de advertência.</b> Nesse caso o desligamento só é aceito como <b>urgente</b>.</div></div>`;
         }
 
-        const urgChecked = st.urgente ? 'checked' : '';
-        const urgTrava = exige ? 'disabled' : '';
+        const rotuloMot = st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento';
         box.innerHTML = `
-        <div style="border:1px solid var(--cor-advertencia, #8b5cf6); border-radius:12px; padding:14px 16px; background: rgba(139,92,246,0.05);">
-            <div style="font-weight:800; color: var(--cor-advertencia, #8b5cf6); margin-bottom:8px;"><i class="fa-solid fa-gavel"></i> Cartas de advertência (exigência da Diretoria)</div>
-            <div style="font-size:0.88rem; margin-bottom:8px;">O colaborador foi orientado através de carta de advertência? <span style="color: var(--cor-perigo);">*</span></div>
-            <div>${radio('sim', 'Sim')}${radio('nao', 'Não')}</div>
-            ${lista}
-            <div style="margin-top:12px; padding-top:10px; border-top:1px dashed var(--cor-borda);">
-                <label style="display:inline-flex; align-items:center; gap:8px; cursor:${exige ? 'not-allowed' : 'pointer'}; font-weight:700; color:#e74c3c;">
-                    <input type="checkbox" id="rescadv-urg-${prefix}" ${urgChecked} ${urgTrava} onchange="window.RESC_ADV._urgente('${prefix}', this.checked)"> <i class="fa-solid fa-triangle-exclamation"></i> Desligamento URGENTE
-                </label>
-                <div style="font-size:0.76rem; color: var(--cor-texto-secundario); margin-top:3px;">${exige ? 'Marcado automaticamente: sem as 3 cartas só vale como urgente.' : 'Marque só se for um caso urgente. A Diretoria vê a flag e o motivo.'}</div>
-                <div id="rescadv-urg-box-${prefix}" style="margin-top:8px;">
-                    <label id="rescadv-motivo-rotulo-${prefix}" style="font-size:0.8rem; font-weight:700;">${st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento'} <span style="color: var(--cor-perigo);">* obrigatório</span></label>
-                    <textarea id="rescadv-urg-motivo-${prefix}" rows="2" maxlength="500" placeholder="${st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...'}" style="width:100%; margin-top:4px; padding:10px 12px; border-radius:8px; border:1px solid var(--cor-borda); background: rgba(0,0,0,0.2); color: var(--cor-texto-principal); font-family:inherit;" oninput="window.RESC_ADV._motivoUrg('${prefix}', this.value)">${esc(st.motivoUrg)}</textarea>
-                </div>
+        <div class="rescadv">
+            <div class="rescadv-topo">
+                <div class="rescadv-ico"><i class="fa-solid fa-gavel"></i></div>
+                <div class="rescadv-tit"><b>Cartas de advertência</b><span>Exigência da Diretoria para o Pedido da Empresa</span></div>
+                ${pill}
+            </div>
+            <div class="rescadv-perg">O colaborador foi orientado através de carta de advertência? <span style="color: var(--cor-perigo);">*</span></div>
+            <div class="rescadv-seg">
+                <label><input type="radio" name="rescadv-orient-${prefix}" value="sim" ${st.orientado === 'sim' ? 'checked' : ''} onchange="window.RESC_ADV._orientou('${prefix}','sim')"><span class="sim"><i class="fa-solid fa-check"></i> Sim</span></label>
+                <label><input type="radio" name="rescadv-orient-${prefix}" value="nao" ${st.orientado === 'nao' ? 'checked' : ''} onchange="window.RESC_ADV._orientou('${prefix}','nao')"><span class="nao"><i class="fa-solid fa-xmark"></i> Não</span></label>
+            </div>
+            ${corpo}
+            <label class="rescadv-urg ${st.urgente ? 'on' : ''} ${exige ? 'trava' : ''}" id="rescadv-urgcard-${prefix}">
+                <span class="ic"><i class="fa-solid ${exige ? 'fa-lock' : 'fa-bolt'}"></i></span>
+                <span class="tx"><b>Desligamento urgente</b><span>${exige ? 'Marcado automaticamente: sem as ' + MIN_CARTAS + ' cartas, só vale como urgente.' : 'Marque só se for um caso urgente. A Diretoria vê a flag e o motivo.'}</span></span>
+                <span class="rescadv-sw"><input type="checkbox" id="rescadv-urg-${prefix}" ${st.urgente ? 'checked' : ''} ${exige ? 'disabled' : ''} onchange="window.RESC_ADV._urgente('${prefix}', this.checked)"><i></i></span>
+            </label>
+            <div class="rescadv-mot" id="rescadv-urg-box-${prefix}">
+                <label id="rescadv-motivo-rotulo-${prefix}"><span>${rotuloMot}</span><em>OBRIGATÓRIO</em></label>
+                <textarea id="rescadv-urg-motivo-${prefix}" maxlength="500" placeholder="${st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...'}" oninput="window.RESC_ADV._motivoUrg('${prefix}', this.value)">${esc(st.motivoUrg)}</textarea>
+                <div class="rescadv-cont" id="rescadv-cont-${prefix}">${String(st.motivoUrg || '').length}/500 · mínimo 10 letras</div>
             </div>
         </div>`;
     }
@@ -184,12 +259,16 @@
     function urgente(prefix, marcado) {
         const st = estado[prefix]; if (!st) return;
         st.urgente = !!marcado;
+        const card = $('rescadv-urgcard-' + prefix); if (card) card.classList.toggle('on', st.urgente);
         const r = $('rescadv-motivo-rotulo-' + prefix);
-        if (r) r.firstChild.textContent = (st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento') + ' ';
+        if (r && r.firstChild) r.firstChild.textContent = st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento';
         const t = $('rescadv-urg-motivo-' + prefix);
         if (t) t.placeholder = st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...';
     }
-    function motivoUrg(prefix, v) { const st = estado[prefix]; if (st) st.motivoUrg = v; }
+    function motivoUrg(prefix, v) {
+        const st = estado[prefix]; if (st) st.motivoUrg = v;
+        const c = $('rescadv-cont-' + prefix); if (c) c.textContent = String(v || '').length + '/500 · mínimo 10 letras';
+    }
 
     // ------------------------------------------------------------------ usado pelo envio do formulário
     // Retorna um texto de erro (HTML) se o formulário não pode ser enviado; senão null.
@@ -257,20 +336,23 @@
         try {
             const i = resc && resc.advertencias_info;
             if (!i) return '';
-            const cartas = (i.cartas || []).map((c, n) => `<div style="margin-top:6px; padding:8px 10px; border-radius:8px; background: rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.35); font-size:0.82rem; display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap;">
-                <div style="flex:1; min-width:200px;"><b style="color:#c4b5fd;">${n + 1}. ${esc(c.tipo)}</b> — ${fmtData(c.data)}<br><span style="color: var(--cor-texto-secundario);">${esc(c.motivo || '')}</span></div>
-                ${c.documento ? `<a href="${esc(c.documento)}" target="_blank" rel="noopener" style="color:#4fc3f7; font-weight:bold; text-decoration:none; white-space:nowrap;"><i class="fa-solid fa-file-pdf"></i> Ver carta</a>` : ''}</div>`).join('');
+            css();
+            const total = i.total_cartas || 0;
+            const pill = i.nao_verificado ? '<span class="rescadv-pill neutro">Não verificado</span>'
+                : (total >= MIN_CARTAS ? `<span class="rescadv-pill ok"><i class="fa-solid fa-circle-check"></i> ${MIN_CARTAS} de ${MIN_CARTAS} cartas</span>`
+                    : `<span class="rescadv-pill alerta"><i class="fa-solid fa-circle-exclamation"></i> ${total} de ${MIN_CARTAS} cartas</span>`);
             const urg = i.urgente
-                ? `<div style="margin-bottom:8px; padding:10px 12px; border-radius:8px; background: rgba(220,53,69,0.12); border:1px solid #dc3545; font-size:0.85rem;"><b style="color:#dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> DESLIGAMENTO URGENTE</b><br><b>Motivo da urgência:</b> ${esc(i.motivo_urgencia || '-')}</div>` : '';
-            const just = (!i.urgente && i.justificativa)
-                ? `<div style="margin-top:8px; padding:9px 12px; border-radius:8px; background: rgba(0,0,0,0.15); border-left:3px solid var(--cor-advertencia, #8b5cf6); font-size:0.83rem;"><b>Justificativa de quem lançou:</b><br>${esc(i.justificativa)}</div>` : '';
+                ? `<div class="rescadv-msg erro" style="margin:0 0 12px;"><i class="fa-solid fa-bolt"></i><div><b>DESLIGAMENTO URGENTE</b><small><b>Motivo da urgência:</b> ${esc(i.motivo_urgencia || '-')}</small></div></div>` : '';
             const resumo = i.orientado_por_carta === false
-                ? 'O colaborador <b>não foi orientado</b> por carta de advertência.'
-                : `O colaborador foi orientado por carta de advertência — <b>${i.total_cartas || 0}</b> carta(s) assinada(s) no sistema${(i.total_cartas || 0) < MIN_CARTAS ? ' (menos de ' + MIN_CARTAS + ')' : ''}.`;
-            const nv = i.nao_verificado ? '<div style="margin-top:6px; font-size:0.78rem; color:#ff9800;"><i class="fa-solid fa-triangle-exclamation"></i> As advertências não puderam ser conferidas automaticamente no lançamento.</div>' : '';
-            return `<div style="border:1px solid var(--cor-advertencia, #8b5cf6); border-radius:12px; padding:12px 14px; margin-bottom:14px; background: rgba(139,92,246,0.05);">
-                <div style="font-weight:800; color: var(--cor-advertencia, #8b5cf6); margin-bottom:8px;"><i class="fa-solid fa-gavel"></i> Cartas de advertência</div>
-                ${urg}<div style="font-size:0.85rem;">${resumo}</div>${cartas}${just}${nv}</div>`;
+                ? '<b>Não foi orientado</b> por carta de advertência.'
+                : `Foi orientado por carta de advertência: <b>${total}</b> carta(s) assinada(s) no sistema${total < MIN_CARTAS ? ' (menos de ' + MIN_CARTAS + ')' : ''}.`;
+            const cartas = (i.cartas || []).length ? `<div class="rescadv-sub">Cartas anexadas</div><div class="rescadv-cartas">${i.cartas.map(cartaHtml).join('')}</div>` : '';
+            const just = (!i.urgente && i.justificativa)
+                ? `<div class="rescadv-msg aviso" style="color: var(--cor-texto-principal); background: rgba(127,127,127,.08); border-color: var(--cor-borda);"><i class="fa-solid fa-comment-dots"></i><div><b>Justificativa de quem lançou</b><small style="opacity:1;">${esc(i.justificativa)}</small></div></div>` : '';
+            const nv = i.nao_verificado ? '<div class="rescadv-msg aviso"><i class="fa-solid fa-triangle-exclamation"></i><div>As advertências não puderam ser conferidas automaticamente no lançamento.</div></div>' : '';
+            return `<div class="rescadv" style="margin-bottom:14px;">
+                <div class="rescadv-topo" style="margin-bottom:10px;"><div class="rescadv-ico"><i class="fa-solid fa-gavel"></i></div><div class="rescadv-tit"><b>Cartas de advertência</b><span>${resumo}</span></div>${pill}</div>
+                ${urg}${cartas}${just}${nv}</div>`;
         } catch (e) { return ''; }
     }
 
