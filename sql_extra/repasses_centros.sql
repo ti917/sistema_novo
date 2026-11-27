@@ -252,7 +252,8 @@ begin
   else
     update public.financeiro_lancamentos set valor_parcela = p_valor, valor_total = p_valor,
       data_vencimento = p_data, data_pagamento = p_data, mes_referencia = v_mes,
-      descricao = 'REPASSE PARA ' || upper(r.destino_centro_nome) || coalesce(' - ' || upper(v_obs), '')
+      descricao = 'REPASSE PARA ' || upper(r.destino_centro_nome) || coalesce(' - ' || upper(v_obs), ''),
+      atualizado_por = v_usuario, atualizado_em = now()
       where id = r.origem_lancamento_id;
   end if;
   if r.destino_tabela = 'secretaria_lancamentos' then
@@ -264,7 +265,8 @@ begin
   else
     update public.financeiro_lancamentos set valor_parcela = p_valor, valor_total = p_valor,
       data_vencimento = p_data, data_pagamento = p_data, mes_referencia = v_mes,
-      descricao = 'REPASSE RECEBIDO DE ' || upper(r.origem_centro_nome) || coalesce(' - ' || upper(v_obs), '')
+      descricao = 'REPASSE RECEBIDO DE ' || upper(r.origem_centro_nome) || coalesce(' - ' || upper(v_obs), ''),
+      atualizado_por = v_usuario, atualizado_em = now()
       where id = r.destino_lancamento_id;
   end if;
 
