@@ -174,12 +174,6 @@
         .rescadv-sw i::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#fff; transition:.15s; box-shadow:0 1px 3px rgba(0,0,0,.35); }
         .rescadv-sw input:checked + i { background:#dc2626; }
         .rescadv-sw input:checked + i::after { left:25px; }
-        .rescadv-mot { margin-top:16px; }
-        .rescadv-mot label { display:flex; justify-content:space-between; align-items:center; font-size:.82rem; font-weight:800; margin-bottom:6px; color: var(--cor-texto-principal); }
-        .rescadv-mot label em { font-style:normal; font-weight:700; font-size:.7rem; color:#dc2626; }
-        .rescadv-mot textarea { width:100%; box-sizing:border-box; min-height:78px; padding:12px 14px; border-radius:12px; border:1px solid var(--cor-borda); background: rgba(127,127,127,.08); color: var(--cor-texto-principal); font-family:inherit; font-size:.9rem; resize:vertical; }
-        .rescadv-mot textarea:focus { outline:2px solid rgba(139,92,246,.6); outline-offset:1px; }
-        .rescadv-cont { text-align:right; font-size:.7rem; color: var(--cor-texto-secundario); margin-top:3px; }
         `;
         document.head.appendChild(st);
     }
@@ -237,14 +231,9 @@
             ${corpo}
             <label class="rescadv-urg ${st.urgente ? 'on' : ''} ${exige ? 'trava' : ''}" id="rescadv-urgcard-${prefix}">
                 <span class="ic"><i class="fa-solid ${exige ? 'fa-lock' : 'fa-bolt'}"></i></span>
-                <span class="tx"><b>Desligamento urgente</b><span>${exige ? 'Marcado automaticamente: sem as ' + MIN_CARTAS + ' cartas, só vale como urgente.' : 'Marque só se for um caso urgente. A Diretoria vê a flag e o motivo.'}</span></span>
+                <span class="tx"><b>Desligamento urgente</b><span>${exige ? 'Marcado automaticamente: sem as ' + MIN_CARTAS + ' cartas, só vale como urgente. Explique a urgência no campo "Motivo do Desligamento" logo abaixo.' : 'Marque só se for um caso urgente. Explique a urgência no campo "Motivo do Desligamento" logo abaixo.'}</span></span>
                 <span class="rescadv-sw"><input type="checkbox" id="rescadv-urg-${prefix}" ${st.urgente ? 'checked' : ''} ${exige ? 'disabled' : ''} onchange="window.RESC_ADV._urgente('${prefix}', this.checked)"><i></i></span>
             </label>
-            <div class="rescadv-mot" id="rescadv-urg-box-${prefix}">
-                <label id="rescadv-motivo-rotulo-${prefix}"><span>${rotuloMot}</span><em>OBRIGATÓRIO</em></label>
-                <textarea id="rescadv-urg-motivo-${prefix}" maxlength="500" placeholder="${st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...'}" oninput="window.RESC_ADV._motivoUrg('${prefix}', this.value)">${esc(st.motivoUrg)}</textarea>
-                <div class="rescadv-cont" id="rescadv-cont-${prefix}">${String(st.motivoUrg || '').length}/500 · mínimo 10 letras</div>
-            </div>
         </div>`;
     }
 
@@ -260,14 +249,11 @@
         const st = estado[prefix]; if (!st) return;
         st.urgente = !!marcado;
         const card = $('rescadv-urgcard-' + prefix); if (card) card.classList.toggle('on', st.urgente);
-        const r = $('rescadv-motivo-rotulo-' + prefix);
-        if (r && r.firstChild) r.firstChild.textContent = st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento';
-        const t = $('rescadv-urg-motivo-' + prefix);
-        if (t) t.placeholder = st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...';
     }
-    function motivoUrg(prefix, v) {
-        const st = estado[prefix]; if (st) st.motivoUrg = v;
-        const c = $('rescadv-cont-' + prefix); if (c) c.textContent = String(v || '').length + '/500 · mínimo 10 letras';
+    function motivoUrg() { /* o motivo é o campo "Motivo do Desligamento" do próprio formulário */ }
+    function textoMotivo(prefix) {
+        const el = $(CFG[prefix].ancora);
+        return el ? String(el.value || '').trim() : '';
     }
 
     // ------------------------------------------------------------------ usado pelo envio do formulário
@@ -280,9 +266,9 @@
             if (!st.orientado) return 'Informe se o colaborador <b>foi orientado através de carta de advertência</b> (Sim ou Não).';
             const exige = precisaUrgencia(st);
             if (exige && !st.urgente) return 'Sem as ' + MIN_CARTAS + ' cartas de advertência, o desligamento só pode ser enviado como <b>URGENTE</b>.';
-            if (String(st.motivoUrg || '').trim().length < 10) return st.urgente
-                ? 'Descreva o <b>motivo da urgência</b> do desligamento (mínimo de 10 letras).'
-                : 'Escreva a <b>justificativa do desligamento</b> (mínimo de 10 letras). O motivo é sempre obrigatório.';
+            if (textoMotivo(prefix).length < 10) return st.urgente
+                ? 'Descreva o <b>motivo da urgência</b> no campo <b>Motivo do Desligamento</b> (mínimo de 10 letras).'
+                : 'Preencha o <b>Motivo do Desligamento</b> (mínimo de 10 letras). O motivo é sempre obrigatório.';
             return null;
         } catch (e) { console.warn('Rescisão×Advertências: falha ao validar', e); return null; }
     }
@@ -299,8 +285,8 @@
                 minimo: MIN_CARTAS,
                 cartas: st.orientado === 'sim' ? st.ultimas : [],
                 urgente: !!st.urgente,
-                motivo_urgencia: st.urgente ? String(st.motivoUrg || '').trim() : '',
-                justificativa: String(st.motivoUrg || '').trim(),
+                motivo_urgencia: st.urgente ? textoMotivo(prefix) : '',
+                justificativa: textoMotivo(prefix),
                 nao_verificado: !!st.falhou,
                 registrado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null,
                 registrado_em: new Date().toISOString()
@@ -341,13 +327,14 @@
             const pill = i.nao_verificado ? '<span class="rescadv-pill neutro">Não verificado</span>'
                 : (total >= MIN_CARTAS ? `<span class="rescadv-pill ok"><i class="fa-solid fa-circle-check"></i> ${MIN_CARTAS} de ${MIN_CARTAS} cartas</span>`
                     : `<span class="rescadv-pill alerta"><i class="fa-solid fa-circle-exclamation"></i> ${total} de ${MIN_CARTAS} cartas</span>`);
+            const mesmo = (x) => String(x || '').trim() === String(resc.motivo || '').trim();
             const urg = i.urgente
-                ? `<div class="rescadv-msg erro" style="margin:0 0 12px;"><i class="fa-solid fa-bolt"></i><div><b>DESLIGAMENTO URGENTE</b><small><b>Motivo da urgência:</b> ${esc(i.motivo_urgencia || '-')}</small></div></div>` : '';
+                ? `<div class="rescadv-msg erro" style="margin:0 0 12px;"><i class="fa-solid fa-bolt"></i><div><b>DESLIGAMENTO URGENTE</b><small>${i.motivo_urgencia && !mesmo(i.motivo_urgencia) ? '<b>Motivo da urgência:</b> ' + esc(i.motivo_urgencia) : 'A urgência está explicada no <b>Motivo</b> do pedido.'}</small></div></div>` : '';
             const resumo = i.orientado_por_carta === false
                 ? '<b>Não foi orientado</b> por carta de advertência.'
                 : `Foi orientado por carta de advertência: <b>${total}</b> carta(s) assinada(s) no sistema${total < MIN_CARTAS ? ' (menos de ' + MIN_CARTAS + ')' : ''}.`;
             const cartas = (i.cartas || []).length ? `<div class="rescadv-sub">Cartas anexadas</div><div class="rescadv-cartas">${i.cartas.map(cartaHtml).join('')}</div>` : '';
-            const just = (!i.urgente && i.justificativa)
+            const just = (!i.urgente && i.justificativa && !mesmo(i.justificativa))
                 ? `<div class="rescadv-msg aviso" style="color: var(--cor-texto-principal); background: rgba(127,127,127,.08); border-color: var(--cor-borda);"><i class="fa-solid fa-comment-dots"></i><div><b>Justificativa de quem lançou</b><small style="opacity:1;">${esc(i.justificativa)}</small></div></div>` : '';
             const nv = i.nao_verificado ? '<div class="rescadv-msg aviso"><i class="fa-solid fa-triangle-exclamation"></i><div>As advertências não puderam ser conferidas automaticamente no lançamento.</div></div>' : '';
             return `<div class="rescadv" style="margin-bottom:14px;">
