@@ -696,13 +696,15 @@
     // página em branco no começo: coloca uma quebra de página no topo (o mesmo mecanismo que já empurra o texto para a página seguinte)
     function paginaNoComeco() {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
-        const br = document.createElement('div'); br.className = 'ra-pgbreak'; br.setAttribute('contenteditable', 'false'); br.textContent = 'página em branco';
+        // um parágrafo vazio EDITÁVEL (a página nova, onde dá para escrever) + a quebra que empurra o resto do texto para a página seguinte
+        const novo = document.createElement('p'); novo.innerHTML = '<br>';
+        const br = document.createElement('div'); br.className = 'ra-pgbreak'; br.setAttribute('contenteditable', 'false'); br.textContent = 'fim desta página';
         ed.insertBefore(br, ed.firstChild);
+        ed.insertBefore(novo, br);
         // as imagens já posicionadas acompanham o texto: descem uma página
         (S.atual.imagens || []).forEach((i) => { i.page = (i.page || 0) + 1; });
-        // cursor no primeiro texto (agora na página 2)
-        let alvo = br.nextElementSibling; while (alvo && (alvo.classList.contains('ra-pgbreak') || alvo.classList.contains('ra-pgmin'))) alvo = alvo.nextElementSibling;
-        if (!alvo) { alvo = document.createElement('p'); alvo.innerHTML = '<br>'; ed.appendChild(alvo); }
+        // cursor na página nova (já pronta para escrever)
+        const alvo = novo;
         ed.focus({ preventScroll: true });
         const r = document.createRange(); r.selectNodeContents(alvo); r.collapse(true); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
         desenharImagens(); sujo(); paginar();
