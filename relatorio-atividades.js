@@ -921,6 +921,8 @@
         const txt = 'Excluir a página ' + (n + 1) + ' (texto e imagens dela)? Não dá para desfazer.';
         const ok = typeof window.mostrarConfirmacao === 'function' ? await window.mostrarConfirmacao(txt, 'Excluir página') : confirm(txt);
         if (!ok) return;
+        // guarda uma cópia do relatório como está AGORA, antes de apagar a página (dá para recuperar em "Versões")
+        if (S.atual && S.atual.id) { try { coletar(); await guardarVersao(S.atual.id, { conteudo_html: S.atual.conteudo_html, imagens: JSON.stringify(S.atual.imagens || []), titulo: S.atual.titulo }, 'antes de excluir página'); } catch (e) { /* segue */ } }
         const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
         const blocos = [];
         Array.from(ed.children).forEach((c) => { if (c.classList.contains('ra-pgmin')) return; if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
