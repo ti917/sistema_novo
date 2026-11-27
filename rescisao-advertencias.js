@@ -266,9 +266,9 @@
             if (!st.orientado) return 'Informe se o colaborador <b>foi orientado através de carta de advertência</b> (Sim ou Não).';
             const exige = precisaUrgencia(st);
             if (exige && !st.urgente) return 'Sem as ' + MIN_CARTAS + ' cartas de advertência, o desligamento só pode ser enviado como <b>URGENTE</b>.';
-            if (textoMotivo(prefix).length < 10) return st.urgente
-                ? 'Descreva o <b>motivo da urgência</b> no campo <b>Motivo do Desligamento</b> (mínimo de 10 letras).'
-                : 'Preencha o <b>Motivo do Desligamento</b> (mínimo de 10 letras). O motivo é sempre obrigatório.';
+            if (textoMotivo(prefix).length < 20) return st.urgente
+                ? 'Descreva o <b>motivo da urgência</b> no campo <b>Motivo do Desligamento</b> (mínimo de 20 letras).'
+                : 'Preencha o <b>Motivo do Desligamento</b> (mínimo de 20 letras). O motivo é sempre obrigatório.';
             return null;
         } catch (e) { console.warn('Rescisão×Advertências: falha ao validar', e); return null; }
     }
