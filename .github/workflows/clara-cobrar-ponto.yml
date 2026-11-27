@@ -1,0 +1,46 @@
+name: Clara cobra ponto esquecido (WhatsApp)
+
+# Todo dia, de manhã, chama a função clara-cobrar-ponto do Supabase.
+# A função só avisa quem foi LIGADO em "Configurar Ponto por Pessoa" ("Clara cobra ponto esquecido"),
+# manda 1 mensagem por pessoa sobre o que faltou bater no DIA ANTERIOR e só se a pessoa ainda não justificou.
+# O repositório é público: o log mostra SÓ contagens, nunca nome nem telefone.
+on:
+  schedule:
+    # 09:15 em Brasilia (12:15 UTC). O GitHub pode atrasar alguns minutos; a função só manda resumo entre 08:00 e 11:00.
+    - cron: '15 12 * * *'
+  workflow_dispatch:
+    inputs:
+      enviar:
+        description: "Enviar DE VERDADE? (desmarcado = só simula e mostra contagens)"
+        type: boolean
+        default: false
+
+jobs:
+  cobrar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Chama a função
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # agendado = envia; manual = só envia se marcar a caixa
+          ENVIAR: ${{ github.event_name == 'schedule' || inputs.enviar }}
+        run: |
+          set -euo pipefail
+          if [ "$ENVIAR" = "true" ]; then BODY='{"enviar": true}'; else BODY='{}'; fi
+          CODE=$(curl -s -o resp.json -w '%{http_code}' -X POST "$SUPABASE_URL/functions/v1/clara-cobrar-ponto" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          echo "HTTP $CODE (enviar=$ENVIAR)"
+          if [ "$CODE" != "200" ]; then
+            # mostra só a mensagem de erro (sem dados de pessoas)
+            jq -r '.erro // "erro sem mensagem"' resp.json || true
+            exit 1
+          fi
+          # só contagens
+          jq '{simulacao, ligados, mensagens_previstas: ((.mensagens // []) | length), enviados: ([.resultados[]? | select(.status=="enviado")] | length), falhas: ([.resultados[]? | select(.status=="falhou")] | length), ja_avisados: ([.resultados[]? | select(.status=="pulado")] | length), ignorados: ((.ignorados // []) | length)}' resp.json
+          # se houve falha de envio, mostra só o motivo (sem nomes)
+          jq -r '[.resultados[]? | select(.status=="falhou") | .erro] | unique | .[]' resp.json || true
+          rm -f resp.json
