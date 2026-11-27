@@ -233,8 +233,9 @@
     // Este pedido precisa passar pela Diretoria mesmo que quem lança seja um Admin "dispensado"?
     function forcaDiretoria(prefix) {
         try {
-            const i = coletar(prefix).advertencias_info;
-            return !!(i && (i.urgente || i.nao_verificado || !i.orientado_por_carta || i.total_cartas < MIN_CARTAS));
+            // 27/11/2026: nos tipos com a regra (Pedido da Empresa), TODO pedido passa pela Diretoria — inclusive o lançado
+            // por Admin/RH, mesmo que ele esteja na lista de "dispensados". (Só vale se houver aprovadores de rescisão configurados.)
+            return !!coletar(prefix).advertencias_info;
         } catch (e) { return false; }
     }
 
