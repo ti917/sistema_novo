@@ -931,10 +931,16 @@
         const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
         const blocos = [];
         Array.from(ed.children).forEach((c) => { if (c.classList.contains('ra-pgmin')) return; if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
-        blocos.forEach((b) => {
+        // 🩹 ERA ESTE O BUG: as posições eram medidas bloco a bloco ENQUANTO os blocos eram apagados; cada bloco apagado puxava os
+        // seguintes para cima (para dentro da página excluída) e o texto de todas as outras páginas também era apagado.
+        // Agora TODAS as posições são medidas antes de apagar qualquer coisa.
+        const medidos = blocos.map((b) => {
             const t = topo(b), h = b.getBoundingClientRect().height / S.escala;
             const p0 = pgDe(t + parseFloat(b.style.paddingTop || 0)), p1 = pgDe(t + h - 1);
-            const sps = Array.from(b.querySelectorAll('.ra-sp')).map((sp) => ({ sp, pg: pgDe(topo(sp) + sp.getBoundingClientRect().height / S.escala + 1) }));
+            const sps = Array.from(b.querySelectorAll('.ra-sp')).map((sp) => ({ sp, pg: pgDe(topo(sp) + sp.getBoundingClientRect().height / S.escala + 4) }));
+            return { b, p0, p1, sps };
+        });
+        medidos.forEach(({ b, p0, p1, sps }) => {
             if (p1 < n || p0 > n) return;
             if (p0 === n && p1 === n) { b.remove(); return; }
             // bloco que atravessa páginas: apaga só o pedaço que cai na página n
