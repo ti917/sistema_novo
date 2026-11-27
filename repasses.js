@@ -123,6 +123,11 @@
             destinos = (r.data || []).filter((d) => String(d.id) !== String(ctx.centroId));
         } catch (e) { return alerta(msgErro(e), 'erro'); }
         if (!destinos.length) return alerta('Não há outro centro de custo para receber o repasse.', 'aviso');
+        // Regra: só repassa quem tem Saldo do Período positivo (receitas - despesas pagas), e nunca mais do que o saldo
+        const temSaldo = typeof ctx.saldo === 'number' && isFinite(ctx.saldo);
+        if (temSaldo && ctx.saldo <= 0) {
+            return alerta('Este centro de custo está sem saldo positivo no período (Saldo do Período: ' + brl(ctx.saldo) + '). Só é possível repassar valor de um centro com receitas que cubram o repasse.', 'aviso');
+        }
 
         const grupo = (tab, tit) => {
             const L = destinos.filter((d) => d.tabela === tab);
@@ -132,6 +137,7 @@
             '<button class="rep-x" title="Fechar">&times;</button>' +
             '<h2><i class="fa-solid fa-right-left" style="color:#4f46e5"></i> Repassar valor</h2>' +
             '<div class="rep-sub">Sai como <b>despesa</b> de <b>' + esc(ctx.centroNome) + '</b> e entra como <b>receita</b> no centro de destino. Os dois lançamentos são criados juntos.</div>' +
+            (temSaldo ? '<div class="rep-aviso" style="margin:0 0 4px"><i class="fa-solid fa-wallet"></i> Saldo disponível no período: <b>' + brl(ctx.saldo) + '</b>. Não é possível repassar mais que isso.</div>' : '') +
             '<label>Centro de destino</label><select id="rep-dest"><option value="">Selecione…</option>' + grupo('financeiro_lancamentos', 'Financeiro') + grupo('secretaria_lancamentos', 'Secretaria') + '</select>' +
             '<div class="rep-linha2"><div><label>Valor (R$)</label><input id="rep-valor" inputmode="numeric" placeholder="0,00" autocomplete="off"></div>' +
             '<div><label>Data do repasse</label><input id="rep-data" type="date" value="' + hoje() + '"></div></div>' +
@@ -147,6 +153,7 @@
             if (!sel) return alerta('Escolha o centro de destino.', 'aviso');
             if (!(valor > 0)) return alerta('Informe um valor maior que zero.', 'aviso');
             if (!data) return alerta('Informe a data do repasse.', 'aviso');
+            if (temSaldo && valor > ctx.saldo + 0.005) return alerta('O valor (' + brl(valor) + ') é maior que o saldo disponível no período (' + brl(ctx.saldo) + ').', 'aviso');
             const [tab, id] = sel.split('|');
             const dest = destinos.find((d) => String(d.id) === id && d.tabela === tab);
             revisar(ov, ctx, dest, valor, data, obs);
