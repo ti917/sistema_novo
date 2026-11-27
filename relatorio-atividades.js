@@ -906,7 +906,7 @@
     async function excluirPagina(nPedida) {
         const ed = $('ra-ed'); if (!ed || S.somenteLeitura) return;
         paginar();
-        const base = ed.getBoundingClientRect().top, P = PG.P;
+        const P = PG.P;
         const pgDe = (y) => Math.floor((y + 0.5) / P);
         // página do cursor (se não houver cursor no texto, a última)
         let n = S.paginas - 1;
@@ -916,13 +916,18 @@
             const rg = sl.getRangeAt(0).cloneRange(); rg.collapse(true);
             let rc = rg.getClientRects()[0];
             if (!rc) { let el = rg.startContainer; el = el.nodeType === 1 ? el : el.parentElement; rc = el && el !== ed ? el.getBoundingClientRect() : null; }
-            if (rc) n = Math.min(S.paginas - 1, Math.max(0, pgDe((rc.top - base) / S.escala + 2)));
+            if (rc) n = Math.min(S.paginas - 1, Math.max(0, pgDe((rc.top - ed.getBoundingClientRect().top) / S.escala + 2)));
         }
         const txt = 'Excluir a página ' + (n + 1) + ' (texto e imagens dela)? Não dá para desfazer.';
         const ok = typeof window.mostrarConfirmacao === 'function' ? await window.mostrarConfirmacao(txt, 'Excluir página') : confirm(txt);
         if (!ok) return;
         // guarda uma cópia do relatório como está AGORA, antes de apagar a página (dá para recuperar em "Versões")
         if (S.atual && S.atual.id) { try { coletar(); await guardarVersao(S.atual.id, { conteudo_html: S.atual.conteudo_html, imagens: JSON.stringify(S.atual.imagens || []), titulo: S.atual.titulo }, 'antes de excluir página'); } catch (e) { /* segue */ } }
+        // 🩹 as posições são medidas DEPOIS da confirmação e do salvamento da cópia (a tela pode ter rolado/mudado nesse meio tempo):
+        // medir com a posição antiga fazia todos os blocos parecerem estar na mesma página e o texto inteiro era apagado
+        paginar();
+        const base = ed.getBoundingClientRect().top;
+        const copiaHtml = ed.innerHTML, copiaImgs = JSON.stringify(S.atual.imagens || []), textoAntes = tamTexto(copiaHtml);
         const topo = (el) => (el.getBoundingClientRect().top - base) / S.escala;
         const blocos = [];
         Array.from(ed.children).forEach((c) => { if (c.classList.contains('ra-pgmin')) return; if (c.tagName === 'UL' || c.tagName === 'OL') Array.from(c.children).forEach((li) => blocos.push(li)); else if (c.tagName === 'TABLE') Array.from(c.rows).filter((r) => !r.classList.contains('ra-sp')).forEach((r) => blocos.push(r)); else blocos.push(c); });
@@ -945,6 +950,13 @@
         ed.querySelectorAll('table').forEach((t) => { if (!t.querySelector('tr')) t.remove(); });
         definirPaginasMinimas(ed, Math.max(1, paginasMinimas(ed) - 1));
         if (!Array.from(ed.children).some((c) => !c.classList.contains('ra-pgmin'))) ed.insertAdjacentHTML('afterbegin', '<p><br></p>');
+        // trava: uma página nunca deve levar a maior parte do texto de um relatório com várias páginas
+        const textoDepois = tamTexto(ed.innerHTML);
+        if (S.paginas >= 2 && textoAntes >= 400 && textoDepois < textoAntes * 0.45) {
+            const tx = 'Atenção: excluir esta página removeria ' + Math.round((1 - textoDepois / textoAntes) * 100) + '% do texto do relatório, inclusive de outras páginas. Continuar mesmo assim?';
+            const certo = typeof window.mostrarConfirmacao === 'function' ? await window.mostrarConfirmacao(tx, 'Confirmar exclusão') : confirm(tx);
+            if (!certo) { ed.innerHTML = copiaHtml; S.atual.imagens = JSON.parse(copiaImgs); desenharImagens(); paginar(); return; }
+        }
         S.atual.imagens = (S.atual.imagens || []).filter((i) => i.page !== n).map((i) => (i.page > n ? { ...i, page: i.page - 1 } : i));
         desenharImagens(); sujo(); paginar();
     }
