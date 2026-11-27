@@ -165,9 +165,9 @@
                     <input type="checkbox" id="rescadv-urg-${prefix}" ${urgChecked} ${urgTrava} onchange="window.RESC_ADV._urgente('${prefix}', this.checked)"> <i class="fa-solid fa-triangle-exclamation"></i> Desligamento URGENTE
                 </label>
                 <div style="font-size:0.76rem; color: var(--cor-texto-secundario); margin-top:3px;">${exige ? 'Marcado automaticamente: sem as 3 cartas só vale como urgente.' : 'Marque só se for um caso urgente. A Diretoria vê a flag e o motivo.'}</div>
-                <div id="rescadv-urg-box-${prefix}" style="margin-top:8px; display:${st.urgente ? 'block' : 'none'};">
-                    <label style="font-size:0.8rem; font-weight:700;">Motivo da urgência <span style="color: var(--cor-perigo);">*</span></label>
-                    <textarea id="rescadv-urg-motivo-${prefix}" rows="2" maxlength="500" placeholder="Explique por que este desligamento é urgente..." style="width:100%; margin-top:4px; padding:10px 12px; border-radius:8px; border:1px solid var(--cor-borda); background: rgba(0,0,0,0.2); color: var(--cor-texto-principal); font-family:inherit;" oninput="window.RESC_ADV._motivoUrg('${prefix}', this.value)">${esc(st.motivoUrg)}</textarea>
+                <div id="rescadv-urg-box-${prefix}" style="margin-top:8px;">
+                    <label id="rescadv-motivo-rotulo-${prefix}" style="font-size:0.8rem; font-weight:700;">${st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento'} <span style="color: var(--cor-perigo);">* obrigatório</span></label>
+                    <textarea id="rescadv-urg-motivo-${prefix}" rows="2" maxlength="500" placeholder="${st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...'}" style="width:100%; margin-top:4px; padding:10px 12px; border-radius:8px; border:1px solid var(--cor-borda); background: rgba(0,0,0,0.2); color: var(--cor-texto-principal); font-family:inherit;" oninput="window.RESC_ADV._motivoUrg('${prefix}', this.value)">${esc(st.motivoUrg)}</textarea>
                 </div>
             </div>
         </div>`;
@@ -184,7 +184,10 @@
     function urgente(prefix, marcado) {
         const st = estado[prefix]; if (!st) return;
         st.urgente = !!marcado;
-        const b = $('rescadv-urg-box-' + prefix); if (b) b.style.display = st.urgente ? 'block' : 'none';
+        const r = $('rescadv-motivo-rotulo-' + prefix);
+        if (r) r.firstChild.textContent = (st.urgente ? 'Motivo da urgência' : 'Justificativa do desligamento') + ' ';
+        const t = $('rescadv-urg-motivo-' + prefix);
+        if (t) t.placeholder = st.urgente ? 'Explique por que este desligamento é urgente...' : 'Escreva a justificativa deste desligamento para a Diretoria...';
     }
     function motivoUrg(prefix, v) { const st = estado[prefix]; if (st) st.motivoUrg = v; }
 
@@ -198,7 +201,9 @@
             if (!st.orientado) return 'Informe se o colaborador <b>foi orientado através de carta de advertência</b> (Sim ou Não).';
             const exige = precisaUrgencia(st);
             if (exige && !st.urgente) return 'Sem as ' + MIN_CARTAS + ' cartas de advertência, o desligamento só pode ser enviado como <b>URGENTE</b>.';
-            if (st.urgente && String(st.motivoUrg || '').trim().length < 10) return 'Descreva o <b>motivo da urgência</b> do desligamento (mínimo de 10 letras).';
+            if (String(st.motivoUrg || '').trim().length < 10) return st.urgente
+                ? 'Descreva o <b>motivo da urgência</b> do desligamento (mínimo de 10 letras).'
+                : 'Escreva a <b>justificativa do desligamento</b> (mínimo de 10 letras). O motivo é sempre obrigatório.';
             return null;
         } catch (e) { console.warn('Rescisão×Advertências: falha ao validar', e); return null; }
     }
@@ -216,6 +221,7 @@
                 cartas: st.orientado === 'sim' ? st.ultimas : [],
                 urgente: !!st.urgente,
                 motivo_urgencia: st.urgente ? String(st.motivoUrg || '').trim() : '',
+                justificativa: String(st.motivoUrg || '').trim(),
                 nao_verificado: !!st.falhou,
                 registrado_por: (typeof usuarioAtual !== 'undefined' && usuarioAtual) ? usuarioAtual.nome : null,
                 registrado_em: new Date().toISOString()
@@ -255,13 +261,15 @@
                 ${c.documento ? `<a href="${esc(c.documento)}" target="_blank" rel="noopener" style="color:#4fc3f7; font-weight:bold; text-decoration:none; white-space:nowrap;"><i class="fa-solid fa-file-pdf"></i> Ver carta</a>` : ''}</div>`).join('');
             const urg = i.urgente
                 ? `<div style="margin-bottom:8px; padding:10px 12px; border-radius:8px; background: rgba(220,53,69,0.12); border:1px solid #dc3545; font-size:0.85rem;"><b style="color:#dc3545;"><i class="fa-solid fa-triangle-exclamation"></i> DESLIGAMENTO URGENTE</b><br><b>Motivo da urgência:</b> ${esc(i.motivo_urgencia || '-')}</div>` : '';
+            const just = (!i.urgente && i.justificativa)
+                ? `<div style="margin-top:8px; padding:9px 12px; border-radius:8px; background: rgba(0,0,0,0.15); border-left:3px solid var(--cor-advertencia, #8b5cf6); font-size:0.83rem;"><b>Justificativa de quem lançou:</b><br>${esc(i.justificativa)}</div>` : '';
             const resumo = i.orientado_por_carta === false
                 ? 'O colaborador <b>não foi orientado</b> por carta de advertência.'
                 : `O colaborador foi orientado por carta de advertência — <b>${i.total_cartas || 0}</b> carta(s) assinada(s) no sistema${(i.total_cartas || 0) < MIN_CARTAS ? ' (menos de ' + MIN_CARTAS + ')' : ''}.`;
             const nv = i.nao_verificado ? '<div style="margin-top:6px; font-size:0.78rem; color:#ff9800;"><i class="fa-solid fa-triangle-exclamation"></i> As advertências não puderam ser conferidas automaticamente no lançamento.</div>' : '';
             return `<div style="border:1px solid var(--cor-advertencia, #8b5cf6); border-radius:12px; padding:12px 14px; margin-bottom:14px; background: rgba(139,92,246,0.05);">
                 <div style="font-weight:800; color: var(--cor-advertencia, #8b5cf6); margin-bottom:8px;"><i class="fa-solid fa-gavel"></i> Cartas de advertência</div>
-                ${urg}<div style="font-size:0.85rem;">${resumo}</div>${cartas}${nv}</div>`;
+                ${urg}<div style="font-size:0.85rem;">${resumo}</div>${cartas}${just}${nv}</div>`;
         } catch (e) { return ''; }
     }
 
