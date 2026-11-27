@@ -526,6 +526,7 @@
                     ${ro ? '' : '<span class="ra-dica" id="ra-aviso-assin" style="color:#f1c40f;" title="O botão Enviar só funciona depois de assinar"><i class="fa-solid fa-signature"></i> Falta assinar para enviar</span>'}
                     <span class="ra-dica" id="ra-status-salvo"></span>
                     <button class="ra-btn" onclick="RelAtv.voltar()"><i class="fa-solid fa-arrow-left"></i> Meus relatórios</button>
+                    ${(ro || !r.id) ? '' : '<button class="ra-btn" onclick="RelAtv.versoes()" title="Ver e restaurar versões anteriores deste relatório"><i class="fa-solid fa-clock-rotate-left"></i> Versões</button>'}
                     ${ro ? '' : '<button class="ra-btn" onclick="RelAtv.salvar(true)"><i class="fa-solid fa-floppy-disk"></i> Salvar rascunho</button>'}
                     <button class="ra-btn prim" onclick="RelAtv.baixar()" id="ra-btn-pdf"><i class="fa-solid fa-file-pdf"></i> Baixar PDF</button>
                     ${ro ? '' : '<button class="ra-btn ok" onclick="RelAtv.enviar()" id="ra-btn-env"><i class="fa-solid fa-paper-plane"></i> Enviar ao financeiro</button>'}
@@ -558,6 +559,8 @@
         paginar();
         recarregarCargos(separar(S.atual.unidade), separar(S.atual.cargo));
         S.dirty = false;
+        S.quedaPausada = false;
+        S.base = r.id ? { conteudo_html: r.conteudo_html || '', imagens: JSON.stringify(r.imagens || []), titulo: r.titulo } : null;   // o que está gravado no banco agora
         atualizarStatusSalvo();
         clearInterval(S.timerAuto);
         if (!ro) S.timerAuto = setInterval(() => { if (S.dirty && !S.salvando && !S.pdfGerando && $('ra-ed')) salvar(false); }, 25000);
@@ -650,7 +653,7 @@
     }
 
     function sujo() { if (S.somenteLeitura) return; S.dirty = true; atualizarStatusSalvo(); }
-    function atualizarStatusSalvo() { const el = $('ra-status-salvo'); if (el) el.textContent = S.somenteLeitura ? '' : (S.dirty ? 'Alterações não salvas…' : (S.atual && S.atual.id ? 'Tudo salvo' : '')); }
+    function atualizarStatusSalvo() { const el = $('ra-status-salvo'); if (el) el.textContent = S.somenteLeitura ? '' : (S.quedaPausada ? '⚠ Salvamento pausado: o texto diminuiu muito. Clique em Salvar rascunho para decidir.' : (S.dirty ? 'Alterações não salvas…' : (S.atual && S.atual.id ? 'Tudo salvo' : ''))); if (el && S.quedaPausada) el.style.color = '#f1c40f'; else if (el) el.style.color = ''; }
 
     // ---------------------------------------------------------------- Comandos de formatação
     function cmd(c) { const ed = $('ra-ed'); if (!ed) return; ed.focus({ preventScroll: true }); document.execCommand(c, false, null); sujo(); agendarPaginacao(); }
@@ -1462,6 +1465,26 @@
         try {
             await resolverNomeGestor();
             const r = coletar();
+            // ---- trava contra apagão + histórico de versões (nunca impedem o salvamento normal) ----
+            let versaoGuardada = false;
+            if (r.id && S.base && !S.forcarSalvar) {
+                const antes = tamTexto(S.base.conteudo_html), depois = tamTexto(r.conteudo_html);
+                const queda = antes >= 400 && depois < antes * 0.4 && (antes - depois) >= 300;
+                if (queda) {
+                    if (!mostrar) {
+                        // salvamento automático: não grava por cima; avisa uma vez e espera o gestor decidir
+                        if (!S.quedaPausada) { S.quedaPausada = true; atualizarStatusSalvo(); alerta('O texto do relatório diminuiu muito. Para sua segurança, o salvamento automático foi pausado. Clique em "Salvar rascunho" para decidir.', 'aviso'); }
+                        return false;
+                    }
+                    const ok = await perguntarRA('<i class="fa-solid fa-triangle-exclamation" style="color:#f1c40f"></i> Você apagou quase todo o texto', 'O texto passou de <b>' + antes + '</b> para <b>' + depois + '</b> caracteres.<br><br>Se foi sem querer, clique em <b>Cancelar</b> e use <b>Ctrl+Z</b>, ou abra <b>Versões</b>. Se salvar mesmo assim, a versão anterior continua guardada em <b>Versões</b>.', 'Salvar mesmo assim');
+                    if (!ok) return false;
+                }
+                S.quedaPausada = false;
+                const mudou = S.base.conteudo_html !== r.conteudo_html || S.base.imagens !== JSON.stringify(r.imagens || []);
+                if (mudou && (queda || !S.ultVersao || Date.now() - S.ultVersao > 180000)) {
+                    versaoGuardada = await guardarVersao(r.id, S.base, queda ? 'antes de apagar muito texto' : 'automática');
+                }
+            }
             const gravar = async (p) => {
                 if (r.id) return await supabaseClient.from('relatorios_atividades').update(p).eq('id', r.id).eq('gestor_id', idGestor());
                 const res = await supabaseClient.from('relatorios_atividades').insert({ ...p, status: 'rascunho' }).select('id').single();
@@ -1473,6 +1496,8 @@
             if (res.error && /cargo/i.test(res.error.message || '') && /(column|schema cache|coluna)/i.test(res.error.message || '')) { S.semColunaCargo = true; res = await gravar(payload(r)); }
             if (res.error) throw res.error;
             S.dirty = false; atualizarStatusSalvo();
+            if (versaoGuardada) S.ultVersao = Date.now();
+            S.base = { conteudo_html: r.conteudo_html || '', imagens: JSON.stringify(r.imagens || []), titulo: r.titulo };
             if (mostrar) alerta('Rascunho salvo.', 'sucesso');
             return true;
         } catch (e) {
@@ -1480,6 +1505,72 @@
             else alerta('Erro ao salvar: ' + (e.message || e), 'erro');
             return false;
         } finally { S.salvando = false; }
+    }
+
+    // ---------------------------------------------------------------- Histórico de versões e trava anti-apagão
+    function tamTexto(h) { const d = document.createElement('div'); d.innerHTML = h || ''; d.querySelectorAll('.ra-pgbreak,[data-ra-m],.ra-pgmin').forEach((x) => x.remove()); return (d.textContent || '').replace(/\s+/g, ' ').trim().length; }
+
+    // guarda uma cópia do que estava gravado ANTES de sobrescrever; se a tabela não existir, segue sem erro
+    async function guardarVersao(relatorioId, base, motivo) {
+        if (S.semTabelaVersoes || !base) return false;
+        try {
+            const { error } = await supabaseClient.from('relatorios_atividades_versoes').insert({
+                relatorio_id: relatorioId, gestor_id: idGestor(), titulo: base.titulo || null, conteudo_html: base.conteudo_html || '',
+                imagens: JSON.parse(base.imagens || '[]'), tamanho_texto: tamTexto(base.conteudo_html), motivo: motivo || 'automática'
+            });
+            if (error) { if (/relatorios_atividades_versoes/i.test(error.message || '') && /(does not exist|schema cache|não existe|could not find)/i.test(error.message || '')) S.semTabelaVersoes = true; console.warn('[RelAtv] versão não guardada:', error.message); return false; }
+            return true;
+        } catch (e) { console.warn('[RelAtv] versão não guardada:', e); return false; }
+    }
+
+    // janelinha própria (sem usar o confirm() feio do navegador)
+    function perguntarRA(titulo, corpoHtml, textoOk) {
+        return new Promise((resolve) => {
+            const f = document.createElement('div');
+            f.style.cssText = 'position:fixed;inset:0;z-index:100100;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px;';
+            f.innerHTML = '<div class="glass-card" style="max-width:440px;width:100%;border:1px solid #f1c40f;"><h3 style="margin:0 0 10px;">' + titulo + '</h3><div style="line-height:1.5;font-size:.9rem;">' + corpoHtml + '</div><div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;"><button type="button" class="ra-btn" data-x="0">Cancelar</button><button type="button" class="ra-btn ok" data-x="1">' + textoOk + '</button></div></div>';
+            f.addEventListener('click', (e) => { const b = e.target.closest('[data-x]'); if (!b) return; f.remove(); resolve(b.getAttribute('data-x') === '1'); });
+            document.body.appendChild(f);
+        });
+    }
+
+    async function versoes() {
+        const r = S.atual; if (!r || !r.id || S.somenteLeitura) return;
+        const f = document.createElement('div');
+        f.id = 'ra-mod-versoes';
+        f.style.cssText = 'position:fixed;inset:0;z-index:100100;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px;';
+        f.innerHTML = '<div class="glass-card" style="max-width:620px;width:100%;max-height:85vh;display:flex;flex-direction:column;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><h3 style="margin:0;"><i class="fa-solid fa-clock-rotate-left"></i> Versões anteriores</h3><button type="button" class="ra-btn" data-fechar="1"><i class="fa-solid fa-xmark"></i></button></div><div style="font-size:.8rem;opacity:.8;margin-bottom:10px;">O sistema guarda uma cópia a cada poucos minutos de edição e sempre antes de apagar muito texto. Restaurar traz aquela versão para o editor (a versão de agora também fica guardada).</div><div id="ra-ver-lista" style="overflow-y:auto;flex:1;">Carregando...</div></div>';
+        document.body.appendChild(f);
+        const lista = f.querySelector('#ra-ver-lista');
+        const { data, error } = await supabaseClient.from('relatorios_atividades_versoes').select('id, tamanho_texto, motivo, criado_em, imagens').eq('relatorio_id', r.id).order('criado_em', { ascending: false }).limit(40);
+        if (error) { lista.innerHTML = /does not exist|schema cache|could not find/i.test(error.message || '') ? 'O histórico ainda não foi ativado no banco (falta rodar o SQL sql_extra/relatorios_atividades_versoes.sql).' : 'Erro ao carregar: ' + esc(error.message); }
+        else if (!data.length) lista.innerHTML = 'Ainda não há versões guardadas deste relatório. Elas começam a ser guardadas a partir da próxima edição.';
+        else lista.innerHTML = data.map((v) => '<div style="display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid rgba(148,163,184,.2);"><div style="flex:1;min-width:0;"><b>' + fmtData(v.criado_em) + '</b><div style="font-size:.78rem;opacity:.8;">' + v.tamanho_texto + ' caracteres · ' + ((v.imagens || []).length) + ' imagem(ns) · ' + esc(v.motivo || 'automática') + '</div></div><button type="button" class="ra-btn" data-ver="' + v.id + '"><i class="fa-solid fa-eye"></i> Ver</button><button type="button" class="ra-btn prim" data-rest="' + v.id + '"><i class="fa-solid fa-rotate-left"></i> Restaurar</button></div>').join('');
+        f.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-fechar]') || e.target === f) { f.remove(); return; }
+            const bv = e.target.closest('[data-ver]'), br = e.target.closest('[data-rest]');
+            if (!bv && !br) return;
+            const id = (bv || br).getAttribute(bv ? 'data-ver' : 'data-rest');
+            const { data: v, error: e2 } = await supabaseClient.from('relatorios_atividades_versoes').select('*').eq('id', id).single();
+            if (e2 || !v) { alerta('Não consegui abrir essa versão.', 'erro'); return; }
+            if (bv) {
+                const d = document.createElement('div'); d.innerHTML = v.conteudo_html || ''; d.querySelectorAll('.ra-pgbreak,[data-ra-m],.ra-pgmin').forEach((x) => x.remove());
+                const txt = (d.innerText || d.textContent || '').trim();
+                await perguntarRA('Prévia (texto) — ' + fmtData(v.criado_em), '<div style="max-height:50vh;overflow:auto;white-space:pre-wrap;font-size:.82rem;">' + esc(txt.slice(0, 6000) || '(sem texto)') + (txt.length > 6000 ? '\n…' : '') + '</div>', 'Fechar');
+                return;
+            }
+            const ok = await perguntarRA('Restaurar esta versão?', 'Versão de <b>' + fmtData(v.criado_em) + '</b> (' + v.tamanho_texto + ' caracteres). O texto atual do editor será trocado por ela, mas fica guardado em Versões.', 'Restaurar');
+            if (!ok) return;
+            try {
+                coletar();
+                await guardarVersao(S.atual.id, { conteudo_html: S.atual.conteudo_html, imagens: JSON.stringify(S.atual.imagens || []), titulo: S.atual.titulo }, 'antes de restaurar');
+                S.atual.conteudo_html = v.conteudo_html || ''; S.atual.imagens = Array.isArray(v.imagens) ? v.imagens : []; if (v.titulo) S.atual.titulo = v.titulo;
+                f.remove();
+                desenharEditor();
+                S.forcarSalvar = true;
+                try { await salvar(true); } finally { S.forcarSalvar = false; }
+            } catch (err) { alerta('Erro ao restaurar: ' + (err.message || err), 'erro'); }
+        });
     }
 
     // ---------------------------------------------------------------- PDF
@@ -1650,5 +1741,5 @@
     window.addEventListener('resize', () => { if ($('ra-cena') && S.zoom === 'auto') { ajustarEscala(); paginar(); } });
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-target="tela-relatorio-atividades"]')) setTimeout(iniciar, 30); });
 
-    window.RelAtv = { iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, menuNovaPagina, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, _modalUnidades: null, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
+    window.RelAtv = { versoes, iniciar, novo, abrir, duplicar, excluir, voltar, salvar, baixar, enviar, cmd, bloco, tamanho, cor, quebra, menuNovaPagina, excluirPagina, imagens, assinar, filtrarLista, buscarLista, mudarUnidade, mudarCargo, _modalUnidades: null, abrirTabela, inserirTabela, tab: tabela, zoom, sujo, _estado: S, _paginar: paginar, _geom: PG };
 })();
