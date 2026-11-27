@@ -70,6 +70,32 @@
         .rep-chip.env { background:#fee2e2; color:#991b1b; } .rep-chip.rec { background:#dbeafe; color:#1e40af; }
         .rep-card #rep-corpo { color:#1f2937; font-size:.9rem; margin-bottom:0; }
         .rep-x { float:right; cursor:pointer; color:#6b7280; font-size:1.2rem; line-height:1; background:none; border:none; }
+        /* TEMA ESCURO (o claro é o padrão acima) */
+        html:not([data-theme="light"]) .rep-card { background:#1b1630; color:#e8e4f5; border:1px solid rgba(255,255,255,.12); color-scheme:dark; }
+        html:not([data-theme="light"]) .rep-card h2 { color:#f3f0fb; }
+        html:not([data-theme="light"]) .rep-card .rep-sub { color:#a9a2c7; }
+        html:not([data-theme="light"]) .rep-card label { color:#b9b2d6; }
+        html:not([data-theme="light"]) .rep-card input, html:not([data-theme="light"]) .rep-card select, html:not([data-theme="light"]) .rep-card textarea { background:#120e22; color:#f3f0fb; border-color:rgba(255,255,255,.18); }
+        html:not([data-theme="light"]) .rep-card ::placeholder { color:#7d76a0; }
+        html:not([data-theme="light"]) .rep-btn { background:#2a2347; border-color:rgba(255,255,255,.18); color:#ece9f7; }
+        html:not([data-theme="light"]) .rep-btn:hover { background:#352d5c; }
+        html:not([data-theme="light"]) .rep-btn.pri { background:#6366f1; border-color:#6366f1; color:#fff; }
+        html:not([data-theme="light"]) .rep-btn.pri:hover { background:#4f46e5; }
+        html:not([data-theme="light"]) .rep-btn.perigo { background:#dc2626; border-color:#dc2626; color:#fff; }
+        html:not([data-theme="light"]) .rep-resumo { background:#120e22; border-color:rgba(255,255,255,.14); color:#ece9f7; }
+        html:not([data-theme="light"]) .rep-resumo .seta { color:#a5b4fc; }
+        html:not([data-theme="light"]) .rep-aviso { background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.45); color:#fcd34d; }
+        html:not([data-theme="light"]) .rep-tab th { color:#a9a2c7; border-bottom-color:rgba(255,255,255,.16); }
+        html:not([data-theme="light"]) .rep-tab td { border-bottom-color:rgba(255,255,255,.08); }
+        html:not([data-theme="light"]) .rep-chip.ok { background:rgba(34,197,94,.18); color:#86efac; }
+        html:not([data-theme="light"]) .rep-chip.est { background:rgba(255,255,255,.12); color:#cfc9e6; }
+        html:not([data-theme="light"]) .rep-chip.env { background:rgba(239,68,68,.2); color:#fca5a5; }
+        html:not([data-theme="light"]) .rep-chip.rec { background:rgba(59,130,246,.2); color:#93c5fd; }
+        html:not([data-theme="light"]) .rep-card #rep-corpo { color:#e8e4f5; }
+        html:not([data-theme="light"]) .rep-x { color:#b9b2d6; }
+        html:not([data-theme="light"]) .rep-card [style*="#991b1b"], html:not([data-theme="light"]) .rep-card [style*="#b91c1c"] { color:#fca5a5 !important; }
+        html:not([data-theme="light"]) .rep-card [style*="#1e40af"] { color:#93c5fd !important; }
+        html:not([data-theme="light"]) .rep-card [style*="#6b7280"] { color:#a9a2c7 !important; }
         `;
         document.head.appendChild(st);
     }
